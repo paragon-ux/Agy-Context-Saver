@@ -210,4 +210,36 @@ console.log("Running Agy-Context-Saver intelligent hook tests...\n");
   console.log("✓ manage_task(Action='list') initial call allowed, rapid consecutive polling blocked");
 }
 
-console.log("\nAll 15 intelligent hook tests passed successfully!");
+// 16. view_file on regular code/doc file: ALLOWED
+{
+  const res = runHook({
+    toolCall: { name: "view_file", args: { AbsolutePath: "C:/project/src/index.js" } }
+  });
+  assert.equal(res.decision, "allow");
+  console.log("✓ view_file on standard source file is allowed (<1ms fast-path)");
+}
+
+// 17. view_file on transcript.jsonl: DENIED with redirection
+{
+  const fakeTranscript = "C:/Users/USER/.gemini/antigravity/brain/42aea43d-ea8b-48f8-bbf5-eef4e6242956/.system_generated/logs/transcript.jsonl";
+  const res = runHook({
+    toolCall: { name: "view_file", args: { AbsolutePath: fakeTranscript } }
+  });
+  assert.equal(res.decision, "deny");
+  assert.match(res.reason, /Reading raw transcript JSONL files directly via view_file is blocked/);
+  assert.match(res.reason, /read_transcript\(conversationId="42aea43d-ea8b-48f8-bbf5-eef4e6242956", mode="compact"\)/);
+  console.log("✓ view_file on transcript.jsonl is denied and redirects to read_transcript with extracted conversationId");
+}
+
+// 18. view_file on transcript_full.jsonl: DENIED with redirection
+{
+  const fakeFull = "/Users/dev/.gemini/antigravity/brain/sess-xyz-789/.system_generated/logs/transcript_full.jsonl";
+  const res = runHook({
+    toolCall: { name: "view_file", args: { AbsolutePath: fakeFull } }
+  });
+  assert.equal(res.decision, "deny");
+  assert.match(res.reason, /read_transcript\(conversationId="sess-xyz-789", mode="compact"\)/);
+  console.log("✓ view_file on transcript_full.jsonl is denied and redirects to read_transcript");
+}
+
+console.log("\nAll 18 intelligent hook tests passed successfully!");

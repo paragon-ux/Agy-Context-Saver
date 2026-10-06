@@ -80,7 +80,9 @@ export function detectExistingInstallation() {
     fs.existsSync(path.join(antigravityMcpDir, "check_context_health.json")) &&
     fs.existsSync(path.join(antigravityMcpDir, "subagent_brief.json")) &&
     fs.existsSync(path.join(antigravityMcpDir, "get_installation_status.json")) &&
-    fs.existsSync(path.join(antigravityMcpDir, "sync_installation.json"));
+    fs.existsSync(path.join(antigravityMcpDir, "sync_installation.json")) &&
+    fs.existsSync(path.join(antigravityMcpDir, "read_transcript.json")) &&
+    fs.existsSync(path.join(antigravityMcpDir, "query_transcript.json"));
 
   const isInstalled = pluginExists || (hookRegistered && mcpRegistered);
   const isComplete = (pluginExists || (hookRegistered && mcpRegistered && scriptExists)) && schemasExist;
@@ -161,7 +163,7 @@ export async function runInstall(options = {}) {
   hooksConfig["execution-guard"] = {
     PreToolUse: [
       {
-        matcher: "manage_task|run_command|schedule",
+        matcher: "manage_task|run_command|schedule|view_file",
         hooks: [
           {
             type: "command",
@@ -197,7 +199,7 @@ export async function runInstall(options = {}) {
   // 5. Mirror Antigravity Tool Schemas in parallel
   await fsPromises.mkdir(antigravityMcpDir, { recursive: true });
 
-  const instructionsContent = `Agy-Context-Saver MCP Server: Universal Model Context Protocol server for Google Antigravity. Provides safe_command execution with automatic repetitive output compression, check_context_health transcript diagnostics, subagent_brief scope isolation, and native installation self-audit/synchronization tools.`;
+  const instructionsContent = `Agy-Context-Saver MCP Server: Universal Model Context Protocol server for Google Antigravity. Provides safe_command execution with automatic repetitive output compression, check_context_health transcript diagnostics, subagent_brief scope isolation, read_transcript compact/full streaming reader, query_transcript forensic filtering engine, and native installation self-audit/synchronization tools.`;
 
   const safeCommandSchema = {
     name: "safe_command",
@@ -265,13 +267,96 @@ export async function runInstall(options = {}) {
     }
   };
 
+  const readTranscriptSchema = {
+    name: "read_transcript",
+    description: "Quickly read recent conversation history from an Antigravity transcript in clean Markdown format with zero JSON noise. Supports 'compact' (transcript.jsonl) and 'full' (transcript_full.jsonl) modes with minimal parameters.",
+    parameters: {
+      type: "object",
+      properties: {
+        conversationId: {
+          type: "string",
+          description: "Conversation ID (UUID), folder name, or full path to transcript.jsonl. If omitted, defaults to active conversation."
+        },
+        mode: {
+          type: "string",
+          enum: ["compact", "full"],
+          description: "Transcript mode: 'compact' reads transcript.jsonl; 'full' reads transcript_full.jsonl (default: 'compact')."
+        },
+        lastTurns: {
+          type: "number",
+          description: "Number of most recent conversation turns to display (default: 10). Set to 0 to read all."
+        },
+        includeThinking: {
+          type: "boolean",
+          description: "Whether to include model thinking / internal reasoning blocks (default: false)."
+        }
+      },
+      required: ["conversationId"]
+    }
+  };
+
+  const queryTranscriptSchema = {
+    name: "query_transcript",
+    description: "Granular query and forensic filtering engine for Antigravity conversation transcripts. Searches by keyword or regex, filters by role (user, assistant, tool, error), slices step ranges, and automatically dereferences full content when truncated.",
+    parameters: {
+      type: "object",
+      properties: {
+        conversationId: {
+          type: "string",
+          description: "Conversation ID (UUID), folder name, or full path to transcript.jsonl."
+        },
+        query: {
+          type: "string",
+          description: "Search keyword or regex pattern to match across message content, tool calls, and thinking."
+        },
+        roles: {
+          type: "array",
+          items: { type: "string" },
+          description: "Filter steps by role/source: 'user', 'assistant', 'tool', 'error', or 'all' (default: ['user', 'assistant'])."
+        },
+        mode: {
+          type: "string",
+          enum: ["auto", "compact", "full"],
+          description: "Mode: 'auto' streams transcript.jsonl and dereferences matched truncated lines from transcript_full.jsonl; 'compact' reads transcript.jsonl only; 'full' reads transcript_full.jsonl only (default: 'auto')."
+        },
+        startStep: {
+          type: "number",
+          description: "Start step_index (inclusive)."
+        },
+        endStep: {
+          type: "number",
+          description: "End step_index (inclusive)."
+        },
+        lastTurns: {
+          type: "number",
+          description: "Limit to last N matched turns."
+        },
+        includeThinking: {
+          type: "boolean",
+          description: "Include model thinking blocks in output (default: false)."
+        },
+        includeToolCalls: {
+          type: "boolean",
+          description: "Include tool call arguments and results in output (default: false)."
+        },
+        maxResults: {
+          type: "number",
+          description: "Maximum number of matched steps to return (default: 25)."
+        }
+      },
+      required: ["conversationId"]
+    }
+  };
+
   await Promise.all([
     fsPromises.writeFile(path.join(antigravityMcpDir, "instructions.md"), instructionsContent, "utf-8"),
     fsPromises.writeFile(path.join(antigravityMcpDir, "safe_command.json"), JSON.stringify(safeCommandSchema, null, 2), "utf-8"),
     fsPromises.writeFile(path.join(antigravityMcpDir, "check_context_health.json"), JSON.stringify(checkHealthSchema, null, 2), "utf-8"),
     fsPromises.writeFile(path.join(antigravityMcpDir, "subagent_brief.json"), JSON.stringify(subagentBriefSchema, null, 2), "utf-8"),
     fsPromises.writeFile(path.join(antigravityMcpDir, "get_installation_status.json"), JSON.stringify(getInstallationStatusSchema, null, 2), "utf-8"),
-    fsPromises.writeFile(path.join(antigravityMcpDir, "sync_installation.json"), JSON.stringify(syncInstallationSchema, null, 2), "utf-8")
+    fsPromises.writeFile(path.join(antigravityMcpDir, "sync_installation.json"), JSON.stringify(syncInstallationSchema, null, 2), "utf-8"),
+    fsPromises.writeFile(path.join(antigravityMcpDir, "read_transcript.json"), JSON.stringify(readTranscriptSchema, null, 2), "utf-8"),
+    fsPromises.writeFile(path.join(antigravityMcpDir, "query_transcript.json"), JSON.stringify(queryTranscriptSchema, null, 2), "utf-8")
   ]);
 
   const elapsed = (performance.now() - startTime).toFixed(1);

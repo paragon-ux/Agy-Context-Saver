@@ -134,6 +134,85 @@ const TOOLS = [
       },
       required: []
     }
+  },
+  {
+    name: "read_transcript",
+    description: "Quickly read recent conversation history from an Antigravity transcript in clean Markdown format with zero JSON noise. Supports 'compact' (transcript.jsonl) and 'full' (transcript_full.jsonl) modes with minimal parameters.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        conversationId: {
+          type: "string",
+          description: "Conversation ID (UUID), folder name, or full path to transcript.jsonl. If omitted, defaults to active conversation."
+        },
+        mode: {
+          type: "string",
+          enum: ["compact", "full"],
+          description: "Transcript mode: 'compact' reads transcript.jsonl; 'full' reads transcript_full.jsonl (default: 'compact')."
+        },
+        lastTurns: {
+          type: "number",
+          description: "Number of most recent conversation turns to display (default: 10). Set to 0 to read all."
+        },
+        includeThinking: {
+          type: "boolean",
+          description: "Whether to include model thinking / internal reasoning blocks (default: false)."
+        }
+      },
+      required: ["conversationId"]
+    }
+  },
+  {
+    name: "query_transcript",
+    description: "Granular query and forensic filtering engine for Antigravity conversation transcripts. Searches by keyword or regex, filters by role (user, assistant, tool, error), slices step ranges, and automatically dereferences full content when truncated.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        conversationId: {
+          type: "string",
+          description: "Conversation ID (UUID), folder name, or full path to transcript.jsonl."
+        },
+        query: {
+          type: "string",
+          description: "Search keyword or regex pattern to match across message content, tool calls, and thinking."
+        },
+        roles: {
+          type: "array",
+          items: { type: "string" },
+          description: "Filter steps by role/source: 'user', 'assistant', 'tool', 'error', or 'all' (default: ['user', 'assistant'])."
+        },
+        mode: {
+          type: "string",
+          enum: ["auto", "compact", "full"],
+          description: "Mode: 'auto' streams transcript.jsonl and dereferences matched truncated lines from transcript_full.jsonl; 'compact' reads transcript.jsonl only; 'full' reads transcript_full.jsonl only (default: 'auto')."
+        },
+        startStep: {
+          type: "number",
+          description: "Start step_index (inclusive)."
+        },
+        endStep: {
+          type: "number",
+          description: "End step_index (inclusive)."
+        },
+        lastTurns: {
+          type: "number",
+          description: "Limit to last N matched turns."
+        },
+        includeThinking: {
+          type: "boolean",
+          description: "Include model thinking blocks in output (default: false)."
+        },
+        includeToolCalls: {
+          type: "boolean",
+          description: "Include tool call arguments and results in output (default: false)."
+        },
+        maxResults: {
+          type: "number",
+          description: "Maximum number of matched steps to return (default: 25)."
+        }
+      },
+      required: ["conversationId"]
+    }
   }
 ];
 
@@ -411,7 +490,7 @@ function handleGetInstallationStatus() {
     `- Native Plugin Link: ${existing.details.plugin.exists ? `ACTIVE (${existing.details.plugin.target})` : "NOT LINKED"}`,
     `- Governor Lifecycle Hook: ${existing.details.hook.registered ? "REGISTERED in hooks.json" : "NOT REGISTERED"} (Script: ${existing.details.hook.scriptExists ? "Present" : "Missing"})`,
     `- Universal MCP Server: ${existing.details.mcp.registered ? "CONFIGURED in mcp_config.json" : "NOT CONFIGURED"}`,
-    `- Antigravity Tool Schemas: ${existing.details.schemas.exists ? "ALL 5 SCHEMAS PRESENT" : "MISSING"} (${existing.details.schemas.dir})`,
+    `- Antigravity Tool Schemas: ${existing.details.schemas.exists ? "ALL 7 SCHEMAS PRESENT" : "MISSING"} (${existing.details.schemas.dir})`,
     "",
     existing.isComplete
       ? "✓ All 4 Antigravity integration layers are fully operational and synchronized."
@@ -432,7 +511,7 @@ async function handleSyncInstallation({ checkOnly = false } = {}) {
     `- Plugin Link: ${result.details?.plugin?.exists ? "Verified" : "Updated"}`,
     `- Lifecycle Hook: Registered in hooks.json`,
     `- MCP Server: Registered in mcp_config.json`,
-    `- Tool Schemas: 5 Schemas mirrored to ~/.gemini/antigravity/mcp/agy-context-saver`,
+    `- Tool Schemas: 7 Schemas mirrored to ~/.gemini/antigravity/mcp/agy-context-saver`,
     "",
     checkOnly ? "✓ Pre-flight check complete (dry-run)." : "✓ Installation fully synchronized and up-to-date in Zero-Delay mode."
   ].join("\n");
@@ -440,6 +519,370 @@ async function handleSyncInstallation({ checkOnly = false } = {}) {
   return {
     content: [{ type: "text", text: report }]
   };
+}
+
+// --- Transcript Reader & Forensics Engine Helpers ---
+
+const MAX_TURN_CHARS = 10000;
+const MAX_OUTPUT_CHARS = 48000;
+
+function extractConvId(p) {
+  const normalized = p.replace(/\\/g, "/");
+  const match = normalized.match(/\/brain\/([^/]+)\//);
+  return match ? match[1] : path.basename(normalized, path.extname(normalized));
+}
+
+function resolveTranscriptPath(target, mode = "compact") {
+  const isFull = mode === "full";
+  const fileName = isFull ? "transcript_full.jsonl" : "transcript.jsonl";
+
+  // 1. If target is omitted, "current", or empty: resolve active conversation
+  let raw = String(target || "").trim();
+  if (!raw || raw.toLowerCase() === "current") {
+    if (process.env.GEMINI_CONVERSATION_ID) {
+      raw = process.env.GEMINI_CONVERSATION_ID;
+    } else {
+      const brainDir = path.join(os.homedir(), ".gemini", "antigravity", "brain");
+      if (fs.existsSync(brainDir)) {
+        try {
+          const entries = fs.readdirSync(brainDir, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => {
+              const p = path.join(brainDir, d.name);
+              const stat = fs.statSync(p);
+              return { name: d.name, mtime: stat.mtimeMs };
+            })
+            .sort((a, b) => b.mtime - a.mtime);
+          if (entries.length > 0) {
+            raw = entries[0].name;
+          }
+        } catch {}
+      }
+    }
+  }
+
+  // 2. Normalize separators
+  const normalized = raw.replace(/\\/g, "/");
+
+  // 3. Direct file path
+  if (normalized.endsWith(".jsonl")) {
+    if (fs.existsSync(normalized)) {
+      if (isFull && normalized.endsWith("transcript.jsonl")) {
+        const fullCandidate = normalized.replace(/transcript\.jsonl$/, "transcript_full.jsonl");
+        if (fs.existsSync(fullCandidate)) return { filePath: fullCandidate, convId: extractConvId(normalized) };
+      }
+      if (!isFull && normalized.endsWith("transcript_full.jsonl")) {
+        const compactCandidate = normalized.replace(/transcript_full\.jsonl$/, "transcript.jsonl");
+        if (fs.existsSync(compactCandidate)) return { filePath: compactCandidate, convId: extractConvId(normalized) };
+      }
+      return { filePath: normalized, convId: extractConvId(normalized) };
+    }
+  }
+
+  // 4. UUID / Directory resolution under ~/.gemini/antigravity/brain/<id>
+  const homeDir = os.homedir();
+  const brainCandidate = path.join(homeDir, ".gemini", "antigravity", "brain", normalized, ".system_generated", "logs", fileName);
+  if (fs.existsSync(brainCandidate)) {
+    return { filePath: brainCandidate, convId: normalized };
+  }
+  if (isFull) {
+    const compactFallback = path.join(homeDir, ".gemini", "antigravity", "brain", normalized, ".system_generated", "logs", "transcript.jsonl");
+    if (fs.existsSync(compactFallback)) {
+      return { filePath: compactFallback, convId: normalized };
+    }
+  }
+
+  // 5. Try local relative/absolute directory path
+  const localCandidate = path.resolve(normalized, ".system_generated", "logs", fileName);
+  if (fs.existsSync(localCandidate)) {
+    return { filePath: localCandidate, convId: extractConvId(localCandidate) };
+  }
+  const directCandidate = path.resolve(normalized, fileName);
+  if (fs.existsSync(directCandidate)) {
+    return { filePath: directCandidate, convId: extractConvId(directCandidate) };
+  }
+
+  return { error: `Transcript not found for target: '${target}'. Searched: ${brainCandidate}` };
+}
+
+function cleanMessageContent(content, maxChars = MAX_TURN_CHARS) {
+  if (content === null || content === undefined) return "";
+  let text = typeof content === "string" ? content : JSON.stringify(content, null, 2);
+
+  // Strip huge base64 media blocks
+  text = text.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, "[Embedded Media/Binary Omitted]");
+  text = text.replace(/[A-Za-z0-9+/=]{200,}/g, "[Binary/Base64 Payload Omitted]");
+
+  // Clamp lines exceeding MAX_LINE_CHARS
+  const lines = text.split("\n");
+  const clampedLines = lines.map((l) => {
+    if (l.length > MAX_LINE_CHARS) {
+      return l.slice(0, MAX_LINE_CHARS) + " ... [line clamped]";
+    }
+    return l;
+  });
+  text = clampedLines.join("\n");
+
+  if (text.length > maxChars) {
+    return text.slice(0, maxChars) + `\n\n... [Content Truncated (${text.length - maxChars} chars omitted to preserve token budget)] ...`;
+  }
+  return text;
+}
+
+function formatTranscriptItem(item, options = {}) {
+  const { includeThinking = false, includeToolCalls = false, maxContentChars = MAX_TURN_CHARS } = options;
+  const stepIdx = item.step_index !== undefined ? item.step_index : "?";
+  const type = item.type || "UNKNOWN";
+  const time = item.created_at ? item.created_at.replace(/\.\d+Z$/, "Z") : "";
+  const timeStr = time ? ` (${time})` : "";
+
+  let role = "SYSTEM";
+  if (type === "USER_INPUT") role = "USER";
+  else if (type === "PLANNER_RESPONSE") role = "ASSISTANT";
+  else if (type === "SUBAGENT_RESPONSE") role = "SUBAGENT";
+  else role = type;
+
+  const parts = [];
+  parts.push(`### [Step ${stepIdx} | ${role}]${timeStr}`);
+
+  // Thinking block
+  if (includeThinking && item.thinking) {
+    const cleanThinking = cleanMessageContent(item.thinking, 4000);
+    parts.push(`> <thinking>\n> ${cleanThinking.split("\n").join("\n> ")}\n> </thinking>`);
+  }
+
+  // Tool calls
+  if ((includeToolCalls || role === "ASSISTANT") && Array.isArray(item.tool_calls) && item.tool_calls.length > 0) {
+    const tcSummary = item.tool_calls.map((tc) => {
+      const name = tc.name || tc.tool_name || "unknown_tool";
+      const args = tc.args || tc.arguments || {};
+      const compactArgs = Object.entries(args)
+        .map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 80)}`)
+        .join(", ");
+      return `- \`${name}(${compactArgs})\``;
+    });
+    parts.push(`**Tool Calls (${item.tool_calls.length}):**\n${tcSummary.join("\n")}`);
+  }
+
+  // Content
+  if (item.content) {
+    const cleaned = cleanMessageContent(item.content, maxContentChars);
+    if (cleaned.trim()) {
+      parts.push(cleaned.trim());
+    }
+  }
+
+  return parts.join("\n\n");
+}
+
+async function findFullStep(fullPath, targetStepIndex) {
+  if (!fs.existsSync(fullPath)) return null;
+  const fileStream = fs.createReadStream(fullPath, { encoding: "utf-8" });
+  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+
+  try {
+    for await (const line of rl) {
+      if (!line.trim()) continue;
+      try {
+        const item = JSON.parse(line);
+        if (item.step_index === targetStepIndex) {
+          rl.close();
+          return item;
+        }
+      } catch {}
+    }
+  } catch {}
+  return null;
+}
+
+async function handleReadTranscript({ conversationId, mode = "compact", lastTurns = 10, includeThinking = false } = {}) {
+  const resolved = resolveTranscriptPath(conversationId, mode);
+  if (resolved.error) {
+    return { isError: true, content: [{ type: "text", text: resolved.error }] };
+  }
+
+  const { filePath, convId } = resolved;
+  const items = [];
+  const fileStream = fs.createReadStream(filePath, { encoding: "utf-8" });
+  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+
+  try {
+    for await (const line of rl) {
+      if (!line.trim()) continue;
+      try {
+        const item = JSON.parse(line);
+        items.push(item);
+      } catch {
+        // Tolerates incomplete trailing flushes during concurrent writes
+      }
+    }
+  } catch (err) {
+    return { isError: true, content: [{ type: "text", text: `Error reading transcript stream: ${err.message}` }] };
+  }
+
+  if (items.length === 0) {
+    return { content: [{ type: "text", text: `Transcript is empty at: ${filePath}` }] };
+  }
+
+  let selected = items;
+  if (lastTurns > 0) {
+    const turnItems = items.filter((it) => it.type === "USER_INPUT" || it.type === "PLANNER_RESPONSE");
+    const cutoff = Math.max(0, turnItems.length - lastTurns);
+    const minStep = turnItems[cutoff] ? turnItems[cutoff].step_index : 0;
+    selected = items.filter((it) => (it.step_index || 0) >= minStep);
+  }
+
+  const formattedBlocks = selected.map((it) => formatTranscriptItem(it, {
+    includeThinking,
+    includeToolCalls: true
+  }));
+
+  const header = [
+    `# Conversation Transcript: \`${convId}\``,
+    `- Mode: **${mode}** (${path.basename(filePath)})`,
+    `- Total Steps in Log: ${items.length}`,
+    `- Displayed Steps: ${selected.length} (showing last ${lastTurns > 0 ? `${lastTurns} turns` : "all"})`,
+    "",
+    "---",
+    ""
+  ].join("\n");
+
+  let fullOutput = header + formattedBlocks.join("\n\n---\n\n");
+  if (fullOutput.length > MAX_OUTPUT_CHARS) {
+    fullOutput = fullOutput.slice(0, MAX_OUTPUT_CHARS) + "\n\n... [Transcript display truncated at 48 KB safety ceiling] ...";
+  }
+
+  return { content: [{ type: "text", text: fullOutput }] };
+}
+
+async function handleQueryTranscript(args = {}) {
+  const {
+    conversationId,
+    query,
+    roles = ["user", "assistant"],
+    mode = "auto",
+    startStep,
+    endStep,
+    lastTurns,
+    includeThinking = false,
+    includeToolCalls = false,
+    maxResults = 25
+  } = args;
+
+  const resolved = resolveTranscriptPath(conversationId, mode === "full" ? "full" : "compact");
+  if (resolved.error) {
+    return { isError: true, content: [{ type: "text", text: resolved.error }] };
+  }
+
+  const { filePath, convId } = resolved;
+  const fullSiblingPath = filePath.replace(/transcript\.jsonl$/, "transcript_full.jsonl");
+  const hasFullSibling = fs.existsSync(fullSiblingPath);
+
+  const roleSet = new Set((Array.isArray(roles) ? roles : [roles]).map((r) => String(r).toLowerCase()));
+  const matchAllRoles = roleSet.has("all");
+
+  let queryRegex = null;
+  if (query) {
+    try {
+      queryRegex = new RegExp(query, "i");
+    } catch {
+      queryRegex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    }
+  }
+
+  const matched = [];
+  const fileStream = fs.createReadStream(filePath, { encoding: "utf-8" });
+  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+
+  try {
+    for await (const line of rl) {
+      if (!line.trim()) continue;
+      let item;
+      try {
+        item = JSON.parse(line);
+      } catch {
+        continue; // skip corrupted or half-flushed trailing lines
+      }
+
+      const stepIdx = item.step_index || 0;
+      if (startStep !== undefined && stepIdx < startStep) continue;
+      if (endStep !== undefined && stepIdx > endStep) continue;
+
+      if (!matchAllRoles) {
+        const type = String(item.type || "").toUpperCase();
+        let roleMatches = false;
+        if (roleSet.has("user") && type === "USER_INPUT") roleMatches = true;
+        if (roleSet.has("assistant") && type === "PLANNER_RESPONSE") roleMatches = true;
+        if (roleSet.has("subagent") && type === "SUBAGENT_RESPONSE") roleMatches = true;
+        if (roleSet.has("tool") && Array.isArray(item.tool_calls) && item.tool_calls.length > 0) roleMatches = true;
+        if (roleSet.has("error") && (item.status === "ERROR" || (typeof item.content === "string" && item.content.includes("Error")))) roleMatches = true;
+        if (!roleMatches) continue;
+      }
+
+      if (queryRegex) {
+        const contentStr = typeof item.content === "string" ? item.content : JSON.stringify(item.content || "");
+        const thinkingStr = typeof item.thinking === "string" ? item.thinking : "";
+        const toolStr = item.tool_calls ? JSON.stringify(item.tool_calls) : "";
+        const haystack = `${contentStr} ${thinkingStr} ${toolStr}`;
+        if (!queryRegex.test(haystack)) continue;
+      }
+
+      matched.push(item);
+    }
+  } catch (err) {
+    return { isError: true, content: [{ type: "text", text: `Error streaming transcript: ${err.message}` }] };
+  }
+
+  if (matched.length === 0) {
+    return {
+      content: [{
+        type: "text",
+        text: `No matching steps found in transcript for \`${convId}\` (query: "${query || '*'}", roles: [${Array.from(roleSet).join(", ")}]).`
+      }]
+    };
+  }
+
+  let finalItems = matched;
+  if (lastTurns && lastTurns > 0) {
+    finalItems = finalItems.slice(-lastTurns);
+  }
+  if (finalItems.length > maxResults) {
+    finalItems = finalItems.slice(-maxResults);
+  }
+
+  // Auto-dereferencing if mode is "auto" and fields were truncated
+  if (mode === "auto" && hasFullSibling) {
+    for (let i = 0; i < finalItems.length; i++) {
+      const it = finalItems[i];
+      if (Array.isArray(it.truncated_fields) && it.truncated_fields.length > 0) {
+        const fullItem = await findFullStep(fullSiblingPath, it.step_index);
+        if (fullItem) {
+          finalItems[i] = fullItem;
+        }
+      }
+    }
+  }
+
+  const blocks = finalItems.map((it) => formatTranscriptItem(it, {
+    includeThinking,
+    includeToolCalls: includeToolCalls || roleSet.has("tool")
+  }));
+
+  const header = [
+    `## Transcript Query Results: \`${convId}\``,
+    `- Filter: query=${query ? `"${query}"` : "NONE"}, roles=[${Array.from(roleSet).join(", ")}], mode=${mode}`,
+    `- Matched Steps: ${matched.length} (showing ${finalItems.length})`,
+    "",
+    "---",
+    ""
+  ].join("\n");
+
+  let output = header + blocks.join("\n\n---\n\n");
+  if (output.length > MAX_OUTPUT_CHARS) {
+    output = output.slice(0, MAX_OUTPUT_CHARS) + "\n\n... [Query results clamped at 48 KB safety ceiling] ...";
+  }
+
+  return { content: [{ type: "text", text: output }] };
 }
 
 // --- JSON-RPC 2.0 Dispatcher ---
@@ -480,6 +923,10 @@ async function handleRequest(request) {
       toolResult = handleGetInstallationStatus();
     } else if (name === "sync_installation") {
       toolResult = await handleSyncInstallation(args);
+    } else if (name === "read_transcript") {
+      toolResult = await handleReadTranscript(args);
+    } else if (name === "query_transcript") {
+      toolResult = await handleQueryTranscript(args);
     } else {
       return {
         jsonrpc: "2.0",

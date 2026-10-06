@@ -36,7 +36,9 @@ assert.ok(fs.existsSync(path.join(installedSchemasDir, "check_context_health.jso
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "subagent_brief.json")), "subagent_brief.json exists in Antigravity MCP directory");
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "get_installation_status.json")), "get_installation_status.json exists in Antigravity MCP directory");
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "sync_installation.json")), "sync_installation.json exists in Antigravity MCP directory");
-console.log("✓ All 5 Antigravity tool schemas successfully installed to ~/.gemini/antigravity/mcp/agy-context-saver");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "read_transcript.json")), "read_transcript.json exists in Antigravity MCP directory");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "query_transcript.json")), "query_transcript.json exists in Antigravity MCP directory");
+console.log("✓ All 7 Antigravity tool schemas successfully installed to ~/.gemini/antigravity/mcp/agy-context-saver");
 
 // Test existing installation detector
 const { detectExistingInstallation } = await import("../scripts/install-register.mjs");
@@ -168,6 +170,19 @@ function callInstalledHook(payload) {
   console.log("✓ Installed Hook: schedule user timer -> ALLOWED");
 }
 
+// 2.11 Intercept view_file on transcript.jsonl
+{
+  const res = callInstalledHook({
+    toolCall: {
+      name: "view_file",
+      args: { AbsolutePath: "C:/Users/USER/.gemini/antigravity/brain/42aea43d-ea8b-48f8-bbf5-eef4e6242956/.system_generated/logs/transcript.jsonl" }
+    }
+  });
+  assert.equal(res.decision, "deny");
+  assert.match(res.reason, /read_transcript\(conversationId="42aea43d-ea8b-48f8-bbf5-eef4e6242956", mode="compact"\)/);
+  console.log("✓ Installed Hook: view_file on transcript.jsonl -> DENIED with redirection to read_transcript");
+}
+
 // --- 3. Live Installed MCP Server Verification ---
 console.log("\n--- 3. Live Installed MCP Server Protocol Verification ---");
 
@@ -215,7 +230,10 @@ function sendRpc(method, params = {}) {
   assert.ok(toolNames.includes("subagent_brief"));
   assert.ok(toolNames.includes("get_installation_status"));
   assert.ok(toolNames.includes("sync_installation"));
-  console.log("✓ Installed MCP Server: tools/list verified [all 5 tools present]");
+  assert.ok(toolNames.includes("read_transcript"));
+  assert.ok(toolNames.includes("query_transcript"));
+  assert.equal(toolNames.length, 7);
+  console.log("✓ Installed MCP Server: tools/list verified [all 7 tools present]");
 }
 
 // 3.3 Installation Status Tool Call

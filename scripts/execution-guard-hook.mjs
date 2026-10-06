@@ -122,7 +122,12 @@ try {
   }
 
   // Fast-path bailout (< 1ms): skip JSON parsing if no governed tools are present
-  if (!inputRaw.includes("manage_task") && !inputRaw.includes("schedule") && !inputRaw.includes("run_command")) {
+  if (
+    !inputRaw.includes("manage_task") &&
+    !inputRaw.includes("schedule") &&
+    !inputRaw.includes("run_command") &&
+    !inputRaw.includes("view_file")
+  ) {
     failOpen();
   }
 
@@ -130,6 +135,23 @@ try {
   const toolCall = payload.toolCall || payload.tool_call || {};
   const toolName = String(toolCall.name || toolCall.tool_name || "").trim().toLowerCase();
   const args = toolCall.args || toolCall.arguments || {};
+
+  // Layer 1: Transcript Read Enforcement for view_file
+  if (toolName === "view_file") {
+    const rawPath = String(args.AbsolutePath || args.absolutePath || args.targetFile || args.path || "").trim();
+    const normalizedPath = rawPath.replace(/\\/g, "/");
+    const transcriptRegex = /\/brain\/([^/]+)\/\.system_generated\/logs\/transcript(?:_full)?\.jsonl$/i;
+    const match = normalizedPath.match(transcriptRegex);
+
+    if (match || /\/\.system_generated\/logs\/transcript(?:_full)?\.jsonl$/i.test(normalizedPath)) {
+      const convId = match ? match[1] : "current";
+      respond({
+        decision: "deny",
+        reason: `Antigravity Execution Governance: Reading raw transcript JSONL files directly via view_file is blocked to prevent severe context bloat and token degradation. Please call the MCP tool read_transcript(conversationId="${convId}", mode="compact") or query_transcript(...) instead.`
+      });
+    }
+    respond({ decision: "allow" });
+  }
 
   // Layer 1: Intelligent Governor for manage_task
   if (toolName === "manage_task") {

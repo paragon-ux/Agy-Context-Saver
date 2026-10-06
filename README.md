@@ -28,8 +28,13 @@ graph TD
     
     C["Agent calls<br/>schedule timer"] -->|PreToolUse Hook| D["DENIED<br/>Polling not allowed"]
     
+    VF["Agent calls<br/>view_file(transcript)"] -->|PreToolUse Hook| VG["DENIED<br/>Redirect to read_transcript"]
+    
     E["Agent calls<br/>safe_command"] -->|MCP Tool| F["Execute with<br/>Output Compression"]
     F --> G["Return summary<br/>+ exit code"]
+    
+    TR["Agent reads<br/>conversation"] -->|MCP Tool| TS["read_transcript /<br/>query_transcript"]
+    TS --> TH["Return clean Markdown<br/>zero JSON noise"]
     
     H["Agent needs<br/>research/forensics"] -->|MCP Tool| I["subagent_brief<br/>offload work"]
     I --> J["Subagent returns<br/>1-paragraph summary"]
@@ -37,6 +42,7 @@ graph TD
 
 ### Layer 1: Intelligent Polling Governor & Reactive Wakeup
 * **Blocks Runaway Busy-Waiting**: Blocks rapid repetitive `manage_task(Action='status')` polling loops and short artificial timers (<120s) that bloat transcripts.
+* **Transcript Read Enforcement**: Intercepts naive `view_file` calls targeting `transcript.jsonl` or `transcript_full.jsonl`, denying them and redirecting the model to use `read_transcript` or `query_transcript`, permanently stopping post-compaction context bloat.
 * **Safe Harbor for Stuck Task Debugging**: Allows status inspections for diagnostic troubleshooting if a process might not exit properly (deadlock, hung build). Initial check and spaced-out cooldown checks (>=30s) are permitted so agents can inspect logs and kill frozen processes.
 * **Safe Harbor for `/teamwork-preview` & Subagents**: Multi-agent coordination and subagent tasks are never blocked from monitoring.
 * **Watchdog Timers**: Legitimate watchdog timers on `schedule` (>= 120s) to catch unhandled stalls are fully permitted.
@@ -104,13 +110,15 @@ If you prefer explicit MCP server registration in `~/.gemini/config/mcp_config.j
 
 ### Option 3: Universal MCP Server & Native In-Chat Tools
 
-Once installed, 5 native MCP tools are directly available to your Antigravity agent or can be called from chat:
+Once installed, 7 native MCP tools are directly available to your Antigravity agent or can be called from chat:
 
 1. **`safe_command`**: Runs shell commands with intelligent log compression, streaming buffer concatenation, 2,000-char line clamping, and escalating SIGKILL timeout protection.
 2. **`check_context_health`**: Streams `transcript.jsonl` using chunked `readline` to audit turn budgets, total payload sizes, and busy-polling events without memory spikes.
-3. **`subagent_brief`**: Formulates scope-isolated prompts for delegated subagents to offload context-heavy exploration.
-4. **`get_installation_status`**: Audits the live 4-layer health (Plugin Link, Lifecycle Hook, MCP Server, Tool Schemas) from inside Antigravity or CLI.
-5. **`sync_installation`**: Programmatically synchronizes and repairs the installation in ~25ms without terminal commands.
+3. **`read_transcript`**: Reads recent conversation turns from Antigravity transcripts in clean Markdown with zero raw JSON noise. Supports `"compact"` and `"full"` modes with 1-to-2 parameters.
+4. **`query_transcript`**: Forensic query and filtering engine. Searches by keyword or regex, filters by role (`user`, `assistant`, `tool`, `error`), and automatically dereferences truncated lines from `transcript_full.jsonl`.
+5. **`subagent_brief`**: Formulates scope-isolated prompts for delegated subagents to offload context-heavy exploration.
+6. **`get_installation_status`**: Audits the live 4-layer health (Plugin Link, Lifecycle Hook, MCP Server, Tool Schemas) from inside Antigravity or CLI.
+7. **`sync_installation`**: Programmatically synchronizes and repairs the installation in ~25ms without terminal commands.
 
 Check installation health from CLI at any time:
 ```bash

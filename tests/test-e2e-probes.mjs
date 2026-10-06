@@ -275,6 +275,126 @@ console.log("✓ MCP Server initialized");
   console.log("✓ safe_command terminated long-running command on timeout with escalating signal protection");
 }
 
+// Probe 2.g: read_transcript streaming on historical transcript (compact and full)
+{
+  console.log("\nTesting MCP read_transcript on historical transcript (compact and full)...");
+  const resCompact = await callRpc("tools/call", {
+    name: "read_transcript",
+    arguments: {
+      conversationId: "fcda194f-62d6-46aa-b545-b2de8fa5774e",
+      mode: "compact",
+      lastTurns: 5
+    }
+  });
+  assert.equal(resCompact.result.isError, undefined);
+  const compactText = resCompact.result.content[0].text;
+  assert.match(compactText, /# Conversation Transcript: `fcda194f-62d6-46aa-b545-b2de8fa5774e`/);
+  assert.match(compactText, /- Mode: \*\*compact\*\*/);
+  assert.match(compactText, /### \[Step \d+ \| (USER|ASSISTANT)\]/);
+  assert.ok(!compactText.includes('{"step_index":'), "Must format into clean Markdown, zero raw JSON strings");
+
+  const resFull = await callRpc("tools/call", {
+    name: "read_transcript",
+    arguments: {
+      conversationId: "fcda194f-62d6-46aa-b545-b2de8fa5774e",
+      mode: "full",
+      lastTurns: 2
+    }
+  });
+  assert.equal(resFull.result.isError, undefined);
+  const fullText = resFull.result.content[0].text;
+  assert.match(fullText, /- Mode: \*\*full\*\*/);
+  console.log("✓ read_transcript successfully rendered clean Markdown dialogue in both compact and full modes");
+}
+
+// Probe 2.h: Edge Case - Trailing unclosed line resilience and base64 media clamping
+{
+  console.log("\nTesting MCP read_transcript edge cases: unclosed trailing lines and base64 media clamping...");
+  const tempEdgeFile = path.join(os.tmpdir(), "edge-transcript.jsonl");
+  const fakeBase64 = "data:image/png;base64," + "A".repeat(500);
+  const giantBase64 = "B".repeat(300);
+  const testLines = [
+    JSON.stringify({ step_index: 1, type: "USER_INPUT", content: `Here is an image: ${fakeBase64} and inline payload: ${giantBase64}` }),
+    JSON.stringify({ step_index: 2, type: "PLANNER_RESPONSE", content: "Processed the payload." }),
+    '{"step_index": 3, "type": "USER_INPUT", "content": "incomplete line without closing brace' // Unclosed trailing line
+  ];
+  fs.writeFileSync(tempEdgeFile, testLines.join("\n"), "utf-8");
+
+  const resEdge = await callRpc("tools/call", {
+    name: "read_transcript",
+    arguments: { conversationId: tempEdgeFile, mode: "compact" }
+  });
+  assert.equal(resEdge.result.isError, undefined);
+  const edgeText = resEdge.result.content[0].text;
+  assert.match(edgeText, /\[Embedded Media\/Binary Omitted\]/, "Must strip data:image base64");
+  assert.match(edgeText, /\[Binary\/Base64 Payload Omitted\]/, "Must strip giant base64 sequences");
+  assert.match(edgeText, /Processed the payload\./, "Must retain valid lines");
+  try { fs.unlinkSync(tempEdgeFile); } catch {}
+  console.log("✓ read_transcript handled unclosed trailing flush and clamped binary/base64 media without errors");
+}
+
+// Probe 2.i: query_transcript filtering by keyword, roles, and boundaries
+{
+  console.log("\nTesting MCP query_transcript keyword and role filtering...");
+  const resQuery = await callRpc("tools/call", {
+    name: "query_transcript",
+    arguments: {
+      conversationId: "fcda194f-62d6-46aa-b545-b2de8fa5774e",
+      query: "anti-overfitting",
+      roles: ["user", "assistant"],
+      maxResults: 5
+    }
+  });
+  assert.equal(resQuery.result.isError, undefined);
+  const qText = resQuery.result.content[0].text;
+  assert.match(qText, /## Transcript Query Results/);
+  assert.match(qText, /anti-overfitting/i);
+  console.log("✓ query_transcript filtered steps by keyword and role with zero context bloat");
+}
+
+// Probe 2.j: query_transcript auto-dereferencing
+{
+  console.log("\nTesting MCP query_transcript auto-dereferencing on synthetic paired transcripts...");
+  const tmpDir = path.join(os.tmpdir(), `test-auto-${Date.now()}`);
+  const logsDir = path.join(tmpDir, ".system_generated", "logs");
+  fs.mkdirSync(logsDir, { recursive: true });
+
+  const compactFile = path.join(logsDir, "transcript.jsonl");
+  const fullFile = path.join(logsDir, "transcript_full.jsonl");
+
+  const compactLine = {
+    step_index: 42,
+    type: "PLANNER_RESPONSE",
+    content: "Truncated summary...",
+    truncated_fields: ["content"]
+  };
+  const fullLine = {
+    step_index: 42,
+    type: "PLANNER_RESPONSE",
+    content: "Full expanded content dereferenced from transcript_full.jsonl!"
+  };
+
+  fs.writeFileSync(compactFile, JSON.stringify(compactLine) + "\n", "utf-8");
+  fs.writeFileSync(fullFile, JSON.stringify(fullLine) + "\n", "utf-8");
+
+  const resAuto = await callRpc("tools/call", {
+    name: "query_transcript",
+    arguments: {
+      conversationId: tmpDir,
+      mode: "auto",
+      roles: ["all"]
+    }
+  });
+  assert.equal(resAuto.result.isError, undefined);
+  const autoText = resAuto.result.content[0].text;
+  assert.match(autoText, /Full expanded content dereferenced from transcript_full\.jsonl!/, "Must automatically dereference full content when truncated");
+
+  try {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  } catch {}
+  console.log("✓ query_transcript auto-dereferenced truncated step from transcript_full.jsonl with step_index verification");
+}
+
 proc.kill();
 console.log("\n=================================================");
 console.log("ALL END-TO-END VERIFICATION PROBES PASSED 100%!");

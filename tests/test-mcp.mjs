@@ -54,7 +54,10 @@ function send(method, params = {}) {
   assert.ok(toolNames.includes("subagent_brief"));
   assert.ok(toolNames.includes("get_installation_status"));
   assert.ok(toolNames.includes("sync_installation"));
-  console.log("✓ tools/list returned all 5 governance & installation tools");
+  assert.ok(toolNames.includes("read_transcript"));
+  assert.ok(toolNames.includes("query_transcript"));
+  assert.equal(toolNames.length, 7);
+  console.log("✓ tools/list returned all 7 governance & transcript tools");
 }
 
 // 3. tools/call: safe_command
@@ -83,7 +86,7 @@ function send(method, params = {}) {
 {
   const res = await send("tools/call", { name: "get_installation_status" });
   assert.match(res.result.content[0].text, /Installation Status: HEALTHY & ACTIVE/);
-  assert.match(res.result.content[0].text, /ALL 5 SCHEMAS PRESENT/);
+  assert.match(res.result.content[0].text, /ALL 7 SCHEMAS PRESENT/);
   console.log("✓ tools/call (get_installation_status) reported live 4-layer health");
 }
 
@@ -98,14 +101,50 @@ function send(method, params = {}) {
   console.log("✓ tools/call (sync_installation) verified dry-run synchronization");
 }
 
-// 7. resources/read
+// 7. tools/call: read_transcript
+{
+  const res = await send("tools/call", {
+    name: "read_transcript",
+    arguments: {
+      conversationId: "fcda194f-62d6-46aa-b545-b2de8fa5774e",
+      mode: "compact",
+      lastTurns: 3
+    }
+  });
+  assert.equal(res.result.isError, undefined);
+  const text = res.result.content[0].text;
+  assert.match(text, /# Conversation Transcript: `fcda194f-62d6-46aa-b545-b2de8fa5774e`/);
+  assert.match(text, /- Mode: \*\*compact\*\*/);
+  assert.match(text, /### \[Step \d+ \|/);
+  console.log("✓ tools/call (read_transcript) successfully streamed and formatted conversation turns");
+}
+
+// 8. tools/call: query_transcript
+{
+  const res = await send("tools/call", {
+    name: "query_transcript",
+    arguments: {
+      conversationId: "fcda194f-62d6-46aa-b545-b2de8fa5774e",
+      query: "verification",
+      roles: ["user", "assistant"],
+      maxResults: 5
+    }
+  });
+  assert.equal(res.result.isError, undefined);
+  const text = res.result.content[0].text;
+  assert.match(text, /## Transcript Query Results: `fcda194f-62d6-46aa-b545-b2de8fa5774e`/);
+  assert.match(text, /- Filter: query="verification"/);
+  console.log("✓ tools/call (query_transcript) filtered and returned matching forensic steps");
+}
+
+// 9. resources/read
 {
   const res = await send("resources/read", { uri: "context-saver://rules/governance" });
   assert.match(res.result.contents[0].text, /Layer 1: Background Task & Polling Ban/);
   console.log("✓ resources/read served governance rulebook");
 }
 
-// 8. prompts/get
+// 10. prompts/get
 {
   const res = await send("prompts/get", { name: "context_shield" });
   assert.match(res.result.messages[0].content.text, /Antigravity Context Governance rules/);
