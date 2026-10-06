@@ -35,9 +35,11 @@ graph TD
     I --> J["Subagent returns<br/>1-paragraph summary"]
 ```
 
-### Layer 1: Hard Polling Denial & Reactive Wakeup
-* **Blocks Recursive Polling**: Denies `manage_task(Action='status')` calls and artificial `schedule` timers.
-* **Enforces Reactive Wakeup**: Forces the agent to stop calling tools and yield the turn. When the background task exits, Antigravity's native `<SYSTEM_MESSAGE>` completion notification automatically wakes up the agent.
+### Layer 1: Intelligent Polling Governor & Reactive Wakeup
+* **Blocks Runaway Busy-Waiting**: Blocks rapid repetitive `manage_task(Action='status')` polling loops and short artificial timers (<120s) that bloat transcripts.
+* **Safe Harbor for Stuck Task Debugging**: Allows status inspections for diagnostic troubleshooting if a process might not exit properly (deadlock, hung build). Initial check and spaced-out cooldown checks (>=30s) are permitted so agents can inspect logs and kill frozen processes.
+* **Safe Harbor for `/teamwork-preview` & Subagents**: Multi-agent coordination and subagent tasks are never blocked from monitoring.
+* **Watchdog Timers**: Legitimate watchdog timers on `schedule` (>= 120s) to catch unhandled stalls are fully permitted.
 
 ### Layer 2: Fast Synchronous Execution & Output Compression
 * **MCP `safe_command`**: Runs shell commands with generous timeouts and **intelligent output compression** (collapses repetitive test dots/logs into concise summaries), preventing raw log explosions from ever reaching the transcript.

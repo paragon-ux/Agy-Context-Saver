@@ -1,9 +1,11 @@
 # Antigravity Execution & Context Governance (Agy-Context-Saver)
 
 ## Layer 1: Background Task & Polling Ban (Reactive Wakeup SSOT)
-- **Hard Ban on Polling / Busy-Waiting**: NEVER call `manage_task(Action='status')` or `schedule` in a loop to wait for a running background command. Polling rapidly degrades session stability by flooding the transcript with repetitive ASCII log snapshots, exhausting the context window, and causing session stalls.
-- **Yield Immediately on Background Detach**: If `run_command` moves a process to the background, the agent MUST immediately stop calling tools. Emit a single concise progress sentence and end the turn. Rely strictly on Antigravity's **Reactive Wakeup** (`<SYSTEM_MESSAGE>` completion notification) to resume execution.
-- **`schedule` Governance**: NEVER use `schedule` as an artificial `sleep` or polling timer for background tasks. `schedule` is reserved exclusively for user-requested future reminders or standing cron jobs.
+- **Ban on Repetitive Busy-Wait Polling**: Do NOT call `manage_task(Action='status')` or rapid `schedule` timers in a tight loop to wait for a running background command. Repetitive busy-wait polling rapidly degrades session stability by flooding the transcript with repetitive ASCII log snapshots and exhausting the context window.
+- **Yield Immediately on Background Detach**: If `run_command` moves a process to the background, the agent should normally stop calling tools, emit a concise status line, and yield the turn. Rely primarily on Antigravity's **Reactive Wakeup** (`<SYSTEM_MESSAGE>` completion notification) to resume execution.
+- **Safe Harbor — Stuck Task Debugging & Diagnostics**: If a background task might not exit properly (e.g. deadlock, frozen interactive prompt, or failure to terminate), the agent is **never blocked** from inspecting status for debugging. Initial diagnostic status checks and spaced checks (>=30s cooldown) are permitted to determine whether to send input or kill the task.
+- **Safe Harbor — Multi-Agent & Teamwork**: Tasks spawned under `/teamwork-preview` or subagent coordination workflows (`invoke_subagent`, `manage_subagents`) are never blocked from monitoring.
+- **Watchdog Timers on `schedule`**: Long watchdog timers (`DurationSeconds >= 120`) designed to wake up and catch deadlocked background tasks that fail to exit are explicitly permitted. Only rapid artificial polling loops (<120s) are denied.
 
 ## Layer 2: Fast Synchronous Execution First
 - **Maximum Synchronous Window**: Always set `WaitMsBeforeAsync: 10000` (the maximum allowed) on `run_command`.

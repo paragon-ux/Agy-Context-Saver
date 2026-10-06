@@ -48,17 +48,48 @@ function callInstalledHook(payload) {
   return JSON.parse(res.stdout.trim());
 }
 
-// 2.1 Polling status denial
+// 2.1 Initial status check: ALLOWED (safe harbor for inspecting potentially hung tasks)
 {
   const res = callInstalledHook({
-    toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-99" } }
+    conversationId: "installed-conv-1",
+    toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-live-1" } }
   });
-  assert.equal(res.decision, "deny");
-  assert.match(res.reason, /Background polling with manage_task\('status'\) is denied/);
-  console.log("✓ Installed Hook: manage_task(Action='status') -> DENIED");
+  assert.equal(res.decision, "allow");
+  console.log("✓ Installed Hook: Initial manage_task(status) -> ALLOWED (debugging safe harbor)");
 }
 
-// 2.2 Task kill allowance
+// 2.2 Rapid consecutive status check: DENIED (blocks compulsive busy-wait loops)
+{
+  const res = callInstalledHook({
+    conversationId: "installed-conv-1",
+    toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-live-1" } }
+  });
+  assert.equal(res.decision, "deny");
+  assert.match(res.reason, /Rapid task polling detected/);
+  console.log("✓ Installed Hook: Rapid consecutive manage_task(status) -> DENIED");
+}
+
+// 2.3 Debugging stuck task: ALLOWED (safe harbor)
+{
+  const res = callInstalledHook({
+    conversationId: "installed-conv-1",
+    toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-live-1", Reason: "debugging stuck background task" } }
+  });
+  assert.equal(res.decision, "allow");
+  console.log("✓ Installed Hook: Debugging manage_task(status) -> ALLOWED");
+}
+
+// 2.4 Teamwork / subagent spawn: ALLOWED (safe harbor)
+{
+  const res = callInstalledHook({
+    conversationId: "teamwork-session-123",
+    toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-teamwork" } }
+  });
+  assert.equal(res.decision, "allow");
+  console.log("✓ Installed Hook: /teamwork-preview manage_task(status) -> ALLOWED");
+}
+
+// 2.5 Task kill allowance
 {
   const res = callInstalledHook({
     toolCall: { name: "manage_task", args: { Action: "kill", TaskId: "task-99" } }
@@ -67,7 +98,7 @@ function callInstalledHook(payload) {
   console.log("✓ Installed Hook: manage_task(Action='kill') -> ALLOWED");
 }
 
-// 2.3 Synchronous wait upgrade
+// 2.6 Synchronous wait upgrade
 {
   const res = callInstalledHook({
     toolCall: { name: "run_command", args: { CommandLine: "npm run build", WaitMsBeforeAsync: 3000 } }
@@ -87,17 +118,35 @@ function callInstalledHook(payload) {
   console.log("✓ Installed Hook: run_command with IsDaemon:true preserves wait window");
 }
 
-// 2.5 Schedule task polling denial
+// 2.7 Schedule task polling denial (< 120s)
 {
   const res = callInstalledHook({
     toolCall: { name: "schedule", args: { DurationSeconds: 30, Prompt: "Check on background task-99" } }
   });
   assert.equal(res.decision, "deny");
-  assert.match(res.reason, /Using schedule as a polling timer/);
-  console.log("✓ Installed Hook: schedule background task polling -> DENIED");
+  assert.match(res.reason, /polling timer/);
+  console.log("✓ Installed Hook: schedule short background task polling -> DENIED");
 }
 
-// 2.6 Schedule regular timer allowance
+// 2.8 Schedule watchdog timer allowance (>= 120s)
+{
+  const res = callInstalledHook({
+    toolCall: { name: "schedule", args: { DurationSeconds: 300, Prompt: "Watchdog timer for background task-99", TimerCondition: "task-99" } }
+  });
+  assert.equal(res.decision, "allow");
+  console.log("✓ Installed Hook: schedule watchdog timer (>= 120s) -> ALLOWED (debugging safe harbor)");
+}
+
+// 2.9 Schedule teamwork context allowance
+{
+  const res = callInstalledHook({
+    toolCall: { name: "schedule", args: { DurationSeconds: 30, Prompt: "teamwork check on subagents" } }
+  });
+  assert.equal(res.decision, "allow");
+  console.log("✓ Installed Hook: schedule with teamwork context -> ALLOWED");
+}
+
+// 2.10 Schedule regular timer allowance
 {
   const res = callInstalledHook({
     toolCall: { name: "schedule", args: { DurationSeconds: 600, Prompt: "Remind user about deployment status" } }
