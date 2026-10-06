@@ -1,13 +1,19 @@
 {
   "name": "agy-context-saver",
   "version": "1.0.0",
-  "description": "Deterministic lifecycle guard and context-isolation governor for Google Antigravity agents",
-  "main": "scripts/execution-guard-hook.mjs",
+  "description": "Cross-platform Model Context Protocol (MCP) server & lifecycle governor for Antigravity, Cursor, and Claude Code",
+  "main": "mcp/index.js",
+  "bin": {
+    "agy-context-saver": "mcp/index.js"
+  },
   "type": "module",
   "scripts": {
-    "test": "node tests/test-hook.mjs"
+    "start": "node mcp/index.js",
+    "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs"
   },
   "keywords": [
+    "mcp",
+    "model-context-protocol",
     "antigravity",
     "gemini",
     "context-window",
