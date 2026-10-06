@@ -36,7 +36,7 @@ try {
 
   // Layer 1: Ban manage_task(Action='status') polling
   if (toolName === "manage_task") {
-    const action = args.Action || args.action;
+    const action = String(args.Action || args.action || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
     if (action === "status") {
       respond({
         decision: "deny",
@@ -48,8 +48,8 @@ try {
 
   // Layer 1: Ban schedule used as artificial polling timer
   if (toolName === "schedule") {
-    const prompt = (args.Prompt || args.prompt || "").toLowerCase();
-    const cond = (args.TimerCondition || args.timerCondition || "").toLowerCase();
+    const prompt = String(args.Prompt || args.prompt || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+    const cond = String(args.TimerCondition || args.timerCondition || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
     const isTaskPoll =
       cond.startsWith("task-") ||
       cond.includes("task") ||

@@ -132,7 +132,8 @@ async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputL
     const proc = spawn(shell, shellArgs, {
       cwd: cwd || process.cwd(),
       env: process.env,
-      windowsHide: true
+      windowsHide: true,
+      windowsVerbatimArguments: isWin
     });
 
     const timer = setTimeout(() => {
@@ -226,8 +227,11 @@ function handleCheckContextHealth({ transcriptPath }) {
           for (const tc of item.tool_calls) {
             const name = tc.tool_name || tc.name;
             const args = tc.args || tc.arguments || {};
-            if (name === "manage_task" && args.Action === "status") pollingEvents++;
-            if (name === "schedule" && (args.Prompt || "").includes("test")) pollingEvents++;
+            const action = String(args.Action || args.action || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+            const prompt = String(args.Prompt || args.prompt || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+            const cond = String(args.TimerCondition || args.timerCondition || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+            if (name === "manage_task" && action === "status") pollingEvents++;
+            if (name === "schedule" && (cond.startsWith("task") || cond.includes("task") || prompt.includes("test") || prompt.includes("check on") || prompt.includes("status"))) pollingEvents++;
           }
         }
       } catch {}

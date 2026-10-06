@@ -9,7 +9,7 @@
   "type": "module",
   "scripts": {
     "start": "node mcp/index.js",
-    "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs"
+    "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs && node tests/test-e2e-probes.mjs"
   },
   "keywords": [
     "antigravity",
