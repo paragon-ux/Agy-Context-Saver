@@ -12,7 +12,7 @@
     "setup": "node scripts/install-register.mjs",
     "uninstall": "node scripts/install-register.mjs --uninstall",
     "status": "node scripts/install-register.mjs --status",
-    "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs && node tests/test-e2e-probes.mjs && node tests/test-installed-verification.mjs"
+    "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs && node tests/test-e2e-probes.mjs && node tests/test-installed-verification.mjs && node tests/test-lifecycle-rollback.mjs"
   },
   "keywords": [
     "antigravity",

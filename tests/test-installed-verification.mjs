@@ -24,11 +24,19 @@ assert.ok(hooksConfig["execution-guard"], "execution-guard must be registered in
 assert.ok(hooksConfig["waymark-continuity"], "waymark-continuity must be preserved in hooks.json");
 console.log("✓ hooks.json contains execution-guard and preserved waymark-continuity");
 
+const hooksBakPath = path.join(geminiConfigDir, "hooks.json.bak");
+assert.ok(fs.existsSync(hooksBakPath), `hooks.json.bak not found at ${hooksBakPath}`);
+console.log("✓ hooks.json.bak configuration backup verified");
+
 assert.ok(fs.existsSync(mcpJsonPath), `mcp_config.json not found at ${mcpJsonPath}`);
 const mcpConfig = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
 assert.ok(mcpConfig.mcpServers?.["agy-context-saver"], "agy-context-saver must be registered in mcpServers");
 assert.ok(mcpConfig.mcpServers?.["waymark-engine"], "waymark-engine must be preserved in mcpServers");
 console.log("✓ mcp_config.json contains agy-context-saver and preserved waymark-engine");
+
+const mcpBakPath = path.join(geminiConfigDir, "mcp_config.json.bak");
+assert.ok(fs.existsSync(mcpBakPath), `mcp_config.json.bak not found at ${mcpBakPath}`);
+console.log("✓ mcp_config.json.bak configuration backup verified");
 
 assert.ok(fs.existsSync(installedSchemasDir), `Antigravity MCP schemas dir not found at ${installedSchemasDir}`);
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "safe_command.json")), "safe_command.json exists in Antigravity MCP directory");

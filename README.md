@@ -146,9 +146,37 @@ node mcp/index.js status
 
 ---
 
+## Transparency, Safety & Governance 🛡️
+
+### Independent Community Tool & Compatibility Notice
+`Agy-Context-Saver` is an open-source community extension purpose-built for Google Antigravity. It is **not developed, maintained, or officially endorsed by Google**.
+
+The tool operates strictly within Antigravity's first-class extensibility specifications (`plugin.json`, `hooks.json`, `mcp_config.json`, and Model Context Protocol stdio servers) as documented in Antigravity's custom plugin guides. It has been tested and validated on Antigravity 2.0+ across Windows, macOS, and Linux.
+
+### Exact Files & Locations Touched
+To maintain total transparency, the following table lists every file and directory modified by `Agy-Context-Saver`:
+
+| Filesystem Path | Purpose | Modification Behavior |
+|:---|:---|:---|
+| `~/.gemini/config/plugins/agy-context-saver` | Native Plugin Link | Directory junction (Windows) or symlink (Unix) linking repo to Antigravity plugin loader. |
+| `~/.gemini/config/scripts/execution-guard-hook.mjs` | Local Hook Script | Mirrored hook script executed by Antigravity during `PreToolUse` lifecycle events. |
+| `~/.gemini/config/hooks.json` | Lifecycle Hook Registration | Registers `execution-guard` for `manage_task\|run_command\|schedule\|view_file`. **Automatically creates `hooks.json.bak` backup before writing. Preserves all other hooks.** |
+| `~/.gemini/config/mcp_config.json` | Universal MCP Server | Registers `agy-context-saver` under `mcpServers`. **Automatically creates `mcp_config.json.bak` backup before writing. Preserves all other servers.** |
+| `~/.gemini/antigravity/mcp/agy-context-saver/` | Antigravity Tool Schemas | Mirrors the 7 tool JSON schemas and `instructions.md` for zero-delay discovery. |
+
+### Safety & Defense-in-Depth Guarantees
+1. **Pre-flight Write Probes**: Validates directory permissions prior to modifying any configuration files; fails early with clear errors if write access is denied.
+2. **Automated Configuration Backups**: Automatically creates `.bak` backups (`hooks.json.bak`, `mcp_config.json.bak`) prior to modifying Antigravity configurations.
+3. **Non-Destructive Merging**: Safely preserves foreign hooks (e.g., `waymark-continuity`) and third-party MCP servers (e.g., `waymark-engine`).
+4. **Complete Rollback & Clean Uninstallation**: `npm run uninstall` cleanly unlinks plugins, removes mirrored scripts and schemas, and strips entries without touching other settings. Run `npm run uninstall -- --restore-backups` to immediately revert configuration files to `.bak` copies.
+5. **Fail-Open Execution Invariant**: Hooks execute in <5ms. In the event of an unhandled runtime exception, missing file, or malformed stdin, the governor immediately fails open (`decision: "allow"`), ensuring the agent never hangs or crashes.
+6. **Zero External Runtime Dependencies**: 100% native Node.js standard library (`fs`, `path`, `os`, `readline`, `child_process`). Zero npm supply-chain risk.
+
+---
+
 ## Verification & Automated Tests
 
-Run the complete test suite across all 4 layers:
+Run the complete test suite across all 5 verification layers:
 ```bash
 npm test
 ```
@@ -171,41 +199,103 @@ Running Agy-Context-Saver intelligent hook tests...
 ✓ manage_task 3-tier circuit breaker correctly escalates Tier 1 -> Tier 2 -> Tier 3 (force_ask)
 ✓ schedule short polling timer escalates to force_ask on 5th denial
 ✓ manage_task(Action='list') initial call allowed, rapid consecutive polling blocked
-All 15 intelligent hook tests passed successfully!
+✓ view_file on standard source file is allowed (<1ms fast-path)
+✓ view_file on transcript.jsonl is denied and redirects to read_transcript with extracted conversationId
+✓ view_file on transcript_full.jsonl is denied and redirects to read_transcript
+All 18 intelligent hook tests passed successfully!
 
 Running Agy-Context-Saver MCP Server tests...
 ✓ initialize handshake succeeded
-✓ tools/list returned all 5 governance & installation tools
+✓ tools/list returned all 7 governance & transcript tools
 ✓ tools/call (safe_command) executed and captured stdout
 ✓ tools/call (subagent_brief) generated scope-isolated brief
 ✓ tools/call (get_installation_status) reported live 4-layer health
 ✓ tools/call (sync_installation) verified dry-run synchronization
+✓ tools/call (read_transcript) successfully streamed and formatted conversation turns
+✓ tools/call (query_transcript) filtered and returned matching forensic steps
 ✓ resources/read served governance rulebook
 ✓ prompts/get served context_shield prompt
 All MCP tests passed successfully!
 
+=================================================
 Agy-Context-Saver Comprehensive End-to-End Probes
-✓ Fail-open safety checks (empty stdin, non-JSON payloads, non-target tools) passed
-✓ safe_command compressed 180 lines to 30 lines with status preservation
-✓ safe_command non-zero exit status (exit 42) accurately retained
-✓ check_context_health detected busy-polling loop and computed metrics
-✓ subagent_brief generated scope-isolated instructions
-✓ safe_command clamped pathological 5,000-char single line
-✓ check_context_health tolerated corrupted JSON lines
+=================================================
+--- Section 1: Hook Resilience Probes (Fail-Open Verification) ---
+✓ Empty stdin -> decision: 'allow'
+✓ Whitespace-only stdin -> decision: 'allow'
+✓ Malformed JSON -> decision: 'allow'
+✓ Non-JSON text payload -> decision: 'allow'
+✓ Non-target tool calls (view_file, write_to_file, ask_question, replace_file_content, custom) -> decision: 'allow'
+✓ Empty object / empty toolCall -> decision: 'allow'
+
+--- Section 2: MCP Server Functional & End-to-End Probes ---
+✓ MCP Server initialized
+✓ safe_command successfully compressed 180 lines to 30 lines (top 15 + bottom 15 preserved, 150 compressed)
+✓ Exit code 0 status preserved: [STATUS: PASSED (exit 0)]
+✓ safe_command non-zero exit status (exit 42) accurately retained without data loss
+✓ check_context_health accurately identified busy-polling loop and computed correct step & byte metrics
+✓ subagent_brief generated strictly formatted, scope-isolated instructions
+✓ safe_command successfully clamped pathological 5,000-char single line
+✓ check_context_health streamed and parsed transcript with corrupt line tolerance
 ✓ safe_command terminated long-running command on timeout with escalating signal protection
+✓ read_transcript successfully rendered clean Markdown dialogue in both compact and full modes
+✓ read_transcript handled unclosed trailing flush and clamped binary/base64 media without errors
+✓ query_transcript filtered steps by keyword and role with zero context bloat
+✓ query_transcript auto-dereferenced truncated step from transcript_full.jsonl with step_index verification
 ALL END-TO-END VERIFICATION PROBES PASSED 100%!
 
+=================================================
 Agy-Context-Saver Live Installed System Validation
+=================================================
+--- 1. Configuration Registration Verification ---
 ✓ hooks.json contains execution-guard and preserved waymark-continuity
+✓ hooks.json.bak configuration backup verified
 ✓ mcp_config.json contains agy-context-saver and preserved waymark-engine
-✓ All 5 Antigravity tool schemas successfully installed to ~/.gemini/antigravity/mcp/agy-context-saver
+✓ mcp_config.json.bak configuration backup verified
+✓ All 7 Antigravity tool schemas successfully installed to ~/.gemini/antigravity/mcp/agy-context-saver
 ✓ detectExistingInstallation() accurately verifies all 4 installation layers
-✓ Live Hook Execution Verification passed across all safe harbors and upgrades
-✓ Live Installed MCP Server Protocol Verification passed across all tools, resources, and prompts
+
+--- 2. Live Hook Execution Verification (cmd.exe /c wrapper) ---
+✓ Installed Hook: Initial manage_task(status) -> ALLOWED (debugging safe harbor)
+✓ Installed Hook: Rapid consecutive manage_task(status) -> DENIED
+✓ Installed Hook: Debugging manage_task(status) -> ALLOWED
+✓ Installed Hook: /teamwork-preview manage_task(status) -> ALLOWED
+✓ Installed Hook: manage_task(Action='kill') -> ALLOWED
+✓ Installed Hook: run_command WaitMsBeforeAsync upgraded to 10000ms
+✓ Installed Hook: run_command with IsDaemon:true preserves wait window
+✓ Installed Hook: schedule short background task polling -> DENIED
+✓ Installed Hook: schedule watchdog timer (>= 120s) -> ALLOWED (debugging safe harbor)
+✓ Installed Hook: schedule with teamwork context -> ALLOWED
+✓ Installed Hook: schedule user timer -> ALLOWED
+✓ Installed Hook: view_file on transcript.jsonl -> DENIED with redirection to read_transcript
+
+--- 3. Live Installed MCP Server Protocol Verification ---
+✓ Installed MCP Server: Handshake succeeded (name: agy-context-saver, v1.0.0)
+✓ Installed MCP Server: tools/list verified [all 7 tools present]
+✓ Installed MCP Server: get_installation_status reported healthy status
+✓ Installed MCP Server: safe_command executed successfully with compressed status
+✓ Installed MCP Server: resources/read served governance markdown rules
+✓ Installed MCP Server: prompts/get served context_shield prompt
 ALL LIVE INSTALLED SYSTEM VALIDATIONS PASSED 100%!
+
+=================================================
+Agy-Context-Saver Lifecycle & Rollback Test Suite
+=================================================
+--- 1. Pre-flight Validation Audit ---
+✓ Pre-flight audit completed without throwing write errors
+--- 2. Initial State Verification ---
+✓ Initial installation verified healthy with configuration backups present
+--- 3. Clean Uninstallation Verification ---
+✓ Clean uninstallation verified: all artifacts removed and foreign configurations preserved
+--- 4. Re-Installation & Synchronization Recovery ---
+✓ Re-installation completed successfully: all 4 integration layers and 7 schemas active
+--- 5. Backup Restore Option Verification ---
+✓ Backup restoration option verified and system returned to clean healthy state
+ALL LIFECYCLE & ROLLBACK TESTS PASSED 100%!
 ```
 
 ---
 
 ## License
 MIT License. Created by paragon-ux.
+

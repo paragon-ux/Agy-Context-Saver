@@ -27,7 +27,9 @@ const pluginsDir = path.join(geminiConfigDir, "plugins");
 const pluginDest = path.join(pluginsDir, "agy-context-saver");
 const scriptsDir = path.join(geminiConfigDir, "scripts");
 const hooksJsonPath = path.join(geminiConfigDir, "hooks.json");
+const hooksBakPath = path.join(geminiConfigDir, "hooks.json.bak");
 const mcpJsonPath = path.join(geminiConfigDir, "mcp_config.json");
+const mcpBakPath = path.join(geminiConfigDir, "mcp_config.json.bak");
 const antigravityMcpDir = path.join(homeDir, ".gemini", "antigravity", "mcp", "agy-context-saver");
 
 const sourceHook = path.join(repoRoot, "scripts", "execution-guard-hook.mjs");
@@ -130,6 +132,16 @@ export async function runInstall(options = {}) {
     log("⚡ Fresh installation of Agy-Context-Saver (Zero-Delay Mode)...");
   }
 
+  // 0. Pre-flight Validation: Verify configuration directory write access
+  try {
+    await fsPromises.mkdir(geminiConfigDir, { recursive: true });
+    const probeFile = path.join(geminiConfigDir, `.preflight-${process.pid}.tmp`);
+    await fsPromises.writeFile(probeFile, "ok", "utf-8");
+    await fsPromises.unlink(probeFile);
+  } catch (err) {
+    throw new Error(`Pre-flight check failed: cannot write to Antigravity configuration directory (${geminiConfigDir}): ${err.message}`);
+  }
+
   // 1. Instant Native Plugin Junction / Symlink (Takes ~5ms)
   await fsPromises.mkdir(pluginsDir, { recursive: true });
   if (!fs.existsSync(pluginDest)) {
@@ -149,11 +161,16 @@ export async function runInstall(options = {}) {
   await fsPromises.copyFile(sourceHook, destHook);
   log(`[OK] Governor hook script mirrored to: ${destHook}`);
 
-  // 3. Register Hook in ~/.gemini/config/hooks.json (Preserves existing hooks)
+  // 3. Register Hook in ~/.gemini/config/hooks.json (Preserves existing hooks + creates backup)
   let hooksConfig = {};
   if (fs.existsSync(hooksJsonPath)) {
     try {
       hooksConfig = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
+      // Create backup if none exists
+      if (!fs.existsSync(hooksBakPath)) {
+        await fsPromises.copyFile(hooksJsonPath, hooksBakPath);
+        log(`[OK] Created configuration backup: ${hooksBakPath}`);
+      }
     } catch (err) {
       hooksConfig = {};
     }
@@ -177,12 +194,17 @@ export async function runInstall(options = {}) {
   await fsPromises.writeFile(hooksJsonPath, JSON.stringify(hooksConfig, null, 2), "utf-8");
   log(`[OK] Lifecycle hook ${alreadyHadHook ? "re-verified" : "registered"} in: ${hooksJsonPath}`);
 
-  // 4. Register MCP Server in ~/.gemini/config/mcp_config.json (Preserves existing servers)
+  // 4. Register MCP Server in ~/.gemini/config/mcp_config.json (Preserves existing servers + creates backup)
   let mcpConfig = { mcpServers: {} };
   if (fs.existsSync(mcpJsonPath)) {
     try {
       mcpConfig = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
       if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+      // Create backup if none exists
+      if (!fs.existsSync(mcpBakPath)) {
+        await fsPromises.copyFile(mcpJsonPath, mcpBakPath);
+        log(`[OK] Created configuration backup: ${mcpBakPath}`);
+      }
     } catch (err) {
       mcpConfig = { mcpServers: {} };
     }
@@ -380,7 +402,17 @@ export async function runUninstall(options = {}) {
     }
   }
 
-  // 2. Remove from hooks.json
+  // 2. Remove mirrored hook script
+  if (fs.existsSync(destHook)) {
+    try {
+      await fsPromises.unlink(destHook);
+      log(`[OK] Removed mirrored hook script: ${destHook}`);
+    } catch (err) {
+      warn(`[WARN] Could not remove mirrored hook script: ${err.message}`);
+    }
+  }
+
+  // 3. Remove from hooks.json
   if (fs.existsSync(hooksJsonPath)) {
     try {
       const hooksConfig = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
@@ -391,7 +423,7 @@ export async function runUninstall(options = {}) {
     } catch {}
   }
 
-  // 3. Remove from mcp_config.json
+  // 4. Remove from mcp_config.json
   if (fs.existsSync(mcpJsonPath)) {
     try {
       const mcpConfig = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
@@ -401,6 +433,36 @@ export async function runUninstall(options = {}) {
       await fsPromises.writeFile(mcpJsonPath, JSON.stringify(mcpConfig, null, 2), "utf-8");
       log(`[OK] Removed from: ${mcpJsonPath}`);
     } catch {}
+  }
+
+  // 5. Remove mirrored Antigravity MCP schemas directory
+  if (fs.existsSync(antigravityMcpDir)) {
+    try {
+      await fsPromises.rm(antigravityMcpDir, { recursive: true, force: true });
+      log(`[OK] Removed mirrored MCP schema directory: ${antigravityMcpDir}`);
+    } catch (err) {
+      warn(`[WARN] Could not remove schema directory: ${err.message}`);
+    }
+  }
+
+  // 6. Optional: Restore configuration files from backups if requested
+  if (options.restoreBackups) {
+    if (fs.existsSync(hooksBakPath)) {
+      try {
+        await fsPromises.copyFile(hooksBakPath, hooksJsonPath);
+        log(`[OK] Restored hooks.json from backup: ${hooksBakPath}`);
+      } catch (err) {
+        warn(`[WARN] Could not restore hooks backup: ${err.message}`);
+      }
+    }
+    if (fs.existsSync(mcpBakPath)) {
+      try {
+        await fsPromises.copyFile(mcpBakPath, mcpJsonPath);
+        log(`[OK] Restored mcp_config.json from backup: ${mcpBakPath}`);
+      } catch (err) {
+        warn(`[WARN] Could not restore mcp backup: ${err.message}`);
+      }
+    }
   }
 
   log("\n✓ Uninstallation complete.\n");
@@ -419,11 +481,22 @@ export function runStatus(options = {}) {
   return existing;
 }
 
+export {
+  pluginDest,
+  destHook,
+  hooksJsonPath,
+  hooksBakPath,
+  mcpJsonPath,
+  mcpBakPath,
+  antigravityMcpDir
+};
+
 // Auto-run if executed directly as script
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const arg = process.argv[2];
   if (arg === "--uninstall" || arg === "uninstall") {
-    await runUninstall();
+    const restoreBackups = process.argv.includes("--restore-backups");
+    await runUninstall({ restoreBackups });
   } else if (arg === "--status" || arg === "status") {
     runStatus();
   } else if (arg === "--check" || arg === "-c") {
