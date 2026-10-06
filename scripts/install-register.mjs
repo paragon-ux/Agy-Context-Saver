@@ -232,7 +232,8 @@ export async function runInstall(options = {}) {
         command: { type: "string", description: "The exact shell command to execute." },
         cwd: { type: "string", description: "Working directory (optional, defaults to current working directory)." },
         timeoutSeconds: { type: "number", description: "Execution timeout in seconds (default: 30)." },
-        maxOutputLines: { type: "number", description: "Maximum output lines to return before compressing (default: 30)." }
+        maxOutputLines: { type: "number", description: "Maximum output lines to return before compressing (default: 30)." },
+        terse: { type: "boolean", description: "If true and command exits 0, returns only a compact 1-line execution summary to minimize UI step height (default: false)." }
       },
       required: ["command"]
     }
@@ -306,7 +307,7 @@ export async function runInstall(options = {}) {
         },
         lastTurns: {
           type: "number",
-          description: "Number of most recent conversation turns to display (default: 10). Set to 0 to read all."
+          description: "Number of most recent conversation turns to display (default: 3). Set to 0 to read all."
         },
         includeThinking: {
           type: "boolean",
@@ -363,7 +364,11 @@ export async function runInstall(options = {}) {
         },
         maxResults: {
           type: "number",
-          description: "Maximum number of matched steps to return (default: 25)."
+          description: "Maximum number of matched steps to return (default: 5)."
+        },
+        summaryOnly: {
+          type: "boolean",
+          description: "If true, returns high-density 1-line step summaries instead of full message blocks to minimize UI card height (default: false)."
         }
       },
       required: ["conversationId"]

@@ -137,6 +137,35 @@ function send(method, params = {}) {
   console.log("✓ tools/call (query_transcript) filtered and returned matching forensic steps");
 }
 
+// 8b. tools/call: safe_command (terse mode)
+{
+  const res = await send("tools/call", {
+    name: "safe_command",
+    arguments: { command: "echo terse-output-line", terse: true }
+  });
+  const text = res.result.content[0].text;
+  assert.match(text, /✓ \[STATUS: PASSED \(exit 0\)/);
+  assert.match(text, /lines collapsed in terse mode/);
+  console.log("✓ tools/call (safe_command with terse: true) returned 1-line collapsed summary");
+}
+
+// 8c. tools/call: query_transcript (summaryOnly mode)
+{
+  const res = await send("tools/call", {
+    name: "query_transcript",
+    arguments: {
+      conversationId: "fcda194f-62d6-46aa-b545-b2de8fa5774e",
+      summaryOnly: true,
+      maxResults: 3
+    }
+  });
+  assert.equal(res.result.isError, undefined);
+  const text = res.result.content[0].text;
+  assert.match(text, /## Transcript Query Summary:/);
+  assert.match(text, /- \*\*\[Step \d+ \|/);
+  console.log("✓ tools/call (query_transcript with summaryOnly: true) returned compact 1-line bullet summaries");
+}
+
 // 9. resources/read
 {
   const res = await send("resources/read", { uri: "context-saver://rules/governance" });

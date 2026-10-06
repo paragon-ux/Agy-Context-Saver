@@ -70,6 +70,10 @@ const TOOLS = [
         maxOutputLines: {
           type: "number",
           description: "Maximum output lines to return before compressing (default: 30)."
+        },
+        terse: {
+          type: "boolean",
+          description: "If true and command exits 0, returns only a compact 1-line execution summary to minimize UI step height (default: false)."
         }
       },
       required: ["command"]
@@ -152,7 +156,7 @@ const TOOLS = [
         },
         lastTurns: {
           type: "number",
-          description: "Number of most recent conversation turns to display (default: 10). Set to 0 to read all."
+          description: "Number of most recent conversation turns to display (default: 3). Set to 0 to read all."
         },
         includeThinking: {
           type: "boolean",
@@ -208,7 +212,11 @@ const TOOLS = [
         },
         maxResults: {
           type: "number",
-          description: "Maximum number of matched steps to return (default: 25)."
+          description: "Maximum number of matched steps to return (default: 5)."
+        },
+        summaryOnly: {
+          type: "boolean",
+          description: "If true, returns high-density 1-line step summaries instead of full message blocks to minimize UI card height (default: false)."
         }
       },
       required: ["conversationId"]
@@ -236,8 +244,8 @@ const PROMPTS = [
 ];
 
 // --- Tool Implementations ---
-const MAX_LINE_CHARS = 2000;
-const MAX_TOTAL_CHARS = 64000;
+const MAX_LINE_CHARS = 1000;
+const MAX_TOTAL_CHARS = 24000;
 const MAX_CAPTURE_BYTES = 50 * 1024 * 1024; // 50MB memory ceiling against runaway commands
 
 function clampLine(line) {
@@ -264,13 +272,45 @@ function compressOutput(text, maxLines) {
 
   if (output.length > MAX_TOTAL_CHARS) {
     const halfChars = Math.floor(MAX_TOTAL_CHARS / 2);
-    output = `${output.slice(0, halfChars)}\n\n... [agy-context-saver: clamped excessive character output (${output.length} chars)] ...\n\n${output.slice(-halfChars)}`;
+    output = `${output.slice(0, halfChars)}\n\n... [agy-context-saver: clamped to 24 KB ceiling to prevent host disk spillover] ...\n\n${output.slice(-halfChars)}`;
   }
 
   return output;
 }
 
-async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputLines = 30 }) {
+async function resolveWorkspaceCwd() {
+  try {
+    const dbPath = path.join(os.homedir(), ".gemini", "antigravity", "conversation_summaries.db");
+    if (fs.existsSync(dbPath)) {
+      const origEmitWarning = process.emitWarning;
+      process.emitWarning = () => {};
+      try {
+        const { DatabaseSync } = await import("node:sqlite");
+        const db = new DatabaseSync(dbPath, { readOnly: true });
+        const row = db.prepare("SELECT workspace_uris FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 1").get();
+        if (row && row.workspace_uris) {
+          const uris = JSON.parse(row.workspace_uris);
+          if (Array.isArray(uris) && uris.length > 0) {
+            const parsed = new URL(uris[0]);
+            let wsPath = decodeURIComponent(parsed.pathname);
+            if (os.platform() === "win32" && wsPath.startsWith("/")) {
+              wsPath = wsPath.slice(1);
+            }
+            if (fs.existsSync(wsPath)) {
+              return wsPath;
+            }
+          }
+        }
+      } finally {
+        process.emitWarning = origEmitWarning;
+      }
+    }
+  } catch {}
+  return process.env.INIT_CWD || process.env.PWD || process.cwd();
+}
+
+async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputLines = 30, terse = false }) {
+  const resolvedCwd = cwd || (await resolveWorkspaceCwd());
   return new Promise((resolve) => {
     const isWin = os.platform() === "win32";
     const shell = isWin ? process.env.ComSpec || "cmd.exe" : "/bin/sh";
@@ -286,7 +326,7 @@ async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputL
     let captureTruncated = false;
 
     const proc = spawn(shell, shellArgs, {
-      cwd: cwd || process.cwd(),
+      cwd: resolvedCwd,
       env: process.env,
       windowsHide: true,
       windowsVerbatimArguments: isWin
@@ -354,6 +394,15 @@ async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputL
       }
 
       const combined = (stdout + (stderr ? "\n[STDERR]\n" + stderr : "")).trim();
+
+      if (terse && exitCode === 0) {
+        const rawLines = combined ? combined.split(/\r?\n/).filter(Boolean).length : 0;
+        return resolve({
+          isError: false,
+          content: [{ type: "text", text: `✓ [STATUS: PASSED (exit 0) in ${elapsed}s] (${rawLines} lines collapsed in terse mode)` }]
+        });
+      }
+
       const compressed = compressOutput(combined, maxOutputLines);
 
       const statusSummary = exitCode === 0 ? "PASSED (exit 0)" : `FAILED (exit ${exitCode})`;
@@ -523,8 +572,8 @@ async function handleSyncInstallation({ checkOnly = false } = {}) {
 
 // --- Transcript Reader & Forensics Engine Helpers ---
 
-const MAX_TURN_CHARS = 10000;
-const MAX_OUTPUT_CHARS = 48000;
+const MAX_TURN_CHARS = 6000;
+const MAX_OUTPUT_CHARS = 24000;
 
 function extractConvId(p) {
   const normalized = p.replace(/\\/g, "/");
@@ -695,7 +744,7 @@ async function findFullStep(fullPath, targetStepIndex) {
   return null;
 }
 
-async function handleReadTranscript({ conversationId, mode = "compact", lastTurns = 10, includeThinking = false } = {}) {
+async function handleReadTranscript({ conversationId, mode = "compact", lastTurns = 3, includeThinking = false } = {}) {
   const resolved = resolveTranscriptPath(conversationId, mode);
   if (resolved.error) {
     return { isError: true, content: [{ type: "text", text: resolved.error }] };
@@ -749,7 +798,7 @@ async function handleReadTranscript({ conversationId, mode = "compact", lastTurn
 
   let fullOutput = header + formattedBlocks.join("\n\n---\n\n");
   if (fullOutput.length > MAX_OUTPUT_CHARS) {
-    fullOutput = fullOutput.slice(0, MAX_OUTPUT_CHARS) + "\n\n... [Transcript display truncated at 48 KB safety ceiling] ...";
+    fullOutput = fullOutput.slice(0, MAX_OUTPUT_CHARS) + "\n\n... [Transcript display clamped at 24 KB safety ceiling] ...";
   }
 
   return { content: [{ type: "text", text: fullOutput }] };
@@ -766,7 +815,8 @@ async function handleQueryTranscript(args = {}) {
     lastTurns,
     includeThinking = false,
     includeToolCalls = false,
-    maxResults = 25
+    maxResults = 5,
+    summaryOnly = false
   } = args;
 
   const resolved = resolveTranscriptPath(conversationId, mode === "full" ? "full" : "compact");
@@ -863,6 +913,36 @@ async function handleQueryTranscript(args = {}) {
     }
   }
 
+  if (summaryOnly) {
+    const summaryLines = finalItems.map((it) => {
+      const step = it.step_index ?? "?";
+      const role = it.type === "USER_INPUT" ? "USER" : it.type === "PLANNER_RESPONSE" ? "ASSISTANT" : it.type === "SUBAGENT_RESPONSE" ? "SUBAGENT" : it.type || "SYSTEM";
+      const time = it.created_at ? ` (${it.created_at.replace(/\.\d+Z$/, "Z")})` : "";
+      let preview = "";
+      if (it.content) {
+        preview = cleanMessageContent(it.content, 120).replace(/\s+/g, " ").trim();
+      } else if (Array.isArray(it.tool_calls) && it.tool_calls.length > 0) {
+        preview = `Tool calls: ${it.tool_calls.map(tc => tc.name || tc.tool_name).join(", ")}`;
+      }
+      return `- **[Step ${step} | ${role}]**${time}: ${preview || "(empty)"}`;
+    });
+
+    const header = [
+      `## Transcript Query Summary: \`${convId}\``,
+      `- Filter: query=${query ? `"${query}"` : "NONE"}, roles=[${Array.from(roleSet).join(", ")}], mode=${mode}`,
+      `- Matched Steps: ${matched.length} (showing ${finalItems.length} in compact summary mode)`,
+      "",
+      "---",
+      ""
+    ].join("\n");
+
+    let output = header + summaryLines.join("\n");
+    if (output.length > MAX_OUTPUT_CHARS) {
+      output = output.slice(0, MAX_OUTPUT_CHARS) + "\n\n... [Query results clamped at 24 KB safety ceiling] ...";
+    }
+    return { content: [{ type: "text", text: output }] };
+  }
+
   const blocks = finalItems.map((it) => formatTranscriptItem(it, {
     includeThinking,
     includeToolCalls: includeToolCalls || roleSet.has("tool")
@@ -879,7 +959,7 @@ async function handleQueryTranscript(args = {}) {
 
   let output = header + blocks.join("\n\n---\n\n");
   if (output.length > MAX_OUTPUT_CHARS) {
-    output = output.slice(0, MAX_OUTPUT_CHARS) + "\n\n... [Query results clamped at 48 KB safety ceiling] ...";
+    output = output.slice(0, MAX_OUTPUT_CHARS) + "\n\n... [Query results clamped at 24 KB safety ceiling] ...";
   }
 
   return { content: [{ type: "text", text: output }] };
