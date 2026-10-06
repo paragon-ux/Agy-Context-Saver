@@ -1,0 +1,16 @@
+{
+  "agy-context-saver": {
+    "PreToolUse": [
+      {
+        "matcher": "manage_task|run_command|schedule",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/execution-guard-hook.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
