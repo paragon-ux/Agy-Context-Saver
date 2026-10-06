@@ -1,22 +1,22 @@
 # Agy-Context-Saver 🛡️
 
-**Cross-Platform Model Context Protocol (MCP) Server & Lifecycle Governor for AI Coding Agents**
+**Cross-Platform Model Context Protocol (MCP) Server & Lifecycle Governor for Google Antigravity**
 
-`Agy-Context-Saver` is a lightweight, zero-dependency MCP server and lifecycle governor designed for **Google Antigravity**, **Claude Code**, **Cursor**, and **OpenAI Codex**. It prevents context window bloat, transcript degradation, and session stalls caused by **background task busy-wait polling** and **delayed context compaction**.
+`Agy-Context-Saver` is a lightweight, zero-dependency MCP server and lifecycle governor purpose-built for **Google Antigravity** (`agy`). It eliminates session degradation, memory bloat, and chat stalls caused by **background task busy-wait polling** and **delayed context compaction**.
 
-Because Google restricts third-party submissions to the Antigravity plugin marketplace, `Agy-Context-Saver` is distributed as a **universal MCP server** that works anywhere on macOS, Linux, and Windows.
+Because Google restricts third-party submissions to the Antigravity plugin marketplace, `Agy-Context-Saver` uses the **open Model Context Protocol (MCP)** standard so that any Antigravity user on macOS, Linux, or Windows can install and run it immediately via `mcp_config.json`.
 
 ---
 
-## The Problem: The Antigravity Polling Trap
+## The Problem: Antigravity's Background Polling Trap
 
-When an agent runs a command that takes longer than `WaitMsBeforeAsync` (default ~5s), the platform detaches the process to a background task. 
+When an Antigravity agent runs a shell command that takes longer than `WaitMsBeforeAsync` (default ~5s), the platform detaches the process to a background task (`task-XYZ`). 
 
-Without governance, LLMs exhibit a compulsive **busy-waiting anti-pattern**:
+Without governance, models exhibit a compulsive **busy-waiting anti-pattern**:
 1. The agent calls `manage_task(Action='status')` or schedules 30s timers with `schedule(...)` in an infinite loop.
-2. Every `status` poll dumps hundreds of lines of raw ASCII progress dots into the conversation transcript.
-3. Because context compaction fires infrequently, the transcript inflates by 50–100 KB per minute.
-4. The context window degrades, prompt instructions get pushed out of attention, and the session crashes or stalls.
+2. Every `status` poll dumps the full task stdout buffer (hundreds of lines of raw ASCII progress dots and ANSI sequences) directly into the conversation transcript.
+3. Because background context compaction fires infrequently, the transcript inflates by 50–100 KB per minute.
+4. The context window degrades, prompt instructions get pushed out of attention, and the session crashes or becomes unresponsive.
 
 ---
 
@@ -46,25 +46,24 @@ flowchart TD
     end
 ```
 
-### Layer 1: Polling Denial & Reactive Wakeup
-* Blocks recursive `manage_task(status)` polling and artificial `schedule` timers.
-* Enforces Antigravity's native **Reactive Wakeup** (`<SYSTEM_MESSAGE>`). The agent yields the turn, and the host wakes it up automatically upon command completion.
+### Layer 1: Hard Polling Denial & Reactive Wakeup
+* **Blocks Recursive Polling**: Denies `manage_task(Action='status')` calls and artificial `schedule` timers.
+* **Enforces Reactive Wakeup**: Forces the agent to stop calling tools and yield the turn. When the background task exits, Antigravity's native `<SYSTEM_MESSAGE>` completion notification automatically wakes up the agent.
 
 ### Layer 2: Fast Synchronous Execution & Output Compression
-* **MCP `safe_command`**: Runs shell commands with generous timeouts and **intelligent output compression** (collapses 10,000 lines of repetitive test dots into a 3-line summary), keeping the context pristine.
-* **Native Hook Overwrite**: Automatically upgrades `WaitMsBeforeAsync: 10000` on native Antigravity commands so fast commands (<10s) complete synchronously in-turn.
+* **MCP `safe_command`**: Runs shell commands with generous timeouts and **intelligent output compression** (collapses repetitive test dots/logs into concise summaries), preventing raw log explosions from ever reaching the transcript.
+* **Native Hook Overwrite**: Automatically forces `WaitMsBeforeAsync: 10000` on native Antigravity commands so fast commands (<10s) complete synchronously in the same turn without spawning background tasks.
 
 ### Layer 3: Subagent Context Offloading
-* **MCP `subagent_brief`**: Formulates scope-isolated prompts for delegated subagents (`invoke_subagent`).
-* Subagents absorb heavy exploration (grepping, viewing 20 files, log forensics) in their own sandboxed transcripts, returning only a high-signal briefing to the main thread.
+* **MCP `subagent_brief`**: Generates scope-isolated prompts for delegated subagents (`invoke_subagent`).
+* Subagents absorb heavy exploration (grepping, viewing multiple large files, inspecting raw transcripts) in their own sandboxed transcripts, returning only a high-signal briefing to the main thread.
 
 ---
 
-## Universal MCP Server Setup (Cross-Platform)
+## Universal MCP Server Setup
 
-Add `agy-context-saver` to your configuration file on macOS, Linux, or Windows:
+Add `agy-context-saver` to your Antigravity MCP configuration file (`~/.gemini/config/mcp_config.json`):
 
-### 1. Google Antigravity (`~/.gemini/config/mcp_config.json`)
 ```json
 {
   "mcpServers": {
@@ -75,31 +74,8 @@ Add `agy-context-saver` to your configuration file on macOS, Linux, or Windows:
   }
 }
 ```
-*(Or via `npx` once published to npm: `"command": "npx", "args": ["-y", "agy-context-saver"]`)*
 
-### 2. Cursor (`.cursor/mcp.json`)
-```json
-{
-  "mcpServers": {
-    "agy-context-saver": {
-      "command": "node",
-      "args": ["/path/to/Agy-Context-Saver/mcp/index.js"]
-    }
-  }
-}
-```
-
-### 3. Claude Code (`~/.claude/mcp.json`)
-```json
-{
-  "mcpServers": {
-    "agy-context-saver": {
-      "command": "node",
-      "args": ["/path/to/Agy-Context-Saver/mcp/index.js"]
-    }
-  }
-}
-```
+*(Or via `npx` once published to npm: `"command": "npx", "args": ["-y", "agy-context-saver"]` across macOS, Linux, and Windows.)*
 
 ---
 
@@ -108,8 +84,8 @@ Add `agy-context-saver` to your configuration file on macOS, Linux, or Windows:
 ### Tools
 | Tool | Description |
 | :--- | :--- |
-| `safe_command` | Executes commands with generous timeouts and output compression (prevents transcript bloat). |
-| `check_context_health` | Analyzes `transcript.jsonl` to report turn count, transcript size, and active polling loops. |
+| `safe_command` | Executes commands with generous timeouts and output compression (collapses test dot streams). |
+| `check_context_health` | Analyzes `transcript.jsonl` to report turn count, raw payload size, and active polling loops. |
 | `subagent_brief` | Generates scope-isolated prompts for subagents to offload context-gathering. |
 
 ### Prompts
@@ -126,13 +102,13 @@ Add `agy-context-saver` to your configuration file on macOS, Linux, or Windows:
 
 ## Local Antigravity Lifecycle Hook (Optional Pre-Tool Guard)
 
-For Antigravity users who want **machine-level physical denial** of `manage_task(status)` before tool execution:
+For users who also want **machine-level physical denial** of native `manage_task(status)` before tool execution:
 
 Run the included installer:
 ```powershell
 .\install.ps1
 ```
-Or register the hook in `~/.gemini/config/hooks.json`:
+Or register the hook directly in `~/.gemini/config/hooks.json`:
 ```json
 {
   "execution-guard": {

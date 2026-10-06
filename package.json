@@ -1,7 +1,7 @@
 {
   "name": "agy-context-saver",
   "version": "1.0.0",
-  "description": "Cross-platform Model Context Protocol (MCP) server & lifecycle governor for Antigravity, Cursor, and Claude Code",
+  "description": "Universal Model Context Protocol (MCP) server & lifecycle governor purpose-built for Google Antigravity",
   "main": "mcp/index.js",
   "bin": {
     "agy-context-saver": "mcp/index.js"
@@ -12,9 +12,9 @@
     "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs"
   },
   "keywords": [
+    "antigravity",
     "mcp",
     "model-context-protocol",
-    "antigravity",
     "gemini",
     "context-window",
     "lifecycle-hooks",

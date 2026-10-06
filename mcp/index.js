@@ -4,8 +4,7 @@
  * Agy-Context-Saver: Universal Model Context Protocol (MCP) Server
  *
  * Implements standard MCP (JSON-RPC 2.0 over stdio) with zero external dependencies.
- * Cross-platform support for macOS, Linux, and Windows across Antigravity, Cursor,
- * Claude Code, and Codex.
+ * Purpose-built for Google Antigravity across macOS, Linux, and Windows.
  *
  * Capabilities:
  * - Tools:
