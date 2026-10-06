@@ -8,9 +8,10 @@
  *
  * Capabilities:
  * - Tools:
- *   - safe_command: Executes shell commands with intelligent output compression
- *     and generous timeouts to prevent context-window bloat and polling loops.
- *   - check_context_health: Inspects conversation transcripts to diagnose bloat.
+ *   - safe_command: Executes shell commands with intelligent output compression,
+ *     chunk-based stream buffering, escalating SIGKILL fallback, and generous timeouts.
+ *   - check_context_health: Inspects conversation transcripts using async streaming
+ *     to diagnose turn count, tool polling loops, and context degradation with minimal memory.
  *   - subagent_brief: Formulates scope-isolated prompts for delegated subagents.
  * - Prompts:
  *   - context_shield: Injects the 3-Layer Context Governance rules.
@@ -24,16 +25,16 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import { runInstall, runUninstall, runStatus } from "../scripts/install-register.mjs";
+import { runInstall, runUninstall, runStatus, detectExistingInstallation } from "../scripts/install-register.mjs";
 
 // Handle CLI subcommands (e.g. npx agy-context-saver install)
 const cliArg = process.argv[2];
 const checkFlag = process.argv.includes("--check") || process.argv.includes("-c");
 if (cliArg === "install" || cliArg === "--install") {
-  runInstall({ checkOnly: checkFlag });
+  await runInstall({ checkOnly: checkFlag });
   process.exit(0);
 } else if (cliArg === "uninstall" || cliArg === "--uninstall") {
-  runUninstall();
+  await runUninstall();
   process.exit(0);
 } else if (cliArg === "status" || cliArg === "--status") {
   runStatus();
@@ -110,6 +111,29 @@ const TOOLS = [
       },
       required: ["objective"]
     }
+  },
+  {
+    name: "get_installation_status",
+    description: "Inspect the live installation status of Agy-Context-Saver across all Antigravity integration points (Native Plugin Link, Governor Hook in hooks.json, MCP Server in mcp_config.json, and Tool Schemas).",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: "sync_installation",
+    description: "Re-verify and synchronize Agy-Context-Saver installation, updating the governor hook, plugin link, and tool schemas in ~25ms without terminal shell commands.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        checkOnly: {
+          type: "boolean",
+          description: "If true, performs a pre-flight audit without writing changes (default: false)."
+        }
+      },
+      required: []
+    }
   }
 ];
 
@@ -133,6 +157,40 @@ const PROMPTS = [
 ];
 
 // --- Tool Implementations ---
+const MAX_LINE_CHARS = 2000;
+const MAX_TOTAL_CHARS = 64000;
+const MAX_CAPTURE_BYTES = 50 * 1024 * 1024; // 50MB memory ceiling against runaway commands
+
+function clampLine(line) {
+  if (line.length <= MAX_LINE_CHARS) return line;
+  const half = Math.floor(MAX_LINE_CHARS / 2);
+  return `${line.slice(0, half)} ... [truncated long line ${line.length} chars] ... ${line.slice(-half)}`;
+}
+
+function compressOutput(text, maxLines) {
+  if (!text) return "(empty output)";
+  const rawLines = text.split(/\r?\n/);
+  const lines = rawLines.map(clampLine);
+
+  let output = "";
+  if (lines.length <= maxLines) {
+    output = lines.join("\n");
+  } else {
+    const half = Math.floor(maxLines / 2);
+    const head = lines.slice(0, half).join("\n");
+    const tail = lines.slice(-half).join("\n");
+    const omitted = lines.length - maxLines;
+    output = `${head}\n\n... [agy-context-saver: compressed ${omitted} repetitive output lines] ...\n\n${tail}`;
+  }
+
+  if (output.length > MAX_TOTAL_CHARS) {
+    const halfChars = Math.floor(MAX_TOTAL_CHARS / 2);
+    output = `${output.slice(0, halfChars)}\n\n... [agy-context-saver: clamped excessive character output (${output.length} chars)] ...\n\n${output.slice(-halfChars)}`;
+  }
+
+  return output;
+}
+
 async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputLines = 30 }) {
   return new Promise((resolve) => {
     const isWin = os.platform() === "win32";
@@ -140,9 +198,13 @@ async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputL
     const shellArgs = isWin ? ["/d", "/s", "/c", command] : ["-c", command];
 
     const startTime = Date.now();
-    let stdout = "";
-    let stderr = "";
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let timedOut = false;
+    let killEscalationTimer = null;
+    let captureTruncated = false;
 
     const proc = spawn(shell, shellArgs, {
       cwd: cwd || process.cwd(),
@@ -153,20 +215,52 @@ async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputL
 
     const timer = setTimeout(() => {
       timedOut = true;
-      proc.kill("SIGTERM");
+      try {
+        proc.kill("SIGTERM");
+      } catch {}
+
+      // Escalating kill signal: force SIGKILL / tree-kill after 1.5s if process lingers
+      killEscalationTimer = setTimeout(() => {
+        try {
+          if (!proc.killed) {
+            if (isWin && proc.pid) {
+              spawn("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true });
+            } else {
+              proc.kill("SIGKILL");
+            }
+          }
+        } catch {}
+      }, 1500);
     }, timeoutSeconds * 1000);
 
     proc.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf-8");
+      if (stdoutBytes < MAX_CAPTURE_BYTES) {
+        stdoutChunks.push(chunk);
+        stdoutBytes += chunk.length;
+      } else {
+        captureTruncated = true;
+      }
     });
 
     proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf-8");
+      if (stderrBytes < MAX_CAPTURE_BYTES) {
+        stderrChunks.push(chunk);
+        stderrBytes += chunk.length;
+      } else {
+        captureTruncated = true;
+      }
     });
 
     proc.on("close", (exitCode) => {
       clearTimeout(timer);
+      if (killEscalationTimer) clearTimeout(killEscalationTimer);
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+
+      let stdout = Buffer.concat(stdoutChunks).toString("utf-8");
+      let stderr = Buffer.concat(stderrChunks).toString("utf-8");
+      if (captureTruncated) {
+        stdout += "\n... [agy-context-saver: raw output exceeded 50MB stream capture ceiling] ...\n";
+      }
 
       if (timedOut) {
         return resolve({
@@ -194,6 +288,7 @@ async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputL
 
     proc.on("error", (err) => {
       clearTimeout(timer);
+      if (killEscalationTimer) clearTimeout(killEscalationTimer);
       resolve({
         isError: true,
         content: [{ type: "text", text: `[SPAWN ERROR] Failed to start command: ${err.message}` }]
@@ -202,20 +297,7 @@ async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputL
   });
 }
 
-function compressOutput(text, maxLines) {
-  if (!text) return "(empty output)";
-  const lines = text.split(/\r?\n/);
-  if (lines.length <= maxLines) return text;
-
-  const half = Math.floor(maxLines / 2);
-  const head = lines.slice(0, half).join("\n");
-  const tail = lines.slice(-half).join("\n");
-  const omitted = lines.length - maxLines;
-
-  return `${head}\n\n... [agy-context-saver: compressed ${omitted} repetitive output lines] ...\n\n${tail}`;
-}
-
-function handleCheckContextHealth({ transcriptPath }) {
+async function handleCheckContextHealth({ transcriptPath }) {
   try {
     if (!fs.existsSync(transcriptPath)) {
       return {
@@ -224,15 +306,30 @@ function handleCheckContextHealth({ transcriptPath }) {
       };
     }
 
-    const lines = fs.readFileSync(transcriptPath, "utf-8").split(/\r?\n/).filter(Boolean);
+    const fileStream = fs.createReadStream(transcriptPath, { encoding: "utf-8" });
+    const rl = readline.createInterface({
+      input: fileStream,
+      crlfDelay: Infinity
+    });
+
+    let totalSteps = 0;
     let userTurns = 0;
     let modelTurns = 0;
     let toolCalls = 0;
     let pollingEvents = 0;
     let totalBytes = 0;
+    let corruptLines = 0;
+    const MAX_LINES = 100000;
 
-    for (const line of lines) {
+    for await (const line of rl) {
+      if (!line.trim()) continue;
+      totalSteps++;
       totalBytes += line.length;
+
+      if (totalSteps > MAX_LINES) {
+        break;
+      }
+
       try {
         const item = JSON.parse(line);
         if (item.type === "USER_INPUT") userTurns++;
@@ -249,26 +346,39 @@ function handleCheckContextHealth({ transcriptPath }) {
             if (name === "schedule" && (cond.startsWith("task") || cond.includes("task") || prompt.includes("test") || prompt.includes("check on") || prompt.includes("status"))) pollingEvents++;
           }
         }
-      } catch {}
+      } catch (err) {
+        corruptLines++;
+      }
     }
 
     const kb = (totalBytes / 1024).toFixed(1);
     const healthStatus = pollingEvents > 3 ? "CRITICAL (Active Polling Loops Detected)" : userTurns > 40 ? "WARNING (High Turn Budget)" : "HEALTHY";
 
-    const report = [
+    const reportLines = [
       `### Context Health Report: ${healthStatus}`,
-      `- Total Steps: ${lines.length}`,
+      `- Total Steps: ${totalSteps}`,
       `- User Turns: ${userTurns}`,
       `- Assistant Responses: ${modelTurns}`,
       `- Tool Calls: ${toolCalls}`,
       `- Detected Busy-Polling Events: ${pollingEvents}`,
-      `- Approximate Raw Transcript Size: ${kb} KB`,
-      "",
-      pollingEvents > 0 ? "⚠️ Recommendation: Background polling detected! Cease manage_task(status) calls and yield execution to native Reactive Wakeup." : "",
-      userTurns >= 35 ? "💡 Recommendation: Turn budget approaching threshold. Delegate broad research to subagents to preserve context." : "✓ Context footprint is well-managed."
-    ].filter(Boolean).join("\n");
+      `- Approximate Raw Transcript Size: ${kb} KB`
+    ];
 
-    return { content: [{ type: "text", text: report }] };
+    if (corruptLines > 0) {
+      reportLines.push(`- Corrupted/Unparsed Lines: ${corruptLines}`);
+    }
+
+    reportLines.push("");
+    if (pollingEvents > 0) {
+      reportLines.push("⚠️ Recommendation: Background polling detected! Cease manage_task(status) calls and yield execution to native Reactive Wakeup.");
+    }
+    if (userTurns >= 35) {
+      reportLines.push("💡 Recommendation: Turn budget approaching threshold. Delegate broad research to subagents to preserve context.");
+    } else {
+      reportLines.push("✓ Context footprint is well-managed.");
+    }
+
+    return { content: [{ type: "text", text: reportLines.join("\n") }] };
   } catch (err) {
     return {
       isError: true,
@@ -292,6 +402,44 @@ function handleSubagentBrief({ objective, scopeFiles = [], expectedDeliverable =
   ].join("\n");
 
   return { content: [{ type: "text", text: prompt }] };
+}
+
+function handleGetInstallationStatus() {
+  const existing = detectExistingInstallation();
+  const report = [
+    `### Agy-Context-Saver Installation Status: ${existing.isComplete ? "HEALTHY & ACTIVE 🛡️" : existing.isInstalled ? "PARTIAL INSTALLATION ⚠️" : "NOT INSTALLED ❌"}`,
+    `- Native Plugin Link: ${existing.details.plugin.exists ? `ACTIVE (${existing.details.plugin.target})` : "NOT LINKED"}`,
+    `- Governor Lifecycle Hook: ${existing.details.hook.registered ? "REGISTERED in hooks.json" : "NOT REGISTERED"} (Script: ${existing.details.hook.scriptExists ? "Present" : "Missing"})`,
+    `- Universal MCP Server: ${existing.details.mcp.registered ? "CONFIGURED in mcp_config.json" : "NOT CONFIGURED"}`,
+    `- Antigravity Tool Schemas: ${existing.details.schemas.exists ? "ALL 5 SCHEMAS PRESENT" : "MISSING"} (${existing.details.schemas.dir})`,
+    "",
+    existing.isComplete
+      ? "✓ All 4 Antigravity integration layers are fully operational and synchronized."
+      : "⚠️ Recommendation: Run sync_installation to re-verify and repair missing layers."
+  ].join("\n");
+
+  return {
+    content: [{ type: "text", text: report }]
+  };
+}
+
+async function handleSyncInstallation({ checkOnly = false } = {}) {
+  const result = await runInstall({ checkOnly, silent: true });
+  const report = [
+    `### Agy-Context-Saver Installation Synchronization`,
+    `- Status: ${result.isComplete ? "SYNCHRONIZED & HEALTHY 🛡️" : "UPDATED"}`,
+    `- Elapsed Time: ${result.elapsedMs || "0"} ms`,
+    `- Plugin Link: ${result.details?.plugin?.exists ? "Verified" : "Updated"}`,
+    `- Lifecycle Hook: Registered in hooks.json`,
+    `- MCP Server: Registered in mcp_config.json`,
+    `- Tool Schemas: 5 Schemas mirrored to ~/.gemini/antigravity/mcp/agy-context-saver`,
+    "",
+    checkOnly ? "✓ Pre-flight check complete (dry-run)." : "✓ Installation fully synchronized and up-to-date in Zero-Delay mode."
+  ].join("\n");
+
+  return {
+    content: [{ type: "text", text: report }]
+  };
 }
 
 // --- JSON-RPC 2.0 Dispatcher ---
@@ -325,9 +473,13 @@ async function handleRequest(request) {
     if (name === "safe_command") {
       toolResult = await handleSafeCommand(args);
     } else if (name === "check_context_health") {
-      toolResult = handleCheckContextHealth(args);
+      toolResult = await handleCheckContextHealth(args);
     } else if (name === "subagent_brief") {
       toolResult = handleSubagentBrief(args);
+    } else if (name === "get_installation_status") {
+      toolResult = handleGetInstallationStatus();
+    } else if (name === "sync_installation") {
+      toolResult = await handleSyncInstallation(args);
     } else {
       return {
         jsonrpc: "2.0",

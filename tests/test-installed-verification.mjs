@@ -34,7 +34,9 @@ assert.ok(fs.existsSync(installedSchemasDir), `Antigravity MCP schemas dir not f
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "safe_command.json")), "safe_command.json exists in Antigravity MCP directory");
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "check_context_health.json")), "check_context_health.json exists in Antigravity MCP directory");
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "subagent_brief.json")), "subagent_brief.json exists in Antigravity MCP directory");
-console.log("✓ Antigravity tool schemas successfully installed to ~/.gemini/antigravity/mcp/agy-context-saver");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "get_installation_status.json")), "get_installation_status.json exists in Antigravity MCP directory");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "sync_installation.json")), "sync_installation.json exists in Antigravity MCP directory");
+console.log("✓ All 5 Antigravity tool schemas successfully installed to ~/.gemini/antigravity/mcp/agy-context-saver");
 
 // Test existing installation detector
 const { detectExistingInstallation } = await import("../scripts/install-register.mjs");
@@ -211,10 +213,19 @@ function sendRpc(method, params = {}) {
   assert.ok(toolNames.includes("safe_command"));
   assert.ok(toolNames.includes("check_context_health"));
   assert.ok(toolNames.includes("subagent_brief"));
-  console.log("✓ Installed MCP Server: tools/list verified [safe_command, check_context_health, subagent_brief]");
+  assert.ok(toolNames.includes("get_installation_status"));
+  assert.ok(toolNames.includes("sync_installation"));
+  console.log("✓ Installed MCP Server: tools/list verified [all 5 tools present]");
 }
 
-// 3.3 Safe Command Tool Call
+// 3.3 Installation Status Tool Call
+{
+  const res = await sendRpc("tools/call", { name: "get_installation_status" });
+  assert.match(res.result.content[0].text, /Installation Status: HEALTHY & ACTIVE/);
+  console.log("✓ Installed MCP Server: get_installation_status reported healthy status");
+}
+
+// 3.4 Safe Command Tool Call
 {
   const res = await sendRpc("tools/call", {
     name: "safe_command",

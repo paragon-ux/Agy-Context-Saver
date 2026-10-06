@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -222,6 +223,56 @@ console.log("✓ MCP Server initialized");
   assert.ok(briefText.includes("cite exact file:line references"), "Must include citation mandate");
 
   console.log("✓ subagent_brief generated strictly formatted, scope-isolated instructions");
+}
+
+// Probe 2.d: Pathological single-line output clamping
+{
+  console.log("\nTesting MCP safe_command clamping on pathological long line (5,000 chars)...");
+  const cmdLong = `node -e "console.log('A'.repeat(5000));"`;
+  const resLong = await callRpc("tools/call", {
+    name: "safe_command",
+    arguments: { command: cmdLong, maxOutputLines: 30 }
+  });
+  const textLong = resLong.result.content[0].text;
+  assert.match(textLong, /\[truncated long line 5000 chars\]/, "Must clamp pathological single-line output exceeding 2000 chars");
+  console.log("✓ safe_command successfully clamped pathological 5,000-char single line");
+}
+
+// Probe 2.e: Transcript streaming error tolerance and corrupt line reporting
+{
+  console.log("\nTesting MCP check_context_health on streaming transcript with corrupted JSON...");
+  const tempTranscript = path.join(os.tmpdir(), "corrupt-probe-transcript.jsonl");
+  const sampleLines = [
+    JSON.stringify({ type: "USER_INPUT", content: "hello" }),
+    "THIS_IS_CORRUPTED_JSON_NOT_VALID",
+    JSON.stringify({ type: "PLANNER_RESPONSE", content: "response" }),
+    JSON.stringify({ type: "PLANNER_RESPONSE", tool_calls: [{ name: "manage_task", args: { Action: "status" } }] })
+  ];
+  fs.writeFileSync(tempTranscript, sampleLines.join("\n"), "utf-8");
+
+  const resHealth = await callRpc("tools/call", {
+    name: "check_context_health",
+    arguments: { transcriptPath: tempTranscript }
+  });
+  const report = resHealth.result.content[0].text;
+  assert.match(report, /- Total Steps: 4/, "Must count all non-empty lines");
+  assert.match(report, /- Corrupted\/Unparsed Lines: 1/, "Must report exact corrupt line count");
+  assert.match(report, /- Detected Busy-Polling Events: 1/, "Must detect tool polling event");
+  try { fs.unlinkSync(tempTranscript); } catch {}
+  console.log("✓ check_context_health streamed and parsed transcript with corrupt line tolerance");
+}
+
+// Probe 2.f: Timeout & escalating termination
+{
+  console.log("\nTesting MCP safe_command process timeout and clean termination...");
+  const cmdSleep = `node -e "setTimeout(() => console.log('done'), 10000);"`;
+  const resTimeout = await callRpc("tools/call", {
+    name: "safe_command",
+    arguments: { command: cmdSleep, timeoutSeconds: 1 }
+  });
+  assert.equal(resTimeout.result.isError, true, "Timed-out command must report isError: true");
+  assert.match(resTimeout.result.content[0].text, /\[COMMAND TIMEOUT\] Process exceeded 1s and was terminated/);
+  console.log("✓ safe_command terminated long-running command on timeout with escalating signal protection");
 }
 
 proc.kill();

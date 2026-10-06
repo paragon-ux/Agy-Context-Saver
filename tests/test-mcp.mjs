@@ -52,7 +52,9 @@ function send(method, params = {}) {
   assert.ok(toolNames.includes("safe_command"));
   assert.ok(toolNames.includes("check_context_health"));
   assert.ok(toolNames.includes("subagent_brief"));
-  console.log("✓ tools/list returned all 3 governance tools");
+  assert.ok(toolNames.includes("get_installation_status"));
+  assert.ok(toolNames.includes("sync_installation"));
+  console.log("✓ tools/list returned all 5 governance & installation tools");
 }
 
 // 3. tools/call: safe_command
@@ -66,7 +68,6 @@ function send(method, params = {}) {
   console.log("✓ tools/call (safe_command) executed and captured stdout");
 }
 
-
 // 4. tools/call: subagent_brief
 {
   const res = await send("tools/call", {
@@ -78,14 +79,33 @@ function send(method, params = {}) {
   console.log("✓ tools/call (subagent_brief) generated scope-isolated brief");
 }
 
-// 5. resources/read
+// 5. tools/call: get_installation_status
+{
+  const res = await send("tools/call", { name: "get_installation_status" });
+  assert.match(res.result.content[0].text, /Installation Status: HEALTHY & ACTIVE/);
+  assert.match(res.result.content[0].text, /ALL 5 SCHEMAS PRESENT/);
+  console.log("✓ tools/call (get_installation_status) reported live 4-layer health");
+}
+
+// 6. tools/call: sync_installation (dry-run audit)
+{
+  const res = await send("tools/call", {
+    name: "sync_installation",
+    arguments: { checkOnly: true }
+  });
+  assert.match(res.result.content[0].text, /Installation Synchronization/);
+  assert.match(res.result.content[0].text, /Pre-flight check complete/);
+  console.log("✓ tools/call (sync_installation) verified dry-run synchronization");
+}
+
+// 7. resources/read
 {
   const res = await send("resources/read", { uri: "context-saver://rules/governance" });
   assert.match(res.result.contents[0].text, /Layer 1: Background Task & Polling Ban/);
   console.log("✓ resources/read served governance rulebook");
 }
 
-// 6. prompts/get
+// 8. prompts/get
 {
   const res = await send("prompts/get", { name: "context_shield" });
   assert.match(res.result.messages[0].content.text, /Antigravity Context Governance rules/);

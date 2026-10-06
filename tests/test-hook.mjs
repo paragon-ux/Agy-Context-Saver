@@ -118,4 +118,96 @@ console.log("Running Agy-Context-Saver intelligent hook tests...\n");
   console.log("✓ schedule standard timer is allowed");
 }
 
-console.log("\nAll 11 intelligent hook tests passed successfully!");
+// 12. State TTL eviction & pruning: Stale entries (> 1 hr) automatically evicted
+{
+  const staleTime = Date.now() - 3700000; // 61 minutes ago
+  fs.writeFileSync(stateFile, JSON.stringify({
+    "test-conv-ttl:task-old": { count: 5, denials: 2, lastTime: staleTime, stepIdx: 1 }
+  }), "utf-8");
+
+  // An initial status poll for this key should now be treated as a fresh count 0 poll (ALLOWED)
+  const out = runHook({
+    conversationId: "test-conv-ttl",
+    toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-old" } }
+  });
+  assert.equal(out.decision, "allow");
+
+  const currentState = JSON.parse(fs.readFileSync(stateFile, "utf-8"));
+  assert.equal(currentState["test-conv-ttl:task-old"].count, 1, "Count must reset to 1 after TTL eviction");
+  console.log("✓ state TTL eviction automatically purges entries older than 1 hour");
+}
+
+// 13. 3-Tier Circuit Breaker for manage_task:
+// Attempt 1: Allowed (initial check)
+// Attempt 2: Denied (Tier 1 standard guidance, denial 1)
+// Attempt 3: Denied (Tier 1 standard guidance, denial 2)
+// Attempt 4: Denied (Tier 2 critical warning, denial 3)
+// Attempt 5: Denied (Tier 2 critical warning, denial 4)
+// Attempt 6: force_ask (Tier 3 autonomous loop freeze, denial 5)
+{
+  const cbConv = "test-conv-cb";
+  const cbTask = "task-stubborn";
+
+  // 1st: Allowed
+  const r1 = runHook({ conversationId: cbConv, toolCall: { name: "manage_task", args: { Action: "status", TaskId: cbTask } } });
+  assert.equal(r1.decision, "allow");
+
+  // 2nd (denial 1): Tier 1
+  const r2 = runHook({ conversationId: cbConv, toolCall: { name: "manage_task", args: { Action: "status", TaskId: cbTask } } });
+  assert.equal(r2.decision, "deny");
+  assert.match(r2.reason, /Rapid task polling detected/);
+
+  // 3rd (denial 2): Tier 1
+  const r3 = runHook({ conversationId: cbConv, toolCall: { name: "manage_task", args: { Action: "status", TaskId: cbTask } } });
+  assert.equal(r3.decision, "deny");
+
+  // 4th (denial 3): Tier 2 (Critical warning)
+  const r4 = runHook({ conversationId: cbConv, toolCall: { name: "manage_task", args: { Action: "status", TaskId: cbTask } } });
+  assert.equal(r4.decision, "deny");
+  assert.match(r4.reason, /\[CRITICAL CIRCUIT BREAKER: Repeated Denials \(Attempt 3\)\]/);
+
+  // 5th (denial 4): Tier 2 (Critical warning)
+  const r5 = runHook({ conversationId: cbConv, toolCall: { name: "manage_task", args: { Action: "status", TaskId: cbTask } } });
+  assert.equal(r5.decision, "deny");
+  assert.match(r5.reason, /\[CRITICAL CIRCUIT BREAKER: Repeated Denials \(Attempt 4\)\]/);
+
+  // 6th (denial 5): Tier 3 (force_ask freezes autonomous loop)
+  const r6 = runHook({ conversationId: cbConv, toolCall: { name: "manage_task", args: { Action: "status", TaskId: cbTask } } });
+  assert.equal(r6.decision, "force_ask");
+  assert.match(r6.reason, /\[CIRCUIT BREAKER ACTIVATED\] Autonomous loop suspended/);
+  console.log("✓ manage_task 3-tier circuit breaker correctly escalates Tier 1 -> Tier 2 -> Tier 3 (force_ask)");
+}
+
+// 14. 3-Tier Circuit Breaker for schedule short polling timer:
+{
+  const schedConv = "test-conv-sched-cb";
+  // Simulate 4 previous schedule denials
+  fs.writeFileSync(stateFile, JSON.stringify({
+    [`${schedConv}:schedule_poll`]: { denials: 4, lastTime: Date.now() }
+  }), "utf-8");
+
+  // 5th denial triggers Tier 3 force_ask
+  const out = runHook({
+    conversationId: schedConv,
+    toolCall: { name: "schedule", args: { DurationSeconds: 30, Prompt: "check task" } }
+  });
+  assert.equal(out.decision, "force_ask");
+  assert.match(out.reason, /\[CIRCUIT BREAKER ACTIVATED\] Autonomous loop suspended/);
+  console.log("✓ schedule short polling timer escalates to force_ask on 5th denial");
+}
+
+// 15. Evasive Loophole Defense: manage_task(Action='list') rapid busy-polling
+{
+  const listConv = "test-conv-list";
+  // 1st list call: ALLOWED
+  const l1 = runHook({ conversationId: listConv, toolCall: { name: "manage_task", args: { Action: "list" } } });
+  assert.equal(l1.decision, "allow");
+
+  // Immediate consecutive list call (<15s): DENIED
+  const l2 = runHook({ conversationId: listConv, toolCall: { name: "manage_task", args: { Action: "list" } } });
+  assert.equal(l2.decision, "deny");
+  assert.match(l2.reason, /Rapid task list polling detected/);
+  console.log("✓ manage_task(Action='list') initial call allowed, rapid consecutive polling blocked");
+}
+
+console.log("\nAll 15 intelligent hook tests passed successfully!");
