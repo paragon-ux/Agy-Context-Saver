@@ -36,6 +36,17 @@ assert.ok(fs.existsSync(path.join(installedSchemasDir, "check_context_health.jso
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "subagent_brief.json")), "subagent_brief.json exists in Antigravity MCP directory");
 console.log("✓ Antigravity tool schemas successfully installed to ~/.gemini/antigravity/mcp/agy-context-saver");
 
+// Test existing installation detector
+const { detectExistingInstallation } = await import("../scripts/install-register.mjs");
+const detection = detectExistingInstallation();
+assert.equal(detection.isInstalled, true, "detectExistingInstallation must report isInstalled: true");
+assert.equal(detection.isComplete, true, "detectExistingInstallation must report isComplete: true");
+assert.equal(detection.details.plugin.exists, true, "plugin link must be detected");
+assert.equal(detection.details.hook.registered, true, "hook registration must be detected");
+assert.equal(detection.details.mcp.registered, true, "mcp registration must be detected");
+assert.equal(detection.details.schemas.exists, true, "schemas must be detected");
+console.log("✓ detectExistingInstallation() accurately verifies all 4 installation layers");
+
 // --- 2. Live Hook Execution Test (via cmd.exe /c as executed by Antigravity) ---
 console.log("\n--- 2. Live Hook Execution Verification (cmd.exe /c wrapper) ---");
 

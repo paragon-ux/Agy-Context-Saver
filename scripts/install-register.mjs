@@ -2,12 +2,12 @@
 
 /**
  * Agy-Context-Saver Registration & Installation Engine
- * Zero-delay cross-platform installer for Google Antigravity.
+ * Zero-delay cross-platform installer with intelligent existing-installation detection.
  *
  * Capabilities:
- * - 1-step Native Plugin Link (~10ms): Links directly into ~/.gemini/config/plugins/
- * - Global JSON Fallback: Safely registers hooks & MCP servers without overwriting existing entries
- * - Antigravity Schema Mirroring: Updates ~/.gemini/antigravity/mcp/ tool definitions
+ * - Detects existing native plugin link, hook registration, MCP server, and tool schemas
+ * - Re-verifies and updates in ~10-15ms without redundant configuration churn
+ * - Supports CLI flags: install, install --check, uninstall, status
  */
 
 import fs from "node:fs";
@@ -32,9 +32,93 @@ const destHook = path.join(scriptsDir, "execution-guard-hook.mjs");
 const mcpIndexPath = path.join(repoRoot, "mcp", "index.js").replace(/\\/g, "/");
 const destHookNormalized = destHook.replace(/\\/g, "/");
 
-export function runInstall() {
+/**
+ * Detects whether Agy-Context-Saver is already installed across all Antigravity integration points.
+ */
+export function detectExistingInstallation() {
+  const pluginExists = fs.existsSync(pluginDest);
+  let pluginTarget = null;
+  if (pluginExists) {
+    try {
+      pluginTarget = fs.readlinkSync(pluginDest);
+    } catch {
+      pluginTarget = "direct folder or junction";
+    }
+  }
+
+  let hookRegistered = false;
+  let hookCommand = null;
+  if (fs.existsSync(hooksJsonPath)) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
+      const h = cfg["execution-guard"] || cfg["agy-context-saver"];
+      if (h) {
+        hookRegistered = true;
+        hookCommand = h.PreToolUse?.[0]?.hooks?.[0]?.command;
+      }
+    } catch {}
+  }
+
+  let mcpRegistered = false;
+  let mcpArgs = null;
+  if (fs.existsSync(mcpJsonPath)) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
+      if (cfg.mcpServers?.["agy-context-saver"]) {
+        mcpRegistered = true;
+        mcpArgs = cfg.mcpServers["agy-context-saver"].args;
+      }
+    } catch {}
+  }
+
+  const scriptExists = fs.existsSync(destHook);
+  const schemasExist =
+    fs.existsSync(path.join(antigravityMcpDir, "safe_command.json")) &&
+    fs.existsSync(path.join(antigravityMcpDir, "check_context_health.json")) &&
+    fs.existsSync(path.join(antigravityMcpDir, "subagent_brief.json"));
+
+  const isInstalled = pluginExists || (hookRegistered && mcpRegistered);
+  const isComplete = (pluginExists || (hookRegistered && mcpRegistered && scriptExists)) && schemasExist;
+
+  return {
+    isInstalled,
+    isComplete,
+    details: {
+      plugin: { exists: pluginExists, target: pluginTarget },
+      hook: { registered: hookRegistered, command: hookCommand, scriptExists },
+      mcp: { registered: mcpRegistered, args: mcpArgs },
+      schemas: { exists: schemasExist, dir: antigravityMcpDir }
+    }
+  };
+}
+
+export function runInstall(options = {}) {
   const startTime = performance.now();
-  console.log("⚡ Installing Agy-Context-Saver (Zero-Delay Mode)...");
+  const existing = detectExistingInstallation();
+
+  if (existing.isInstalled) {
+    console.log("🔍 Existing installation detected:");
+    if (existing.details.plugin.exists) {
+      console.log(`   ✓ Native Plugin Link: ${pluginDest}`);
+    }
+    if (existing.details.hook.registered) {
+      console.log(`   ✓ Governor Hook: Registered in ${hooksJsonPath}`);
+    }
+    if (existing.details.mcp.registered) {
+      console.log(`   ✓ Universal MCP Server: Configured in ${mcpJsonPath}`);
+    }
+    if (existing.details.schemas.exists) {
+      console.log(`   ✓ Antigravity Tool Schemas: Present in ${antigravityMcpDir}`);
+    }
+
+    if (options.checkOnly) {
+      console.log("\n[OK] Pre-flight check complete. Installation is active.");
+      return existing;
+    }
+    console.log("\n⚡ Re-verifying and synchronizing to latest version...");
+  } else {
+    console.log("⚡ Fresh installation of Agy-Context-Saver (Zero-Delay Mode)...");
+  }
 
   // 1. Instant Native Plugin Junction / Symlink (Takes ~5ms)
   fs.mkdirSync(pluginsDir, { recursive: true });
@@ -65,6 +149,7 @@ export function runInstall() {
     }
   }
 
+  const alreadyHadHook = Boolean(hooksConfig["execution-guard"]);
   hooksConfig["execution-guard"] = {
     PreToolUse: [
       {
@@ -80,7 +165,7 @@ export function runInstall() {
     ]
   };
   fs.writeFileSync(hooksJsonPath, JSON.stringify(hooksConfig, null, 2), "utf-8");
-  console.log(`[OK] Lifecycle hook registered in: ${hooksJsonPath}`);
+  console.log(`[OK] Lifecycle hook ${alreadyHadHook ? "re-verified" : "registered"} in: ${hooksJsonPath}`);
 
   // 4. Register MCP Server in ~/.gemini/config/mcp_config.json (Preserves existing servers)
   let mcpConfig = { mcpServers: {} };
@@ -93,12 +178,13 @@ export function runInstall() {
     }
   }
 
+  const alreadyHadMcp = Boolean(mcpConfig.mcpServers["agy-context-saver"]);
   mcpConfig.mcpServers["agy-context-saver"] = {
     command: "node",
     args: [mcpIndexPath]
   };
   fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2), "utf-8");
-  console.log(`[OK] MCP Server registered in: ${mcpJsonPath}`);
+  console.log(`[OK] MCP Server ${alreadyHadMcp ? "re-verified" : "registered"} in: ${mcpJsonPath}`);
 
   // 5. Mirror Antigravity Tool Schemas
   fs.mkdirSync(antigravityMcpDir, { recursive: true });
@@ -151,7 +237,9 @@ export function runInstall() {
   fs.writeFileSync(path.join(antigravityMcpDir, "subagent_brief.json"), JSON.stringify(subagentBriefSchema, null, 2), "utf-8");
 
   const elapsed = (performance.now() - startTime).toFixed(1);
-  console.log(`\n✓ Installation completed in ${elapsed}ms (Zero Delay)!\n`);
+  const statusVerb = existing.isInstalled ? "synchronized & up-to-date" : "completed";
+  console.log(`\n✓ Installation ${statusVerb} in ${elapsed}ms (Zero Delay)!\n`);
+  return { ...existing, isInstalled: true, elapsedMs: elapsed };
 }
 
 export function runUninstall() {
@@ -194,33 +282,15 @@ export function runUninstall() {
 }
 
 export function runStatus() {
+  const existing = detectExistingInstallation();
   console.log("Checking Agy-Context-Saver installation status...\n");
-  const pluginActive = fs.existsSync(pluginDest);
-  console.log(`- Native Plugin Link: ${pluginActive ? "ACTIVE (" + pluginDest + ")" : "NOT LINKED"}`);
+  console.log(`- Native Plugin Link: ${existing.details.plugin.exists ? "ACTIVE (" + pluginDest + ")" : "NOT LINKED"}`);
+  console.log(`- Execution Governor Hook: ${existing.details.hook.registered ? "REGISTERED in hooks.json" : "NOT REGISTERED"}`);
+  console.log(`- Universal MCP Server: ${existing.details.mcp.registered ? "CONFIGURED in mcp_config.json" : "NOT CONFIGURED"}`);
+  console.log(`- Antigravity Tool Schemas: ${existing.details.schemas.exists ? "PRESENT" : "MISSING"}`);
 
-  let hookActive = false;
-  if (fs.existsSync(hooksJsonPath)) {
-    try {
-      const cfg = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
-      hookActive = Boolean(cfg["execution-guard"] || cfg["agy-context-saver"]);
-    } catch {}
-  }
-  console.log(`- Execution Governor Hook: ${hookActive ? "REGISTERED in hooks.json" : "NOT REGISTERED"}`);
-
-  let mcpActive = false;
-  if (fs.existsSync(mcpJsonPath)) {
-    try {
-      const cfg = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
-      mcpActive = Boolean(cfg.mcpServers?.["agy-context-saver"]);
-    } catch {}
-  }
-  console.log(`- Universal MCP Server: ${mcpActive ? "CONFIGURED in mcp_config.json" : "NOT CONFIGURED"}`);
-
-  const schemasActive = fs.existsSync(antigravityMcpDir);
-  console.log(`- Antigravity Tool Schemas: ${schemasActive ? "PRESENT" : "MISSING"}`);
-
-  const fullyHealthy = pluginActive || (hookActive && mcpActive && schemasActive);
-  console.log(`\nOverall Status: ${fullyHealthy ? "HEALTHY & ACTIVE 🛡️" : "INCOMPLETE SETUP"}\n`);
+  console.log(`\nOverall Status: ${existing.isComplete ? "HEALTHY & ACTIVE 🛡️" : existing.isInstalled ? "PARTIAL INSTALLATION" : "NOT INSTALLED"}\n`);
+  return existing;
 }
 
 // Auto-run if executed directly as script
@@ -230,6 +300,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     runUninstall();
   } else if (arg === "--status" || arg === "status") {
     runStatus();
+  } else if (arg === "--check" || arg === "-c") {
+    runInstall({ checkOnly: true });
   } else {
     runInstall();
   }

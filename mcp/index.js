@@ -28,8 +28,9 @@ import { runInstall, runUninstall, runStatus } from "../scripts/install-register
 
 // Handle CLI subcommands (e.g. npx agy-context-saver install)
 const cliArg = process.argv[2];
+const checkFlag = process.argv.includes("--check") || process.argv.includes("-c");
 if (cliArg === "install" || cliArg === "--install") {
-  runInstall();
+  runInstall({ checkOnly: checkFlag });
   process.exit(0);
 } else if (cliArg === "uninstall" || cliArg === "--uninstall") {
   runUninstall();
