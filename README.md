@@ -2,21 +2,27 @@
 
 **Cross-Platform Model Context Protocol (MCP) Server & Lifecycle Governor for Google Antigravity**
 
-`Agy-Context-Saver` is a lightweight, zero-dependency MCP server and lifecycle governor purpose-built for **Google Antigravity** (`agy`). It eliminates session degradation, memory bloat, and chat stalls caused by **background task busy-wait polling** and **delayed context compaction**.
+`Agy-Context-Saver` is a lightweight, zero-dependency MCP server and lifecycle governor purpose-built for **Google Antigravity** (`agy`). It eliminates session degradation, memory bloat, and context window exhaustion caused by two independent failure modes: **background task busy-wait polling** and **raw transcript reading**.
 
 Because Google restricts third-party submissions to the Antigravity plugin marketplace, `Agy-Context-Saver` uses the **open Model Context Protocol (MCP)** standard so that any Antigravity user on macOS, Linux, or Windows can install and run it immediately via `mcp_config.json`.
 
 ---
 
-## The Problem: Antigravity's Background Polling Trap
+## The Problems: Two Independent Context Traps
 
-When an Antigravity agent runs a shell command that takes longer than `WaitMsBeforeAsync` (default ~5s), the platform detaches the process to a background task (`task-XYZ`). 
+Without governance, Antigravity sessions suffer from two distinct failure modes that corrupt context attention and degrade long-running sessions:
 
-Without governance, models exhibit a compulsive **busy-waiting anti-pattern**:
-1. The agent calls `manage_task(Action='status')` or schedules 30s timers with `schedule(...)` in an infinite loop.
-2. Every `status` poll dumps the full task stdout buffer (hundreds of lines of raw ASCII progress dots and ANSI sequences) directly into the conversation transcript.
-3. Because background context compaction fires infrequently, the transcript inflates by 50–100 KB per minute.
-4. The context window degrades, prompt instructions get pushed out of attention, and the session crashes or becomes unresponsive.
+### Problem 1: The Background Task Polling Trap (Runaway Busy-Waiting)
+When an agent runs a shell command that takes longer than `WaitMsBeforeAsync` (default ~5s), Antigravity detaches the process to a background task (`task-XYZ`).
+* **The Anti-Pattern**: Models exhibit a compulsive busy-waiting loop, calling `manage_task(Action='status')` or scheduling short timers (`schedule(...)`) repeatedly instead of yielding execution for native reactive notifications.
+* **The Log Explosion**: Every `status` poll dumps the full task stdout buffer (hundreds of lines of raw ASCII progress dots, ANSI escape sequences, repetitive build logs) directly into the conversation transcript.
+* **The Impact**: Because background context compaction fires infrequently, the transcript inflates by 50–100 KB per minute. Working memory degrades, critical prompt instructions get pushed out of attention, and the session slows down or stalls.
+
+### Problem 2: The Raw Transcript Reading Trap (JSON Bloat & Compaction Amnesia)
+When an agent needs to review historical turns, inspect a subagent's findings, or resume previous work, Antigravity's system instructions advise agents to read `transcript.jsonl` directly.
+* **The Raw JSON Tax**: Models naturally call native `view_file` on multi-megabyte `transcript.jsonl` files, dumping raw JSON structures, escaped strings (`\"`, `\n`), internal timestamps, and massive tool call arguments into the active context window.
+* **The Dual-File Chore**: Because `transcript.jsonl` truncates large fields, the model must manually cross-reference and parse corresponding line numbers in `transcript_full.jsonl`, introducing further cognitive overhead and token waste.
+* **Post-Compaction Amnesia**: When context compaction occurs, the agent's short-term conversational context is compressed, and the model reverts to its baseline system prompt habits. It immediately attempts another `view_file` read on `transcript.jsonl`, re-polluting the newly compacted window with thousands of tokens of raw JSON overhead.
 
 ---
 
