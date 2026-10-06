@@ -23,27 +23,16 @@ Without governance, models exhibit a compulsive **busy-waiting anti-pattern**:
 ## Architecture: 3-Layer Context Defense
 
 ```mermaid
-flowchart TD
-    subgraph Layer 1: Machine-Enforced Polling Ban
-        A["Agent calls manage_task('status')"] --> B["PreToolUse Hook intercepts"]
-        B -->|Status Poll Detected| C["Return decision: 'deny'<br/>'Polling denied. Yield turn and wait for Reactive Wakeup.'"]
-        
-        D["Agent calls schedule(polling timer)"] --> E["PreToolUse Hook intercepts"]
-        E -->|Polling Intent Detected| F["Return decision: 'deny'<br/>'Artificial polling timer denied.'"]
-    end
-
-    subgraph Layer 2: Fast Synchronous Execution & Safe Execution
-        G["Agent calls safe_command (MCP)"] --> H["Execute with Smart Output Compression"]
-        H --> I["Return clean summary + exit code (Zero Bloat)"]
-        
-        J["Agent calls run_command (Native)"] --> K["PreToolUse Hook forces WaitMsBeforeAsync = 10000"]
-    end
-
-    subgraph Layer 3: Context Offloading via Subagents
-        L["Agent needs broad research / deep forensics"] --> M["Call subagent_brief (MCP)"]
-        M --> N["Launch Subagent in isolated sandbox"]
-        N --> O["Returns concise 1-paragraph summary to Main Thread"]
-    end
+graph TD
+    A["Agent calls<br/>manage_task(status)"] -->|PreToolUse Hook| B["DENIED<br/>Yield turn & wait"]
+    
+    C["Agent calls<br/>schedule timer"] -->|PreToolUse Hook| D["DENIED<br/>Polling not allowed"]
+    
+    E["Agent calls<br/>safe_command"] -->|MCP Tool| F["Execute with<br/>Output Compression"]
+    F --> G["Return summary<br/>+ exit code"]
+    
+    H["Agent needs<br/>research/forensics"] -->|MCP Tool| I["subagent_brief<br/>offload work"]
+    I --> J["Subagent returns<br/>1-paragraph summary"]
 ```
 
 ### Layer 1: Hard Polling Denial & Reactive Wakeup
