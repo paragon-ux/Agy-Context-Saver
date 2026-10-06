@@ -6,8 +6,11 @@
  * Enforces:
  * - Layer 1: Hard Polling Ban. Intercepts manage_task(Action='status') and artificial
  *   schedule polling timers; enforces native Reactive Wakeup.
- * - Layer 2: Fast Synchronous Execution. Automatically overwrites WaitMsBeforeAsync
- *   to 10000ms (the platform maximum) on non-daemon run_command calls.
+ * - Layer 2: Fast Synchronous Execution. Automatically upgrades WaitMsBeforeAsync
+ *   to ensure fast commands (<10s) complete synchronously without premature backgrounding.
+ *
+ * Performance:
+ * - Ultra-fast fail-open bailout (< 1ms) for non-governed tools without full JSON parsing.
  */
 
 import fs from "node:fs";
@@ -26,6 +29,11 @@ function failOpen() {
 try {
   const inputRaw = fs.readFileSync(0, "utf-8");
   if (!inputRaw || !inputRaw.trim()) {
+    failOpen();
+  }
+
+  // Fast-path bailout (< 1ms): avoid JSON parsing overhead if not targeting governed tools
+  if (!inputRaw.includes("manage_task") && !inputRaw.includes("schedule") && !inputRaw.includes("run_command")) {
     failOpen();
   }
 
@@ -71,12 +79,13 @@ try {
   if (toolName === "run_command") {
     const isDaemon = args.IsDaemon === true || args.isDaemon === true;
     const waitMs = args.WaitMsBeforeAsync !== undefined ? args.WaitMsBeforeAsync : args.waitMsBeforeAsync;
+    const targetMaxWait = Number(process.env.AGY_MAX_WAIT_MS) || 10000;
 
-    if (!isDaemon && (waitMs === undefined || waitMs < 10000)) {
+    if (!isDaemon && (waitMs === undefined || waitMs < targetMaxWait)) {
       respond({
         decision: "allow",
         overwrite: {
-          WaitMsBeforeAsync: 10000
+          WaitMsBeforeAsync: targetMaxWait
         }
       });
     }

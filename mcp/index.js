@@ -24,6 +24,20 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { runInstall, runUninstall, runStatus } from "../scripts/install-register.mjs";
+
+// Handle CLI subcommands (e.g. npx agy-context-saver install)
+const cliArg = process.argv[2];
+if (cliArg === "install" || cliArg === "--install") {
+  runInstall();
+  process.exit(0);
+} else if (cliArg === "uninstall" || cliArg === "--uninstall") {
+  runUninstall();
+  process.exit(0);
+} else if (cliArg === "status" || cliArg === "--status") {
+  runStatus();
+  process.exit(0);
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rulesPath = path.resolve(__dirname, "../rules/AGENTS.md");

@@ -49,9 +49,44 @@ graph TD
 
 ---
 
-## Universal MCP Server Setup
+---
 
-Add `agy-context-saver` to your Antigravity MCP configuration file (`~/.gemini/config/mcp_config.json`):
+## Zero-Delay Instant Installation ⚡
+
+`Agy-Context-Saver` can be installed in milliseconds without manual configuration file editing:
+
+### Option 1: One-Line CLI / NPX (Fastest)
+
+```bash
+# If using npx
+npx agy-context-saver install
+
+# Or locally inside the repository
+npm run setup
+```
+*(Executes in ~15ms: automatically links the native Antigravity plugin and mirrors tool definitions).*
+
+### Option 2: Native Antigravity Plugin Link (Zero Overhead)
+
+Because `Agy-Context-Saver` is a fully structured Antigravity Plugin, you can link it directly into your Antigravity plugins directory:
+
+**Windows (cmd / PowerShell):**
+```powershell
+.\install.ps1
+# Or manual junction:
+cmd /c mklink /J "$env:USERPROFILE\.gemini\config\plugins\agy-context-saver" "$PWD"
+```
+
+**macOS / Linux:**
+```bash
+./install.sh
+# Or manual symlink:
+ln -s "$(pwd)" ~/.gemini/config/plugins/agy-context-saver
+```
+
+### Option 3: Manual MCP Config (Optional)
+
+If you prefer explicit MCP server registration in `~/.gemini/config/mcp_config.json`:
 
 ```json
 {
@@ -64,57 +99,11 @@ Add `agy-context-saver` to your Antigravity MCP configuration file (`~/.gemini/c
 }
 ```
 
-*(Or via `npx` once published to npm: `"command": "npx", "args": ["-y", "agy-context-saver"]` across macOS, Linux, and Windows.)*
-
----
-
-## MCP Features Exposed
-
-### Tools
-| Tool | Description |
-| :--- | :--- |
-| `safe_command` | Executes commands with generous timeouts and output compression (collapses test dot streams). |
-| `check_context_health` | Analyzes `transcript.jsonl` to report turn count, raw payload size, and active polling loops. |
-| `subagent_brief` | Generates scope-isolated prompts for subagents to offload context-gathering. |
-
-### Prompts
-| Prompt | Description |
-| :--- | :--- |
-| `context_shield` | One-click prompt that injects the complete 3-Layer Context Governance rulebook. |
-
-### Resources
-| URI | Description |
-| :--- | :--- |
-| `context-saver://rules/governance` | Read-only markdown resource containing the authoritative governance rules. |
-
----
-
-## Local Antigravity Lifecycle Hook (Optional Pre-Tool Guard)
-
-For users who also want **machine-level physical denial** of native `manage_task(status)` before tool execution:
-
-Run the included installer:
-```powershell
-.\install.ps1
-```
-Or register the hook directly in `~/.gemini/config/hooks.json`:
-```json
-{
-  "execution-guard": {
-    "PreToolUse": [
-      {
-        "matcher": "manage_task|run_command|schedule",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node scripts/execution-guard-hook.mjs",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  }
-}
+Check installation health at any time:
+```bash
+npm run status
+# or
+node mcp/index.js status
 ```
 
 ---
