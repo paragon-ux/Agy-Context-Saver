@@ -45,30 +45,31 @@ function send(method, params = {}) {
   console.log("✓ initialize handshake succeeded");
 }
 
-// 2. tools/list
+// 2. tools/list (6 tools, safe_command permanently retired)
 {
   const res = await send("tools/list");
   const toolNames = res.result.tools.map((t) => t.name);
-  assert.ok(toolNames.includes("safe_command"));
+  assert.equal(toolNames.includes("safe_command"), false, "safe_command must not be exposed in tools/list");
   assert.ok(toolNames.includes("check_context_health"));
   assert.ok(toolNames.includes("subagent_brief"));
   assert.ok(toolNames.includes("get_installation_status"));
   assert.ok(toolNames.includes("sync_installation"));
   assert.ok(toolNames.includes("read_transcript"));
   assert.ok(toolNames.includes("query_transcript"));
-  assert.equal(toolNames.length, 7);
-  console.log("✓ tools/list returned all 7 governance & transcript tools");
+  assert.equal(toolNames.length, 6, "Must expose exactly 6 canonical tools");
+  console.log("✓ tools/list returned all 6 governance & transcript tools (safe_command retired)");
 }
 
-// 3. tools/call: safe_command
+// 3. tools/call: safe_command must fail as tool not found
 {
   const res = await send("tools/call", {
     name: "safe_command",
-    arguments: { command: "echo hello-from-safe-command" }
+    arguments: { command: "echo should-fail" }
   });
-  assert.match(res.result.content[0].text, /hello-from-safe-command/);
-  assert.match(res.result.content[0].text, /STATUS: PASSED/);
-  console.log("✓ tools/call (safe_command) executed and captured stdout");
+  assert.ok(res.error, "Calling safe_command must return an error");
+  assert.equal(res.error.code, -32601);
+  assert.match(res.error.message, /Tool not found: safe_command/);
+  console.log("✓ tools/call (safe_command) correctly rejected (-32601 tool not found)");
 }
 
 // 4. tools/call: subagent_brief
@@ -86,8 +87,9 @@ function send(method, params = {}) {
 {
   const res = await send("tools/call", { name: "get_installation_status" });
   assert.match(res.result.content[0].text, /Installation Status: HEALTHY & ACTIVE/);
-  assert.match(res.result.content[0].text, /ALL 7 SCHEMAS PRESENT/);
-  console.log("✓ tools/call (get_installation_status) reported live 4-layer health");
+  assert.match(res.result.content[0].text, /ALL 6 SCHEMAS PRESENT/);
+  assert.match(res.result.content[0].text, /RTK Binary: INSTALLED/);
+  console.log("✓ tools/call (get_installation_status) reported live 4-layer health + RTK");
 }
 
 // 6. tools/call: sync_installation (dry-run audit)
@@ -98,6 +100,7 @@ function send(method, params = {}) {
   });
   assert.match(res.result.content[0].text, /Installation Synchronization/);
   assert.match(res.result.content[0].text, /Pre-flight check complete/);
+  assert.match(res.result.content[0].text, /RTK Binary:/);
   console.log("✓ tools/call (sync_installation) verified dry-run synchronization");
 }
 
@@ -115,7 +118,6 @@ function send(method, params = {}) {
   const text = res.result.content[0].text;
   assert.match(text, /# Conversation Transcript: `fcda194f-62d6-46aa-b545-b2de8fa5774e`/);
   assert.match(text, /- Mode: \*\*compact\*\*/);
-  assert.match(text, /### \[Step \d+ \|/);
   console.log("✓ tools/call (read_transcript) successfully streamed and formatted conversation turns");
 }
 
@@ -137,59 +139,7 @@ function send(method, params = {}) {
   console.log("✓ tools/call (query_transcript) filtered and returned matching forensic steps");
 }
 
-// 8b. tools/call: safe_command (legacy terse mode)
-{
-  const res = await send("tools/call", {
-    name: "safe_command",
-    arguments: { command: "echo terse-output-line", terse: true }
-  });
-  const text = res.result.content[0].text;
-  assert.match(text, /✓ \[STATUS: PASSED \(exit 0\)/);
-  assert.match(text, /lines collapsed in terse mode/);
-  assert.ok(text.length <= 500, "Terse output must be <= 500 chars");
-  console.log("✓ tools/call (safe_command with terse: true) returned 1-line collapsed summary");
-}
-
-// 8b-2. tools/call: safe_command (verbosity: quiet)
-{
-  const res = await send("tools/call", {
-    name: "safe_command",
-    arguments: { command: "echo quiet-output-line", verbosity: "quiet" }
-  });
-  const text = res.result.content[0].text;
-  assert.match(text, /✓ \[STATUS: PASSED \(exit 0\)/);
-  assert.match(text, /lines collapsed in quiet mode/);
-  assert.ok(text.length <= 500, "Quiet output must be <= 500 chars");
-  console.log("✓ tools/call (safe_command with verbosity: quiet) returned 1-line collapsed summary");
-}
-
-// 8b-3. tools/call: safe_command (verbosity: normal with code block fencing)
-{
-  const res = await send("tools/call", {
-    name: "safe_command",
-    arguments: { command: "echo normal-mode-output", verbosity: "normal" }
-  });
-  const text = res.result.content[0].text;
-  assert.match(text, /\[STATUS: PASSED \(exit 0\)/);
-  assert.match(text, /```text\r?\nnormal-mode-output\r?\n```/);
-  assert.ok(text.length <= 4096, "Normal output must be <= 4096 chars");
-  console.log("✓ tools/call (safe_command with verbosity: normal) returned output inside ```text code fences");
-}
-
-// 8b-4. tools/call: safe_command (verbosity: full)
-{
-  const res = await send("tools/call", {
-    name: "safe_command",
-    arguments: { command: "echo full-mode-output", verbosity: "full" }
-  });
-  const text = res.result.content[0].text;
-  assert.match(text, /\[STATUS: PASSED \(exit 0\)/);
-  assert.match(text, /```text\r?\nfull-mode-output\r?\n```/);
-  assert.ok(text.length <= 24576, "Full output must be <= 24576 chars");
-  console.log("✓ tools/call (safe_command with verbosity: full) returned raw output inside code fences");
-}
-
-// 8c. tools/call: query_transcript (summaryOnly mode)
+// 8b. tools/call: query_transcript (summaryOnly mode)
 {
   const res = await send("tools/call", {
     name: "query_transcript",
@@ -202,14 +152,13 @@ function send(method, params = {}) {
   assert.equal(res.result.isError, undefined);
   const text = res.result.content[0].text;
   assert.match(text, /## Transcript Query Summary:/);
-  assert.match(text, /- \*\*\[Step \d+ \|/);
   console.log("✓ tools/call (query_transcript with summaryOnly: true) returned compact 1-line bullet summaries");
 }
 
 // 9. resources/read
 {
   const res = await send("resources/read", { uri: "context-saver://rules/governance" });
-  assert.match(res.result.contents[0].text, /Layer 1: Background Task & Polling Ban/);
+  assert.match(res.result.contents[0].text, /Antigravity Execution & Context Governance/);
   console.log("✓ resources/read served governance rulebook");
 }
 

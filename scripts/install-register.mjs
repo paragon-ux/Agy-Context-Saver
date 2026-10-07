@@ -16,6 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureRtkInstalled, findExistingRtk } from "./provision-rtk.mjs";
 
 const fsPromises = fs.promises;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -78,7 +79,6 @@ export function detectExistingInstallation() {
 
   const scriptExists = fs.existsSync(destHook);
   const schemasExist =
-    fs.existsSync(path.join(antigravityMcpDir, "safe_command.json")) &&
     fs.existsSync(path.join(antigravityMcpDir, "check_context_health.json")) &&
     fs.existsSync(path.join(antigravityMcpDir, "subagent_brief.json")) &&
     fs.existsSync(path.join(antigravityMcpDir, "get_installation_status.json")) &&
@@ -86,8 +86,9 @@ export function detectExistingInstallation() {
     fs.existsSync(path.join(antigravityMcpDir, "read_transcript.json")) &&
     fs.existsSync(path.join(antigravityMcpDir, "query_transcript.json"));
 
+  const rtkInfo = findExistingRtk();
   const isInstalled = pluginExists || (hookRegistered && mcpRegistered);
-  const isComplete = (pluginExists || (hookRegistered && mcpRegistered && scriptExists)) && schemasExist;
+  const isComplete = (pluginExists || (hookRegistered && mcpRegistered && scriptExists)) && schemasExist && Boolean(rtkInfo);
 
   return {
     isInstalled,
@@ -96,7 +97,8 @@ export function detectExistingInstallation() {
       plugin: { exists: pluginExists, target: pluginTarget },
       hook: { registered: hookRegistered, command: hookCommand, scriptExists },
       mcp: { registered: mcpRegistered, args: mcpArgs },
-      schemas: { exists: schemasExist, dir: antigravityMcpDir }
+      schemas: { exists: schemasExist, dir: antigravityMcpDir },
+      rtk: rtkInfo
     }
   };
 }
@@ -142,6 +144,14 @@ export async function runInstall(options = {}) {
     throw new Error(`Pre-flight check failed: cannot write to Antigravity configuration directory (${geminiConfigDir}): ${err.message}`);
   }
 
+  // 0a. Ensure RTK is provisioned and available
+  try {
+    const rtkResult = await ensureRtkInstalled({ silent: options.silent });
+    log(`[OK] RTK Command Optimizer verified: ${rtkResult.version} (${rtkResult.path})`);
+  } catch (err) {
+    warn(`[WARN] RTK provisioning check encountered an issue: ${err.message}`);
+  }
+
   // 1. Instant Native Plugin Junction / Symlink (Takes ~5ms)
   await fsPromises.mkdir(pluginsDir, { recursive: true });
   if (!fs.existsSync(pluginDest)) {
@@ -180,7 +190,7 @@ export async function runInstall(options = {}) {
   hooksConfig["execution-guard"] = {
     PreToolUse: [
       {
-        matcher: "manage_task|run_command|schedule|view_file",
+        matcher: "manage_task|schedule|run_command|view_file|read_file|read_many_files|grep_search|find_by_name|list_dir",
         hooks: [
           {
             type: "command",
@@ -221,28 +231,16 @@ export async function runInstall(options = {}) {
   // 5. Mirror Antigravity Tool Schemas in parallel
   await fsPromises.mkdir(antigravityMcpDir, { recursive: true });
 
-  const instructionsContent = `Agy-Context-Saver MCP Server: Universal Model Context Protocol server for Google Antigravity. Provides safe_command execution with automatic repetitive output compression, check_context_health transcript diagnostics, subagent_brief scope isolation, read_transcript compact/full streaming reader, query_transcript forensic filtering engine, and native installation self-audit/synchronization tools.`;
+  // Clean up legacy safe_command schema if present
+  const legacySafeCommandPath = path.join(antigravityMcpDir, "safe_command.json");
+  if (fs.existsSync(legacySafeCommandPath)) {
+    try {
+      await fsPromises.unlink(legacySafeCommandPath);
+      log(`[OK] Cleaned up legacy safe_command schema from: ${legacySafeCommandPath}`);
+    } catch {}
+  }
 
-  const safeCommandSchema = {
-    name: "safe_command",
-    description: "Run a shell command with adaptive semantic reduction, generous timeout, and zero context bloat. Collapses repetitive test passes and progress streams to 2-4 KB, protects errors and diffs, and formats outputs with clean Markdown fences.",
-    parameters: {
-      type: "object",
-      properties: {
-        command: { type: "string", description: "The exact shell command to execute." },
-        cwd: { type: "string", description: "Working directory (optional, defaults to current working directory)." },
-        timeoutSeconds: { type: "number", description: "Execution timeout in seconds (default: 30)." },
-        maxOutputLines: { type: "number", description: "Maximum output lines to return before compressing (default: 30)." },
-        verbosity: {
-          type: "string",
-          enum: ["quiet", "normal", "full"],
-          description: "quiet = status badge only for routine passes (<=200 chars); normal = adaptive semantic reduction targeting 2-4 KB (default); full = preserve raw output up to 24 KB ceiling."
-        },
-        terse: { type: "boolean", description: "Legacy alias: if true, maps to verbosity='quiet' to minimize UI step height (default: false)." }
-      },
-      required: ["command"]
-    }
-  };
+  const instructionsContent = `Agy-Context-Saver MCP Server: Universal Model Context Protocol server for Google Antigravity. Command output optimization is handled transparently via RTK (Rust Token Killer) hooks. Provides check_context_health transcript diagnostics, subagent_brief scope isolation, read_transcript compact/full streaming reader, query_transcript forensic filtering engine, and native installation self-audit/synchronization tools.`;
 
   const checkHealthSchema = {
     name: "check_context_health",
@@ -382,7 +380,6 @@ export async function runInstall(options = {}) {
 
   await Promise.all([
     fsPromises.writeFile(path.join(antigravityMcpDir, "instructions.md"), instructionsContent, "utf-8"),
-    fsPromises.writeFile(path.join(antigravityMcpDir, "safe_command.json"), JSON.stringify(safeCommandSchema, null, 2), "utf-8"),
     fsPromises.writeFile(path.join(antigravityMcpDir, "check_context_health.json"), JSON.stringify(checkHealthSchema, null, 2), "utf-8"),
     fsPromises.writeFile(path.join(antigravityMcpDir, "subagent_brief.json"), JSON.stringify(subagentBriefSchema, null, 2), "utf-8"),
     fsPromises.writeFile(path.join(antigravityMcpDir, "get_installation_status.json"), JSON.stringify(getInstallationStatusSchema, null, 2), "utf-8"),
@@ -485,7 +482,8 @@ export function runStatus(options = {}) {
   log(`- Native Plugin Link: ${existing.details.plugin.exists ? "ACTIVE (" + pluginDest + ")" : "NOT LINKED"}`);
   log(`- Execution Governor Hook: ${existing.details.hook.registered ? "REGISTERED in hooks.json" : "NOT REGISTERED"}`);
   log(`- Universal MCP Server: ${existing.details.mcp.registered ? "CONFIGURED in mcp_config.json" : "NOT CONFIGURED"}`);
-  log(`- Antigravity Tool Schemas: ${existing.details.schemas.exists ? "PRESENT" : "MISSING"}`);
+  log(`- Antigravity Tool Schemas: ${existing.details.schemas.exists ? "PRESENT (6 Schemas)" : "MISSING"}`);
+  log(`- RTK Command Optimizer: ${existing.details.rtk ? "INSTALLED (" + existing.details.rtk.version + ")" : "MISSING"}`);
 
   log(`\nOverall Status: ${existing.isComplete ? "HEALTHY & ACTIVE 🛡️" : existing.isInstalled ? "PARTIAL INSTALLATION" : "NOT INSTALLED"}\n`);
   return existing;

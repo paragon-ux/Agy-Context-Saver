@@ -1,21 +1,35 @@
-# Antigravity Execution & Context Governance (Agy-Context-Saver)
+# Antigravity Execution & Context Governance (Agy-Context-Saver + RTK)
 
-## Layer 1: Background Task & Polling Ban (Reactive Wakeup SSOT)
-- **Ban on Repetitive Busy-Wait Polling**: Do NOT call `manage_task(Action='status')` or rapid `schedule` timers in a tight loop to wait for a running background command. Repetitive busy-wait polling rapidly degrades session stability by flooding the transcript with repetitive ASCII log snapshots and exhausting the context window.
-- **Yield Immediately on Background Detach**: If `run_command` moves a process to the background, the agent should normally stop calling tools, emit a concise status line, and yield the turn. Rely primarily on Antigravity's **Reactive Wakeup** (`<SYSTEM_MESSAGE>` completion notification) to resume execution.
-- **Safe Harbor — Stuck Task Debugging & Diagnostics**: If a background task might not exit properly (e.g. deadlock, frozen interactive prompt, or failure to terminate), the agent is **never blocked** from inspecting status for debugging. Initial diagnostic status checks and spaced checks (>=30s cooldown) are permitted to determine whether to send input or kill the task.
-- **Safe Harbor — Multi-Agent & Teamwork**: Tasks spawned under `/teamwork-preview` or subagent coordination workflows (`invoke_subagent`, `manage_subagents`) are never blocked from monitoring.
-- **Watchdog Timers on `schedule`**: Long watchdog timers (`DurationSeconds >= 120`) designed to wake up and catch deadlocked background tasks that fail to exit are explicitly permitted. Only rapid artificial polling loops (<120s) are denied.
-- **3-Tier Circuit Breaker Enforcement**: If an agent model stubbornly attempts repeated denied polling calls in succession without yielding, the governor hook enforces an escalating 3-tier circuit breaker:
-  - *Tier 1 (Attempts 1–2)*: Standard denial with guidance to yield for Reactive Wakeup.
-  - *Tier 2 (Attempts 3–4)*: Escalated critical warning advising of imminent trajectory corruption.
-  - *Tier 3 (Attempt 5+)*: Automatic escalation to `force_ask`, immediately freezing autonomous execution to prompt the user and halt runaway loops.
+## Core Architectural Boundary
+- **RTK (Rust Token Killer)**: Owns shell command transparent rewriting, output reduction, and compact codebase inspection (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`, `rtk err`, `rtk summary`).
+- **Agy-Context-Saver**: Owns Antigravity lifecycle governance, Reactive Wakeup enforcement, transcript forensics, and session integrity.
 
-## Layer 2: Fast Synchronous Execution First
-- **Maximum Synchronous Window**: Always set `WaitMsBeforeAsync: 10000` (the maximum allowed) on `run_command`.
-- **Targeted Test Execution**: In interactive turns, NEVER run full-suite catalogue sweeps or whole-repo tests. Always run targeted test files with `-q` and fail-fast (e.g. `pytest tests/test_execution_phase.py -q -x`) that complete synchronously within <5–8s. This prevents background tasks from detaching and eliminates context bloat.
+---
 
-## Layer 3: Context Offloading & Minimalist Footprint (Subagent Delegation)
-- **Subagent Delegation for Deep Context Gathering**: NEVER run broad multi-file explorations, transcript forensics, multi-repository grep sweeps, or raw log investigations directly in the main conversation thread. Delegate context-gathering tasks to subagents (`invoke_subagent` with `research` or `self`). Subagents execute in isolated contexts and return only synthesized, high-signal findings, keeping the main thread's context lean and pristine.
-- **Output Compression**: Keep agent outputs concise, structured, and focused. Avoid dumping full-file contents, large raw logs, or repetitive recaps into the conversation. Use targeted slices (`view_file` with line bounds) and short status lines.
-- **Ledger Continuity Across Compaction**: Maintain a canonical decision ledger (e.g. `LEDGER.md`). Whenever a milestone is settled, record it in the ledger so that continuity survives context compaction automatically without needing transcript bloat.
+## Layer 1: Background Tasks & Polling Ban (Reactive Wakeup SSOT)
+- **Zero-Tolerance on Task Polling**: Do NOT call `manage_task(Action='status')` or `schedule` timers in a loop to wait for running background tasks. Background tasks execute asynchronously and automatically resume the agent via **Reactive Wakeup** (`<SYSTEM_MESSAGE>`).
+- **Yield Turn Immediately**: When a process moves to the background, stop calling tools, output a concise status message, and yield the turn.
+- **No Keyword or Timer Exemptions**: Words like "debug", "timeout", "diagnose", or "stuck" do NOT exempt an agent from lifecycle governance. Timers with `duration >= 120` are NOT exempt.
+- **Circuit Breaker**: Repeated polling calls across any tasks in a session trigger an escalating circuit breaker. At 5 cumulative denials, autonomous execution is frozen via `force_ask`.
+
+---
+
+## Layer 2: Transparent Shell Execution & Codebase Inspection via RTK
+- **Native Shell Commands**: Run shell commands normally using `run_command`. The PreToolUse hook transparently rewrites supported commands via RTK (`git`, `pytest`, `cargo`, `npm`, etc.) to produce ultra-compact outputs.
+- **Canonical Codebase Inspection**: Native file and search inspection tools (`view_file`, `grep_search`, `find_by_name`, `list_dir`) that bypass RTK are blocked for workspace files. Use RTK's canonical CLI interfaces via `run_command`:
+  - `rtk read <file>`: Read file with intelligent token filtering and line ranges.
+  - `rtk grep "<pattern>"`: Compact ripgrep search grouped by file.
+  - `rtk find <path>`: Compact file search tree.
+  - `rtk ls`: Token-optimized directory listing.
+  - `rtk err <cmd>`: Run command and show only errors/warnings.
+  - `rtk summary <cmd>`: Run command and produce a 2-line heuristic summary.
+- **Antigravity Special Files Safe Harbor**: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/` configs) are permitted via `view_file`.
+- **Protected Internal State**: Direct native inspection of `.system_generated/` (transcripts, task logs, progress files) is strictly forbidden. Use Agy MCP tools `read_transcript` and `query_transcript`.
+
+---
+
+## Layer 3: Synchronous Execution & Subagent Delegation
+- **Maximum Synchronous Window**: Non-daemon `run_command` calls are automatically set to `WaitMsBeforeAsync: 10000` to complete synchronously and prevent unnecessary background detachment.
+- **Targeted Test Execution**: Avoid massive multi-minute test sweeps in interactive turns. Run targeted, quiet, fail-fast commands (e.g. `pytest tests/test_core.py -q -x`).
+- **Subagent Delegation**: Delegate heavy multi-file exploration and exploratory research to subagents (`invoke_subagent`). Subagents absorb intermediate steps and return high-signal summaries.
+- **Benchmark / Evaluator Integrity**: Never mutate benchmark definitions, prompt templates, or scoring artifacts during an active evaluation without explicit user confirmation.

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 
@@ -14,6 +15,12 @@ const hooksJsonPath = path.join(geminiConfigDir, "hooks.json");
 const mcpJsonPath = path.join(geminiConfigDir, "mcp_config.json");
 const installedHookScript = path.join(geminiConfigDir, "scripts", "execution-guard-hook.mjs");
 const installedSchemasDir = path.join(homeDir, ".gemini", "antigravity", "mcp", "agy-context-saver");
+const stateFile = path.join(os.tmpdir(), "agy-session-governance-state.json");
+
+// Clean test state
+try {
+  if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
+} catch {}
 
 // --- 1. Verify Configuration Registrations ---
 console.log("--- 1. Configuration Registration Verification ---");
@@ -22,7 +29,14 @@ assert.ok(fs.existsSync(hooksJsonPath), `hooks.json not found at ${hooksJsonPath
 const hooksConfig = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
 assert.ok(hooksConfig["execution-guard"], "execution-guard must be registered in hooks.json");
 assert.ok(hooksConfig["waymark-continuity"], "waymark-continuity must be preserved in hooks.json");
-console.log("✓ hooks.json contains execution-guard and preserved waymark-continuity");
+const hookMatcher = hooksConfig["execution-guard"].PreToolUse[0].matcher;
+assert.ok(hookMatcher.includes("manage_task"), "matcher includes manage_task");
+assert.ok(hookMatcher.includes("run_command"), "matcher includes run_command");
+assert.ok(hookMatcher.includes("view_file"), "matcher includes view_file");
+assert.ok(hookMatcher.includes("grep_search"), "matcher includes grep_search");
+assert.ok(hookMatcher.includes("find_by_name"), "matcher includes find_by_name");
+assert.ok(hookMatcher.includes("list_dir"), "matcher includes list_dir");
+console.log(`✓ hooks.json contains execution-guard with closed-topology matcher: "${hookMatcher}"`);
 
 const hooksBakPath = path.join(geminiConfigDir, "hooks.json.bak");
 assert.ok(fs.existsSync(hooksBakPath), `hooks.json.bak not found at ${hooksBakPath}`);
@@ -39,14 +53,14 @@ assert.ok(fs.existsSync(mcpBakPath), `mcp_config.json.bak not found at ${mcpBakP
 console.log("✓ mcp_config.json.bak configuration backup verified");
 
 assert.ok(fs.existsSync(installedSchemasDir), `Antigravity MCP schemas dir not found at ${installedSchemasDir}`);
-assert.ok(fs.existsSync(path.join(installedSchemasDir, "safe_command.json")), "safe_command.json exists in Antigravity MCP directory");
-assert.ok(fs.existsSync(path.join(installedSchemasDir, "check_context_health.json")), "check_context_health.json exists in Antigravity MCP directory");
-assert.ok(fs.existsSync(path.join(installedSchemasDir, "subagent_brief.json")), "subagent_brief.json exists in Antigravity MCP directory");
-assert.ok(fs.existsSync(path.join(installedSchemasDir, "get_installation_status.json")), "get_installation_status.json exists in Antigravity MCP directory");
-assert.ok(fs.existsSync(path.join(installedSchemasDir, "sync_installation.json")), "sync_installation.json exists in Antigravity MCP directory");
-assert.ok(fs.existsSync(path.join(installedSchemasDir, "read_transcript.json")), "read_transcript.json exists in Antigravity MCP directory");
-assert.ok(fs.existsSync(path.join(installedSchemasDir, "query_transcript.json")), "query_transcript.json exists in Antigravity MCP directory");
-console.log("✓ All 7 Antigravity tool schemas successfully installed to ~/.gemini/antigravity/mcp/agy-context-saver");
+assert.equal(fs.existsSync(path.join(installedSchemasDir, "safe_command.json")), false, "safe_command.json must NOT exist in MCP dir");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "check_context_health.json")), "check_context_health.json exists");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "subagent_brief.json")), "subagent_brief.json exists");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "get_installation_status.json")), "get_installation_status.json exists");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "sync_installation.json")), "sync_installation.json exists");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "read_transcript.json")), "read_transcript.json exists");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "query_transcript.json")), "query_transcript.json exists");
+console.log("✓ Exactly 6 Antigravity tool schemas installed (safe_command permanently removed)");
 
 // Test existing installation detector
 const { detectExistingInstallation } = await import("../scripts/install-register.mjs");
@@ -57,7 +71,8 @@ assert.equal(detection.details.plugin.exists, true, "plugin link must be detecte
 assert.equal(detection.details.hook.registered, true, "hook registration must be detected");
 assert.equal(detection.details.mcp.registered, true, "mcp registration must be detected");
 assert.equal(detection.details.schemas.exists, true, "schemas must be detected");
-console.log("✓ detectExistingInstallation() accurately verifies all 4 installation layers");
+assert.ok(detection.details.rtk, "RTK must be detected");
+console.log(`✓ detectExistingInstallation() verified 4 layers + RTK (${detection.details.rtk.version})`);
 
 // --- 2. Live Hook Execution Test (via cmd.exe /c as executed by Antigravity) ---
 console.log("\n--- 2. Live Hook Execution Verification (cmd.exe /c wrapper) ---");
@@ -71,48 +86,28 @@ function callInstalledHook(payload) {
   return JSON.parse(res.stdout.trim());
 }
 
-// 2.1 Initial status check: ALLOWED (safe harbor for inspecting potentially hung tasks)
+// 2.1 Initial status check: ALLOWED
 {
   const res = callInstalledHook({
     conversationId: "installed-conv-1",
     toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-live-1" } }
   });
   assert.equal(res.decision, "allow");
-  console.log("✓ Installed Hook: Initial manage_task(status) -> ALLOWED (debugging safe harbor)");
+  console.log("✓ Installed Hook: Initial manage_task(status) -> ALLOWED");
 }
 
-// 2.2 Rapid consecutive status check: DENIED (blocks compulsive busy-wait loops)
+// 2.2 Rapid consecutive status check: DENIED
 {
   const res = callInstalledHook({
     conversationId: "installed-conv-1",
     toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-live-1" } }
   });
   assert.equal(res.decision, "deny");
-  assert.match(res.reason, /Rapid task polling detected/);
-  console.log("✓ Installed Hook: Rapid consecutive manage_task(status) -> DENIED");
+  assert.match(res.reason, /Background task polling is prohibited/);
+  console.log("✓ Installed Hook: Subsequent manage_task(status) -> DENIED");
 }
 
-// 2.3 Debugging stuck task: ALLOWED (safe harbor)
-{
-  const res = callInstalledHook({
-    conversationId: "installed-conv-1",
-    toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-live-1", Reason: "debugging stuck background task" } }
-  });
-  assert.equal(res.decision, "allow");
-  console.log("✓ Installed Hook: Debugging manage_task(status) -> ALLOWED");
-}
-
-// 2.4 Teamwork / subagent spawn: ALLOWED (safe harbor)
-{
-  const res = callInstalledHook({
-    conversationId: "teamwork-session-123",
-    toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-teamwork" } }
-  });
-  assert.equal(res.decision, "allow");
-  console.log("✓ Installed Hook: /teamwork-preview manage_task(status) -> ALLOWED");
-}
-
-// 2.5 Task kill allowance
+// 2.3 Task kill allowance
 {
   const res = callInstalledHook({
     toolCall: { name: "manage_task", args: { Action: "kill", TaskId: "task-99" } }
@@ -121,17 +116,18 @@ function callInstalledHook(payload) {
   console.log("✓ Installed Hook: manage_task(Action='kill') -> ALLOWED");
 }
 
-// 2.6 Synchronous wait upgrade
+// 2.4 Synchronous wait upgrade & RTK rewrite
 {
   const res = callInstalledHook({
-    toolCall: { name: "run_command", args: { CommandLine: "npm run build", WaitMsBeforeAsync: 3000 } }
+    toolCall: { name: "run_command", args: { CommandLine: "git status", WaitMsBeforeAsync: 3000 } }
   });
   assert.equal(res.decision, "allow");
+  assert.equal(res.overwrite?.CommandLine, "rtk git status");
   assert.equal(res.overwrite?.WaitMsBeforeAsync, 10000);
-  console.log("✓ Installed Hook: run_command WaitMsBeforeAsync upgraded to 10000ms");
+  console.log("✓ Installed Hook: run_command('git status') rewritten to 'rtk git status' & wait 10000ms");
 }
 
-// 2.4 Daemon run preservation
+// 2.5 Daemon run preservation
 {
   const res = callInstalledHook({
     toolCall: { name: "run_command", args: { CommandLine: "node server.js", IsDaemon: true, WaitMsBeforeAsync: 500 } }
@@ -141,44 +137,36 @@ function callInstalledHook(payload) {
   console.log("✓ Installed Hook: run_command with IsDaemon:true preserves wait window");
 }
 
-// 2.7 Schedule task polling denial (< 120s)
+// 2.6 Schedule task polling denial
 {
   const res = callInstalledHook({
-    toolCall: { name: "schedule", args: { DurationSeconds: 30, Prompt: "Check on background task-99" } }
+    toolCall: { name: "schedule", args: { DurationSeconds: 180, Prompt: "Check on background task-99", TimerCondition: "task-99" } }
   });
   assert.equal(res.decision, "deny");
-  assert.match(res.reason, /polling timer/);
-  console.log("✓ Installed Hook: schedule short background task polling -> DENIED");
+  assert.match(res.reason, /Scheduling timers to poll or monitor background tasks is prohibited/);
+  console.log("✓ Installed Hook: schedule task polling (180s) -> DENIED (no watchdog loophole)");
 }
 
-// 2.8 Schedule watchdog timer allowance (>= 120s)
+// 2.7 Schedule user timer allowance
 {
   const res = callInstalledHook({
-    toolCall: { name: "schedule", args: { DurationSeconds: 300, Prompt: "Watchdog timer for background task-99", TimerCondition: "task-99" } }
+    toolCall: { name: "schedule", args: { DurationSeconds: 600, Prompt: "Remind user about deployment status", TimerCondition: "never" } }
   });
   assert.equal(res.decision, "allow");
-  console.log("✓ Installed Hook: schedule watchdog timer (>= 120s) -> ALLOWED (debugging safe harbor)");
+  console.log("✓ Installed Hook: schedule user reminder -> ALLOWED");
 }
 
-// 2.9 Schedule teamwork context allowance
+// 2.8 Native inspection routing: view_file on workspace file -> RTK read
 {
   const res = callInstalledHook({
-    toolCall: { name: "schedule", args: { DurationSeconds: 30, Prompt: "teamwork check on subagents" } }
+    toolCall: { name: "view_file", args: { AbsolutePath: "c:/project/src/index.js" } }
   });
-  assert.equal(res.decision, "allow");
-  console.log("✓ Installed Hook: schedule with teamwork context -> ALLOWED");
+  assert.equal(res.decision, "deny");
+  assert.match(res.reason, /rtk read/);
+  console.log("✓ Installed Hook: view_file on workspace file -> DENIED & routed to 'rtk read'");
 }
 
-// 2.10 Schedule regular timer allowance
-{
-  const res = callInstalledHook({
-    toolCall: { name: "schedule", args: { DurationSeconds: 600, Prompt: "Remind user about deployment status" } }
-  });
-  assert.equal(res.decision, "allow");
-  console.log("✓ Installed Hook: schedule user timer -> ALLOWED");
-}
-
-// 2.11 Intercept view_file on transcript.jsonl
+// 2.9 Protected internal state: view_file on transcript.jsonl
 {
   const res = callInstalledHook({
     toolCall: {
@@ -187,8 +175,8 @@ function callInstalledHook(payload) {
     }
   });
   assert.equal(res.decision, "deny");
-  assert.match(res.reason, /read_transcript\(conversationId="42aea43d-ea8b-48f8-bbf5-eef4e6242956", mode="compact"\)/);
-  console.log("✓ Installed Hook: view_file on transcript.jsonl -> DENIED with redirection to read_transcript");
+  assert.match(res.reason, /Direct access to internal Antigravity execution state \(\.system_generated\)/);
+  console.log("✓ Installed Hook: view_file on .system_generated -> STRICTLY DENIED by root");
 }
 
 // --- 3. Live Installed MCP Server Verification ---
@@ -229,48 +217,49 @@ function sendRpc(method, params = {}) {
   console.log("✓ Installed MCP Server: Handshake succeeded (name: agy-context-saver, v1.0.0)");
 }
 
-// 3.2 Tools List
+// 3.2 Tools List (6 tools)
 {
   const res = await sendRpc("tools/list");
   const toolNames = res.result.tools.map(t => t.name);
-  assert.ok(toolNames.includes("safe_command"));
+  assert.equal(toolNames.includes("safe_command"), false);
   assert.ok(toolNames.includes("check_context_health"));
   assert.ok(toolNames.includes("subagent_brief"));
   assert.ok(toolNames.includes("get_installation_status"));
   assert.ok(toolNames.includes("sync_installation"));
   assert.ok(toolNames.includes("read_transcript"));
   assert.ok(toolNames.includes("query_transcript"));
-  assert.equal(toolNames.length, 7);
-  console.log("✓ Installed MCP Server: tools/list verified [all 7 tools present]");
+  assert.equal(toolNames.length, 6);
+  console.log("✓ Installed MCP Server: tools/list verified [all 6 tools present, safe_command retired]");
 }
 
 // 3.3 Installation Status Tool Call
 {
   const res = await sendRpc("tools/call", { name: "get_installation_status" });
   assert.match(res.result.content[0].text, /Installation Status: HEALTHY & ACTIVE/);
-  console.log("✓ Installed MCP Server: get_installation_status reported healthy status");
+  assert.match(res.result.content[0].text, /ALL 6 SCHEMAS PRESENT/);
+  assert.match(res.result.content[0].text, /RTK Binary: INSTALLED/);
+  console.log("✓ Installed MCP Server: get_installation_status reported healthy status + RTK");
 }
 
-// 3.4 Safe Command Tool Call
+// 3.4 Safe Command is rejected
 {
   const res = await sendRpc("tools/call", {
     name: "safe_command",
-    arguments: { command: "node -e \"console.log('mcp-live-test-success')\"" }
+    arguments: { command: "echo test" }
   });
-  assert.equal(res.result.isError, false);
-  assert.match(res.result.content[0].text, /mcp-live-test-success/);
-  assert.match(res.result.content[0].text, /STATUS: PASSED \(exit 0\)/);
-  console.log("✓ Installed MCP Server: safe_command executed successfully with compressed status");
+  assert.ok(res.error);
+  assert.equal(res.error.code, -32601);
+  console.log("✓ Installed MCP Server: safe_command correctly rejected (-32601 tool not found)");
 }
 
-// 3.4 Resources Read
+// 3.5 Resources Read
 {
   const res = await sendRpc("resources/read", { uri: "context-saver://rules/governance" });
   assert.ok(res.result.contents[0].text.length > 500);
   console.log("✓ Installed MCP Server: resources/read served governance markdown rules");
 }
 
-// 3.5 Prompts Get
+// 3.6 Prompts Get
 {
   const res = await sendRpc("prompts/get", { name: "context_shield" });
   assert.ok(res.result.messages[0].content.text.includes("Antigravity Context Governance"));

@@ -1,63 +1,67 @@
 # Overview & Motivation
 
-**Agy-Context-Saver** is an open-source Model Context Protocol (MCP) server and lifecycle governor engineered specifically for **Google Antigravity** (`agy`).
+**Agy-Context-Saver** is an open-source Model Context Protocol (MCP) server and lifecycle governor engineered specifically for **Google Antigravity** (`agy`), paired with **RTK (Rust Token Killer)** for transparent CLI output reduction.
 
-It eliminates session degradation, memory leaks, and context window exhaustion caused by two independent failure modes in autonomous coding agents: **background task busy-wait polling** and **raw transcript reading**.
-
----
-
-## Why Agy-Context-Saver?
-
-Because third-party extension distribution to the official Google Antigravity marketplace is currently restricted, `Agy-Context-Saver` leverages the **open Model Context Protocol (MCP)** specification alongside native Antigravity lifecycle hooks. 
-
-Any developer running Antigravity on macOS, Linux, or Windows can install and activate the governor immediately without external cloud dependencies or binary compilers.
+It eliminates session degradation, memory leaks, and context window exhaustion caused by **background task busy-wait polling**, **terminal output bloat**, **native inspection bypasses**, and **raw transcript reading**.
 
 ---
 
-## The Two Context Traps
+## Why Agy-Context-Saver + RTK?
 
-Without proactive lifecycle governance, autonomous agent sessions frequently encounter severe conversational context corruption:
+`Agy-Context-Saver` leverages the **open Model Context Protocol (MCP)** specification alongside native Antigravity lifecycle hooks, integrating seamlessly with RTK:
+
+- **RTK owns command optimization**: Supported shell commands are transparently rewritten via `rtk rewrite` before execution, yielding 60–90% token reduction across git, pytest, cargo, npm, docker, and linters.
+- **Agy owns Antigravity integrity**: Hard-routes native inspection tools to canonical RTK shell commands, enforces Reactive Wakeup, blocks direct access to internal `.system_generated` state, and provides zero-JSON Markdown transcript extraction.
+
+Any developer running Antigravity on macOS, Linux, or Windows can install and activate the governor immediately without external cloud dependencies.
+
+---
+
+## The Core Problems Solved
 
 ```mermaid
 graph TD
-    subgraph Trap1["Trap 1: The Busy-Waiting Loop"]
-        A1["Long-running Command (>5s)"] --> B1["Detached to Background Task"]
+    subgraph Problem1["1. Background Polling Trap"]
+        A1["Long-running Command"] --> B1["Detached to Background Task"]
         B1 --> C1["Agent polls manage_task('status')"]
-        C1 --> D1["Hundreds of raw progress lines dumped"]
-        D1 --> E1["Context inflated by 50-100 KB/min"]
-        E1 --> C1
+        C1 --> D1["Context inflated by 50-100 KB/min"]
+        D1 --> C1
     end
 
-    subgraph Trap2["Trap 2: The Raw JSON Transcript Trap"]
-        A2["Agent seeks forensic history"] --> B2["Calls view_file('transcript.jsonl')"]
-        B2 --> C2["Multi-megabyte raw JSON dumped"]
-        C2 --> D2["Context Compaction triggered"]
-        D2 --> E2["Post-compaction amnesia reverts agent to habit"]
-        E2 --> B2
+    subgraph Problem2["2. Raw Terminal & JSON Bloat"]
+        A2["Verbose Shell / Transcript Reads"] --> B2["Raw ASCII dots, dumps, JSON noise"]
+        B2 --> C2["Context window exhausted"]
+        C2 --> D2["Compaction amnesia & CoT degradation"]
     end
 ```
 
 ### 1. The Background Task Polling Trap
 When an agent initiates a shell command exceeding `WaitMsBeforeAsync` (~5 seconds), Antigravity detaches the process into a background task (`task-XYZ`).
-- **The Anti-Pattern**: Large Language Models exhibit an innate busy-waiting bias: they repeatedly invoke `manage_task(Action='status')` or schedule short 5–10s timers (`schedule(...)`) rather than yielding execution to the native **Reactive Wakeup** system.
-- **The Log Explosion**: Each status check appends the entire accumulated process stdout buffer (ANSI escape codes, compiler progress dots, raw build logs) into the conversation history.
+- **The Anti-Pattern**: Large Language Models exhibit an innate busy-waiting bias: they repeatedly invoke `manage_task(Action='status')` or schedule short timers rather than yielding execution to the native **Reactive Wakeup** system.
 - **The Consequence**: Transcripts bloat rapidly, pushing critical user instructions and architectural constraints out of the attention window, degrading model reasoning and causing session stalls.
+- **The Solution**: Agy's closed session ledger blocks repeated polling and enforces native Reactive Wakeup (`<SYSTEM_MESSAGE>`).
 
-### 2. The Raw Transcript Reading Trap
-When reviewing prior turns, inspecting subagent findings, or diagnosing errors, system instructions prompt agents to inspect transcripts at `.system_generated/logs/transcript.jsonl`.
-- **The Raw JSON Tax**: Agents execute native `view_file` on multi-megabyte JSONL files, filling working memory with escaped quotes, bracket noise, timestamps, and massive tool payload blobs.
-- **The Two-File Sync Tax**: Because large tool outputs in `transcript.jsonl` are truncated, agents must manually look up matching line numbers in `transcript_full.jsonl`, wasting cognitive budget on mechanical parsing.
-- **Post-Compaction Amnesia**: When context compaction triggers, the agent's short-term conversational context is compressed, and the model reverts to its baseline system prompt habits. It immediately attempts another `view_file` read on `transcript.jsonl`, re-polluting the newly compacted window with thousands of tokens of raw JSON overhead.
+### 2. The Terminal Output Bloat Trap
+- **The Problem**: Routine test runs, linters, and build commands dump thousands of repetitive pass lines and progress indicators into the transcript.
+- **The Solution**: RTK transparently intercepts and optimizes commands via PreToolUse hooks, collapsing passes and preserving failures.
+
+### 3. The Native Inspection Bypass Trap
+- **The Problem**: Native file and search tools (`view_file`, `grep_search`, `find_by_name`, `list_dir`) bypass RTK command optimization.
+- **The Solution**: Agy hard-routes workspace inspection to canonical RTK CLI interfaces (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`).
+
+### 4. The Raw Transcript Reading Trap
+- **The Problem**: Direct `view_file` on `.system_generated/logs/transcript.jsonl` floods working memory with raw JSON syntax.
+- **The Solution**: Agy blocks direct reads of `.system_generated` by root and provides streaming Markdown tools (`read_transcript`, `query_transcript`).
 
 ---
 
 ## Core Value Proposition
 
-| Metric / Feature | Without Governor | With Agy-Context-Saver |
+| Metric / Feature | Without Governor | With Agy-Context-Saver + RTK |
 | :--- | :--- | :--- |
-| **Long Command Execution** | Detached after 5s $\to$ busy-wait loop | Synchronous window expanded to 10s $\to$ finishes cleanly in-turn |
-| **Output Log Bloat** | Unlimited raw dots, ANSI dumps | Adaptive semantic reduction (2–4 KB target) + 24 KB ceiling |
+| **Command Output Bloat** | Unlimited raw test dots, ANSI dumps | RTK transparent reduction (60–90% token savings) |
+| **Workspace File Inspection** | Massive uncompressed view_file dumps | Compact `rtk read`, `rtk grep`, `rtk find` |
+| **Long Command Execution** | Detached after 5s $\to$ busy-wait loop | Synchronous window expanded to 10s $\to$ finishes in-turn |
+| **Background Task Monitoring** | Repetitive busy-polling loops | Enforced Reactive Wakeup with 5-strike circuit breaker |
 | **Transcript Review** | Raw JSONL dumped into context | Clean human-readable Markdown via `read_transcript` |
-| **Forensic Search** | Full file scans across 2 files | Filtered, auto-dereferenced queries via `query_transcript` |
-| **UI Step Height & Readability** | Multi-screen scrolling run-on cards | `verbosity: "quiet"` 1-line badges & Markdown ` ```text ` code fences |
-| **Runtime Dependencies** | N/A | **Zero** external npm dependencies (100% Node.js stdlib) |
+| **Runtime Dependencies** | N/A | **Zero** external npm dependencies (100% Node.js stdlib) + native RTK binary |

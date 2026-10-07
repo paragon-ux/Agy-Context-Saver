@@ -2,53 +2,85 @@
 name: context-governance
 description: >-
   Use when running shell commands with large outputs, inspecting session transcript health,
-  preventing repetitive background polling loops, or delegating heavy research to subagents.
+  preventing repetitive background polling loops, inspecting codebases with RTK, or delegating heavy research to subagents.
 ---
 
-# Context Governance & Execution Guard (Agy-Context-Saver)
+# Context Governance & Execution Guard (Agy-Context-Saver + RTK)
 
-Agy-Context-Saver protects session transcript health and LLM attention by preventing repetitive busy-wait polling, compressing noisy test dot outputs, and offloading deep research to sandboxed subagents.
+Agy-Context-Saver and RTK protect session transcript health and LLM attention by transparently compressing command outputs, preventing repetitive background polling loops, routing native inspection to compact CLI interfaces, and offloading deep research to sandboxed subagents.
 
-## Available MCP Tools
+## Architectural Boundaries
 
-### 1. `safe_command`
-Executes shell commands with generous timeouts and intelligent log compression. Collapses massive streams of test dots, repeated log rows, and pathological output to prevent transcript pollution.
-- **Parameters**:
-  - `command` (string, required): Shell command to execute.
-  - `cwd` (string, optional): Working directory.
-  - `timeoutSeconds` (number, default: 30): Generous execution ceiling with escalating SIGKILL protection.
-  - `maxOutputLines` (number, default: 30): Output lines preserved before collapsing repetitive middle sections.
+- **RTK (Rust Token Killer)**: Owns shell command rewriting, terminal output compression, and canonical codebase inspection (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`, `rtk err`, `rtk summary`).
+- **Agy-Context-Saver**: Owns Antigravity lifecycle governance, Reactive Wakeup enforcement, transcript forensics, and session integrity.
 
-### 2. `check_context_health`
-Performs asynchronous streaming inspection of `transcript.jsonl` to calculate turn budgets, step counts, raw payload size, and detect busy-polling loops.
+---
+
+## Codebase Inspection via RTK
+
+Native Antigravity file and search tools (`view_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token compression and are hard-routed to RTK shell commands:
+
+- `rtk read <file>`: Reads file with intelligent token filtering and line ranges.
+- `rtk grep "<pattern>"`: Compact ripgrep search grouped by file.
+- `rtk find <path>`: Compact file search tree.
+- `rtk ls`: Token-optimized directory listing.
+- `rtk err <cmd>`: Runs command and displays only errors/warnings.
+- `rtk summary <cmd>`: Runs command and produces a 2-line technical summary.
+
+*Safe Harbor*: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/`) may be viewed directly via `view_file`.
+
+---
+
+## Available Agy MCP Tools
+
+### 1. `check_context_health`
+Performs streaming inspection of `transcript.jsonl` to calculate turn budgets, step counts, raw payload size, RTK status, and detect busy-polling loops.
 - **Parameters**:
   - `transcriptPath` (string, required): Absolute path to `transcript.jsonl`.
 
-### 3. `subagent_brief`
+### 2. `subagent_brief`
 Generates a strictly formatted, scope-isolated prompt for delegating research or debugging to a subagent (`invoke_subagent`).
 - **Parameters**:
   - `objective` (string, required): Core investigative or implementation goal.
   - `scopeFiles` (array of strings, optional): Specific file targets.
   - `expectedDeliverable` (string, optional): Expected concise synthesis format.
 
-### 4. `get_installation_status`
-Audits the 4 Antigravity integration layers (Native Plugin Link, Lifecycle Hook in `hooks.json`, MCP Server in `mcp_config.json`, and Tool Schemas in Antigravity directory).
+### 3. `read_transcript`
+Quickly reads recent conversation turns from an Antigravity transcript in clean Markdown format with zero JSON noise.
+- **Parameters**:
+  - `conversationId` (string, required): Conversation UUID or path.
+  - `mode` (string, default: "compact"): "compact" or "full".
+  - `lastTurns` (number, default: 3): Number of turns to display.
 
-### 5. `sync_installation`
-Re-verifies, repairs, and synchronizes the global Antigravity installation in ~25ms without terminal shell commands.
+### 4. `query_transcript`
+Granular query and forensic filtering engine for transcripts with keyword/regex search and role filtering.
+- **Parameters**:
+  - `conversationId` (string, required): Conversation UUID or path.
+  - `query` (string, optional): Search keyword or regex.
+  - `roles` (array, default: ["user", "assistant"]): Filter by role.
+
+### 5. `get_installation_status`
+Audits the Antigravity integration layers (Native Plugin Link, Lifecycle Hook in `hooks.json`, MCP Server in `mcp_config.json`, Tool Schemas, and RTK binary/hook).
+
+### 6. `sync_installation`
+Re-verifies, repairs, and synchronizes the installation and tool schemas in ~25ms.
 - **Parameters**:
   - `checkOnly` (boolean, default: false): Dry-run audit mode.
 
-## 3-Layer Governance Rules
+---
 
-1. **Layer 1: Reactive Wakeup First**:
-   - Never busy-wait on `manage_task(Action='status')` or rapid `<120s` timers.
+## Core Governance Rules
+
+1. **Reactive Wakeup First**:
+   - Never busy-wait on `manage_task(Action='status')` or `schedule` polling timers.
    - Stop calling tools and yield the turn for native Reactive Wakeup (`<SYSTEM_MESSAGE>`).
-   - For debugging stuck/hung tasks, initial status inspections and spaced cooldown checks (>=30s) are permitted under Safe Harbor.
-   - Repeated denied polling triggers an automatic 3-tier circuit breaker: Tier 1 (guidance) $\to$ Tier 2 (critical warning) $\to$ Tier 3 (`force_ask` autonomous freeze).
+   - Polling calls across tasks are tracked in a session ledger. 5 cumulative denials trigger `force_ask` autonomous freeze.
 
-2. **Layer 2: Fast Synchronous Execution**:
+2. **Fast Synchronous Execution**:
    - Commands default to `WaitMsBeforeAsync: 10000` to complete synchronously without background detachment.
 
-3. **Layer 3: Subagent Delegation**:
-   - Broad grep sweeps and multi-file exploration are delegated to subagents to preserve main thread context.
+3. **Protected Antigravity State**:
+   - Direct access to `.system_generated/` (transcripts, task logs, scheduler state) is strictly denied. Use Agy MCP transcript tools.
+
+4. **Benchmark Integrity**:
+   - Mutating benchmark definitions, prompt templates, or evaluators requires explicit user confirmation.

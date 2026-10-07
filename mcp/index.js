@@ -7,25 +7,29 @@
  * Purpose-built for Google Antigravity across macOS, Linux, and Windows.
  *
  * Capabilities:
+ * - Transparent Command Optimization:
+ *   - Native shell commands transparently optimized via RTK (Rust Token Killer).
  * - Tools:
- *   - safe_command: Executes shell commands with intelligent output compression,
- *     chunk-based stream buffering, escalating SIGKILL fallback, and generous timeouts.
  *   - check_context_health: Inspects conversation transcripts using async streaming
  *     to diagnose turn count, tool polling loops, and context degradation with minimal memory.
  *   - subagent_brief: Formulates scope-isolated prompts for delegated subagents.
+ *   - get_installation_status: Audits live Antigravity plugin, hook, MCP, and RTK integration.
+ *   - sync_installation: Re-verifies and synchronizes installation and tool schemas.
+ *   - read_transcript: Clean Markdown streaming reader for compact and full transcripts.
+ *   - query_transcript: Forensic filtering and regex search engine for conversation logs.
  * - Prompts:
- *   - context_shield: Injects the 3-Layer Context Governance rules.
+ *   - context_shield: Injects the Context Governance rules.
  * - Resources:
  *   - context-saver://rules/governance: Serves the full AGENTS.md rulebook.
  */
 
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { runInstall, runUninstall, runStatus, detectExistingInstallation } from "../scripts/install-register.mjs";
+import { findExistingRtk } from "../scripts/provision-rtk.mjs";
 
 // Handle CLI subcommands (e.g. npx agy-context-saver install)
 const cliArg = process.argv[2];
@@ -49,41 +53,6 @@ const SERVER_VERSION = "1.0.0";
 
 // --- Tools Specification ---
 const TOOLS = [
-  {
-    name: "safe_command",
-    description: "Run a shell command with adaptive semantic reduction, generous timeout, and zero context bloat. Collapses repetitive test passes and progress streams to 2-4 KB, protects errors and diffs, and formats outputs with clean Markdown fences.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        command: {
-          type: "string",
-          description: "The exact shell command to execute."
-        },
-        cwd: {
-          type: "string",
-          description: "Working directory (optional, defaults to current working directory)."
-        },
-        timeoutSeconds: {
-          type: "number",
-          description: "Execution timeout in seconds (default: 30)."
-        },
-        maxOutputLines: {
-          type: "number",
-          description: "Maximum output lines to return before compressing (default: 30)."
-        },
-        verbosity: {
-          type: "string",
-          enum: ["quiet", "normal", "full"],
-          description: "quiet = status badge only for routine passes (<=200 chars); normal = adaptive semantic reduction targeting 2-4 KB (default); full = preserve raw output up to 24 KB ceiling."
-        },
-        terse: {
-          type: "boolean",
-          description: "Legacy alias: if true, maps to verbosity='quiet' to minimize UI step height (default: false)."
-        }
-      },
-      required: ["command"]
-    }
-  },
   {
     name: "check_context_health",
     description: "Inspects a conversation transcript (transcript.jsonl) to diagnose turn count, payload size, tool polling loops, and context degradation risk.",
@@ -249,378 +218,7 @@ const PROMPTS = [
 ];
 
 // --- Tool Implementations ---
-const MAX_LINE_CHARS = 1000;
-const MAX_TOTAL_CHARS = 24000;
-const TARGET_NORMAL_CHARS = 4096;
-const MAX_CAPTURE_BYTES = 50 * 1024 * 1024; // 50MB memory ceiling against runaway commands
 
-function clampLine(line) {
-  if (line.length <= MAX_LINE_CHARS) return line;
-  const half = Math.floor(MAX_LINE_CHARS / 2);
-  return `${line.slice(0, half)} ... [truncated long line ${line.length} chars] ... ${line.slice(-half)}`;
-}
-
-/**
- * Adaptive Semantic Output Reducer:
- * Optimizes the representation of command outputs for LLM reasoning and UI readability.
- * Targets 2-4 KB for routine commands while preserving 100% of errors, stack traces, and diffs.
- */
-function reduceSemanticOutput({
-  stdout = "",
-  stderr = "",
-  exitCode = 0,
-  command = "",
-  maxOutputLines = 30,
-  verbosity = "normal",
-  elapsed = "0.00",
-  isTerseLegacy = false
-}) {
-  const isQuiet = verbosity === "quiet";
-  const isFull = verbosity === "full";
-  const isSuccess = exitCode === 0;
-
-  const rawCombined = (stdout + (stderr ? "\n[STDERR]\n" + stderr : "")).trim();
-  const rawLines = rawCombined ? rawCombined.split(/\r?\n/).filter(Boolean).length : 0;
-
-  // 1. Quiet mode: if successful, return compact 1-line badge (<=200 chars)
-  // If failed, automatically bypass quiet mode to provide full diagnostic signal
-  if (isQuiet && isSuccess) {
-    const modeLabel = isTerseLegacy ? "terse mode" : "quiet mode";
-    return {
-      isError: false,
-      text: `✓ [STATUS: PASSED (exit 0) in ${elapsed}s] (${rawLines} lines collapsed in ${modeLabel})`
-    };
-  }
-
-  // 2. Full mode: preserve raw output bounded by 24 KB ceiling inside markdown fences
-  if (isFull) {
-    let body = rawCombined || "(empty output)";
-    if (body.length > MAX_TOTAL_CHARS) {
-      const half = Math.floor(MAX_TOTAL_CHARS / 2);
-      body = `${body.slice(0, half)}\n\n... [agy-context-saver: clamped to 24 KB ceiling] ...\n\n${body.slice(-half)}`;
-    }
-    const statusHeader = isSuccess
-      ? `[STATUS: PASSED (exit 0) in ${elapsed}s]`
-      : `[STATUS: FAILED (exit ${exitCode}) in ${elapsed}s]`;
-    return {
-      isError: !isSuccess,
-      text: `${statusHeader}\n\`\`\`text\n${body.trim()}\n\`\`\``
-    };
-  }
-
-  // 3. Normal mode: adaptive semantic reduction targeting 2-4 KB
-  let errSection = "";
-  if (stderr && stderr.trim()) {
-    errSection = stderr.trim();
-  }
-
-  const rawStdoutLines = stdout ? stdout.trim().split(/\r?\n/).map(clampLine) : [];
-
-  // Phase A: Identify high-value lines (errors, stack traces, diffs)
-  const isHighValueLine = (line) => {
-    return /^(?:diff --git|index [0-9a-f]|---|\+\+\+|@@ -|error|exception|fail|failed|fatal|traceback|\s*at\s+\S+|\s+File\s+".*",\s+line)/i.test(line);
-  };
-
-  // Phase B: Detect and collapse repetitive patterns
-  const isTestPassLine = (line) => {
-    return /^\s*(?:PASS|✓|✔|\[PASS\]|test\s+\S+\s+\.\.\.\s+ok|ok\s+\d+|passed)/i.test(line);
-  };
-
-  const isProgressLine = (line) => {
-    return /^\s*(?:\.{3,}|[-=]{4,}|\[[=\s>]{4,}\]|\d+%\s*\||Progress:|Fetching:|Downloading:)/i.test(line);
-  };
-
-  const processed = [];
-  let i = 0;
-  while (i < rawStdoutLines.length) {
-    const line = rawStdoutLines[i];
-
-    // Check for repetitive test passes (run of 3 or more)
-    if (isTestPassLine(line) && !isHighValueLine(line)) {
-      let runEnd = i;
-      while (runEnd < rawStdoutLines.length && isTestPassLine(rawStdoutLines[runEnd]) && !isHighValueLine(rawStdoutLines[runEnd])) {
-        runEnd++;
-      }
-      const runLength = runEnd - i;
-      if (runLength >= 3) {
-        processed.push(rawStdoutLines[i]);
-        processed.push(`... [${runLength - 2} repetitive test pass lines collapsed] ...`);
-        processed.push(rawStdoutLines[runEnd - 1]);
-        i = runEnd;
-        continue;
-      }
-    }
-
-    // Check for repetitive progress indicators (run of 3 or more)
-    if (isProgressLine(line)) {
-      let runEnd = i;
-      while (runEnd < rawStdoutLines.length && isProgressLine(rawStdoutLines[runEnd])) {
-        runEnd++;
-      }
-      const runLength = runEnd - i;
-      if (runLength >= 3) {
-        processed.push(`... [${runLength} progress updates collapsed] ...`);
-        i = runEnd;
-        continue;
-      }
-    }
-
-    // Check for consecutive identical lines (run of 3 or more)
-    let runEnd = i + 1;
-    while (runEnd < rawStdoutLines.length && rawStdoutLines[runEnd] === line) {
-      runEnd++;
-    }
-    const identicalRun = runEnd - i;
-    if (identicalRun >= 3 && line.trim().length > 0) {
-      processed.push(line);
-      processed.push(`... [${identicalRun - 1} identical lines collapsed] ...`);
-      i = runEnd;
-      continue;
-    }
-
-    processed.push(line);
-    i++;
-  }
-
-  // Phase C: If lines exceed maxOutputLines, apply head/tail safety clamping
-  let stdoutBody = "";
-  if (processed.length <= maxOutputLines) {
-    stdoutBody = processed.join("\n");
-  } else {
-    const half = Math.floor(maxOutputLines / 2);
-    const head = processed.slice(0, half).join("\n");
-    const tail = processed.slice(-half).join("\n");
-    const omitted = processed.length - maxOutputLines;
-    stdoutBody = `${head}\n\n... [agy-context-saver: compressed ${omitted} repetitive output lines] ...\n\n${tail}`;
-  }
-
-  // Combine stdoutBody and errSection (ensuring errors are never dropped)
-  let combinedNormal = stdoutBody;
-  if (errSection) {
-    combinedNormal = combinedNormal ? `${combinedNormal}\n\n[STDERR]\n${errSection}` : `[STDERR]\n${errSection}`;
-  }
-  if (!combinedNormal.trim()) {
-    combinedNormal = "(empty output)";
-  }
-
-  // Phase D: Target budget safety clamping (target <= 4096 chars)
-  if (combinedNormal.length > TARGET_NORMAL_CHARS) {
-    const halfBudget = Math.floor(TARGET_NORMAL_CHARS / 2);
-    combinedNormal = `${combinedNormal.slice(0, halfBudget)}\n\n... [clamped to 4 KB normal budget; pass verbosity: "full" to see raw output] ...\n\n${combinedNormal.slice(-halfBudget)}`;
-  }
-
-  const statusHeader = isSuccess
-    ? `[STATUS: PASSED (exit 0) in ${elapsed}s]`
-    : `[STATUS: FAILED (exit ${exitCode}) in ${elapsed}s]`;
-
-  return {
-    isError: !isSuccess,
-    text: `${statusHeader}\n\`\`\`text\n${combinedNormal.trim()}\n\`\`\``
-  };
-}
-
-// Legacy helper retained for backwards compatibility
-function compressOutput(text, maxLines) {
-  if (!text) return "(empty output)";
-  const rawLines = text.split(/\r?\n/);
-  const lines = rawLines.map(clampLine);
-
-  let output = "";
-  if (lines.length <= maxLines) {
-    output = lines.join("\n");
-  } else {
-    const half = Math.floor(maxLines / 2);
-    const head = lines.slice(0, half).join("\n");
-    const tail = lines.slice(-half).join("\n");
-    const omitted = lines.length - maxLines;
-    output = `${head}\n\n... [agy-context-saver: compressed ${omitted} repetitive output lines] ...\n\n${tail}`;
-  }
-
-  if (output.length > MAX_TOTAL_CHARS) {
-    const halfChars = Math.floor(MAX_TOTAL_CHARS / 2);
-    output = `${output.slice(0, halfChars)}\n\n... [agy-context-saver: clamped to 24 KB ceiling to prevent host disk spillover] ...\n\n${output.slice(-halfChars)}`;
-  }
-
-  return output;
-}
-
-function assistantOnlyBlock(text) {
-  return {
-    type: "text",
-    text,
-    annotations: {
-      audience: ["assistant"],
-      priority: 0
-    }
-  };
-}
-
-function userFacingBlock(text) {
-  return {
-    type: "text",
-    text,
-    annotations: {
-      audience: ["user"],
-      priority: 1
-    }
-  };
-}
-
-async function resolveWorkspaceCwd() {
-  try {
-    const dbPath = path.join(os.homedir(), ".gemini", "antigravity", "conversation_summaries.db");
-    if (fs.existsSync(dbPath)) {
-      const origEmitWarning = process.emitWarning;
-      process.emitWarning = () => {};
-      try {
-        const { DatabaseSync } = await import("node:sqlite");
-        const db = new DatabaseSync(dbPath, { readOnly: true });
-        const row = db.prepare("SELECT workspace_uris FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 1").get();
-        if (row && row.workspace_uris) {
-          const uris = JSON.parse(row.workspace_uris);
-          if (Array.isArray(uris) && uris.length > 0) {
-            const parsed = new URL(uris[0]);
-            let wsPath = decodeURIComponent(parsed.pathname);
-            if (os.platform() === "win32" && wsPath.startsWith("/")) {
-              wsPath = wsPath.slice(1);
-            }
-            if (fs.existsSync(wsPath)) {
-              return wsPath;
-            }
-          }
-        }
-      } finally {
-        process.emitWarning = origEmitWarning;
-      }
-    }
-  } catch {}
-  return process.env.INIT_CWD || process.env.PWD || process.cwd();
-}
-
-async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputLines = 30, verbosity = "normal", terse = false }) {
-  const resolvedCwd = cwd || (await resolveWorkspaceCwd());
-  const isTerseLegacy = terse === true;
-  const effectiveVerbosity = isTerseLegacy ? "quiet" : (verbosity || "normal");
-
-  return new Promise((resolve) => {
-    const isWin = os.platform() === "win32";
-    const shell = isWin ? process.env.ComSpec || "cmd.exe" : "/bin/sh";
-    const shellArgs = isWin ? ["/d", "/s", "/c", command] : ["-c", command];
-
-    const startTime = Date.now();
-    const stdoutChunks = [];
-    const stderrChunks = [];
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let timedOut = false;
-    let killEscalationTimer = null;
-    let captureTruncated = false;
-
-    const proc = spawn(shell, shellArgs, {
-      cwd: resolvedCwd,
-      env: process.env,
-      windowsHide: true,
-      windowsVerbatimArguments: isWin
-    });
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        proc.kill("SIGTERM");
-      } catch {}
-
-      // Escalating kill signal: force SIGKILL / tree-kill after 1.5s if process lingers
-      killEscalationTimer = setTimeout(() => {
-        try {
-          if (!proc.killed) {
-            if (isWin && proc.pid) {
-              spawn("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true });
-            } else {
-              proc.kill("SIGKILL");
-            }
-          }
-        } catch {}
-      }, 1500);
-    }, timeoutSeconds * 1000);
-
-    proc.stdout.on("data", (chunk) => {
-      if (stdoutBytes < MAX_CAPTURE_BYTES) {
-        stdoutChunks.push(chunk);
-        stdoutBytes += chunk.length;
-      } else {
-        captureTruncated = true;
-      }
-    });
-
-    proc.stderr.on("data", (chunk) => {
-      if (stderrBytes < MAX_CAPTURE_BYTES) {
-        stderrChunks.push(chunk);
-        stderrBytes += chunk.length;
-      } else {
-        captureTruncated = true;
-      }
-    });
-
-    proc.on("close", (exitCode) => {
-      clearTimeout(timer);
-      if (killEscalationTimer) clearTimeout(killEscalationTimer);
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-
-      let stdout = Buffer.concat(stdoutChunks).toString("utf-8");
-      let stderr = Buffer.concat(stderrChunks).toString("utf-8");
-      if (captureTruncated) {
-        stdout += "\n... [agy-context-saver: raw output exceeded 50MB stream capture ceiling] ...\n";
-      }
-
-      if (timedOut) {
-        const timeoutReduction = reduceSemanticOutput({
-          stdout,
-          stderr: `[COMMAND TIMEOUT] Process exceeded ${timeoutSeconds}s and was terminated.`,
-          exitCode: 124,
-          command,
-          maxOutputLines: 15,
-          verbosity: "normal",
-          elapsed: String(timeoutSeconds)
-        });
-        return resolve({
-          isError: true,
-          content: [
-            assistantOnlyBlock(timeoutReduction.text)
-          ]
-        });
-      }
-
-      const reduction = reduceSemanticOutput({
-        stdout,
-        stderr,
-        exitCode,
-        command,
-        maxOutputLines,
-        verbosity: effectiveVerbosity,
-        elapsed,
-        isTerseLegacy
-      });
-
-      resolve({
-        isError: reduction.isError,
-        content: [
-          assistantOnlyBlock(reduction.text)
-        ]
-      });
-    });
-
-    proc.on("error", (err) => {
-      clearTimeout(timer);
-      if (killEscalationTimer) clearTimeout(killEscalationTimer);
-      resolve({
-        isError: true,
-        content: [
-          assistantOnlyBlock(`[STATUS: FAILED (spawn error)]\n\`\`\`text\n[SPAWN ERROR] Failed to start command: ${err.message}\n\`\`\``)
-        ]
-      });
-    });
-  });
-}
 
 
 async function handleCheckContextHealth({ transcriptPath }) {
@@ -680,6 +278,7 @@ async function handleCheckContextHealth({ transcriptPath }) {
     const kb = (totalBytes / 1024).toFixed(1);
     const healthStatus = pollingEvents > 3 ? "CRITICAL (Active Polling Loops Detected)" : userTurns > 40 ? "WARNING (High Turn Budget)" : "HEALTHY";
 
+    const rtkInfo = findExistingRtk();
     const reportLines = [
       `### Context Health Report: ${healthStatus}`,
       `- Total Steps: ${totalSteps}`,
@@ -687,7 +286,8 @@ async function handleCheckContextHealth({ transcriptPath }) {
       `- Assistant Responses: ${modelTurns}`,
       `- Tool Calls: ${toolCalls}`,
       `- Detected Busy-Polling Events: ${pollingEvents}`,
-      `- Approximate Raw Transcript Size: ${kb} KB`
+      `- Approximate Raw Transcript Size: ${kb} KB`,
+      `- RTK Command Optimizer: ${rtkInfo ? `Active (${rtkInfo.version})` : "Missing (run sync_installation)"}`
     ];
 
     if (corruptLines > 0) {
@@ -732,15 +332,18 @@ function handleSubagentBrief({ objective, scopeFiles = [], expectedDeliverable =
 
 function handleGetInstallationStatus() {
   const existing = detectExistingInstallation();
+  const rtkInfo = findExistingRtk();
   const report = [
     `### Agy-Context-Saver Installation Status: ${existing.isComplete ? "HEALTHY & ACTIVE 🛡️" : existing.isInstalled ? "PARTIAL INSTALLATION ⚠️" : "NOT INSTALLED ❌"}`,
     `- Native Plugin Link: ${existing.details.plugin.exists ? `ACTIVE (${existing.details.plugin.target})` : "NOT LINKED"}`,
     `- Governor Lifecycle Hook: ${existing.details.hook.registered ? "REGISTERED in hooks.json" : "NOT REGISTERED"} (Script: ${existing.details.hook.scriptExists ? "Present" : "Missing"})`,
     `- Universal MCP Server: ${existing.details.mcp.registered ? "CONFIGURED in mcp_config.json" : "NOT CONFIGURED"}`,
-    `- Antigravity Tool Schemas: ${existing.details.schemas.exists ? "ALL 7 SCHEMAS PRESENT" : "MISSING"} (${existing.details.schemas.dir})`,
+    `- Antigravity Tool Schemas: ${existing.details.schemas.exists ? "ALL 6 SCHEMAS PRESENT" : "MISSING"} (${existing.details.schemas.dir})`,
+    `- RTK Binary: ${rtkInfo ? `INSTALLED (${rtkInfo.version})` : "MISSING"}`,
+    `- RTK Hook Optimization: ${existing.details.hook.registered ? "ACTIVE (via PreToolUse)" : "INACTIVE"}`,
     "",
-    existing.isComplete
-      ? "✓ All 4 Antigravity integration layers are fully operational and synchronized."
+    existing.isComplete && rtkInfo
+      ? "✓ All Antigravity integration layers and RTK optimizer are fully operational."
       : "⚠️ Recommendation: Run sync_installation to re-verify and repair missing layers."
   ].join("\n");
 
@@ -751,6 +354,7 @@ function handleGetInstallationStatus() {
 
 async function handleSyncInstallation({ checkOnly = false } = {}) {
   const result = await runInstall({ checkOnly, silent: true });
+  const rtkInfo = findExistingRtk();
   const report = [
     `### Agy-Context-Saver Installation Synchronization`,
     `- Status: ${result.isComplete ? "SYNCHRONIZED & HEALTHY 🛡️" : "UPDATED"}`,
@@ -758,7 +362,8 @@ async function handleSyncInstallation({ checkOnly = false } = {}) {
     `- Plugin Link: ${result.details?.plugin?.exists ? "Verified" : "Updated"}`,
     `- Lifecycle Hook: Registered in hooks.json`,
     `- MCP Server: Registered in mcp_config.json`,
-    `- Tool Schemas: 7 Schemas mirrored to ~/.gemini/antigravity/mcp/agy-context-saver`,
+    `- Tool Schemas: 6 Schemas mirrored to ~/.gemini/antigravity/mcp/agy-context-saver`,
+    `- RTK Binary: ${rtkInfo ? `Verified (${rtkInfo.version})` : "Provisioned"}`,
     "",
     checkOnly ? "✓ Pre-flight check complete (dry-run)." : "✓ Installation fully synchronized and up-to-date in Zero-Delay mode."
   ].join("\n");
@@ -770,6 +375,7 @@ async function handleSyncInstallation({ checkOnly = false } = {}) {
 
 // --- Transcript Reader & Forensics Engine Helpers ---
 
+const MAX_LINE_CHARS = 1000;
 const MAX_TURN_CHARS = 6000;
 const MAX_OUTPUT_CHARS = 24000;
 
@@ -1191,9 +797,7 @@ async function handleRequest(request) {
     const { name, arguments: args = {} } = params || {};
     let toolResult;
 
-    if (name === "safe_command") {
-      toolResult = await handleSafeCommand(args);
-    } else if (name === "check_context_health") {
+    if (name === "check_context_health") {
       toolResult = await handleCheckContextHealth(args);
     } else if (name === "subagent_brief") {
       toolResult = handleSubagentBrief(args);
