@@ -1,6 +1,6 @@
 {
   "name": "agy-context-saver",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Universal Model Context Protocol (MCP) server & lifecycle governor purpose-built for Google Antigravity",
   "main": "mcp/index.js",
   "bin": {

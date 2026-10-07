@@ -213,7 +213,7 @@ function sendRpc(method, params = {}) {
 {
   const res = await sendRpc("initialize", { protocolVersion: "2024-11-05" });
   assert.equal(res.result.serverInfo.name, "agy-context-saver");
-  assert.equal(res.result.serverInfo.version, "1.0.0");
+  assert.equal(res.result.serverInfo.version, "1.1.0");
   console.log("✓ Installed MCP Server: Handshake succeeded (name: agy-context-saver, v1.0.0)");
 }
 

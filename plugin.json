@@ -1,5 +1,5 @@
 {
   "name": "agy-context-saver",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Deterministic background polling governor and subagent context preservation shield for Antigravity"
 }
