@@ -38,11 +38,60 @@ if (cliArg === "install" || cliArg === "--install") {
   await runInstall({ checkOnly: checkFlag });
   process.exit(0);
 } else if (cliArg === "uninstall" || cliArg === "--uninstall") {
-  await runUninstall();
+  const restoreBackups = process.argv.includes("--restore-backups");
+  await runUninstall({ restoreBackups });
   process.exit(0);
 } else if (cliArg === "status" || cliArg === "--status") {
   runStatus();
   process.exit(0);
+} else if (cliArg === "--help" || cliArg === "-h" || cliArg === "help") {
+  printHelp();
+  process.exit(0);
+}
+
+function printHelp() {
+  console.log(`
+Agy-Context-Saver 🛡️ (v1.0.0)
+Universal MCP Server & Lifecycle Governor for Google Antigravity (Powered by RTK)
+
+Usage:
+  agy-context-saver [command] [options]
+  node mcp/index.js [command] [options]
+
+Commands:
+  status, --status             Audit live registration across plugin, hook, MCP, & RTK
+  install, --install           Synchronize & register plugin, hook, MCP server, and schemas
+  install --check, -c          Run pre-flight validation check without writing changes
+  uninstall, --uninstall       Unregister hook, MCP server, and remove plugin link
+  uninstall --restore-backups  Unregister and restore original configuration backups
+  help, --help, -h             Show this help message
+
+Options:
+  --check, -c                  Dry-run verification mode for install
+  --restore-backups            Restore backup files (*.bak) during uninstall
+  --silent                     Suppress console log outputs
+
+MCP Server Stdio Mode:
+  When launched without subcommands, agy-context-saver runs as a JSON-RPC 2.0
+  stdio Model Context Protocol server (intended for Antigravity or MCP clients).
+  ⚠️  Do not execute interactively in a terminal without piped JSON-RPC input.
+
+Testing & Verification Playbook:
+  npm run status               Verify live 4-layer integration status
+  npm test                     Run complete 5-suite automated test suite
+  node tests/test-hook.mjs     Run 28 closed-topology governance rule tests
+  node tests/test-mcp.mjs      Run MCP protocol, method, and schema tests
+
+Platform-Aware Inspection Directives (RTK):
+  Windows:
+    - Search:     rtk rg "<pattern>" .   (trailing dot is required to prevent stdin pipe stalls)
+    - Read:       rtk read <file>
+    - Directory:  rtk find <path>        (cross-platform; avoids missing ls.exe)
+  POSIX (macOS/Linux):
+    - Search:     rtk grep "<pattern>"  or  rtk rg "<pattern>"
+    - Read:       rtk read <file>
+    - Directory:  rtk ls <path>         or  rtk tree
+`);
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -55,16 +104,19 @@ const SERVER_VERSION = "1.0.0";
 const TOOLS = [
   {
     name: "check_context_health",
-    description: "Inspects a conversation transcript (transcript.jsonl) to diagnose turn count, payload size, tool polling loops, and context degradation risk.",
+    description: "Inspects a conversation transcript (transcript.jsonl) to diagnose turn count, payload size, tool polling loops, and context degradation risk. Accepts a file path, conversation UUID, or empty for active conversation.",
     inputSchema: {
       type: "object",
       properties: {
         transcriptPath: {
           type: "string",
-          description: "Path to transcript.jsonl file."
+          description: "Path to transcript.jsonl file, conversation UUID, or empty for active conversation."
+        },
+        conversationId: {
+          type: "string",
+          description: "Conversation UUID or folder name (alternative to transcriptPath)."
         }
-      },
-      required: ["transcriptPath"]
+      }
     }
   },
   {
@@ -221,13 +273,21 @@ const PROMPTS = [
 
 
 
-async function handleCheckContextHealth({ transcriptPath }) {
+async function handleCheckContextHealth(args = {}) {
   try {
+    const rawTarget = args.transcriptPath || args.conversationId || "current";
+    let transcriptPath = rawTarget;
+
     if (!fs.existsSync(transcriptPath)) {
-      return {
-        isError: true,
-        content: [{ type: "text", text: `Transcript not found: ${transcriptPath}` }]
-      };
+      const resolved = resolveTranscriptPath(rawTarget, "compact");
+      if (resolved && resolved.filePath && fs.existsSync(resolved.filePath)) {
+        transcriptPath = resolved.filePath;
+      } else {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Transcript not found: ${rawTarget}` }]
+        };
+      }
     }
 
     const fileStream = fs.createReadStream(transcriptPath, { encoding: "utf-8" });

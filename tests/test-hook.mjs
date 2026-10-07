@@ -120,14 +120,14 @@ console.log("\n--- Group B: Native Inspection Hard-Routing to RTK ---");
   console.log("✓ read_many_files hard-routed to 'rtk read'");
 }
 
-// 9. grep_search is hard-routed to rtk grep
+// 9. grep_search is hard-routed to rtk grep / rtk rg
 {
   const out = runHook({
     toolCall: { name: "grep_search", args: { query: "export function handleRequest" } }
   });
   assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Run 'rtk grep "export function handleRequest"' via run_command instead/);
-  console.log("✓ grep_search hard-routed to 'rtk grep'");
+  assert.match(out.reason, /Run '(?:rtk rg "export function handleRequest" \.|rtk grep "export function handleRequest")' via run_command instead/);
+  console.log("✓ grep_search hard-routed to 'rtk grep' / 'rtk rg'");
 }
 
 // 10. find_by_name is hard-routed to rtk find
@@ -140,14 +140,14 @@ console.log("\n--- Group B: Native Inspection Hard-Routing to RTK ---");
   console.log("✓ find_by_name hard-routed to 'rtk find'");
 }
 
-// 11. list_dir is hard-routed to rtk ls / rtk tree
+// 11. list_dir is hard-routed to rtk ls / rtk find
 {
   const out = runHook({
     toolCall: { name: "list_dir", args: { dirPath: "c:/project/tests" } }
   });
   assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Run 'rtk ls c:\/project\/tests' or 'rtk tree'/);
-  console.log("✓ list_dir hard-routed to 'rtk ls' / 'rtk tree'");
+  assert.match(out.reason, /Run '(?:rtk find c:\/project\/tests|rtk ls c:\/project\/tests)'/);
+  console.log("✓ list_dir hard-routed to 'rtk find' / 'rtk ls'");
 }
 
 // ============================================================================

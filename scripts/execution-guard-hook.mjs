@@ -168,6 +168,33 @@ function isProtectedBenchmarkPath(targetPath) {
   );
 }
 
+let resolvedRtkPath = null;
+function getRtkBinary() {
+  if (resolvedRtkPath) return resolvedRtkPath;
+
+  // 1. Try global rtk on PATH
+  try {
+    const check = spawnSync("rtk", ["--version"], { timeout: 1000, windowsHide: true });
+    if (check.status === 0) {
+      resolvedRtkPath = "rtk";
+      return resolvedRtkPath;
+    }
+  } catch {}
+
+  // 2. Try plugin local bin
+  const isWin = os.platform() === "win32";
+  const exeName = isWin ? "rtk.exe" : "rtk";
+  const homeDir = os.homedir();
+  const pluginBin = path.join(homeDir, ".gemini", "config", "plugins", "agy-context-saver", "bin", exeName);
+  if (fs.existsSync(pluginBin)) {
+    resolvedRtkPath = pluginBin;
+    return resolvedRtkPath;
+  }
+
+  resolvedRtkPath = "rtk";
+  return resolvedRtkPath;
+}
+
 /**
  * Rewrite raw shell command using RTK (Rust Token Killer).
  */
@@ -182,7 +209,8 @@ function rewriteCommandWithRtk(rawCmd) {
   }
 
   try {
-    const res = spawnSync("rtk", ["rewrite", trimmed], {
+    const rtkBin = getRtkBinary();
+    const res = spawnSync(rtkBin, ["rewrite", trimmed], {
       encoding: "utf-8",
       timeout: 2000,
       windowsHide: true
@@ -321,9 +349,11 @@ try {
 
     if (toolName === "grep_search") {
       const pattern = args.query || args.pattern || "";
+      const isWin = os.platform() === "win32";
+      const cmdHint = isWin ? `rtk rg "${pattern}" .` : `rtk grep "${pattern}"`;
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Native grep inspection via 'grep_search' bypasses token optimization. Run 'rtk grep "${pattern}"' via run_command instead.`
+        reason: `Antigravity Governance: Native grep inspection via 'grep_search' bypasses token optimization. Run '${cmdHint}' via run_command instead.`
       });
     }
 
@@ -336,9 +366,11 @@ try {
     }
 
     if (toolName === "list_dir") {
+      const isWin = os.platform() === "win32";
+      const cmdHint = isWin ? `rtk find ${target || "."}` : `rtk ls ${target || ""}`;
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Native directory listing via 'list_dir' bypasses token optimization. Run 'rtk ls ${target || ""}' or 'rtk tree' via run_command instead.`
+        reason: `Antigravity Governance: Native directory listing via 'list_dir' bypasses token optimization. Run '${cmdHint}' via run_command instead.`
       });
     }
 

@@ -87,15 +87,70 @@ npm run status
 - **Transparent RTK Rewriting**: Native `run_command` calls are automatically rewritten (e.g. `pytest` $\to$ `rtk pytest`) via Antigravity PreToolUse hooks.
 - **Canonical Codebase Inspection**:
   - `rtk read <file>`: Read file with intelligent token filtering and line ranges.
-  - `rtk grep "<pattern>"`: Compact ripgrep search grouped by file.
-  - `rtk find <path>`: Compact file search tree.
-  - `rtk ls`: Token-optimized directory listing.
+  - `rtk find <path>`: Compact file search tree and directory listing (cross-platform, works on Windows & POSIX).
+  - Search by platform:
+    - **Windows**: `rtk rg "<pattern>" .` (explicit target `.` prevents child process stdin stalls) or `rg "<pattern>" .`.
+    - **POSIX / Linux / macOS**: `rtk grep "<pattern>"` or `rtk rg "<pattern>"`.
+  - Directory listing by platform:
+    - **Windows**: `rtk find <path>` or PowerShell `dir` / `Get-ChildItem`. (Avoid `rtk ls` / `rtk tree` on Windows as they rely on POSIX binaries/flags).
+    - **POSIX / Linux / macOS**: `rtk ls <path>` or `rtk tree`.
   - `rtk err <cmd>`: Run command and show only errors/warnings.
   - `rtk summary <cmd>`: Run command and produce a 2-line heuristic summary.
 - **Antigravity Special Files Safe Harbor**: Direct `view_file` access to `SKILL.md`, brain artifacts, and config files is preserved.
 - **Protected Internal State**: Root-based guard prevents reading `.system_generated/` (transcripts, task logs, progress).
 - **Session-Wide Lifecycle Ledger**: Polling checks are tracked globally per session; changing task IDs or waiting does not reset governance.
 - **Zero-JSON Transcript Streaming**: Stream conversation turns without raw JSON syntax using `read_transcript` and `query_transcript`.
+
+---
+
+## Zero-Guesswork Testing & Verification Playbook
+
+To cleanly test every layer of the framework without guesswork or interactive stalls:
+
+### 1. Audit Live Registration
+```bash
+npm run status
+# or
+node mcp/index.js status
+```
+*Confirms that all 4 integration layers (Plugin link, Lifecycle Hook, MCP Server, Schemas) and RTK are active.*
+
+### 2. Run Complete Automated Test Suite
+```bash
+npm test
+```
+*Runs all 5 test suites (28 hook tests, MCP protocol tests, E2E probes, installed verification, lifecycle rollback).*
+
+### 3. Run Targeted Tests Individually
+```bash
+# Governance hook unit tests (28 closed-topology tests)
+node tests/test-hook.mjs
+
+# MCP server protocol & method tests
+node tests/test-mcp.mjs
+
+# End-to-end edge case & probe tests
+node tests/test-e2e-probes.mjs
+
+# Live installed environment verification
+node tests/test-installed-verification.mjs
+
+# Clean install/uninstall/restore lifecycle test
+node tests/test-lifecycle-rollback.mjs
+```
+
+### 4. Test MCP Tools from Antigravity Agent
+- `get_installation_status`: Call with `{}` to audit all 4 layers + RTK.
+- `check_context_health`: Call with `{ "transcriptPath": "<path-to-transcript.jsonl>" }`.
+- `read_transcript`: Call with `{ "conversationId": "<uuid>", "lastTurns": 3, "mode": "compact" }`.
+- `query_transcript`: Call with `{ "conversationId": "<uuid>", "query": "<term>", "summaryOnly": true }`.
+- `subagent_brief`: Call with `{ "objective": "<goal>", "scopeFiles": ["..."] }`.
+
+### 5. Testing Pitfalls & Anti-Patterns to Avoid
+- ❌ **Do NOT run `npm start` or `node mcp/index.js` interactively**: It starts the stdio JSON-RPC daemon and waits indefinitely on `stdin`.
+- ❌ **Do NOT loop on `manage_task(Action='status')`**: Polling triggers the session ledger circuit breaker at 5 cumulative denials. Rely on native Reactive Wakeup (`<SYSTEM_MESSAGE>`).
+- ❌ **Do NOT run `npm run uninstall` as a standalone check**: It unregisters the live hook. If run, immediately re-run `npm run setup`.
+- ❌ **On Windows, do NOT omit the directory in `rtk rg`**: Always run `rtk rg "<pattern>" .` to avoid stdin pipe blocking.
 
 ---
 

@@ -21,9 +21,13 @@ Agy-Context-Saver and RTK protect session transcript health and LLM attention by
 Native Antigravity file and search tools (`view_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token compression and are hard-routed to RTK shell commands:
 
 - `rtk read <file>`: Reads file with intelligent token filtering and line ranges.
-- `rtk grep "<pattern>"`: Compact ripgrep search grouped by file.
-- `rtk find <path>`: Compact file search tree.
-- `rtk ls`: Token-optimized directory listing.
+- `rtk find <path>`: Compact file search tree and directory listings (cross-platform, works on Windows & POSIX).
+- Search commands by platform:
+  - **Windows**: Use `rtk rg "<pattern>" .` (explicit target `.` is required to avoid child process stdin pipe stalls) or `rg "<pattern>" .`.
+  - **POSIX / Linux / macOS**: Use `rtk grep "<pattern>"` or `rtk rg "<pattern>"`.
+- Directory listing by platform:
+  - **Windows**: Use `rtk find <path>` or PowerShell `dir` / `Get-ChildItem`. (Avoid `rtk ls` or `rtk tree` on Windows as they rely on POSIX binaries/flags).
+  - **POSIX / Linux / macOS**: Use `rtk ls <path>` or `rtk tree`.
 - `rtk err <cmd>`: Runs command and displays only errors/warnings.
 - `rtk summary <cmd>`: Runs command and produces a 2-line technical summary.
 
@@ -84,3 +88,43 @@ Re-verifies, repairs, and synchronizes the installation and tool schemas in ~25m
 
 4. **Benchmark Integrity**:
    - Mutating benchmark definitions, prompt templates, or evaluators requires explicit user confirmation.
+
+---
+
+## Zero-Guesswork Testing & Verification Playbook
+
+When validating this framework or reproducing tests, execute these exact steps:
+
+1. **Check Live Registration**:
+   ```bash
+   npm run status
+   # or
+   node mcp/index.js status
+   ```
+   *Expected*: Reports `HEALTHY & ACTIVE 🛡️` across plugin link, hook, MCP server, schemas, and RTK.
+
+2. **Run Full Test Suite**:
+   ```bash
+   npm test
+   ```
+   *Expected*: All 5 suites pass (Unit hook tests, MCP protocol tests, E2E probes, live system validation, lifecycle rollback).
+
+3. **Run Targeted Suite Tests**:
+   - Governance Hook: `node tests/test-hook.mjs`
+   - MCP Protocol & JSON-RPC: `node tests/test-mcp.mjs`
+   - E2E Probes: `node tests/test-e2e-probes.mjs`
+   - Live System Checks: `node tests/test-installed-verification.mjs`
+   - Lifecycle & Rollback: `node tests/test-lifecycle-rollback.mjs`
+
+4. **Verify MCP Tools Inside Antigravity**:
+   - `get_installation_status`: Call with `{}` to audit all 4 layers + RTK.
+   - `check_context_health`: Call with `{ "transcriptPath": "<path-to-transcript.jsonl>" }`.
+   - `read_transcript`: Call with `{ "conversationId": "<uuid>", "lastTurns": 3, "mode": "compact" }`.
+   - `query_transcript`: Call with `{ "conversationId": "<uuid>", "query": "<term>", "summaryOnly": true }`.
+   - `subagent_brief`: Call with `{ "objective": "<goal>", "scopeFiles": ["..."] }`.
+
+5. **Operational Guardrails**:
+   - ❌ Never launch `npm start` or `node mcp/index.js` interactively without stdin redirection (it is a stdio JSON-RPC daemon).
+   - ❌ Never loop on `manage_task(Action='status')` or use task watchdog timers (circuit breaker freezes at 5 denials).
+   - ❌ Never run `npm run uninstall` as an isolated test (always follow immediately with `npm run setup`).
+   - ❌ On Windows, never run `rtk rg` without an explicit directory (e.g. use `rtk rg "pattern" .`).
