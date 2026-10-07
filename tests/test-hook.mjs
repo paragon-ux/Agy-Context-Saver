@@ -12,6 +12,13 @@ const stateFile = path.join(os.tmpdir(), "agy-session-governance-state.json");
 function resetState() {
   try {
     if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
+    const rewriteCache = path.join(os.tmpdir(), "agy-rtk-rewrite-cache.json");
+    if (fs.existsSync(rewriteCache)) fs.unlinkSync(rewriteCache);
+    for (const f of fs.readdirSync(os.tmpdir())) {
+      if (f.startsWith("agy-session-") && f.endsWith(".json")) {
+        try { fs.unlinkSync(path.join(os.tmpdir(), f)); } catch {}
+      }
+    }
   } catch {}
 }
 
@@ -57,12 +64,45 @@ console.log("--- Group A: RTK Integration & Command Rewriting ---");
 // 3. run_command: unsupported command falls back gracefully
 {
   const out = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: "custom_proprietary_tool --arg1", WaitMsBeforeAsync: 5000 } }
+    toolCall: { name: "run_command", args: { CommandLine: "custom_proprietary_tool --arg1", WaitMsBeforeAsync: 500 } }
   });
   assert.equal(out.decision, "allow");
   assert.equal(out.overwrite?.CommandLine, undefined, "Unsupported command must not be rewritten");
   assert.equal(out.overwrite?.WaitMsBeforeAsync, 10000);
   console.log("✓ run_command with unsupported command falls back gracefully to raw command");
+}
+
+// 3a. run_command: fast-path shell builtin bypass (node, powershell, dir)
+{
+  const outNode = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: "node -e 'console.log(1)'", WaitMsBeforeAsync: 1000 } }
+  });
+  assert.equal(outNode.decision, "allow");
+  assert.equal(outNode.overwrite?.CommandLine, undefined, "Node command must not be rewritten");
+  assert.equal(outNode.overwrite?.WaitMsBeforeAsync, 10000);
+
+  const outPs = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: "powershell Get-Process", WaitMsBeforeAsync: 1000 } }
+  });
+  assert.equal(outPs.decision, "allow");
+  assert.equal(outPs.overwrite?.CommandLine, undefined, "PowerShell command must not be rewritten");
+
+  console.log("✓ run_command fast-path bypasses non-rewritable shell builtins and utilities");
+}
+
+// 3b. run_command: rewrite caching in tmpdir
+{
+  const cacheFile = path.join(os.tmpdir(), "agy-rtk-rewrite-cache.json");
+  assert.ok(fs.existsSync(cacheFile), "Rewrite cache file should exist after prior rewrites");
+  const cache = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+  assert.equal(cache["git status"], "rtk git status", "Cache must store git status rewrite");
+
+  const outCached = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: "git status", WaitMsBeforeAsync: 1000 } }
+  });
+  assert.equal(outCached.decision, "allow");
+  assert.equal(outCached.overwrite?.CommandLine, "rtk git status");
+  console.log("✓ run_command uses LRU rewrite cache on repeat invocations");
 }
 
 // 4. run_command: daemon process preserves custom wait window

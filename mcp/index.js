@@ -51,7 +51,7 @@ if (cliArg === "install" || cliArg === "--install") {
 
 function printHelp() {
   console.log(`
-Agy-Context-Saver 🛡️ (v1.1.0)
+Agy-Context-Saver 🛡️ (v1.2.0)
 Universal MCP Server & Lifecycle Governor for Google Antigravity (Powered by RTK)
 
 Usage:
@@ -98,7 +98,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rulesPath = path.resolve(__dirname, "../rules/AGENTS.md");
 
 const SERVER_NAME = "agy-context-saver";
-const SERVER_VERSION = "1.1.0";
+const SERVER_VERSION = "1.2.0";
 
 // --- Tools Specification ---
 const TOOLS = [
@@ -522,19 +522,32 @@ function cleanMessageContent(content, maxChars = MAX_TURN_CHARS) {
   if (content === null || content === undefined) return "";
   let text = typeof content === "string" ? content : JSON.stringify(content, null, 2);
 
-  // Strip huge base64 media blocks
-  text = text.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, "[Embedded Media/Binary Omitted]");
-  text = text.replace(/[A-Za-z0-9+/=]{200,}/g, "[Binary/Base64 Payload Omitted]");
+  // Fast-path: short text without base64 or long blocks skips heavy line splits and regex
+  if (text.length <= 120 && !text.includes("base64")) {
+    return text;
+  }
 
-  // Clamp lines exceeding MAX_LINE_CHARS
-  const lines = text.split("\n");
-  const clampedLines = lines.map((l) => {
-    if (l.length > MAX_LINE_CHARS) {
-      return l.slice(0, MAX_LINE_CHARS) + " ... [line clamped]";
+  // Strip huge base64 media blocks only if relevant keywords or large length
+  if (text.includes("base64") || text.length > 200) {
+    text = text.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, "[Embedded Media/Binary Omitted]");
+    text = text.replace(/[A-Za-z0-9+/=]{200,}/g, "[Binary/Base64 Payload Omitted]");
+  }
+
+  // Clamp lines exceeding MAX_LINE_CHARS only if newline exists and text is long enough
+  if (text.length > MAX_LINE_CHARS && text.includes("\n")) {
+    const lines = text.split("\n");
+    let changed = false;
+    const clampedLines = lines.map((l) => {
+      if (l.length > MAX_LINE_CHARS) {
+        changed = true;
+        return l.slice(0, MAX_LINE_CHARS) + " ... [line clamped]";
+      }
+      return l;
+    });
+    if (changed) {
+      text = clampedLines.join("\n");
     }
-    return l;
-  });
-  text = clampedLines.join("\n");
+  }
 
   if (text.length > maxChars) {
     return text.slice(0, maxChars) + `\n\n... [Content Truncated (${text.length - maxChars} chars omitted to preserve token budget)] ...`;
@@ -588,8 +601,33 @@ function formatTranscriptItem(item, options = {}) {
   return parts.join("\n\n");
 }
 
-async function findFullStep(fullPath, targetStepIndex) {
-  if (!fs.existsSync(fullPath)) return null;
+const regexCache = new Map();
+const MAX_REGEX_CACHE_ENTRIES = 100;
+
+function getCompiledRegex(pattern) {
+  if (!pattern || typeof pattern !== "string") return null;
+  const cached = regexCache.get(pattern);
+  if (cached) return cached;
+
+  let rx;
+  try {
+    rx = new RegExp(pattern, "i");
+  } catch {
+    rx = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  }
+
+  if (regexCache.size >= MAX_REGEX_CACHE_ENTRIES) {
+    const firstKey = regexCache.keys().next().value;
+    regexCache.delete(firstKey);
+  }
+  regexCache.set(pattern, rx);
+  return rx;
+}
+
+async function batchFindFullSteps(fullPath, stepIndicesSet) {
+  const result = new Map();
+  if (!fs.existsSync(fullPath) || !stepIndicesSet || stepIndicesSet.size === 0) return result;
+
   const fileStream = fs.createReadStream(fullPath, { encoding: "utf-8" });
   const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
 
@@ -598,14 +636,22 @@ async function findFullStep(fullPath, targetStepIndex) {
       if (!line.trim()) continue;
       try {
         const item = JSON.parse(line);
-        if (item.step_index === targetStepIndex) {
-          rl.close();
-          return item;
+        if (stepIndicesSet.has(item.step_index)) {
+          result.set(item.step_index, item);
+          if (result.size >= stepIndicesSet.size) {
+            rl.close();
+            break;
+          }
         }
       } catch {}
     }
   } catch {}
-  return null;
+  return result;
+}
+
+async function findFullStep(fullPath, targetStepIndex) {
+  const map = await batchFindFullSteps(fullPath, new Set([targetStepIndex]));
+  return map.get(targetStepIndex) || null;
 }
 
 async function handleReadTranscript({ conversationId, mode = "compact", lastTurns = 3, includeThinking = false } = {}) {
@@ -619,12 +665,19 @@ async function handleReadTranscript({ conversationId, mode = "compact", lastTurn
   const fileStream = fs.createReadStream(filePath, { encoding: "utf-8" });
   const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
 
+  let totalStepsCount = 0;
+  const WINDOW_SIZE = lastTurns > 0 ? Math.max(100, lastTurns * 15) : Infinity;
+
   try {
     for await (const line of rl) {
       if (!line.trim()) continue;
       try {
         const item = JSON.parse(line);
+        totalStepsCount++;
         items.push(item);
+        if (items.length > WINDOW_SIZE) {
+          items.shift();
+        }
       } catch {
         // Tolerates incomplete trailing flushes during concurrent writes
       }
@@ -633,7 +686,7 @@ async function handleReadTranscript({ conversationId, mode = "compact", lastTurn
     return { isError: true, content: [{ type: "text", text: `Error reading transcript stream: ${err.message}` }] };
   }
 
-  if (items.length === 0) {
+  if (totalStepsCount === 0) {
     return { content: [{ type: "text", text: `Transcript is empty at: ${filePath}` }] };
   }
 
@@ -645,24 +698,36 @@ async function handleReadTranscript({ conversationId, mode = "compact", lastTurn
     selected = items.filter((it) => (it.step_index || 0) >= minStep);
   }
 
-  const formattedBlocks = selected.map((it) => formatTranscriptItem(it, {
-    includeThinking,
-    includeToolCalls: true
-  }));
-
   const header = [
     `# Conversation Transcript: \`${convId}\``,
     `- Mode: **${mode}** (${path.basename(filePath)})`,
-    `- Total Steps in Log: ${items.length}`,
+    `- Total Steps in Log: ${totalStepsCount}`,
     `- Displayed Steps: ${selected.length} (showing last ${lastTurns > 0 ? `${lastTurns} turns` : "all"})`,
     "",
     "---",
     ""
   ].join("\n");
 
+  const formattedBlocks = [];
+  let currentLength = header.length;
+  let clamped = false;
+
+  for (let i = selected.length - 1; i >= 0; i--) {
+    const block = formatTranscriptItem(selected[i], {
+      includeThinking,
+      includeToolCalls: true
+    });
+    if (currentLength + block.length + 6 > MAX_OUTPUT_CHARS) {
+      clamped = true;
+      break;
+    }
+    formattedBlocks.unshift(block);
+    currentLength += block.length + 6;
+  }
+
   let fullOutput = header + formattedBlocks.join("\n\n---\n\n");
-  if (fullOutput.length > MAX_OUTPUT_CHARS) {
-    fullOutput = fullOutput.slice(0, MAX_OUTPUT_CHARS) + "\n\n... [Transcript display clamped at 24 KB safety ceiling] ...";
+  if (clamped) {
+    fullOutput += "\n\n... [Transcript display clamped at 24 KB safety ceiling] ...";
   }
 
   return { content: [{ type: "text", text: fullOutput }] };
@@ -695,14 +760,7 @@ async function handleQueryTranscript(args = {}) {
   const roleSet = new Set((Array.isArray(roles) ? roles : [roles]).map((r) => String(r).toLowerCase()));
   const matchAllRoles = roleSet.has("all");
 
-  let queryRegex = null;
-  if (query) {
-    try {
-      queryRegex = new RegExp(query, "i");
-    } catch {
-      queryRegex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-    }
-  }
+  const queryRegex = getCompiledRegex(query);
 
   const matched = [];
   const fileStream = fs.createReadStream(filePath, { encoding: "utf-8" });
@@ -734,11 +792,22 @@ async function handleQueryTranscript(args = {}) {
       }
 
       if (queryRegex) {
-        const contentStr = typeof item.content === "string" ? item.content : JSON.stringify(item.content || "");
-        const thinkingStr = typeof item.thinking === "string" ? item.thinking : "";
-        const toolStr = item.tool_calls ? JSON.stringify(item.tool_calls) : "";
-        const haystack = `${contentStr} ${thinkingStr} ${toolStr}`;
-        if (!queryRegex.test(haystack)) continue;
+        let matches = false;
+        if (typeof item.content === "string") {
+          matches = queryRegex.test(item.content);
+        } else if (item.content) {
+          matches = queryRegex.test(JSON.stringify(item.content));
+        }
+
+        if (!matches && typeof item.thinking === "string") {
+          matches = queryRegex.test(item.thinking);
+        }
+
+        if (!matches && Array.isArray(item.tool_calls) && item.tool_calls.length > 0) {
+          matches = queryRegex.test(JSON.stringify(item.tool_calls));
+        }
+
+        if (!matches) continue;
       }
 
       matched.push(item);
@@ -764,14 +833,20 @@ async function handleQueryTranscript(args = {}) {
     finalItems = finalItems.slice(-maxResults);
   }
 
-  // Auto-dereferencing if mode is "auto" and fields were truncated
+  // Auto-dereferencing if mode is "auto" and fields were truncated (single pass)
   if (mode === "auto" && hasFullSibling) {
-    for (let i = 0; i < finalItems.length; i++) {
-      const it = finalItems[i];
-      if (Array.isArray(it.truncated_fields) && it.truncated_fields.length > 0) {
-        const fullItem = await findFullStep(fullSiblingPath, it.step_index);
-        if (fullItem) {
-          finalItems[i] = fullItem;
+    const truncatedIndices = new Set();
+    for (const it of finalItems) {
+      if (Array.isArray(it.truncated_fields) && it.truncated_fields.length > 0 && it.step_index !== undefined) {
+        truncatedIndices.add(it.step_index);
+      }
+    }
+    if (truncatedIndices.size > 0) {
+      const fullMap = await batchFindFullSteps(fullSiblingPath, truncatedIndices);
+      for (let i = 0; i < finalItems.length; i++) {
+        const it = finalItems[i];
+        if (it && fullMap.has(it.step_index)) {
+          finalItems[i] = fullMap.get(it.step_index);
         }
       }
     }
@@ -807,11 +882,6 @@ async function handleQueryTranscript(args = {}) {
     return { content: [{ type: "text", text: output }] };
   }
 
-  const blocks = finalItems.map((it) => formatTranscriptItem(it, {
-    includeThinking,
-    includeToolCalls: includeToolCalls || roleSet.has("tool")
-  }));
-
   const header = [
     `## Transcript Query Results: \`${convId}\``,
     `- Filter: query=${query ? `"${query}"` : "NONE"}, roles=[${Array.from(roleSet).join(", ")}], mode=${mode}`,
@@ -821,12 +891,47 @@ async function handleQueryTranscript(args = {}) {
     ""
   ].join("\n");
 
+  const blocks = [];
+  let currentLength = header.length;
+  let clamped = false;
+
+  for (let i = finalItems.length - 1; i >= 0; i--) {
+    const block = formatTranscriptItem(finalItems[i], {
+      includeThinking,
+      includeToolCalls: includeToolCalls || roleSet.has("tool")
+    });
+    if (currentLength + block.length + 6 > MAX_OUTPUT_CHARS) {
+      clamped = true;
+      break;
+    }
+    blocks.unshift(block);
+    currentLength += block.length + 6;
+  }
+
   let output = header + blocks.join("\n\n---\n\n");
-  if (output.length > MAX_OUTPUT_CHARS) {
-    output = output.slice(0, MAX_OUTPUT_CHARS) + "\n\n... [Query results clamped at 24 KB safety ceiling] ...";
+  if (clamped) {
+    output += "\n\n... [Query results clamped at 24 KB safety ceiling] ...";
   }
 
   return { content: [{ type: "text", text: output }] };
+}
+
+let cachedRulesContent = null;
+let cachedRulesMtime = 0;
+
+function getGovernanceRules() {
+  try {
+    if (fs.existsSync(rulesPath)) {
+      const stat = fs.statSync(rulesPath);
+      if (cachedRulesContent && stat.mtimeMs === cachedRulesMtime) {
+        return cachedRulesContent;
+      }
+      cachedRulesContent = fs.readFileSync(rulesPath, "utf-8");
+      cachedRulesMtime = stat.mtimeMs;
+      return cachedRulesContent;
+    }
+  } catch {}
+  return "# Governance rules not found";
 }
 
 // --- JSON-RPC 2.0 Dispatcher ---
@@ -887,7 +992,7 @@ async function handleRequest(request) {
   if (method === "resources/read") {
     const { uri } = params || {};
     if (uri === "context-saver://rules/governance") {
-      const content = fs.existsSync(rulesPath) ? fs.readFileSync(rulesPath, "utf-8") : "# Governance rules not found";
+      const content = getGovernanceRules();
       return {
         jsonrpc: "2.0",
         id,
@@ -916,7 +1021,7 @@ async function handleRequest(request) {
   if (method === "prompts/get") {
     const { name } = params || {};
     if (name === "context_shield") {
-      const content = fs.existsSync(rulesPath) ? fs.readFileSync(rulesPath, "utf-8") : "";
+      const content = getGovernanceRules();
       return {
         jsonrpc: "2.0",
         id,
@@ -949,10 +1054,20 @@ async function handleRequest(request) {
 }
 
 // Stdio JSON-RPC line loop
+const MAX_STDIO_PAYLOAD_BYTES = Number(process.env.AGY_MAX_STDIO_PAYLOAD_BYTES) || (10 * 1024 * 1024); // 10 MB ceiling default
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
 
 rl.on("line", async (line) => {
   if (!line || !line.trim()) return;
+  if (line.length > MAX_STDIO_PAYLOAD_BYTES) {
+    const errResp = {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32600, message: "Invalid Request: Payload exceeds 10MB safety ceiling" }
+    };
+    process.stdout.write(JSON.stringify(errResp) + "\n");
+    return;
+  }
   try {
     const req = JSON.parse(line);
     const resp = await handleRequest(req);

@@ -52,16 +52,24 @@ const GOVERNED_TOOLS = new Set([
   "write_to_file"
 ]);
 
-const STATE_FILE = path.join(os.tmpdir(), "agy-session-governance-state.json");
 const STATE_TTL_MS = 3600000; // 1 hour TTL
 const MAX_STATE_ENTRIES = 50;
 
+function getStateFilePath(convId = "global") {
+  if (!convId || convId === "global") {
+    return path.join(os.tmpdir(), "agy-session-governance-state.json");
+  }
+  const safeId = String(convId).replace(/[^a-zA-Z0-9_-]/g, "_");
+  return path.join(os.tmpdir(), `agy-session-${safeId}.json`);
+}
+
 function getSessionState(convId = "global") {
+  const file = getStateFilePath(convId);
   try {
-    if (fs.existsSync(STATE_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
+    if (fs.existsSync(file)) {
+      const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+      const entry = (parsed && typeof parsed.pollCount === "number") ? parsed : (parsed && parsed[convId]);
       const now = Date.now();
-      const entry = parsed[convId];
       if (entry && typeof entry.lastPollTime === "number" && (now - entry.lastPollTime) < STATE_TTL_MS) {
         return entry;
       }
@@ -71,32 +79,40 @@ function getSessionState(convId = "global") {
 }
 
 function saveSessionState(convId = "global", entry) {
+  const file = getStateFilePath(convId);
   try {
     const now = Date.now();
-    let state = {};
-    if (fs.existsSync(STATE_FILE)) {
-      try {
-        state = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
-      } catch {}
+    entry.lastPollTime = now;
+    let toWrite;
+    if (!convId || convId === "global") {
+      let state = {};
+      if (fs.existsSync(file)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+          if (parsed && typeof parsed === "object" && typeof parsed.pollCount !== "number") {
+            state = parsed;
+          }
+        } catch {}
+      }
+      state[convId] = entry;
+
+      // Prune stale entries
+      const entries = Object.entries(state)
+        .filter(([_, v]) => v && typeof v.lastPollTime === "number" && (now - v.lastPollTime) < STATE_TTL_MS)
+        .sort((a, b) => (b[1].lastPollTime || 0) - (a[1].lastPollTime || 0))
+        .slice(0, MAX_STATE_ENTRIES);
+
+      toWrite = JSON.stringify(Object.fromEntries(entries));
+    } else {
+      toWrite = JSON.stringify(entry);
     }
 
-    entry.lastPollTime = now;
-    state[convId] = entry;
-
-    // Prune stale entries
-    const entries = Object.entries(state)
-      .filter(([_, v]) => v && typeof v.lastPollTime === "number" && (now - v.lastPollTime) < STATE_TTL_MS)
-      .sort((a, b) => (b[1].lastPollTime || 0) - (a[1].lastPollTime || 0))
-      .slice(0, MAX_STATE_ENTRIES);
-
-    const pruned = Object.fromEntries(entries);
-    const json = JSON.stringify(pruned);
-    const tmpFile = `${STATE_FILE}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-    fs.writeFileSync(tmpFile, json, "utf-8");
+    const tmpFile = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    fs.writeFileSync(tmpFile, toWrite, "utf-8");
     try {
-      fs.renameSync(tmpFile, STATE_FILE);
+      fs.renameSync(tmpFile, file);
     } catch {
-      fs.writeFileSync(STATE_FILE, json, "utf-8");
+      fs.writeFileSync(file, toWrite, "utf-8");
       try { fs.unlinkSync(tmpFile); } catch {}
     }
   } catch {}
@@ -195,6 +211,58 @@ function getRtkBinary() {
   return resolvedRtkPath;
 }
 
+const NON_REWRITABLE_BINARIES = new Set([
+  "node", "node.exe",
+  "powershell", "powershell.exe",
+  "pwsh", "pwsh.exe",
+  "cmd", "cmd.exe",
+  "dir",
+  "echo",
+  "cd",
+  "del",
+  "mkdir",
+  "rmdir",
+  "copy",
+  "move",
+  "type",
+  "cls",
+  "clear",
+  "set",
+  "export"
+]);
+
+const REWRITE_CACHE_FILE = path.join(os.tmpdir(), "agy-rtk-rewrite-cache.json");
+const REWRITE_CACHE_MAX = 100;
+let inMemoryRewriteCache = null;
+
+function loadRewriteCache() {
+  if (inMemoryRewriteCache) return inMemoryRewriteCache;
+  try {
+    if (fs.existsSync(REWRITE_CACHE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(REWRITE_CACHE_FILE, "utf-8"));
+      if (data && typeof data === "object") {
+        inMemoryRewriteCache = data;
+        return inMemoryRewriteCache;
+      }
+    }
+  } catch {}
+  inMemoryRewriteCache = {};
+  return inMemoryRewriteCache;
+}
+
+function saveRewriteCache(cache) {
+  try {
+    const keys = Object.keys(cache);
+    let toSave = cache;
+    if (keys.length > REWRITE_CACHE_MAX) {
+      const slice = keys.slice(keys.length - REWRITE_CACHE_MAX);
+      toSave = {};
+      for (const k of slice) toSave[k] = cache[k];
+    }
+    fs.writeFileSync(REWRITE_CACHE_FILE, JSON.stringify(toSave), "utf-8");
+  } catch {}
+}
+
 /**
  * Rewrite raw shell command using RTK (Rust Token Killer).
  */
@@ -208,6 +276,28 @@ function rewriteCommandWithRtk(rawCmd) {
     return trimmed;
   }
 
+  // Fast-path bypass for shell builtins, non-rewritable binaries, and powershell cmdlets
+  const firstWord = (trimmed.match(/^[^\s"']+/)?.[0] || "").toLowerCase();
+  if (
+    NON_REWRITABLE_BINARIES.has(firstWord) ||
+    firstWord.startsWith("get-") ||
+    firstWord.startsWith("set-") ||
+    firstWord.startsWith("start-") ||
+    firstWord.startsWith("stop-") ||
+    firstWord.startsWith("new-") ||
+    firstWord.startsWith("remove-") ||
+    firstWord.startsWith("test-")
+  ) {
+    return trimmed;
+  }
+
+  // Check persistent cache
+  const cache = loadRewriteCache();
+  if (cache[trimmed] !== undefined) {
+    return cache[trimmed];
+  }
+
+  let rewritten = trimmed;
   try {
     const rtkBin = getRtkBinary();
     const res = spawnSync(rtkBin, ["rewrite", trimmed], {
@@ -218,11 +308,13 @@ function rewriteCommandWithRtk(rawCmd) {
 
     // RTK exits 0 or 3 when rewritten, with new command on stdout
     if ((res.status === 0 || res.status === 3) && res.stdout && res.stdout.trim()) {
-      return res.stdout.trim();
+      rewritten = res.stdout.trim();
     }
   } catch {}
 
-  return trimmed;
+  cache[trimmed] = rewritten;
+  saveRewriteCache(cache);
+  return rewritten;
 }
 
 // --- Main Hook Entrypoint ---

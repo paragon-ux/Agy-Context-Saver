@@ -39,6 +39,41 @@ const mcpIndexPath = path.join(pluginDest, "mcp", "index.js").replace(/\\/g, "/"
 const destHookNormalized = destHook.replace(/\\/g, "/");
 
 /**
+ * Write file only if content has changed, eliminating disk churn.
+ */
+export async function safeWriteFileIfChanged(targetPath, newContent) {
+  try {
+    if (fs.existsSync(targetPath)) {
+      const existing = await fsPromises.readFile(targetPath, "utf-8");
+      if (existing === newContent) {
+        return false;
+      }
+    }
+  } catch {}
+  await fsPromises.writeFile(targetPath, newContent, "utf-8");
+  return true;
+}
+
+/**
+ * Copy file only if content differs.
+ */
+export async function safeCopyFileIfChanged(sourcePath, targetPath) {
+  try {
+    if (fs.existsSync(targetPath)) {
+      const [srcBuf, destBuf] = await Promise.all([
+        fsPromises.readFile(sourcePath),
+        fsPromises.readFile(targetPath)
+      ]);
+      if (srcBuf.equals(destBuf)) {
+        return false;
+      }
+    }
+  } catch {}
+  await fsPromises.copyFile(sourcePath, targetPath);
+  return true;
+}
+
+/**
  * Detects whether Agy-Context-Saver is already installed across all Antigravity integration points.
  */
 export function detectExistingInstallation() {
@@ -146,7 +181,7 @@ export async function runInstall(options = {}) {
 
   // 0a. Ensure RTK is provisioned and available
   try {
-    const rtkResult = await ensureRtkInstalled({ silent: options.silent });
+    const rtkResult = await ensureRtkInstalled({ silent: options.silent, existingRtk: existing.details.rtk });
     log(`[OK] RTK Command Optimizer verified: ${rtkResult.version} (${rtkResult.path})`);
   } catch (err) {
     warn(`[WARN] RTK provisioning check encountered an issue: ${err.message}`);
@@ -182,8 +217,8 @@ export async function runInstall(options = {}) {
 
   // 2. Ensure scripts dir exists & copy hook script asynchronously
   await fsPromises.mkdir(scriptsDir, { recursive: true });
-  await fsPromises.copyFile(sourceHook, destHook);
-  log(`[OK] Governor hook script mirrored to: ${destHook}`);
+  const hookUpdated = await safeCopyFileIfChanged(sourceHook, destHook);
+  log(`[OK] Governor hook script mirrored to: ${destHook}${hookUpdated ? "" : " (up-to-date)"}`);
 
   // 3. Register Hook in ~/.gemini/config/hooks.json (Preserves existing hooks + creates backup)
   let hooksConfig = {};
@@ -215,8 +250,8 @@ export async function runInstall(options = {}) {
       }
     ]
   };
-  await fsPromises.writeFile(hooksJsonPath, JSON.stringify(hooksConfig, null, 2), "utf-8");
-  log(`[OK] Lifecycle hook ${alreadyHadHook ? "re-verified" : "registered"} in: ${hooksJsonPath}`);
+  const hooksUpdated = await safeWriteFileIfChanged(hooksJsonPath, JSON.stringify(hooksConfig, null, 2));
+  log(`[OK] Lifecycle hook ${alreadyHadHook ? "re-verified" : "registered"} in: ${hooksJsonPath}${hooksUpdated ? "" : " (up-to-date)"}`);
 
   // 4. Register MCP Server in ~/.gemini/config/mcp_config.json (Preserves existing servers + creates backup)
   let mcpConfig = { mcpServers: {} };
@@ -239,8 +274,8 @@ export async function runInstall(options = {}) {
     command: "node",
     args: [mcpIndexPath]
   };
-  await fsPromises.writeFile(mcpJsonPath, JSON.stringify(mcpConfig, null, 2), "utf-8");
-  log(`[OK] MCP Server ${alreadyHadMcp ? "re-verified" : "registered"} in: ${mcpJsonPath}`);
+  const mcpUpdated = await safeWriteFileIfChanged(mcpJsonPath, JSON.stringify(mcpConfig, null, 2));
+  log(`[OK] MCP Server ${alreadyHadMcp ? "re-verified" : "registered"} in: ${mcpJsonPath}${mcpUpdated ? "" : " (up-to-date)"}`);
 
   // 5. Mirror Antigravity Tool Schemas in parallel
   await fsPromises.mkdir(antigravityMcpDir, { recursive: true });
@@ -429,13 +464,13 @@ Agy-Context-Saver is the universal Model Context Protocol server and lifecycle g
   };
 
   await Promise.all([
-    fsPromises.writeFile(path.join(antigravityMcpDir, "instructions.md"), instructionsContent, "utf-8"),
-    fsPromises.writeFile(path.join(antigravityMcpDir, "check_context_health.json"), JSON.stringify(checkHealthSchema, null, 2), "utf-8"),
-    fsPromises.writeFile(path.join(antigravityMcpDir, "subagent_brief.json"), JSON.stringify(subagentBriefSchema, null, 2), "utf-8"),
-    fsPromises.writeFile(path.join(antigravityMcpDir, "get_installation_status.json"), JSON.stringify(getInstallationStatusSchema, null, 2), "utf-8"),
-    fsPromises.writeFile(path.join(antigravityMcpDir, "sync_installation.json"), JSON.stringify(syncInstallationSchema, null, 2), "utf-8"),
-    fsPromises.writeFile(path.join(antigravityMcpDir, "read_transcript.json"), JSON.stringify(readTranscriptSchema, null, 2), "utf-8"),
-    fsPromises.writeFile(path.join(antigravityMcpDir, "query_transcript.json"), JSON.stringify(queryTranscriptSchema, null, 2), "utf-8")
+    safeWriteFileIfChanged(path.join(antigravityMcpDir, "instructions.md"), instructionsContent),
+    safeWriteFileIfChanged(path.join(antigravityMcpDir, "check_context_health.json"), JSON.stringify(checkHealthSchema, null, 2)),
+    safeWriteFileIfChanged(path.join(antigravityMcpDir, "subagent_brief.json"), JSON.stringify(subagentBriefSchema, null, 2)),
+    safeWriteFileIfChanged(path.join(antigravityMcpDir, "get_installation_status.json"), JSON.stringify(getInstallationStatusSchema, null, 2)),
+    safeWriteFileIfChanged(path.join(antigravityMcpDir, "sync_installation.json"), JSON.stringify(syncInstallationSchema, null, 2)),
+    safeWriteFileIfChanged(path.join(antigravityMcpDir, "read_transcript.json"), JSON.stringify(readTranscriptSchema, null, 2)),
+    safeWriteFileIfChanged(path.join(antigravityMcpDir, "query_transcript.json"), JSON.stringify(queryTranscriptSchema, null, 2))
   ]);
 
   const elapsed = (performance.now() - startTime).toFixed(1);

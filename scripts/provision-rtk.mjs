@@ -54,7 +54,7 @@ export function findExistingRtk() {
 
 export async function ensureRtkInstalled(options = {}) {
   const log = options.silent ? () => {} : console.log;
-  const existing = findExistingRtk();
+  const existing = options.existingRtk || findExistingRtk();
   if (existing) {
     log(`✓ RTK is already installed: ${existing.version} (${existing.path})`);
     return existing;
