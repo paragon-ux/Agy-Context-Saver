@@ -23,6 +23,19 @@
     "lifecycle-hooks",
     "agentic-coding"
   ],
+  "files": [
+    "mcp",
+    "scripts",
+    "rules",
+    "skills",
+    "hooks.json",
+    "plugin.json",
+    "mcp_config.json",
+    "install.ps1",
+    "install.sh",
+    "README.md",
+    "LICENSE"
+  ],
   "author": "paragon-ux",
   "license": "MIT"
 }

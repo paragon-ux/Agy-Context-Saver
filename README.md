@@ -118,10 +118,10 @@ If you prefer explicit MCP server registration in `~/.gemini/config/mcp_config.j
 
 Once installed, 7 native MCP tools are directly available to your Antigravity agent or can be called from chat:
 
-1. **`safe_command`**: Runs shell commands with intelligent log compression, streaming buffer concatenation, 2,000-char line clamping, and escalating SIGKILL timeout protection.
+1. **`safe_command`**: Runs shell commands with intelligent log compression, streaming buffer concatenation, 1,000-char line clamping, dynamic workspace `cwd` auto-resolution, optional `terse: true` 1-line execution summaries on exit 0, and escalating SIGKILL timeout protection.
 2. **`check_context_health`**: Streams `transcript.jsonl` using chunked `readline` to audit turn budgets, total payload sizes, and busy-polling events without memory spikes.
 3. **`read_transcript`**: Reads recent conversation turns from Antigravity transcripts in clean Markdown with zero raw JSON noise. Supports `"compact"` and `"full"` modes with 1-to-2 parameters.
-4. **`query_transcript`**: Forensic query and filtering engine. Searches by keyword or regex, filters by role (`user`, `assistant`, `tool`, `error`), and automatically dereferences truncated lines from `transcript_full.jsonl`.
+4. **`query_transcript`**: Forensic query and filtering engine. Searches by keyword or regex, filters by role (`user`, `assistant`, `tool`, `error`), supports `summaryOnly: true` (1-line bullet summaries per matched step), and automatically dereferences truncated lines from `transcript_full.jsonl`.
 5. **`subagent_brief`**: Formulates scope-isolated prompts for delegated subagents to offload context-heavy exploration.
 6. **`get_installation_status`**: Audits the live 4-layer health (Plugin Link, Lifecycle Hook, MCP Server, Tool Schemas) from inside Antigravity or CLI.
 7. **`sync_installation`**: Programmatically synchronizes and repairs the installation in ~25ms without terminal commands.
@@ -137,9 +137,11 @@ node mcp/index.js status
 
 ## Performance Optimizations & Resilience Engine
 
+- **Hard 24 KB Ceiling & Line Clamping**: Restricts single output lines to 1,000 characters and total output to 24 KB. This strictly prevents the Antigravity host process from intercepting oversized tool returns and writing them to disk as `.system_generated/steps/<step>/output.txt` references.
+- **Dynamic Workspace Cwd Auto-Resolution**: When `cwd` is omitted in `safe_command`, queries `~/.gemini/antigravity/conversation_summaries.db` via native `node:sqlite` to resolve the current active workspace path instead of falling back to the MCP daemon's installation directory.
+- **Compact UI Output (`terse: true`)**: Clean command executions (exit code 0) return a single-line summary (e.g. `[STATUS: PASSED (exit 0) in 0.16s]`), drastically reducing vertical card height in the Antigravity chat timeline while maintaining full error dumps on non-zero exit.
 - **Streaming Transcript Engine**: Reads transcripts using `readline` chunk streams, processing 100,000+ steps with bounded memory.
 - **Array Buffer Aggregation**: Replaces O(n²) string concatenation with `Buffer.concat()`, eliminating event loop latency on high-volume stdout.
-- **Pathological Clamping**: Restricts single output lines to 2,000 characters and total output to 64 KB, preventing terminal stream lockups.
 - **Process Tree Escalation**: Dispatches `SIGTERM`, followed by a 1.5s grace period before escalating to `SIGKILL` / Windows `taskkill /T /F` to eliminate zombie processes.
 - **TTL State Cache & Atomic Writes**: Automatically evicts hook polling cache entries older than 1 hour, capping state memory and writing via atomic tempfiles.
 - **3-Tier Circuit Breaker**: Repeated polling denials escalate from Tier 1 (guidance) $\to$ Tier 2 (critical warning) $\to$ Tier 3 (`force_ask`), immediately freezing autonomous execution to prompt the user and halt runaway trajectory corruption.
