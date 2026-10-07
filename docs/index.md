@@ -56,8 +56,8 @@ When reviewing prior turns, inspecting subagent findings, or diagnosing errors, 
 | Metric / Feature | Without Governor | With Agy-Context-Saver |
 | :--- | :--- | :--- |
 | **Long Command Execution** | Detached after 5s $\to$ busy-wait loop | Synchronous window expanded to 10s $\to$ finishes cleanly in-turn |
-| **Output Log Bloat** | Unlimited raw dots, ANSI dumps | Intelligent head/tail compression + 24 KB ceiling |
+| **Output Log Bloat** | Unlimited raw dots, ANSI dumps | Adaptive semantic reduction (2–4 KB target) + 24 KB ceiling |
 | **Transcript Review** | Raw JSONL dumped into context | Clean human-readable Markdown via `read_transcript` |
 | **Forensic Search** | Full file scans across 2 files | Filtered, auto-dereferenced queries via `query_transcript` |
-| **UI Step Height** | Multi-screen scrolling cards | Optional `terse: true` 1-line execution confirmations |
+| **UI Step Height & Readability** | Multi-screen scrolling run-on cards | `verbosity: "quiet"` 1-line badges & Markdown ` ```text ` code fences |
 | **Runtime Dependencies** | N/A | **Zero** external npm dependencies (100% Node.js stdlib) |

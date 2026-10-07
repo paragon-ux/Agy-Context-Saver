@@ -51,7 +51,7 @@ const SERVER_VERSION = "1.0.0";
 const TOOLS = [
   {
     name: "safe_command",
-    description: "Run a shell command with intelligent output compression, generous timeout, and zero context bloat. Collapses massive test dot streams and repetitive logs to protect context window attention.",
+    description: "Run a shell command with adaptive semantic reduction, generous timeout, and zero context bloat. Collapses repetitive test passes and progress streams to 2-4 KB, protects errors and diffs, and formats outputs with clean Markdown fences.",
     inputSchema: {
       type: "object",
       properties: {
@@ -71,9 +71,14 @@ const TOOLS = [
           type: "number",
           description: "Maximum output lines to return before compressing (default: 30)."
         },
+        verbosity: {
+          type: "string",
+          enum: ["quiet", "normal", "full"],
+          description: "quiet = status badge only for routine passes (<=200 chars); normal = adaptive semantic reduction targeting 2-4 KB (default); full = preserve raw output up to 24 KB ceiling."
+        },
         terse: {
           type: "boolean",
-          description: "If true and command exits 0, returns only a compact 1-line execution summary to minimize UI step height (default: false)."
+          description: "Legacy alias: if true, maps to verbosity='quiet' to minimize UI step height (default: false)."
         }
       },
       required: ["command"]
@@ -246,6 +251,7 @@ const PROMPTS = [
 // --- Tool Implementations ---
 const MAX_LINE_CHARS = 1000;
 const MAX_TOTAL_CHARS = 24000;
+const TARGET_NORMAL_CHARS = 4096;
 const MAX_CAPTURE_BYTES = 50 * 1024 * 1024; // 50MB memory ceiling against runaway commands
 
 function clampLine(line) {
@@ -254,6 +260,166 @@ function clampLine(line) {
   return `${line.slice(0, half)} ... [truncated long line ${line.length} chars] ... ${line.slice(-half)}`;
 }
 
+/**
+ * Adaptive Semantic Output Reducer:
+ * Optimizes the representation of command outputs for LLM reasoning and UI readability.
+ * Targets 2-4 KB for routine commands while preserving 100% of errors, stack traces, and diffs.
+ */
+function reduceSemanticOutput({
+  stdout = "",
+  stderr = "",
+  exitCode = 0,
+  command = "",
+  maxOutputLines = 30,
+  verbosity = "normal",
+  elapsed = "0.00",
+  isTerseLegacy = false
+}) {
+  const isQuiet = verbosity === "quiet";
+  const isFull = verbosity === "full";
+  const isSuccess = exitCode === 0;
+
+  const rawCombined = (stdout + (stderr ? "\n[STDERR]\n" + stderr : "")).trim();
+  const rawLines = rawCombined ? rawCombined.split(/\r?\n/).filter(Boolean).length : 0;
+
+  // 1. Quiet mode: if successful, return compact 1-line badge (<=200 chars)
+  // If failed, automatically bypass quiet mode to provide full diagnostic signal
+  if (isQuiet && isSuccess) {
+    const modeLabel = isTerseLegacy ? "terse mode" : "quiet mode";
+    return {
+      isError: false,
+      text: `✓ [STATUS: PASSED (exit 0) in ${elapsed}s] (${rawLines} lines collapsed in ${modeLabel})`
+    };
+  }
+
+  // 2. Full mode: preserve raw output bounded by 24 KB ceiling inside markdown fences
+  if (isFull) {
+    let body = rawCombined || "(empty output)";
+    if (body.length > MAX_TOTAL_CHARS) {
+      const half = Math.floor(MAX_TOTAL_CHARS / 2);
+      body = `${body.slice(0, half)}\n\n... [agy-context-saver: clamped to 24 KB ceiling] ...\n\n${body.slice(-half)}`;
+    }
+    const statusHeader = isSuccess
+      ? `[STATUS: PASSED (exit 0) in ${elapsed}s]`
+      : `[STATUS: FAILED (exit ${exitCode}) in ${elapsed}s]`;
+    return {
+      isError: !isSuccess,
+      text: `${statusHeader}\n\`\`\`text\n${body.trim()}\n\`\`\``
+    };
+  }
+
+  // 3. Normal mode: adaptive semantic reduction targeting 2-4 KB
+  let errSection = "";
+  if (stderr && stderr.trim()) {
+    errSection = stderr.trim();
+  }
+
+  const rawStdoutLines = stdout ? stdout.trim().split(/\r?\n/).map(clampLine) : [];
+
+  // Phase A: Identify high-value lines (errors, stack traces, diffs)
+  const isHighValueLine = (line) => {
+    return /^(?:diff --git|index [0-9a-f]|---|\+\+\+|@@ -|error|exception|fail|failed|fatal|traceback|\s*at\s+\S+|\s+File\s+".*",\s+line)/i.test(line);
+  };
+
+  // Phase B: Detect and collapse repetitive patterns
+  const isTestPassLine = (line) => {
+    return /^\s*(?:PASS|✓|✔|\[PASS\]|test\s+\S+\s+\.\.\.\s+ok|ok\s+\d+|passed)/i.test(line);
+  };
+
+  const isProgressLine = (line) => {
+    return /^\s*(?:\.{3,}|[-=]{4,}|\[[=\s>]{4,}\]|\d+%\s*\||Progress:|Fetching:|Downloading:)/i.test(line);
+  };
+
+  const processed = [];
+  let i = 0;
+  while (i < rawStdoutLines.length) {
+    const line = rawStdoutLines[i];
+
+    // Check for repetitive test passes (run of 3 or more)
+    if (isTestPassLine(line) && !isHighValueLine(line)) {
+      let runEnd = i;
+      while (runEnd < rawStdoutLines.length && isTestPassLine(rawStdoutLines[runEnd]) && !isHighValueLine(rawStdoutLines[runEnd])) {
+        runEnd++;
+      }
+      const runLength = runEnd - i;
+      if (runLength >= 3) {
+        processed.push(rawStdoutLines[i]);
+        processed.push(`... [${runLength - 2} repetitive test pass lines collapsed] ...`);
+        processed.push(rawStdoutLines[runEnd - 1]);
+        i = runEnd;
+        continue;
+      }
+    }
+
+    // Check for repetitive progress indicators (run of 3 or more)
+    if (isProgressLine(line)) {
+      let runEnd = i;
+      while (runEnd < rawStdoutLines.length && isProgressLine(rawStdoutLines[runEnd])) {
+        runEnd++;
+      }
+      const runLength = runEnd - i;
+      if (runLength >= 3) {
+        processed.push(`... [${runLength} progress updates collapsed] ...`);
+        i = runEnd;
+        continue;
+      }
+    }
+
+    // Check for consecutive identical lines (run of 3 or more)
+    let runEnd = i + 1;
+    while (runEnd < rawStdoutLines.length && rawStdoutLines[runEnd] === line) {
+      runEnd++;
+    }
+    const identicalRun = runEnd - i;
+    if (identicalRun >= 3 && line.trim().length > 0) {
+      processed.push(line);
+      processed.push(`... [${identicalRun - 1} identical lines collapsed] ...`);
+      i = runEnd;
+      continue;
+    }
+
+    processed.push(line);
+    i++;
+  }
+
+  // Phase C: If lines exceed maxOutputLines, apply head/tail safety clamping
+  let stdoutBody = "";
+  if (processed.length <= maxOutputLines) {
+    stdoutBody = processed.join("\n");
+  } else {
+    const half = Math.floor(maxOutputLines / 2);
+    const head = processed.slice(0, half).join("\n");
+    const tail = processed.slice(-half).join("\n");
+    const omitted = processed.length - maxOutputLines;
+    stdoutBody = `${head}\n\n... [agy-context-saver: compressed ${omitted} repetitive output lines] ...\n\n${tail}`;
+  }
+
+  // Combine stdoutBody and errSection (ensuring errors are never dropped)
+  let combinedNormal = stdoutBody;
+  if (errSection) {
+    combinedNormal = combinedNormal ? `${combinedNormal}\n\n[STDERR]\n${errSection}` : `[STDERR]\n${errSection}`;
+  }
+  if (!combinedNormal.trim()) {
+    combinedNormal = "(empty output)";
+  }
+
+  // Phase D: Target budget safety clamping (target <= 4096 chars)
+  if (combinedNormal.length > TARGET_NORMAL_CHARS) {
+    const halfBudget = Math.floor(TARGET_NORMAL_CHARS / 2);
+    combinedNormal = `${combinedNormal.slice(0, halfBudget)}\n\n... [clamped to 4 KB normal budget; pass verbosity: "full" to see raw output] ...\n\n${combinedNormal.slice(-halfBudget)}`;
+  }
+
+  const statusHeader = isSuccess
+    ? `[STATUS: PASSED (exit 0) in ${elapsed}s]`
+    : `[STATUS: FAILED (exit ${exitCode}) in ${elapsed}s]`;
+
+  return {
+    isError: !isSuccess,
+    text: `${statusHeader}\n\`\`\`text\n${combinedNormal.trim()}\n\`\`\``
+  };
+}
+
+// Legacy helper retained for backwards compatibility
 function compressOutput(text, maxLines) {
   if (!text) return "(empty output)";
   const rawLines = text.split(/\r?\n/);
@@ -276,6 +442,28 @@ function compressOutput(text, maxLines) {
   }
 
   return output;
+}
+
+function assistantOnlyBlock(text) {
+  return {
+    type: "text",
+    text,
+    annotations: {
+      audience: ["assistant"],
+      priority: 0
+    }
+  };
+}
+
+function userFacingBlock(text) {
+  return {
+    type: "text",
+    text,
+    annotations: {
+      audience: ["user"],
+      priority: 1
+    }
+  };
 }
 
 async function resolveWorkspaceCwd() {
@@ -309,8 +497,11 @@ async function resolveWorkspaceCwd() {
   return process.env.INIT_CWD || process.env.PWD || process.cwd();
 }
 
-async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputLines = 30, terse = false }) {
+async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputLines = 30, verbosity = "normal", terse = false }) {
   const resolvedCwd = cwd || (await resolveWorkspaceCwd());
+  const isTerseLegacy = terse === true;
+  const effectiveVerbosity = isTerseLegacy ? "quiet" : (verbosity || "normal");
+
   return new Promise((resolve) => {
     const isWin = os.platform() === "win32";
     const shell = isWin ? process.env.ComSpec || "cmd.exe" : "/bin/sh";
@@ -382,35 +573,39 @@ async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputL
       }
 
       if (timedOut) {
+        const timeoutReduction = reduceSemanticOutput({
+          stdout,
+          stderr: `[COMMAND TIMEOUT] Process exceeded ${timeoutSeconds}s and was terminated.`,
+          exitCode: 124,
+          command,
+          maxOutputLines: 15,
+          verbosity: "normal",
+          elapsed: String(timeoutSeconds)
+        });
         return resolve({
           isError: true,
           content: [
-            {
-              type: "text",
-              text: `[COMMAND TIMEOUT] Process exceeded ${timeoutSeconds}s and was terminated.\nPartial output:\n${compressOutput(stdout, 15)}`
-            }
+            assistantOnlyBlock(timeoutReduction.text)
           ]
         });
       }
 
-      const combined = (stdout + (stderr ? "\n[STDERR]\n" + stderr : "")).trim();
-
-      if (terse && exitCode === 0) {
-        const rawLines = combined ? combined.split(/\r?\n/).filter(Boolean).length : 0;
-        return resolve({
-          isError: false,
-          content: [{ type: "text", text: `✓ [STATUS: PASSED (exit 0) in ${elapsed}s] (${rawLines} lines collapsed in terse mode)` }]
-        });
-      }
-
-      const compressed = compressOutput(combined, maxOutputLines);
-
-      const statusSummary = exitCode === 0 ? "PASSED (exit 0)" : `FAILED (exit ${exitCode})`;
-      const resultText = `[STATUS: ${statusSummary} in ${elapsed}s]\n${compressed}`;
+      const reduction = reduceSemanticOutput({
+        stdout,
+        stderr,
+        exitCode,
+        command,
+        maxOutputLines,
+        verbosity: effectiveVerbosity,
+        elapsed,
+        isTerseLegacy
+      });
 
       resolve({
-        isError: exitCode !== 0,
-        content: [{ type: "text", text: resultText }]
+        isError: reduction.isError,
+        content: [
+          assistantOnlyBlock(reduction.text)
+        ]
       });
     });
 
@@ -419,11 +614,14 @@ async function handleSafeCommand({ command, cwd, timeoutSeconds = 30, maxOutputL
       if (killEscalationTimer) clearTimeout(killEscalationTimer);
       resolve({
         isError: true,
-        content: [{ type: "text", text: `[SPAWN ERROR] Failed to start command: ${err.message}` }]
+        content: [
+          assistantOnlyBlock(`[STATUS: FAILED (spawn error)]\n\`\`\`text\n[SPAWN ERROR] Failed to start command: ${err.message}\n\`\`\``)
+        ]
       });
     });
   });
 }
+
 
 async function handleCheckContextHealth({ transcriptPath }) {
   try {

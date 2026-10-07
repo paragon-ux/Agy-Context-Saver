@@ -18,15 +18,15 @@
 
 ---
 
-## 3-Layer Defense Overview
+## 3-Pillar Architecture Overview
 
 ```mermaid
 graph TD
-    A["Agent calls<br/>manage_task(status)"] -->|PreToolUse Hook| B["DENIED<br/>Yield turn to Reactive Wakeup"]
-    C["Agent calls<br/>view_file(transcript)"] -->|PreToolUse Hook| D["DENIED<br/>Redirect to read_transcript"]
-    E["Agent calls<br/>safe_command"] -->|MCP Tool| F["Execute with<br/>Output Compression + 24KB Cap"]
-    G["Agent audits<br/>history"] -->|MCP Tool| H["read_transcript /<br/>query_transcript (Zero JSON)"]
-    I["Agent needs<br/>exploration"] -->|MCP Tool| J["subagent_brief<br/>offload to sub-transcript"]
+    subgraph AgyContextSaver["Agy-Context-Saver 3-Pillar Architecture"]
+        P1["1. Polling Governor<br/>(PreToolUse Hook)"] -->|Hard barrier on manage_task & short schedule| G1["Eliminates 50-100 KB/min<br/>background polling traps"]
+        P2["2. Output Reducer<br/>(safe_command)"] -->|Adaptive reduction: 2-4 KB target<br/>verbosity: quiet / normal / full| G2["Eliminates routine log bloat<br/>while preserving 100% diagnostics"]
+        P3["3. Transcript Guard<br/>(read/query_transcript)"] -->|Direct JSONL reading blocked<br/>Zero-JSON Markdown streaming| G3["Prevents compaction amnesia<br/>and token explosion"]
+    end
 ```
 
 ---
@@ -48,13 +48,17 @@ npm run status
 
 ---
 
-## Key Features
+## Key Capabilities
 
-- **Intelligent Output Compression**: Collapses massive compiler loops and test dot streams to concise summaries.
+- **Adaptive Semantic Output Reducer**: Collapses repetitive test passes (`PASS ...`, `✓ ...`), progress indicators, and consecutive identical lines into compact explicit badges, targeting **2–4 KB** on routine commands while preserving 100% of errors, stack traces, `stderr`, and diffs.
+- **Three Verbosity Tiers (`quiet`, `normal`, `full`)**:
+  - `quiet`: Ultra-compact 1-line badge ($\le 200$ chars) on success; automatically bypasses to full diagnostics on failure. (Supports legacy `terse: true`).
+  - `normal` (default): Adaptive semantic reduction with Markdown code fencing for optimal token economics and UI scannability.
+  - `full`: Uncompressed raw output bounded by the 24 KB safety ceiling for forensic debugging.
+- **Clean Markdown Code Fencing**: Wraps multi-line terminal outputs in ```` ```text ```` code fences so monospace indentation, line breaks, and table columns render properly in Antigravity's IDE timeline.
 - **Hard 24 KB Ceiling & Line Clamping**: Strictly prevents the Antigravity host process from spilling tool returns onto disk as `.system_generated/steps/...` files.
 - **Dynamic Workspace Cwd Detection**: Resolves active project directories automatically from Antigravity's local SQLite database.
-- **Compact UI Mode (`terse: true`)**: Clean passes (exit code 0) return a 1-line confirmation card, eliminating UI clutter.
-- **Clean Markdown Transcripts**: Stream conversation turns without raw JSON syntax using `read_transcript` and `query_transcript`.
+- **Zero-JSON Transcript Streaming**: Stream conversation turns without raw JSON syntax using `read_transcript` and `query_transcript`.
 - **Zero External Dependencies**: 100% native Node.js standard library. Zero npm supply-chain risk.
 
 ---

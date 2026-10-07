@@ -137,7 +137,7 @@ function send(method, params = {}) {
   console.log("✓ tools/call (query_transcript) filtered and returned matching forensic steps");
 }
 
-// 8b. tools/call: safe_command (terse mode)
+// 8b. tools/call: safe_command (legacy terse mode)
 {
   const res = await send("tools/call", {
     name: "safe_command",
@@ -146,7 +146,47 @@ function send(method, params = {}) {
   const text = res.result.content[0].text;
   assert.match(text, /✓ \[STATUS: PASSED \(exit 0\)/);
   assert.match(text, /lines collapsed in terse mode/);
+  assert.ok(text.length <= 500, "Terse output must be <= 500 chars");
   console.log("✓ tools/call (safe_command with terse: true) returned 1-line collapsed summary");
+}
+
+// 8b-2. tools/call: safe_command (verbosity: quiet)
+{
+  const res = await send("tools/call", {
+    name: "safe_command",
+    arguments: { command: "echo quiet-output-line", verbosity: "quiet" }
+  });
+  const text = res.result.content[0].text;
+  assert.match(text, /✓ \[STATUS: PASSED \(exit 0\)/);
+  assert.match(text, /lines collapsed in quiet mode/);
+  assert.ok(text.length <= 500, "Quiet output must be <= 500 chars");
+  console.log("✓ tools/call (safe_command with verbosity: quiet) returned 1-line collapsed summary");
+}
+
+// 8b-3. tools/call: safe_command (verbosity: normal with code block fencing)
+{
+  const res = await send("tools/call", {
+    name: "safe_command",
+    arguments: { command: "echo normal-mode-output", verbosity: "normal" }
+  });
+  const text = res.result.content[0].text;
+  assert.match(text, /\[STATUS: PASSED \(exit 0\)/);
+  assert.match(text, /```text\r?\nnormal-mode-output\r?\n```/);
+  assert.ok(text.length <= 4096, "Normal output must be <= 4096 chars");
+  console.log("✓ tools/call (safe_command with verbosity: normal) returned output inside ```text code fences");
+}
+
+// 8b-4. tools/call: safe_command (verbosity: full)
+{
+  const res = await send("tools/call", {
+    name: "safe_command",
+    arguments: { command: "echo full-mode-output", verbosity: "full" }
+  });
+  const text = res.result.content[0].text;
+  assert.match(text, /\[STATUS: PASSED \(exit 0\)/);
+  assert.match(text, /```text\r?\nfull-mode-output\r?\n```/);
+  assert.ok(text.length <= 24576, "Full output must be <= 24576 chars");
+  console.log("✓ tools/call (safe_command with verbosity: full) returned raw output inside code fences");
 }
 
 // 8c. tools/call: query_transcript (summaryOnly mode)

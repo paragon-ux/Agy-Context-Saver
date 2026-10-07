@@ -169,6 +169,46 @@ console.log("✓ MCP Server initialized");
   assert.ok(textFail.includes("ERR_ROW_200"), "ERR_ROW_200 must be preserved in tail");
   assert.match(textFail, /compressed 170 repetitive output lines/, "Should report 170 compressed lines");
   console.log("✓ safe_command non-zero exit status (exit 42) accurately retained without data loss");
+
+  // Probe 2.a-2: Measurable Invariant Probes (1,000+ repetitive test passes -> target <= 4096 chars)
+  console.log("Testing MCP safe_command quantitative invariants on 1,000 repetitive test passes...");
+  const cmdPassStream = `node -e "for(let i=1; i<=1000; i++) console.log('PASS test/unit/suite_' + i + '.test.ts (2ms)');"`;
+  
+  // Normal mode: adaptive semantic reduction
+  const resNormalStream = await callRpc("tools/call", {
+    name: "safe_command",
+    arguments: { command: cmdPassStream, verbosity: "normal" }
+  });
+  assert.equal(resNormalStream.result.isError, false);
+  const textNormal = resNormalStream.result.content[0].text;
+  assert.match(textNormal, /repetitive test pass lines collapsed/);
+  assert.ok(textNormal.includes("```text"), "Normal output must be formatted with ```text code fences");
+  assert.ok(textNormal.length <= 4096, `Normal output (${textNormal.length} chars) must satisfy <= 4096 chars invariant`);
+  console.log(`✓ safe_command normal mode reduced 1,000 test passes from ~40KB to ${textNormal.length} chars (<= 4096 chars invariant satisfied)`);
+
+  // Quiet mode: <= 500 chars invariant
+  const resQuietStream = await callRpc("tools/call", {
+    name: "safe_command",
+    arguments: { command: cmdPassStream, verbosity: "quiet" }
+  });
+  assert.equal(resQuietStream.result.isError, false);
+  const textQuiet = resQuietStream.result.content[0].text;
+  assert.match(textQuiet, /✓ \[STATUS: PASSED/);
+  assert.ok(textQuiet.length <= 500, `Quiet output (${textQuiet.length} chars) must satisfy <= 500 chars invariant`);
+  console.log(`✓ safe_command quiet mode returned 1-line badge (${textQuiet.length} chars, <= 500 chars invariant satisfied)`);
+
+  // Diagnostic preservation invariant: failing command with stack trace survives 100% in quiet mode
+  console.log("Testing MCP safe_command diagnostic preservation on failure during quiet mode...");
+  const cmdCrash = `node -e "console.error('TypeError: Critical diagnostic stack trace signature at core.js:42'); process.exit(1);"`;
+  const resCrash = await callRpc("tools/call", {
+    name: "safe_command",
+    arguments: { command: cmdCrash, verbosity: "quiet" }
+  });
+  assert.equal(resCrash.result.isError, true, "Failing command must set isError: true");
+  const textCrash = resCrash.result.content[0].text;
+  assert.match(textCrash, /\[STATUS: FAILED \(exit 1\)/);
+  assert.ok(textCrash.includes("TypeError: Critical diagnostic stack trace signature at core.js:42"), "Critical diagnostic stack trace must survive 100% even when verbosity='quiet'");
+  console.log("✓ safe_command diagnostic preservation verified: 100% of failure signatures preserved without loss");
 }
 
 // Probe 2.b: check_context_health against historical transcript

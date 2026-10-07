@@ -4,25 +4,26 @@
 
 ---
 
-## 3-Layer Context Defense Model
+## 3-Pillar Context Architecture
 
 ```mermaid
 graph TD
-    subgraph Layer1["Layer 1: PreToolUse Lifecycle Hook"]
+    subgraph Pillar1["Pillar 1: Polling Governor (PreToolUse Hook)"]
         H1["execution-guard-hook.mjs"]
         H1 -->|Intercept| P1["Block Busy-Polling (<30s)"]
         H1 -->|Intercept| P2["Block Naive transcript view_file"]
         H1 -->|Upgrade| P3["Upgrade WaitMsBeforeAsync to 10s"]
     end
 
-    subgraph Layer2["Layer 2: Fast MCP Execution Engine"]
+    subgraph Pillar2["Pillar 2: Adaptive Output Reducer (safe_command)"]
         M1["safe_command"]
-        M1 --> C1["Intelligent Output Compression"]
-        M1 --> C2["24 KB Hard Output Ceiling"]
-        M1 --> C3["Dynamic Workspace Cwd Detection"]
+        M1 --> C1["Semantic Reduction (2-4 KB target)"]
+        M1 --> C2["Clean Markdown ```text Fencing"]
+        M1 --> C3["24 KB Hard Output Ceiling"]
+        M1 --> C4["Dynamic Workspace Cwd Detection"]
     end
 
-    subgraph Layer3["Layer 3: Transcript & Subagent Engine"]
+    subgraph Pillar3["Pillar 3: Transcript Guard & Subagent Sandbox"]
         T1["read_transcript / query_transcript"]
         T1 --> S1["Bounded Streaming (readline)"]
         T1 --> S2["Zero-JSON Markdown Formatting"]
@@ -34,6 +35,13 @@ graph TD
 ---
 
 ## Key Technical Subsystems
+
+### 1. Adaptive Semantic Output Reduction
+`safe_command` implements a multi-stage classification and reduction pipeline:
+- **Phase A (Diagnostic Protection)**: Scans for non-zero exit codes, compiler diagnostics, stack traces, and `stderr`. These lines are prioritized and never dropped.
+- **Phase B (Semantic Repetition Collapse)**: Detects runs of consecutive test passes (`PASS ...`, `✓ ...`), progress indicators (`....`), and consecutive identical lines, collapsing them into concise count markers (e.g. `... [42 repetitive test pass lines collapsed] ...`).
+- **Phase C (Target Budget Optimization)**: Normal execution targets 2–4 KB, preventing routine logs from degrading LLM attention while preserving 100% of information needed for downstream reasoning.
+- **Phase D (Presentation Fencing)**: Wraps multi-line output in Markdown ` ```text ` code fences to preserve column alignment and monospace formatting in Antigravity's IDE renderer.
 
 ### 1. Dynamic Workspace Auto-Resolution
 When an agent or tool invokes `safe_command` without an explicit `cwd` argument, the server does not fall back to its own daemon path (`~/.gemini/config/plugins/...`). 

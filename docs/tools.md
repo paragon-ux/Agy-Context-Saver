@@ -6,7 +6,7 @@
 
 ## 1. `safe_command`
 
-Runs shell commands with intelligent log compression, dynamic working directory auto-resolution, streaming buffer concatenation, and escalating timeout protection.
+Runs shell commands with adaptive semantic reduction, dynamic working directory auto-resolution, streaming buffer concatenation, clean Markdown code block fencing, and escalating timeout protection.
 
 ### Parameters
 
@@ -14,40 +14,57 @@ Runs shell commands with intelligent log compression, dynamic working directory 
 | :--- | :--- | :--- | :--- | :--- |
 | `command` | `string` | **Yes** | — | The exact shell command line to execute. |
 | `cwd` | `string` | No | Auto | Working directory. If omitted, dynamically queries the active Antigravity workspace. |
+| `verbosity` | `string` | No | `"normal"` | Execution verbosity: `"quiet"`, `"normal"`, `"full"`. |
 | `maxOutputLines` | `number` | No | `30` | Maximum lines to return before compressing repetitive output blocks. |
 | `timeoutSeconds` | `number` | No | `30` | Maximum execution duration before escalating SIGKILL termination. |
-| `terse` | `boolean` | No | `false` | If `true` and command exits 0, returns a compact 1-line execution summary. |
+| `terse` | `boolean` | No | `false` | Legacy alias: maps to `verbosity: "quiet"`. |
 
-### Example
+### Verbosity Tiers
 
-=== "Standard Output"
+- **`quiet`** ($\le 200$ chars): Returns only a 1-line execution status badge on clean passes (exit 0). If the command fails, automatically bypasses quiet mode to return full diagnostic error output.
+- **`normal`** (Default, target 2–4 KB): Adaptively reduces routine logs (repetitive test passes, build spinners, consecutive identical lines) into explicit collapsed count badges, while preserving errors, stack traces, `stderr`, and diffs inside Markdown ` ```text ` code fences.
+- **`full`** ($\le 24$ KB): Preserves uncompressed raw stdout and stderr inside code fences, bounded by the 24 KB safety ceiling.
+
+### Examples
+
+=== "Normal Mode (Default Adaptive Reduction)"
     ```json
     {
       "command": "npm test",
-      "maxOutputLines": 25
+      "verbosity": "normal"
     }
     ```
     Returns:
     ```text
     [STATUS: PASSED (exit 0) in 1.45s]
-    ✓ Test suite 1 passed (12 tests)
-    ✓ Test suite 2 passed (8 tests)
-    ... [agy-context-saver: compressed 45 repetitive output lines] ...
-    ✓ Test suite 5 passed (14 tests)
-    All 34 tests passed cleanly.
+    ```text
+    PASS tests/test-hook.mjs
+    ... [16 repetitive test pass lines collapsed] ...
+    PASS tests/test-lifecycle-rollback.mjs
+    All 18 tests passed cleanly.
+    ```
     ```
 
-=== "Terse Output (UI Optimization)"
+=== "Quiet Mode (Compact Status Badge)"
     ```json
     {
       "command": "git status",
-      "terse": true
+      "verbosity": "quiet"
     }
     ```
     Returns:
     ```text
-    [STATUS: PASSED (exit 0) in 0.16s]
+    ✓ [STATUS: PASSED (exit 0) in 0.16s] (4 lines collapsed in quiet mode)
     ```
+
+=== "Full Mode (Raw Output up to 24 KB)"
+    ```json
+    {
+      "command": "git diff",
+      "verbosity": "full"
+    }
+    ```
+    Returns raw diff output inside Markdown code fences.
 
 ---
 

@@ -225,7 +225,7 @@ export async function runInstall(options = {}) {
 
   const safeCommandSchema = {
     name: "safe_command",
-    description: "Run a shell command with intelligent output compression, generous timeout, and zero context bloat. Collapses massive test dot streams and repetitive logs to protect context window attention.",
+    description: "Run a shell command with adaptive semantic reduction, generous timeout, and zero context bloat. Collapses repetitive test passes and progress streams to 2-4 KB, protects errors and diffs, and formats outputs with clean Markdown fences.",
     parameters: {
       type: "object",
       properties: {
@@ -233,7 +233,12 @@ export async function runInstall(options = {}) {
         cwd: { type: "string", description: "Working directory (optional, defaults to current working directory)." },
         timeoutSeconds: { type: "number", description: "Execution timeout in seconds (default: 30)." },
         maxOutputLines: { type: "number", description: "Maximum output lines to return before compressing (default: 30)." },
-        terse: { type: "boolean", description: "If true and command exits 0, returns only a compact 1-line execution summary to minimize UI step height (default: false)." }
+        verbosity: {
+          type: "string",
+          enum: ["quiet", "normal", "full"],
+          description: "quiet = status badge only for routine passes (<=200 chars); normal = adaptive semantic reduction targeting 2-4 KB (default); full = preserve raw output up to 24 KB ceiling."
+        },
+        terse: { type: "boolean", description: "Legacy alias: if true, maps to verbosity='quiet' to minimize UI step height (default: false)." }
       },
       required: ["command"]
     }
