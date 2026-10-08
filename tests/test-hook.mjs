@@ -50,6 +50,26 @@ console.log("--- Group A: RTK Integration & Command Rewriting ---");
   console.log("✓ run_command('git status') transparently rewritten to 'rtk git status'");
 }
 
+// 1b. run_command: bare pytest auto-injects fail-fast flags (LH-11)
+{
+  const out = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: "pytest", WaitMsBeforeAsync: 2000 } }
+  });
+  assert.equal(out.decision, "allow");
+  assert.equal(out.overwrite?.CommandLine, "rtk pytest -x -q", "Bare pytest must be normalized with -x -q");
+  console.log("✓ run_command('pytest') auto-injects fail-fast flags (-x -q) (LH-11 closed)");
+}
+
+// 1c. run_command: bare python -m pytest auto-injects fail-fast flags (LH-11)
+{
+  const out = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: "python -m pytest", WaitMsBeforeAsync: 2000 } }
+  });
+  assert.equal(out.decision, "allow");
+  assert.equal(out.overwrite?.CommandLine, "rtk pytest -x -q", "Bare python -m pytest must be normalized with -x -q");
+  console.log("✓ run_command('python -m pytest') auto-injects fail-fast flags (-x -q) (LH-11 closed)");
+}
+
 // 2. run_command: already prefixed with rtk is preserved
 {
   const out = runHook({

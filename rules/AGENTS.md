@@ -6,11 +6,27 @@
 
 ---
 
-## Layer 1: Background Tasks & Polling Ban (Reactive Wakeup SSOT)
-- **Zero-Tolerance on Task Polling**: Do NOT call `manage_task(Action='status')` or `schedule` timers in a loop to wait for running background tasks. Background tasks execute asynchronously and automatically resume the agent via **Reactive Wakeup** (`<SYSTEM_MESSAGE>`).
-- **Yield Turn Immediately**: When a process moves to the background, stop calling tools, output a concise status message, and yield the turn.
-- **No Keyword or Timer Exemptions**: Words like "debug", "timeout", "diagnose", or "stuck" do NOT exempt an agent from lifecycle governance. Timers with `duration >= 120` are NOT exempt.
-- **Circuit Breaker**: Repeated polling calls across any tasks in a session trigger an escalating circuit breaker. At 5 cumulative denials, autonomous execution is frozen via `force_ask`.
+## Layer 1: Background Tasks & Proportional Backoff Protocol (Reactive Wakeup SSOT)
+- **Zero-Tolerance on Busy-Polling**: Do NOT call `manage_task(Action='status')` in tight loops or schedule rapid timers to wait for running background tasks. Background tasks execute asynchronously and automatically resume the agent via **Reactive Wakeup** (`<SYSTEM_MESSAGE>`).
+- **Proportional Backoff Protocol**: Diagnostic inspections scale along an exponential backoff curve:
+  $\text{Cooldown} = \min(600, \text{round}(30 \times 2.5^{\text{pollCount} - 1})) \quad [0\text{s} \to 30\text{s} \to 75\text{s} \to 188\text{s} \to 469\text{s} \to 600\text{s}]$
+  - Check #1 (Immediate upon launch): Permitted ($0\text{s}$).
+  - Premature status checks within an active backoff window are denied. 5 consecutive premature checks trigger the `force_ask` circuit breaker.
+  - Silent/hung background tasks: Once the backoff window elapses, a single diagnostic check is permitted to inspect logs, detect deadlocks, and issue `manage_task(Action='kill')` if needed.
+- **Coordinated Watchdog Protocol (`schedule`)**: For long-running operations (builds, migrations, test suites) expected to take $> 15\text{s}$:
+  - Schedule a coordinated watchdog timer: `schedule(DurationSeconds=45, Prompt="Check status of background task-X", TimerCondition="task-X")`.
+  - Watchdog timers must satisfy `DurationSeconds >= Math.max(30, requiredBackoffSec)`. Short timers are denied.
+  - If the task completes early, Reactive Wakeup auto-cancels the timer and resumes the agent immediately.
+  - If the task is still running when the watchdog fires, perform a legal diagnostic check (`manage_task(status)`) and post a live progress update in chat for the user.
+- **Mandatory Pre-Yield Status Card**: When a command moves to the background, NEVER yield with a silent or generic one-liner. Output a structured Markdown card so the user is never left wondering if the IDE has stalled:
+  ```markdown
+  ### ⏳ Background Execution Started
+  - **Command**: `<cmd>`
+  - **Scope / Target**: `<scope>`
+  - **Estimated Duration**: `~X minutes`
+  - **Watchdog Active**: Coordinated check scheduled in 45s via Reactive Wakeup.
+  ```
+- **Kill & Stdin Immediate Exemption**: `manage_task(Action='kill')` and `manage_task(Action='send_input')` are ALWAYS permitted immediately ($0\text{s}$ backoff, zero penalties).
 
 ---
 
@@ -34,7 +50,12 @@
 
 ## Layer 3: Synchronous Execution & Subagent Delegation
 - **Maximum Synchronous Window**: Non-daemon `run_command` calls are automatically set to `WaitMsBeforeAsync: 10000` to complete synchronously and prevent unnecessary background detachment.
-- **Targeted Test Execution**: Avoid massive multi-minute test sweeps in interactive turns. Run targeted, quiet, fail-fast commands (e.g. `pytest tests/test_core.py -q -x`).
+- **Targeted Test Execution & Bare Sweep Ban (LH-11)**:
+  - **NEVER** run bare test runner commands (e.g. `pytest`, `python -m pytest`, `cargo test`, `npm test`) across an entire codebase in an interactive turn without specifying target test files or fail-fast flags.
+  - In sizable repositories, full sweeps run hundreds of tests and take 5–10 minutes, appearing deadlocked while RTK aggregates output.
+  - Always target the specific test file or directory relevant to the immediate change (e.g. `pytest tests/test_core.py -q -x`).
+  - PreToolUse automatically injects `-x -q` (fail-fast, quiet) if bare `pytest` is invoked.
+  - If a full repository sweep is truly required: delegate it to a subagent (`invoke_subagent`).
 - **Subagent Delegation**: Delegate heavy multi-file exploration and exploratory research to subagents (`invoke_subagent`). Subagents absorb intermediate steps and return high-signal summaries.
 - **Benchmark / Evaluator Integrity**: Never mutate benchmark definitions, prompt templates, or scoring artifacts during an active evaluation without explicit user confirmation.
 

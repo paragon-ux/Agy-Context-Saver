@@ -5,6 +5,16 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-10-07
+
+### Governance & Asynchronous Execution Observability (LH-11)
+- **Fail-Fast Auto-Injection on Bare Test Sweeps**: `execution-guard-hook.mjs` transparently normalizes bare `pytest` and `python -m pytest` invocations to include `-x -q` (fail-fast, quiet mode). In large codebases (e.g. 900+ tests), this prevents multi-minute unconstrained sweeps by stopping execution immediately at the first failure.
+- **Coordinated Watchdog Protocol Codification**: Updated `rules/AGENTS.md` to explicitly train agents on the Coordinated Watchdog Protocol: when launching heavy background operations ($> 15\text{s}$), agents must schedule a coordinated watchdog timer (`schedule(DurationSeconds=45, ...)`) to prevent silent yielding into unmonitored execution black holes.
+- **Mandatory Pre-Yield Status Cards**: Codified in `rules/AGENTS.md` that agents launching background tasks must output a structured markdown status card (command, scope, estimated duration, watchdog tier) before yielding their turn, eliminating user uncertainty during prolonged runs.
+- **Loophole Ledger LH-11 Addition**: Formally documented LH-11 (Silent Background Deadlock & Bare Sweep Exhaustion) from Incident `07b0f8d8` in `LEDGER.md`.
+
+---
+
 ## [1.3.0] - 2026-10-07
 
 ### Governance & Loophole Elimination

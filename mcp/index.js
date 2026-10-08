@@ -98,7 +98,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rulesPath = path.resolve(__dirname, "../rules/AGENTS.md");
 
 const SERVER_NAME = "agy-context-saver";
-const SERVER_VERSION = "1.3.0";
+const SERVER_VERSION = "1.3.1";
 
 // --- Tools Specification ---
 const TOOLS = [
