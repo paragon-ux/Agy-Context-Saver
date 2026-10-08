@@ -239,7 +239,7 @@ export async function runInstall(options = {}) {
   hooksConfig["execution-guard"] = {
     PreToolUse: [
       {
-        matcher: "manage_task|schedule|run_command|view_file|read_file|read_many_files|grep_search|find_by_name|list_dir",
+        matcher: "manage_task|schedule|run_command|view_file|read_file|read_many_files|grep_search|find_by_name|list_dir|replace_file_content|write_to_file",
         hooks: [
           {
             type: "command",

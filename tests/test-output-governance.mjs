@@ -114,13 +114,36 @@ console.log("\n--- Group 1: Safe-Harbor rtk read for Runtime Spillover Files ---
 // --- Group 2: Lifecycle-Gated Task Output Inspection ---
 console.log("\n--- Group 2: Lifecycle-Gated Task Output Inspection ---");
 
+const tempBrainDir = path.join(os.tmpdir(), `agy-test-brain-${Date.now()}`);
+process.env.AGY_BRAIN_DIR = tempBrainDir;
+const convLive = "conv-test-live";
+const convDir = path.join(tempBrainDir, convLive, ".system_generated");
+fs.mkdirSync(path.join(convDir, "logs"), { recursive: true });
+fs.mkdirSync(path.join(convDir, "tasks"), { recursive: true });
+const liveLog = path.join(convDir, "tasks", "task-live-1.log");
+const transcriptFile = path.join(convDir, "logs", "transcript.jsonl");
+
+// Reset session state for conv-test-live
+try { fs.unlinkSync(path.join(os.tmpdir(), "agy-session-conv_test_live.json")); } catch {}
+
+fs.writeFileSync(liveLog, "Running output in progress...\n", "utf-8");
+fs.writeFileSync(
+  transcriptFile,
+  JSON.stringify({
+    step_index: 1,
+    type: "SYSTEM_MESSAGE",
+    content: `Tool is running as a background task with task id: ${convLive}/task-live-1\nTask logs are available at: ${liveLog}`
+  }) + "\n",
+  "utf-8"
+);
+
 // 2.1 view_file on actively running task log is DENIED with Proportional Backoff
 {
   const out = invokeHook({
-    conversationId: "conv-test-live",
+    conversationId: convLive,
     toolCall: {
       name: "view_file",
-      args: { AbsolutePath: "C:/Users/USER/.gemini/antigravity/brain/conv-test-live/.system_generated/tasks/task-live-1.log" }
+      args: { AbsolutePath: liveLog.replace(/\\/g, "/") }
     }
   });
   assert.equal(out.decision, "deny");
@@ -131,7 +154,7 @@ console.log("\n--- Group 2: Lifecycle-Gated Task Output Inspection ---");
 // 2.2 run_command on actively running task log is DENIED with Proportional Backoff
 {
   const out = invokeHook({
-    conversationId: "conv-test-live",
+    conversationId: convLive,
     toolCall: {
       name: "run_command",
       args: { CommandLine: "rtk read tasks/task-live-1.log" }
@@ -142,20 +165,40 @@ console.log("\n--- Group 2: Lifecycle-Gated Task Output Inspection ---");
   console.log("✓ run_command on actively running task log denies with Proportional Backoff");
 }
 
+// 2.2b OBS-B Regression: task quiet for >15s without finish notice remains actively RUNNING
+{
+  const pastTime = (Date.now() - 30000) / 1000;
+  fs.utimesSync(liveLog, pastTime, pastTime);
+  const out = invokeHook({
+    conversationId: convLive,
+    toolCall: {
+      name: "run_command",
+      args: { CommandLine: "rtk read tasks/task-live-1.log" }
+    }
+  });
+  assert.equal(out.decision, "deny");
+  assert.match(out.reason, /actively RUNNING/);
+  console.log("✓ OBS-B verified: task log quiet for >15s remains actively RUNNING if unfinished in transcript");
+}
+
 // 2.3 view_file on completed task log denies and routes to rtk read
 {
-  // Create a synthetic completed task log (>15s old)
-  const tmpTaskDir = path.resolve(__dirname, "../tmp_tasks_test/.system_generated/tasks");
-  fs.mkdirSync(tmpTaskDir, { recursive: true });
-  const completedLog = path.join(tmpTaskDir, "task-done-1.log");
-  fs.writeFileSync(completedLog, "Completed output test\n", "utf-8");
-  const pastTime = (Date.now() - 30000) / 1000;
-  fs.utimesSync(completedLog, pastTime, pastTime);
+  // Mark finished in transcript
+  fs.appendFileSync(
+    transcriptFile,
+    JSON.stringify({
+      step_index: 2,
+      type: "SYSTEM_MESSAGE",
+      content: `Task id "${convLive}/task-live-1" finished with result:\nAll tests passed.`
+    }) + "\n",
+    "utf-8"
+  );
 
   const out = invokeHook({
+    conversationId: convLive,
     toolCall: {
       name: "view_file",
-      args: { AbsolutePath: completedLog }
+      args: { AbsolutePath: liveLog.replace(/\\/g, "/") }
     }
   });
   assert.equal(out.decision, "deny");
@@ -165,17 +208,35 @@ console.log("\n--- Group 2: Lifecycle-Gated Task Output Inspection ---");
 
 // 2.4 run_command with rtk read on completed task log is ALLOWED
 {
-  const completedLog = path.resolve(__dirname, "../tmp_tasks_test/.system_generated/tasks/task-done-1.log");
   const out = invokeHook({
+    conversationId: convLive,
     toolCall: {
       name: "run_command",
-      args: { CommandLine: `rtk read ${completedLog}` }
+      args: { CommandLine: `rtk read tasks/task-live-1.log` }
     }
   });
   assert.equal(out.decision, "allow");
   console.log("✓ run_command with 'rtk read' on completed task log is ALLOWED");
+}
 
-  try { fs.rmSync(path.resolve(__dirname, "../tmp_tasks_test"), { recursive: true, force: true }); } catch {}
+// 2.5 Legacy task log >5m old without notices falls back to completed and is ALLOWED
+{
+  const legacyLog = path.join(convDir, "tasks", "task-legacy-99.log");
+  fs.writeFileSync(legacyLog, "Old session output\n", "utf-8");
+  const oldTime = (Date.now() - 360000) / 1000;
+  fs.utimesSync(legacyLog, oldTime, oldTime);
+
+  const out = invokeHook({
+    conversationId: convLive,
+    toolCall: {
+      name: "run_command",
+      args: { CommandLine: `rtk read tasks/task-legacy-99.log` }
+    }
+  });
+  assert.equal(out.decision, "allow");
+  console.log("✓ legacy task log >5m old without notices falls back to completed and is ALLOWED");
+
+  try { fs.rmSync(tempBrainDir, { recursive: true, force: true }); } catch {}
 }
 
 // --- Group 3: Forensic Extraction Folded into query_transcript ---

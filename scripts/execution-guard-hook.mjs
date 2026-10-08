@@ -66,13 +66,11 @@ function getStateFilePath(convId = "global") {
 function getSessionState(convId = "global") {
   const file = getStateFilePath(convId);
   try {
-    if (fs.existsSync(file)) {
-      const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
-      const entry = (parsed && typeof parsed.pollCount === "number") ? parsed : (parsed && parsed[convId]);
-      const now = Date.now();
-      if (entry && typeof entry.lastPollTime === "number" && (now - entry.lastPollTime) < STATE_TTL_MS) {
-        return entry;
-      }
+    const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+    const entry = (parsed && typeof parsed.pollCount === "number") ? parsed : (parsed && parsed[convId]);
+    const now = Date.now();
+    if (entry && typeof entry.lastPollTime === "number" && (now - entry.lastPollTime) < STATE_TTL_MS) {
+      return entry;
     }
   } catch {}
   return { pollCount: 0, denials: 0, taskIds: [], lastPollTime: 0 };
@@ -86,14 +84,12 @@ function saveSessionState(convId = "global", entry) {
     let toWrite;
     if (!convId || convId === "global") {
       let state = {};
-      if (fs.existsSync(file)) {
-        try {
-          const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
-          if (parsed && typeof parsed === "object" && typeof parsed.pollCount !== "number") {
-            state = parsed;
-          }
-        } catch {}
-      }
+      try {
+        const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+        if (parsed && typeof parsed === "object" && typeof parsed.pollCount !== "number") {
+          state = parsed;
+        }
+      } catch {}
       state[convId] = entry;
 
       // Prune stale entries
@@ -123,12 +119,7 @@ function saveSessionState(convId = "global", entry) {
  */
 function isProtectedInternalState(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
-  const normalized = targetPath.replace(/\\/g, "/");
-  return (
-    normalized.includes("/.system_generated/") ||
-    normalized.endsWith("/.system_generated") ||
-    /\.system_generated(?:$|[\/\\])/i.test(normalized)
-  );
+  return /\.system_generated(?:$|[\/\\])/i.test(targetPath);
 }
 
 /**
@@ -189,6 +180,7 @@ function isProtectedBenchmarkPath(targetPath) {
  */
 function isStepSpilloverPath(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
+  if (!isProtectedInternalState(targetPath)) return false; // cheap precheck
   const normalized = targetPath.replace(/\\/g, "/");
   return (
     /\.system_generated[/\\]steps[/\\]\d+[/\\]output\.txt/i.test(normalized) ||
@@ -197,180 +189,110 @@ function isStepSpilloverPath(targetPath) {
 }
 
 /**
- * Extracts task ID from target path or command if targeting a task output log.
+ * Extracts the task-log reference from a target path or command, or null.
+ * Returns { id, token }: `id` is the bare task id; `token` is the matched path text
+ * (relative "tasks/task-1.log" or absolute ".../.system_generated/tasks/task-1.log").
  */
-function getTaskLogMatch(targetPath) {
-  if (!targetPath || typeof targetPath !== "string") return null;
-  const normalized = targetPath.replace(/\\/g, "/");
-  const match = normalized.match(/(?:^|[\s"'/])(?:\.system_generated\/)?tasks\/(?:task-)?([a-zA-Z0-9_-]+)\.log/i);
-  return match ? match[1] : null;
+function getTaskLogMatch(text) {
+  if (!text || typeof text !== "string" || !text.includes(".log")) return null;
+  const normalized = text.replace(/\\/g, "/");
+  if (!normalized.includes("tasks/")) return null;
+  const m = normalized.match(/(?:^|[\s"'])((?:[^\s"']*\/)?tasks\/(?:task-)?([a-zA-Z0-9_-]+)\.log)/i);
+  if (!m) return null;
+  let token = m[1].replace(/^file:\/\//i, "");
+  if (/^\/[A-Za-z]:/.test(token)) token = token.slice(1);
+  return { id: m[2], token };
 }
 
-/**
- * Resolves full path to a task log on disk.
- */
-function resolveTaskLogFile(taskId, convId) {
-  if (taskId && typeof taskId === "string") {
-    if (fs.existsSync(taskId)) {
-      const cleanId = String(taskId).replace(/^.*[\/\\]/, "").replace(/\.log$/i, "");
-      return { logPath: taskId, convId: convId || "global", cleanId };
-    }
-    if (taskId.includes("/") || taskId.includes("\\")) {
-      const cleanId = String(taskId).replace(/^.*[\/\\]/, "").replace(/\.log$/i, "");
-      return { logPath: null, convId: convId || "global", cleanId };
-    }
-  }
+const TASK_TAIL_BYTES = 262144; // transcript tail scanned first (256 KB)
+const TASK_QUIET_MS = 300000;   // log-mtime fallback: quiet for 5 min => treated as finished
 
-  const cleanId = String(taskId).replace(/^.*[\/\\]/, "").replace(/\.log$/i, "");
-  const baseTaskName = cleanId.startsWith("task-") ? cleanId : `task-${cleanId}`;
-
-  const home = os.homedir();
-  const brainDir = path.join(home, ".gemini", "antigravity", "brain");
-
-  if (convId && convId !== "global") {
-    const candidate = path.join(brainDir, convId, ".system_generated", "tasks", `${baseTaskName}.log`);
-    if (fs.existsSync(candidate)) {
-      return { logPath: candidate, convId, cleanId: baseTaskName };
-    }
-  }
-
-  return { logPath: null, convId: convId || "global", cleanId: baseTaskName };
+function getBrainDir() {
+  return process.env.AGY_BRAIN_DIR || path.join(os.homedir(), ".gemini", "antigravity", "brain");
 }
 
-/**
- * Determines whether a background task is verified completed / terminated.
- */
-function isTaskCompleted(taskId, convId, rawPath) {
-  const candidatePath = (rawPath && fs.existsSync(rawPath)) ? rawPath : null;
-  const resolved = resolveTaskLogFile(candidatePath || taskId, convId);
-  const logPath = resolved.logPath || candidatePath;
-  const cleanId = resolved.cleanId;
-
-  // 1. Session state check
-  const safeId = String(resolved.convId || convId || "global").replace(/[^a-zA-Z0-9_-]/g, "_");
-  const sessionPath = path.join(os.tmpdir(), `agy-session-${safeId}.json`);
-  if (fs.existsSync(sessionPath)) {
-    try {
-      const sess = JSON.parse(fs.readFileSync(sessionPath, "utf-8"));
-      if (sess && sess.tasks && sess.tasks[cleanId]) {
-        if (sess.tasks[cleanId].state === "TERMINATED" || sess.tasks[cleanId].state === "COMPLETED") return true;
-        if (sess.tasks[cleanId].state === "RUNNING") return false;
-      }
-    } catch {}
-  }
-
-  // 2. Transcript check
-  if (resolved.convId && resolved.convId !== "global") {
-    const home = os.homedir();
-    const candidateTrans = path.join(home, ".gemini", "antigravity", "brain", resolved.convId, ".system_generated", "logs", "transcript.jsonl");
-    if (fs.existsSync(candidateTrans)) {
-      try {
-        const content = fs.readFileSync(candidateTrans, "utf-8");
-        const taskRegex = new RegExp(`Task id [^"]*${cleanId}[^"]* finished`, "i");
-        if (taskRegex.test(content)) return true;
-      } catch {}
-    }
-  }
-
-  // 3. File exists on disk and age check (>15s and not marked live)
-  if (logPath && fs.existsSync(logPath)) {
-    if (cleanId.includes("live") || cleanId.includes("running")) {
-      return false;
-    }
-    try {
-      const stats = fs.statSync(logPath);
-      const mtimeAgeMs = Date.now() - stats.mtimeMs;
-      if (mtimeAgeMs > 15000) {
-        return true;
-      }
-    } catch {}
-  }
-
-  return false;
-}
-
-/**
- * Determines whether a background task is actively running.
- */
-function isTaskRunning(taskId, convId, rawPath) {
-  const candidatePath = (rawPath && fs.existsSync(rawPath)) ? rawPath : null;
-  const { logPath: resolvedPath, convId: resolvedConvId, cleanId } = resolveTaskLogFile(candidatePath || taskId, convId);
-  const logPath = resolvedPath || candidatePath;
-
-  // 1. Session state ledger check
-  const safeId = String(resolvedConvId || convId || "global").replace(/[^a-zA-Z0-9_-]/g, "_");
-  const sessionPath = path.join(os.tmpdir(), `agy-session-${safeId}.json`);
-  if (fs.existsSync(sessionPath)) {
-    try {
-      const sess = JSON.parse(fs.readFileSync(sessionPath, "utf-8"));
-      if (sess && sess.tasks && sess.tasks[cleanId]) {
-        if (sess.tasks[cleanId].state === "RUNNING") return true;
-        if (sess.tasks[cleanId].state === "TERMINATED" || sess.tasks[cleanId].state === "COMPLETED") return false;
-      }
-    } catch {}
-  }
-
-  // 2. Transcript check for completion notice
-  if (resolvedConvId && resolvedConvId !== "global") {
-    const home = os.homedir();
-    const candidateTrans = path.join(home, ".gemini", "antigravity", "brain", resolvedConvId, ".system_generated", "logs", "transcript.jsonl");
-    if (fs.existsSync(candidateTrans)) {
-      try {
-        const content = fs.readFileSync(candidateTrans, "utf-8");
-        const taskRegex = new RegExp(`Task id [^"]*${cleanId}[^"]* finished`, "i");
-        if (taskRegex.test(content)) {
-          return false; // completed!
-        }
-      } catch {}
-    }
-  }
-
-  // 3. File modification age check
-  if (logPath && fs.existsSync(logPath)) {
-    try {
-      const stats = fs.statSync(logPath);
-      const mtimeAgeMs = Date.now() - stats.mtimeMs;
-      if (mtimeAgeMs > 15000) {
-        return false; // Inactive for >15s -> terminated!
-      }
-      return true; // Modified within 15s and not marked finished -> RUNNING!
-    } catch {}
-  }
-
-  // 4. Test environment / naming convention
-  if (cleanId.includes("live") || cleanId.includes("running")) {
-    return true;
-  }
-
-  return false;
-}
-
-
-let resolvedRtkPath = null;
-function getRtkBinary() {
-  if (resolvedRtkPath) return resolvedRtkPath;
-
-  // 1. Try global rtk on PATH
+/** Reads the last `bytes` of a file. Returns { text, whole } or null. */
+function readTail(file, bytes) {
+  let fd;
   try {
-    const check = spawnSync("rtk", ["--version"], { timeout: 1000, windowsHide: true });
-    if (check.status === 0) {
-      resolvedRtkPath = "rtk";
-      return resolvedRtkPath;
-    }
-  } catch {}
+    fd = fs.openSync(file, "r");
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, bytes);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    return { text: buf.toString("utf-8"), whole: len === size };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+  }
+}
 
-  // 2. Try plugin local bin
-  const isWin = os.platform() === "win32";
-  const exeName = isWin ? "rtk.exe" : "rtk";
-  const homeDir = os.homedir();
-  const pluginBin = path.join(homeDir, ".gemini", "config", "plugins", "agy-context-saver", "bin", exeName);
-  if (fs.existsSync(pluginBin)) {
-    resolvedRtkPath = pluginBin;
-    return resolvedRtkPath;
+/**
+ * Looks for the finish / start notices of `taskName` in transcript text using literal needles
+ * (JSON-escaped and raw variants). Finish: `<conv>/task-N" finished with result`.
+ * Start: `<conv>/task-N` followed by a newline and "Task Description" or "Task logs".
+ * Returns "COMPLETED", "RUNNING" or null.
+ */
+function scanTaskMarkers(text, taskName) {
+  if (text.includes(`/${taskName}\\" finished`) || text.includes(`/${taskName}" finished`)) return "COMPLETED";
+  if (text.includes(`/${taskName}\\nTask `) || text.includes(`/${taskName}\nTask `)) return "RUNNING";
+  return null;
+}
+
+/**
+ * Resolves a background task's lifecycle state: "RUNNING", "COMPLETED" or "UNKNOWN".
+ * Authority order: transcript notices (tail first, full file only if needed), then log mtime.
+ */
+function getTaskState(match, convId) {
+  const taskName = `task-${match.id}`;
+  const token = match.token;
+  let logPath = null;
+  let transcript = null;
+
+  if (/^(?:[A-Za-z]:)?\//.test(token)) {
+    logPath = token;
+    const sysDir = path.posix.dirname(path.posix.dirname(token));
+    if (path.posix.basename(sysDir) === ".system_generated") transcript = `${sysDir}/logs/transcript.jsonl`;
+  }
+  if (convId && convId !== "global") {
+    const sysDir = path.join(getBrainDir(), convId, ".system_generated");
+    logPath = logPath || path.join(sysDir, "tasks", `${taskName}.log`);
+    transcript = transcript || path.join(sysDir, "logs", "transcript.jsonl");
   }
 
-  resolvedRtkPath = "rtk";
-  return resolvedRtkPath;
+  if (transcript) {
+    const tail = readTail(transcript, TASK_TAIL_BYTES);
+    if (tail) {
+      let state = scanTaskMarkers(tail.text, taskName);
+      if (!state && !tail.whole) {
+        try { state = scanTaskMarkers(fs.readFileSync(transcript, "utf-8"), taskName); } catch {}
+      }
+      if (state) return state;
+    }
+  }
+
+  if (logPath) {
+    try {
+      return (Date.now() - fs.statSync(logPath).mtimeMs) > TASK_QUIET_MS ? "COMPLETED" : "RUNNING";
+    } catch {}
+  }
+  return "UNKNOWN";
+}
+
+/**
+ * Runs `rtk rewrite <cmd>`. Spawns the PATH binary directly (a separate `--version` probe doubled
+ * the cost of every cache miss); falls back to the plugin-local binary only when PATH has none.
+ */
+function runRtkRewrite(cmd) {
+  const opts = { encoding: "utf-8", timeout: 2000, windowsHide: true };
+  const res = spawnSync("rtk", ["rewrite", cmd], opts);
+  if (res.error && res.error.code === "ENOENT") {
+    const exeName = os.platform() === "win32" ? "rtk.exe" : "rtk";
+    const pluginBin = path.join(os.homedir(), ".gemini", "config", "plugins", "agy-context-saver", "bin", exeName);
+    if (fs.existsSync(pluginBin)) return spawnSync(pluginBin, ["rewrite", cmd], opts);
+  }
+  return res;
 }
 
 const NON_REWRITABLE_BINARIES = new Set([
@@ -397,31 +319,39 @@ const REWRITE_CACHE_FILE = path.join(os.tmpdir(), "agy-rtk-rewrite-cache.json");
 const REWRITE_CACHE_MAX = 100;
 let inMemoryRewriteCache = null;
 
-function loadRewriteCache() {
-  if (inMemoryRewriteCache) return inMemoryRewriteCache;
+function readRewriteCacheFile() {
   try {
-    if (fs.existsSync(REWRITE_CACHE_FILE)) {
-      const data = JSON.parse(fs.readFileSync(REWRITE_CACHE_FILE, "utf-8"));
-      if (data && typeof data === "object") {
-        inMemoryRewriteCache = data;
-        return inMemoryRewriteCache;
-      }
-    }
+    const data = JSON.parse(fs.readFileSync(REWRITE_CACHE_FILE, "utf-8"));
+    if (data && typeof data === "object" && !Array.isArray(data)) return data;
   } catch {}
-  inMemoryRewriteCache = {};
+  return {};
+}
+
+function loadRewriteCache() {
+  if (!inMemoryRewriteCache) inMemoryRewriteCache = readRewriteCacheFile();
   return inMemoryRewriteCache;
 }
 
-function saveRewriteCache(cache) {
+/**
+ * Persists one rewrite result. Re-reads the file first so concurrent hook processes merge instead
+ * of overwriting each other, trims to the newest entries, and writes atomically (temp + rename).
+ */
+function rememberRewrite(cmd, rewritten) {
+  loadRewriteCache()[cmd] = rewritten;
   try {
-    const keys = Object.keys(cache);
-    let toSave = cache;
-    if (keys.length > REWRITE_CACHE_MAX) {
-      const slice = keys.slice(keys.length - REWRITE_CACHE_MAX);
-      toSave = {};
-      for (const k of slice) toSave[k] = cache[k];
+    const disk = readRewriteCacheFile();
+    delete disk[cmd];
+    disk[cmd] = rewritten;
+    const keys = Object.keys(disk);
+    for (const k of keys.slice(0, Math.max(0, keys.length - REWRITE_CACHE_MAX))) delete disk[k];
+    const tmp = `${REWRITE_CACHE_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(disk), "utf-8");
+    try {
+      fs.renameSync(tmp, REWRITE_CACHE_FILE);
+    } catch {
+      fs.writeFileSync(REWRITE_CACHE_FILE, JSON.stringify(disk), "utf-8");
+      try { fs.unlinkSync(tmp); } catch {}
     }
-    fs.writeFileSync(REWRITE_CACHE_FILE, JSON.stringify(toSave), "utf-8");
   } catch {}
 }
 
@@ -474,13 +404,12 @@ function rewriteCommandWithRtk(rawCmd) {
   }
 
   let rewritten = trimmed;
+  let cacheable = false;
   try {
-    const rtkBin = getRtkBinary();
-    const res = spawnSync(rtkBin, ["rewrite", trimmed], {
-      encoding: "utf-8",
-      timeout: 2000,
-      windowsHide: true
-    });
+    const res = runRtkRewrite(trimmed);
+    // Never cache timeouts, spawn errors or signals: a transient failure must not pin a command
+    // to "no rewrite" for the lifetime of the cache.
+    cacheable = !res.error && !res.signal && typeof res.status === "number" && res.status >= 0 && res.status <= 3;
 
     // RTK exits 0 or 3 when rewritten, with new command on stdout
     if ((res.status === 0 || res.status === 3) && res.stdout && res.stdout.trim()) {
@@ -488,8 +417,7 @@ function rewriteCommandWithRtk(rawCmd) {
     }
   } catch {}
 
-  cache[trimmed] = rewritten;
-  saveRewriteCache(cache);
+  if (cacheable) rememberRewrite(trimmed, rewritten);
   return rewritten;
 }
 
@@ -502,6 +430,34 @@ function rewriteCommandWithRtk(rawCmd) {
 function getRequiredBackoffSeconds(pollCount) {
   if (pollCount <= 0) return 0;
   return Math.min(600, Math.round(30 * Math.pow(2.5, Math.max(0, pollCount - 1))));
+}
+
+/**
+ * Denies reading the log of an actively RUNNING task: records the denial, trips the circuit
+ * breaker at 5 cumulative denials, otherwise answers with the Proportional Backoff message.
+ */
+function denyRunningTask(taskId, convId) {
+  const session = getSessionState(convId);
+  session.denials++;
+  saveSessionState(convId, session);
+
+  if (session.denials >= 5) {
+    respond({
+      decision: "force_ask",
+      reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: reading task log '${taskId}' attempted prematurely ${session.denials} times during active backoff window. Stop calling tools and yield the turn for native Reactive Wakeup (<SYSTEM_MESSAGE>). User confirmation required to proceed.`
+    });
+  }
+
+  const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(session.pollCount));
+  const requiredBackoffMs = requiredBackoffSec * 1000;
+  const elapsedMs = session.lastPollTime ? (Date.now() - session.lastPollTime) : Infinity;
+  const elapsedSec = Math.floor(elapsedMs / 1000);
+  const remainingSec = Math.max(1, Math.ceil((requiredBackoffMs - elapsedMs) / 1000));
+
+  respond({
+    decision: "deny",
+    reason: `Antigravity Execution Governance: Task '${taskId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. Diagnostic check #${session.pollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${remainingSec}s remaining). Tasks execute asynchronously and notify you automatically via native Reactive Wakeup (<SYSTEM_MESSAGE>) upon completion. Stop calling tools and yield your turn now.`
+  });
 }
 
 // --- Main Hook Entrypoint ---
@@ -563,71 +519,49 @@ try {
       });
     }
 
+    // Raw-command governance gates are pure string/fs checks: run them BEFORE the rtk rewrite
+    // spawn so denied commands never pay for a subprocess.
+    const isSpillover = isStepSpilloverPath(rawCmd);
+    const taskMatch = isSpillover ? null : getTaskLogMatch(rawCmd);
+
+    // Check 1: Other protected internal state (transcripts, scheduler, progress)
+    if (!isSpillover && !taskMatch && isProtectedInternalState(rawCmd)) {
+      respond({
+        decision: "deny",
+        reason:
+          "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+          "- To inspect conversation transcripts: Call MCP tool read_transcript(conversationId=\"...\", mode=\"compact\") or query_transcript(...).\n" +
+          "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
+      });
+    }
+
+    // Check 2: Task Log Inspection (Lifecycle-Gated, 0 New Tools): RUNNING => Proportional Backoff
+    if (taskMatch && getTaskState(taskMatch, convId) === "RUNNING") {
+      denyRunningTask(taskMatch.id, convId);
+    }
+
     const rewritten = rewriteCommandWithRtk(rawCmd);
     const effectiveCmd = rewritten;
+    const isRtkRead = /^rtk(?:\.exe)?\s+read\b/i.test(effectiveCmd);
 
-    // Check 1: Step Output Spillover Safe Harbor (0 New Tools)
-    if (isStepSpilloverPath(rawCmd) || isStepSpilloverPath(effectiveCmd)) {
-      if (/^rtk(?:\.exe)?\s+read\b/i.test(effectiveCmd)) {
-        // Safe harbor: rtk read already provides line clamping and token windowing
-      } else {
-        respond({
-          decision: "deny",
-          reason:
-            "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command to prevent context blowouts."
-        });
-      }
-    } else {
-      // Check 2: Task Log Inspection (Lifecycle-Gated, 0 New Tools)
-      const taskLogId = getTaskLogMatch(rawCmd) || getTaskLogMatch(effectiveCmd);
-      if (taskLogId) {
-        if (isTaskRunning(taskLogId, convId, rawCmd)) {
-          // Task actively running: Deny with Proportional Backoff
-          const session = getSessionState(convId);
-          session.denials++;
-          saveSessionState(convId, session);
+    // Check 3: Step Output Spillover Safe Harbor (rtk read only; it clamps + windows output)
+    if (isSpillover && !isRtkRead) {
+      respond({
+        decision: "deny",
+        reason:
+          "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command to prevent context blowouts."
+      });
+    }
 
-          if (session.denials >= 5) {
-            respond({
-              decision: "force_ask",
-              reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: reading task log '${taskLogId}' attempted prematurely ${session.denials} times during active backoff window. Stop calling tools and yield the turn for native Reactive Wakeup (<SYSTEM_MESSAGE>). User confirmation required to proceed.`
-            });
-          }
-
-          const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(session.pollCount));
-          const requiredBackoffMs = requiredBackoffSec * 1000;
-          const elapsedMs = session.lastPollTime ? (Date.now() - session.lastPollTime) : Infinity;
-          const elapsedSec = Math.floor(elapsedMs / 1000);
-          const remainingSec = Math.max(1, Math.ceil((requiredBackoffMs - elapsedMs) / 1000));
-
-          respond({
-            decision: "deny",
-            reason: `Antigravity Execution Governance: Task '${taskLogId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. Diagnostic check #${session.pollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${remainingSec}s remaining). Tasks execute asynchronously and notify you automatically via native Reactive Wakeup (<SYSTEM_MESSAGE>) upon completion. Stop calling tools and yield your turn now.`
-          });
-        }
-
-        // Task is TERMINATED / COMPLETED: allow rtk read
-        if (/^rtk(?:\.exe)?\s+read\b/i.test(effectiveCmd)) {
-          // Allowed under lifecycle governance
-        } else {
-          respond({
-            decision: "deny",
-            reason:
-              "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
-              `- Once completed, inspect output using 'rtk read <path>' via run_command.\n` +
-              "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
-          });
-        }
-      } else if (isProtectedInternalState(rawCmd) || isProtectedInternalState(effectiveCmd)) {
-        // Check 3: Other protected internal state (transcripts, scheduler, progress)
-        respond({
-          decision: "deny",
-          reason:
-            "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
-            "- To inspect conversation transcripts: Call MCP tool read_transcript(conversationId=\"...\", mode=\"compact\") or query_transcript(...).\n" +
-            "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
-        });
-      }
+    // Check 4: Terminated / unknown-state task log: allow only through rtk read
+    if (taskMatch && !isRtkRead) {
+      respond({
+        decision: "deny",
+        reason:
+          "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+          `- Once completed, inspect output using 'rtk read <path>' via run_command.\n` +
+          "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+      });
     }
 
     const isDaemon = args.IsDaemon === true || args.isDaemon === true;
@@ -682,33 +616,14 @@ try {
     }
 
     // 2b. Task Log Inspection (Lifecycle-Gated)
-    const taskLogId = getTaskLogMatch(target);
-    if (taskLogId) {
-      if (isTaskRunning(taskLogId, convId, target)) {
-        const session = getSessionState(convId);
-        session.denials++;
-        saveSessionState(convId, session);
-
-        if (session.denials >= 5) {
-          respond({
-            decision: "force_ask",
-            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: reading task log '${taskLogId}' attempted prematurely ${session.denials} times during active backoff window. Stop calling tools and yield the turn for native Reactive Wakeup (<SYSTEM_MESSAGE>). User confirmation required to proceed.`
-          });
-        }
-
-        const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(session.pollCount));
-        const requiredBackoffMs = requiredBackoffSec * 1000;
-        const elapsedMs = session.lastPollTime ? (Date.now() - session.lastPollTime) : Infinity;
-        const elapsedSec = Math.floor(elapsedMs / 1000);
-        const remainingSec = Math.max(1, Math.ceil((requiredBackoffMs - elapsedMs) / 1000));
-
-        respond({
-          decision: "deny",
-          reason: `Antigravity Execution Governance: Task '${taskLogId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. Diagnostic check #${session.pollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${remainingSec}s remaining). Tasks execute asynchronously and notify you automatically via native Reactive Wakeup (<SYSTEM_MESSAGE>) upon completion. Stop calling tools and yield your turn now.`
-        });
+    const taskMatch = getTaskLogMatch(target);
+    if (taskMatch) {
+      const state = getTaskState(taskMatch, convId);
+      if (state === "RUNNING") {
+        denyRunningTask(taskMatch.id, convId);
       }
 
-      if (isTaskCompleted(taskLogId, convId, target)) {
+      if (state === "COMPLETED") {
         // If terminated / completed, route to rtk read:
         respond({
           decision: "deny",

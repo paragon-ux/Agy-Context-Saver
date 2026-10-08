@@ -37,6 +37,8 @@ assert.ok(hookMatcher.includes("view_file"), "matcher includes view_file");
 assert.ok(hookMatcher.includes("grep_search"), "matcher includes grep_search");
 assert.ok(hookMatcher.includes("find_by_name"), "matcher includes find_by_name");
 assert.ok(hookMatcher.includes("list_dir"), "matcher includes list_dir");
+assert.ok(hookMatcher.includes("replace_file_content"), "matcher includes replace_file_content");
+assert.ok(hookMatcher.includes("write_to_file"), "matcher includes write_to_file");
 console.log(`✓ hooks.json contains execution-guard with closed-topology matcher: "${hookMatcher}"`);
 
 const hooksBakPath = path.join(geminiConfigDir, "hooks.json.bak");

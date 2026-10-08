@@ -313,36 +313,52 @@ async function handleCheckContextHealth(args = {}) {
     let corruptLines = 0;
     const MAX_LINES = 100000;
 
-    for await (const line of rl) {
-      if (!line.trim()) continue;
-      totalSteps++;
-      totalBytes += line.length;
+    try {
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        totalSteps++;
+        totalBytes += line.length;
 
-      if (totalSteps > MAX_LINES) {
-        break;
-      }
-
-      try {
-        const item = JSON.parse(line);
-        if (item.type === "USER_INPUT") userTurns++;
-        if (item.type === "PLANNER_RESPONSE") modelTurns++;
-        if (item.tool_calls && item.tool_calls.length) {
-          toolCalls += item.tool_calls.length;
-          for (const tc of item.tool_calls) {
-            const name = tc.tool_name || tc.name;
-            const args = tc.args || tc.arguments || {};
-            const action = String(args.Action || args.action || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
-            const prompt = String(args.Prompt || args.prompt || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
-            const cond = String(args.TimerCondition || args.timerCondition || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
-            if (name === "manage_task" && action === "status") pollingEvents++;
-            if (name === "schedule" && (cond.startsWith("task") || cond.includes("task") || prompt.includes("test") || prompt.includes("check on") || prompt.includes("status"))) pollingEvents++;
-          }
+        if (totalSteps > MAX_LINES) {
+          break;
         }
-      } catch (err) {
-        corruptLines++;
-      }
-    }
 
+        // Fast check for common step types without parsing if no tool calls (PERF-16)
+        const hasToolCalls = line.includes('"tool_calls"');
+        const head = line.slice(0, 300);
+        const isUserInput = head.includes('"type":"USER_INPUT"');
+        const isPlannerResp = head.includes('"type":"PLANNER_RESPONSE"');
+
+        if (!hasToolCalls && (isUserInput || isPlannerResp)) {
+          if (isUserInput) userTurns++;
+          else modelTurns++;
+          continue;
+        }
+
+        try {
+          const item = JSON.parse(line);
+          if (item.type === "USER_INPUT") userTurns++;
+          if (item.type === "PLANNER_RESPONSE") modelTurns++;
+          if (item.tool_calls && item.tool_calls.length) {
+            toolCalls += item.tool_calls.length;
+            for (const tc of item.tool_calls) {
+              const name = tc.tool_name || tc.name;
+              const args = tc.args || tc.arguments || {};
+              const action = String(args.Action || args.action || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+              const prompt = String(args.Prompt || args.prompt || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+              const cond = String(args.TimerCondition || args.timerCondition || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+              if (name === "manage_task" && action === "status") pollingEvents++;
+              if (name === "schedule" && (cond.startsWith("task") || cond.includes("task") || prompt.includes("test") || prompt.includes("check on") || prompt.includes("status"))) pollingEvents++;
+            }
+          }
+        } catch (err) {
+          corruptLines++;
+        }
+      }
+    } finally {
+      rl.close();
+      fileStream.destroy();
+    }
     const kb = (totalBytes / 1024).toFixed(1);
     const healthStatus = pollingEvents > 3 ? "CRITICAL (Active Polling Loops Detected)" : userTurns > 40 ? "WARNING (High Turn Budget)" : "HEALTHY";
 
@@ -459,6 +475,9 @@ function extractConvId(p) {
   return match ? match[1] : path.basename(normalized, path.extname(normalized));
 }
 
+let cachedActiveConv = null;
+let cachedActiveConvTime = 0;
+
 function resolveTranscriptPath(target, mode = "compact") {
   const isFull = mode === "full";
   const fileName = isFull ? "transcript_full.jsonl" : "transcript.jsonl";
@@ -469,19 +488,38 @@ function resolveTranscriptPath(target, mode = "compact") {
     if (process.env.GEMINI_CONVERSATION_ID) {
       raw = process.env.GEMINI_CONVERSATION_ID;
     } else {
-      const brainDir = path.join(os.homedir(), ".gemini", "antigravity", "brain");
-      if (fs.existsSync(brainDir)) {
+      const now = Date.now();
+      if (cachedActiveConv && (now - cachedActiveConvTime) < 5000) {
+        raw = cachedActiveConv;
+      } else {
+        const brainDir = path.join(os.homedir(), ".gemini", "antigravity", "brain");
         try {
-          const entries = fs.readdirSync(brainDir, { withFileTypes: true })
-            .filter((d) => d.isDirectory())
-            .map((d) => {
-              const p = path.join(brainDir, d.name);
-              const stat = fs.statSync(p);
-              return { name: d.name, mtime: stat.mtimeMs };
-            })
-            .sort((a, b) => b.mtime - a.mtime);
-          if (entries.length > 0) {
-            raw = entries[0].name;
+          const entries = fs.readdirSync(brainDir, { withFileTypes: true });
+          let bestMtime = 0;
+          let bestName = null;
+          for (const d of entries) {
+            if (!d.isDirectory()) continue;
+            try {
+              const transPath = path.join(brainDir, d.name, ".system_generated", "logs", "transcript.jsonl");
+              const mtime = fs.statSync(transPath).mtimeMs;
+              if (mtime > bestMtime) {
+                bestMtime = mtime;
+                bestName = d.name;
+              }
+            } catch {
+              try {
+                const mtime = fs.statSync(path.join(brainDir, d.name)).mtimeMs;
+                if (mtime > bestMtime) {
+                  bestMtime = mtime;
+                  bestName = d.name;
+                }
+              } catch {}
+            }
+          }
+          if (bestName) {
+            raw = bestName;
+            cachedActiveConv = bestName;
+            cachedActiveConvTime = now;
           }
         } catch {}
       }
@@ -541,6 +579,11 @@ function cleanMessageContent(content, maxChars = MAX_TURN_CHARS) {
     return text;
   }
 
+  const origLength = text.length;
+  // Pre-slice huge text to ~4x maxChars before heavy regex and line clamping (PERF-15)
+  if (text.length > maxChars * 4) {
+    text = text.slice(0, maxChars * 4);
+  }
   // Strip huge base64 media blocks only if relevant keywords or large length
   if (text.includes("base64") || text.length > 200) {
     text = text.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, "[Embedded Media/Binary Omitted]");
@@ -563,8 +606,9 @@ function cleanMessageContent(content, maxChars = MAX_TURN_CHARS) {
     }
   }
 
-  if (text.length > maxChars) {
-    return text.slice(0, maxChars) + `\n\n... [Content Truncated (${text.length - maxChars} chars omitted to preserve token budget)] ...`;
+  if (origLength > maxChars || text.length > maxChars) {
+    const omitted = Math.max(origLength - maxChars, 0);
+    return text.slice(0, maxChars) + `\n\n... [Content Truncated (${omitted} chars omitted to preserve token budget)] ...`;
   }
   return text;
 }
@@ -662,12 +706,14 @@ function getCompiledRegex(pattern) {
 
 async function batchFindFullSteps(fullPath, stepIndicesSet) {
   const result = new Map();
-  if (!fs.existsSync(fullPath) || !stepIndicesSet || stepIndicesSet.size === 0) return result;
+  if (!stepIndicesSet || stepIndicesSet.size === 0) return result;
 
-  const fileStream = fs.createReadStream(fullPath, { encoding: "utf-8" });
-  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
-
+  let fileStream;
+  let rl;
   try {
+    fileStream = fs.createReadStream(fullPath, { encoding: "utf-8" });
+    rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+
     for await (const line of rl) {
       if (!line.trim()) continue;
       try {
@@ -675,13 +721,15 @@ async function batchFindFullSteps(fullPath, stepIndicesSet) {
         if (stepIndicesSet.has(item.step_index)) {
           result.set(item.step_index, item);
           if (result.size >= stepIndicesSet.size) {
-            rl.close();
             break;
           }
         }
       } catch {}
     }
-  } catch {}
+  } catch {} finally {
+    if (rl) rl.close();
+    if (fileStream) fileStream.destroy();
+  }
   return result;
 }
 
@@ -697,33 +745,47 @@ async function handleReadTranscript({ conversationId, mode = "compact", lastTurn
   }
 
   const { filePath, convId } = resolved;
-  const items = [];
-  const fileStream = fs.createReadStream(filePath, { encoding: "utf-8" });
-  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+  const rawLines = [];
+  let fileStream;
+  let rl;
 
   let totalStepsCount = 0;
   const WINDOW_SIZE = lastTurns > 0 ? Math.max(100, lastTurns * 15) : Infinity;
 
   try {
+    fileStream = fs.createReadStream(filePath, { encoding: "utf-8" });
+    rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
     for await (const line of rl) {
-      if (!line.trim()) continue;
-      try {
-        const item = JSON.parse(line);
-        totalStepsCount++;
-        items.push(item);
-        if (items.length > WINDOW_SIZE) {
-          items.shift();
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      totalStepsCount++;
+      if (WINDOW_SIZE === Infinity) {
+        rawLines.push(trimmed);
+      } else {
+        rawLines.push(trimmed);
+        if (rawLines.length > WINDOW_SIZE) {
+          rawLines.shift();
         }
-      } catch {
-        // Tolerates incomplete trailing flushes during concurrent writes
       }
     }
   } catch (err) {
     return { isError: true, content: [{ type: "text", text: `Error reading transcript stream: ${err.message}` }] };
+  } finally {
+    if (rl) rl.close();
+    if (fileStream) fileStream.destroy();
   }
 
   if (totalStepsCount === 0) {
     return { content: [{ type: "text", text: `Transcript is empty at: ${filePath}` }] };
+  }
+
+  const items = [];
+  for (const line of rawLines) {
+    try {
+      items.push(JSON.parse(line));
+    } catch {
+      // Tolerates incomplete trailing flushes during concurrent writes
+    }
   }
 
   let selected = items;
@@ -733,7 +795,6 @@ async function handleReadTranscript({ conversationId, mode = "compact", lastTurn
     const minStep = turnItems[cutoff] ? turnItems[cutoff].step_index : 0;
     selected = items.filter((it) => (it.step_index || 0) >= minStep);
   }
-
   const header = [
     `# Conversation Transcript: \`${convId}\``,
     `- Mode: **${mode}** (${path.basename(filePath)})`,
@@ -798,17 +859,16 @@ async function handleQueryTranscript(args = {}) {
 
     const resolvedFull = resolveTranscriptPath(conversationId, "full");
     let step = null;
-    if (resolvedFull && resolvedFull.filePath && fs.existsSync(resolvedFull.filePath)) {
+    if (resolvedFull && resolvedFull.filePath) {
       step = await findFullStep(resolvedFull.filePath, numIndex);
     }
 
     if (!step) {
       const resolvedCompact = resolveTranscriptPath(conversationId, "compact");
-      if (resolvedCompact && resolvedCompact.filePath && fs.existsSync(resolvedCompact.filePath)) {
+      if (resolvedCompact && resolvedCompact.filePath) {
         step = await findFullStep(resolvedCompact.filePath, numIndex);
       }
     }
-
     if (!step) {
       return {
         isError: true,
@@ -888,20 +948,31 @@ async function handleQueryTranscript(args = {}) {
 
   const { filePath, convId } = resolved;
   const fullSiblingPath = filePath.replace(/transcript\.jsonl$/, "transcript_full.jsonl");
-  const hasFullSibling = fs.existsSync(fullSiblingPath);
 
   const roleSet = new Set((Array.isArray(roles) ? roles : [roles]).map((r) => String(r).toLowerCase()));
   const matchAllRoles = roleSet.has("all");
 
   const queryRegex = getCompiledRegex(query);
+  const isPlainLiteral = query && /^[A-Za-z0-9_ -]+$/.test(query);
 
-  const matched = [];
-  const fileStream = fs.createReadStream(filePath, { encoding: "utf-8" });
-  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+  const effectiveLimit = Math.min(lastTurns > 0 ? lastTurns : Infinity, maxResults > 0 ? maxResults : 5);
+  const ringCap = Number.isFinite(effectiveLimit) ? effectiveLimit : 1000;
+  const ring = [];
+  let matchedCount = 0;
+
+  let fileStream;
+  let rl;
 
   try {
+    fileStream = fs.createReadStream(filePath, { encoding: "utf-8" });
+    rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+
     for await (const line of rl) {
       if (!line.trim()) continue;
+
+      // PERF-12: Raw-line prefilter for plain literal queries
+      if (isPlainLiteral && !queryRegex.test(line)) continue;
+
       let item;
       try {
         item = JSON.parse(line);
@@ -943,13 +1014,20 @@ async function handleQueryTranscript(args = {}) {
         if (!matches) continue;
       }
 
-      matched.push(item);
+      matchedCount++;
+      ring.push(item);
+      if (ring.length > ringCap) {
+        ring.shift();
+      }
     }
   } catch (err) {
     return { isError: true, content: [{ type: "text", text: `Error streaming transcript: ${err.message}` }] };
+  } finally {
+    if (rl) rl.close();
+    if (fileStream) fileStream.destroy();
   }
 
-  if (matched.length === 0) {
+  if (matchedCount === 0) {
     return {
       content: [{
         type: "text",
@@ -958,8 +1036,8 @@ async function handleQueryTranscript(args = {}) {
     };
   }
 
-  let finalItems = matched;
-  if (lastTurns && lastTurns > 0) {
+  let finalItems = ring;
+  if (lastTurns && lastTurns > 0 && finalItems.length > lastTurns) {
     finalItems = finalItems.slice(-lastTurns);
   }
   if (finalItems.length > maxResults) {
@@ -967,8 +1045,8 @@ async function handleQueryTranscript(args = {}) {
   }
 
   // Auto-dereferencing if mode is "auto" and fields were truncated (single pass)
-  if (mode === "auto" && hasFullSibling) {
-    const truncatedIndices = new Set();
+  // PERF-17: check fs.existsSync(fullSiblingPath) lazily ONLY if truncatedIndices.size > 0
+  if (mode === "auto") {    const truncatedIndices = new Set();
     for (const it of finalItems) {
       if (Array.isArray(it.truncated_fields) && it.truncated_fields.length > 0 && it.step_index !== undefined) {
         truncatedIndices.add(it.step_index);
@@ -1002,7 +1080,7 @@ async function handleQueryTranscript(args = {}) {
     const header = [
       `## Transcript Query Summary: \`${convId}\``,
       `- Filter: query=${query ? `"${query}"` : "NONE"}, roles=[${Array.from(roleSet).join(", ")}], mode=${mode}`,
-      `- Matched Steps: ${matched.length} (showing ${finalItems.length} in compact summary mode)`,
+      `- Matched Steps: ${matchedCount} (showing ${finalItems.length} in compact summary mode)`,
       "",
       "---",
       ""
@@ -1018,7 +1096,7 @@ async function handleQueryTranscript(args = {}) {
   const header = [
     `## Transcript Query Results: \`${convId}\``,
     `- Filter: query=${query ? `"${query}"` : "NONE"}, roles=[${Array.from(roleSet).join(", ")}], mode=${mode}`,
-    `- Matched Steps: ${matched.length} (showing ${finalItems.length})`,
+    `- Matched Steps: ${matchedCount} (showing ${finalItems.length})`,
     "",
     "---",
     ""
