@@ -5,6 +5,25 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Performance & Memory Optimizations
+- **File-Descriptor Leak Fixes (PERF-01, PERF-02)**: Ensured guaranteed stream destruction via `finally { rl.close(); fileStream.destroy(); }` across `batchFindFullSteps`, `handleCheckContextHealth`, `handleReadTranscript`, and `handleQueryTranscript`, eliminating open handle leaks on early exits and line caps (verified 0/20 leaked).
+- **Subprocess Call Reduction in PreToolUse Hook (PERF-03)**: Dropped redundant `rtk --version` probe in hook initialization; executes `rtk rewrite` directly and falls back to plugin binary only on `ENOENT`, reducing cache miss latency from 302ms to 249ms (-17.5%).
+- **Surgical Tail-Window Task State Resolution (PERF-04, PERF-07)**: Unified task lifecycle checking into a single `getTaskState()` reading the last 256KB tail of `transcript.jsonl` with literal needle matching (`scanTaskMarkers`), dropping check latency from 123ms to 2ms on 10.5MB transcripts (-98%).
+- **Atomic Concurrency-Safe Rewrite Cache (PERF-05, PERF-09)**: Rewrite cache now filters out timeouts and non-zero/non-clean exit codes, re-reads disk state to merge concurrent updates, and persists atomically via temporary files.
+- **Pre-Rewrite Fast Denial Ordering (PERF-10)**: Reordered command checks so raw-command gates (internal state access and running task log denials) execute before invoking `rtk rewrite`, eliminating subprocess overhead for denied commands.
+- **Bounded Query Memory & Raw-Line Prefilter (PERF-11, PERF-12)**: Implemented ring-buffered step retention bounded by `effectiveLimit` with `matchedCount` in `query_transcript`, and added raw-line ASCII substring pre-filtering to skip `JSON.parse` on non-matching lines.
+- **Active Conversation Resolution Cache (PERF-13)**: Cached `resolveTranscriptPath("current")` lookups for 5s and implemented resilient per-entry directory stats.
+- **Sliding-Window Parsing & String Pre-Slicing (PERF-14, PERF-15, PERF-16)**: `read_transcript` now streams raw lines and only parses retained turns; `cleanMessageContent` pre-slices oversized payloads to `4 * maxChars` before running regexes; `check_context_health` skips parsing for steps without tool calls.
+- **Redundant Syscall Elimination (PERF-17, PERF-18, PERF-19)**: Removed unnecessary `existsSync` checks before reads and replaced dynamic task id regexes with literal string searching.
+
+### Governance & Configuration Hardening
+- **Installed Hook Matcher Inclusion (OBS-A)**: Added `replace_file_content|write_to_file` to hook matchers in `hooks.json` and `scripts/install-register.mjs`, ensuring benchmark mutation guards (LH-09) are wired in installed environments.
+- **Transcript Authority for Silent Running Tasks (OBS-B)**: Updated task state resolver to treat background tasks with start notices as actively `RUNNING` regardless of log quiet duration until an explicit finish notice appears, preventing premature inspection of quiet background jobs.
+
+---
+
 ## [1.4.0] - 2026-10-08
 
 ### Added (Output Inspection Governance & Forensic Dereferencing - LH-12)
