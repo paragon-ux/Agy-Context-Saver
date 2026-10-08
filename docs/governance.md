@@ -2,6 +2,9 @@
 
 The core of `Agy-Context-Saver` is its proactive **Lifecycle Governor** (`execution-guard`), executed during `PreToolUse` lifecycle events before the agent calls native Antigravity tools.
 
+!!! tip "Instant Activation via Slash Command"
+    You can explicitly inject and enforce the complete 3-layer context governance rules in any active conversation by typing `/mcp:agy-context-saver:context_shield` in the Antigravity chat input.
+
 ---
 
 ## The PreToolUse Interception Architecture

@@ -6,6 +6,27 @@ It eliminates session degradation, memory leaks, and context window exhaustion c
 
 ---
 
+## Quickstart
+
+Install and activate the governor across your Antigravity environment in seconds:
+
+=== "NPX (Recommended)"
+    ```bash
+    npx agy-context-saver install
+    ```
+
+=== "Local Setup"
+    ```bash
+    npm run setup
+    ```
+
+=== "Audit Status"
+    ```bash
+    npm run status
+    ```
+
+---
+
 ## Why Agy-Context-Saver + RTK?
 
 `Agy-Context-Saver` leverages the **open Model Context Protocol (MCP)** specification alongside native Antigravity lifecycle hooks, integrating seamlessly with RTK:
@@ -65,3 +86,21 @@ When an agent initiates a shell command exceeding `WaitMsBeforeAsync` (~5 second
 | **Background Task Monitoring** | Repetitive busy-polling loops | Enforced Reactive Wakeup with 5-strike circuit breaker |
 | **Transcript Review** | Raw JSONL dumped into context | Clean human-readable Markdown via `read_transcript` |
 | **Runtime Dependencies** | N/A | **Zero** external npm dependencies (100% Node.js stdlib) + native RTK binary |
+
+---
+
+## MCP Capabilities at a Glance
+
+`Agy-Context-Saver` exposes two distinct interfaces in Antigravity:
+
+* **User Slash Commands (MCP Prompts)**:
+  - [`/mcp:agy-context-saver:context_shield`](tools.md#mcp-prompts-mcp-user-slash-commands): One-click prompt template in your chat input that injects the complete 3-layer governance rules and RTK standards into any session.
+* **Agent MCP Tools**:
+  - [`check_context_health`](tools.md#1-check_context_health): Diagnoses transcript turn counts, payload size, and polling loops.
+  - [`subagent_brief`](tools.md#4-subagent_brief): Formulates scope-isolated prompts for delegated subagents.
+  - [`read_transcript`](tools.md#2-read_transcript): Streams recent conversation history in clean Markdown format.
+  - [`query_transcript`](tools.md#3-query_transcript): Forensic filtering and regex search engine for transcripts.
+  - [`get_installation_status`](tools.md#5-get_installation_status): Audits live plugin link, hook, MCP server, schemas, and RTK.
+  - [`sync_installation`](tools.md#6-sync_installation): Re-verifies and repairs all 4 integration layers in ~25ms.
+
+See the complete [Tool & Prompt Reference](tools.md) for parameter details and usage examples.

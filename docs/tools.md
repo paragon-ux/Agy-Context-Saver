@@ -1,6 +1,9 @@
-# MCP Tool & CLI Reference
+# MCP Tool, Prompt & CLI Reference
 
-`Agy-Context-Saver` provides 6 specialized Model Context Protocol (MCP) tools for Antigravity lifecycle and context governance, paired with **RTK (Rust Token Killer)** for transparent CLI output reduction.
+`Agy-Context-Saver` implements standard Model Context Protocol (MCP) capabilities purpose-built for Antigravity:
+- **6 Agent-Facing Tools**: Invoked autonomously by the AI during coding sessions to govern lifecycles, stream transcripts, and audit installations.
+- **1 User-Facing Prompt (`context_shield`)**: Appears as a slash command (`/mcp:agy-context-saver:context_shield`) in the chat autocomplete menu to inject 3-layer governance rules with a single click.
+- **RTK (Rust Token Killer)**: Transparent CLI proxy that reduces terminal and inspection token consumption by 60–99%.
 
 ---
 
@@ -103,3 +106,28 @@ Programmatically reconciles and repairs all installation layers and tool schemas
 | Name | Type | Required | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `checkOnly` | `boolean` | No | `false` | If `true`, performs dry-run audit without writing changes. |
+
+---
+
+## MCP Prompts (`/mcp:...`): User Slash Commands
+
+The Model Context Protocol supports **Prompts**, which Antigravity exposes directly in the user chat interface as slash commands prefixed with `/mcp:<server>:<prompt>`.
+
+Unlike tools (which the model invokes during reasoning), prompts are user-triggered directives that populate the chat with pre-configured governance instructions.
+
+### `/mcp:agy-context-saver:context_shield`
+
+* **Prompt Identifier**: `context_shield`
+* **Trigger**: Type `/mcp:agy-context-saver:context_shield` in the Antigravity chat input box or select it from the slash command autocomplete popup.
+* **Purpose**: Instantly injects the complete 3-Layer Context Governance and RTK Optimization rulebook into the conversation context.
+
+#### When to Use
+- **Start of a New Session**: Establishes strict zero-polling and RTK inspection habits from turn 1.
+- **Before Complex Refactors or Test Runs**: Ensures the model will not enter busy-waiting loops if test tasks or builds detach into background jobs.
+- **Session Recovery**: Re-engages governance boundaries if an agent starts reverting to uncompressed commands or polling patterns.
+
+#### Injected Governance Rules
+When triggered, `context_shield` delivers three operational layers to the session:
+1. **Layer 1 (Background Tasks & Reactive Wakeup)**: Forbids `manage_task(Action='status')` polling loops and polling timers; enforces native Reactive Wakeup via `<SYSTEM_MESSAGE>`. Escalates to a `force_ask` circuit breaker after 5 repeated polling attempts.
+2. **Layer 2 (Transparent Shell & RTK Inspection)**: Hard-routes workspace file reads (`rtk read`), directory searches (`rtk find`), and regex scans (`rtk rg "<pattern>" .`) to RTK's canonical CLI; protects internal state (`.system_generated/`).
+3. **Layer 3 (Synchronous Execution & Subagent Delegation)**: Expands the synchronous execution window to 10 seconds to avoid unnecessary background detachment, bounds test sweeps, and isolates deep exploration to subagents via `subagent_brief`.

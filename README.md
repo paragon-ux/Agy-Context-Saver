@@ -13,6 +13,23 @@ It permanently eliminates session degradation, memory bloat, and context window 
 
 ---
 
+## Quickstart (Instant Install)
+
+Install and synchronize the governor and RTK across your Antigravity environment:
+
+```bash
+# Fastest: one-line registration via npx
+npx agy-context-saver install
+
+# Or locally from this repository
+npm run setup
+
+# Audit health across all layers at any time
+npm run status
+```
+
+---
+
 ## Architectural Division of Responsibilities
 
 ```text
@@ -62,23 +79,6 @@ It permanently eliminates session degradation, memory bloat, and context window 
 2. **The Terminal Bloat Trap**: Routine test runs and git operations dump hundreds of lines of noise into context. RTK compresses these outputs natively before they enter model context.
 3. **The Raw Transcript Trap**: Reading `transcript.jsonl` dumps megabytes of raw JSON into context. Agy blocks direct reads of `.system_generated` and provides high-density Markdown streaming tools.
 4. **Native Inspection Bypass**: Native inspection tools (`view_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token reduction. Agy hard-routes workspace inspection to RTK's canonical CLI (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`).
-
----
-
-## Quickstart (Instant Install)
-
-Install and synchronize the governor and RTK across your Antigravity environment:
-
-```bash
-# Fastest: one-line registration via npx
-npx agy-context-saver install
-
-# Or locally from this repository
-npm run setup
-
-# Audit health across all layers at any time
-npm run status
-```
 
 ---
 
@@ -154,14 +154,17 @@ node tests/test-lifecycle-rollback.mjs
 
 ---
 
-## Available MCP Tools
+## MCP Tools & Slash Commands
 
-1. `check_context_health`: Diagnoses conversation transcript turn budgets, payload size, RTK status, and polling loops.
-2. `subagent_brief`: Formulates scope-isolated prompts for delegated subagents.
-3. `read_transcript`: Reads recent conversation history in clean Markdown format (compact/full).
-4. `query_transcript`: Forensic filtering and regex search engine for conversation logs.
-5. `get_installation_status`: Inspects live Antigravity plugin link, hook, MCP server, tool schemas, and RTK binary.
-6. `sync_installation`: Re-verifies and repairs all integration layers in ~25ms.
+* **User Slash Command (`/mcp:...`)**:
+  - `/mcp:agy-context-saver:context_shield`: Injects 3-layer governance rules and RTK standards into any session with one click. *(MCP Prompts appear in your chat autocomplete menu; MCP Tools are called autonomously by the agent).*
+* **Agent MCP Tools**:
+  1. `check_context_health`: Diagnoses conversation transcript turn budgets, payload size, RTK status, and polling loops.
+  2. `subagent_brief`: Formulates scope-isolated prompts for delegated subagents.
+  3. `read_transcript`: Reads recent conversation history in clean Markdown format (compact/full).
+  4. `query_transcript`: Forensic filtering and regex search engine for conversation logs.
+  5. `get_installation_status`: Inspects live Antigravity plugin link, hook, MCP server, tool schemas, and RTK binary.
+  6. `sync_installation`: Re-verifies and repairs all integration layers in ~25ms.
 
 ---
 
