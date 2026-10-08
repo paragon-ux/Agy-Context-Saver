@@ -16,6 +16,7 @@ const mcpJsonPath = path.join(geminiConfigDir, "mcp_config.json");
 const installedHookScript = path.join(geminiConfigDir, "scripts", "execution-guard-hook.mjs");
 const installedSchemasDir = path.join(homeDir, ".gemini", "antigravity", "mcp", "agy-context-saver");
 const stateFile = path.join(os.tmpdir(), "agy-session-governance-state.json");
+const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
 
 // Clean test state
 try {
@@ -213,8 +214,8 @@ function sendRpc(method, params = {}) {
 {
   const res = await sendRpc("initialize", { protocolVersion: "2024-11-05" });
   assert.equal(res.result.serverInfo.name, "agy-context-saver");
-  assert.equal(res.result.serverInfo.version, "1.2.0");
-  console.log("✓ Installed MCP Server: Handshake succeeded (name: agy-context-saver, v1.2.0)");
+  assert.equal(res.result.serverInfo.version, pkg.version);
+  console.log(`✓ Installed MCP Server: Handshake succeeded (name: agy-context-saver, v${pkg.version})`);
 }
 
 // 3.2 Tools List (6 tools)

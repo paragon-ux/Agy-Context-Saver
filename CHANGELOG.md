@@ -5,6 +5,16 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-10-07
+
+### Documentation & Developer Experience
+- **MCP Prompts Documentation**: Formally documented the `/mcp:agy-context-saver:context_shield` prompt across `README.md` and the documentation site, clarifying the operational difference between user slash commands (Prompts) and autonomous agent capabilities (Tools).
+- **Quickstart Optimization**: Repositioned the Quickstart installation block to the very top of `README.md` and `docs/index.md` for immediate onboarding.
+- **Zensical Docs Site Overhaul**: Added `context_shield` reference and tip callouts across `docs/index.md`, `docs/tools.md`, and `docs/governance.md`; updated navigation title to `Tools & Prompts`.
+- **Dynamic Test Assertions**: Updated installed MCP server verification test to dynamically synchronize with `package.json` version.
+
+---
+
 ## [1.2.0] - 2026-10-07
 
 ### Performance & Forensics

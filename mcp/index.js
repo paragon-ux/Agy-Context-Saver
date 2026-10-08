@@ -51,7 +51,7 @@ if (cliArg === "install" || cliArg === "--install") {
 
 function printHelp() {
   console.log(`
-Agy-Context-Saver 🛡️ (v1.2.0)
+Agy-Context-Saver 🛡️ (v1.2.1)
 Universal MCP Server & Lifecycle Governor for Google Antigravity (Powered by RTK)
 
 Usage:
@@ -98,7 +98,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rulesPath = path.resolve(__dirname, "../rules/AGENTS.md");
 
 const SERVER_NAME = "agy-context-saver";
-const SERVER_VERSION = "1.2.0";
+const SERVER_VERSION = "1.2.1";
 
 // --- Tools Specification ---
 const TOOLS = [
