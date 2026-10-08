@@ -50,24 +50,24 @@ console.log("--- Group A: RTK Integration & Command Rewriting ---");
   console.log("✓ run_command('git status') transparently rewritten to 'rtk git status'");
 }
 
-// 1b. run_command: bare pytest auto-injects fail-fast flags (LH-11)
+// 1b. run_command: bare pytest rewrites to rtk pytest with native semantics (LH-11)
 {
   const out = runHook({
     toolCall: { name: "run_command", args: { CommandLine: "pytest", WaitMsBeforeAsync: 2000 } }
   });
   assert.equal(out.decision, "allow");
-  assert.equal(out.overwrite?.CommandLine, "rtk pytest -x -q", "Bare pytest must be normalized with -x -q");
-  console.log("✓ run_command('pytest') auto-injects fail-fast flags (-x -q) (LH-11 closed)");
+  assert.equal(out.overwrite?.CommandLine, "rtk pytest", "Bare pytest rewrites natively without forced -x");
+  console.log("✓ run_command('pytest') rewrites to 'rtk pytest' preserving native semantics");
 }
 
-// 1c. run_command: bare python -m pytest auto-injects fail-fast flags (LH-11)
+// 1c. run_command: opt-in fail-fast flags (-x) are preserved cleanly (LH-11)
 {
   const out = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: "python -m pytest", WaitMsBeforeAsync: 2000 } }
+    toolCall: { name: "run_command", args: { CommandLine: "pytest -x", WaitMsBeforeAsync: 2000 } }
   });
   assert.equal(out.decision, "allow");
-  assert.equal(out.overwrite?.CommandLine, "rtk pytest -x -q", "Bare python -m pytest must be normalized with -x -q");
-  console.log("✓ run_command('python -m pytest') auto-injects fail-fast flags (-x -q) (LH-11 closed)");
+  assert.equal(out.overwrite?.CommandLine, "rtk pytest -x", "Opt-in -x flag must be preserved");
+  console.log("✓ run_command('pytest -x') preserves opt-in fail-fast flag");
 }
 
 // 2. run_command: already prefixed with rtk is preserved

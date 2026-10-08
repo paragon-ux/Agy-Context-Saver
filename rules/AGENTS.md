@@ -50,12 +50,11 @@
 
 ## Layer 3: Synchronous Execution & Subagent Delegation
 - **Maximum Synchronous Window**: Non-daemon `run_command` calls are automatically set to `WaitMsBeforeAsync: 10000` to complete synchronously and prevent unnecessary background detachment.
-- **Targeted Test Execution & Bare Sweep Ban (LH-11)**:
-  - **NEVER** run bare test runner commands (e.g. `pytest`, `python -m pytest`, `cargo test`, `npm test`) across an entire codebase in an interactive turn without specifying target test files or fail-fast flags.
-  - In sizable repositories, full sweeps run hundreds of tests and take 5–10 minutes, appearing deadlocked while RTK aggregates output.
-  - Always target the specific test file or directory relevant to the immediate change (e.g. `pytest tests/test_core.py -q -x`).
-  - PreToolUse automatically injects `-x -q` (fail-fast, quiet) if bare `pytest` is invoked.
-  - If a full repository sweep is truly required: delegate it to a subagent (`invoke_subagent`).
+- **Targeted Test Execution & Opt-In Fail-Fast (LH-11)**:
+  - **Targeted Invocations**: In interactive turns, prefer targeting specific test files or directories (e.g. `pytest tests/test_core.py`) rather than running full multi-minute repository sweeps.
+  - **Fail-Fast Flags are Opt-In**: Fail-fast flags (`-x`, `--maxfail=1`) are opt-in. Use them when quickly debugging a localized failure, but omit them when assessing the full blast radius across the codebase to avoid the "whack-a-mole" loop.
+  - **Coordinated Watchdog Mandatory for Full Sweeps**: When running full multi-minute test sweeps without `-x`, agents **MUST** pair execution with the **Coordinated Watchdog Protocol** (`schedule(DurationSeconds=45, ...)`) and output a **Pre-Yield Status Card**. Never yield silently.
+  - **Subagent Delegation for Deep Audits**: When a comprehensive repository-wide test audit is required, delegate the sweep to a subagent (`invoke_subagent`) to keep the main thread responsive.
 - **Subagent Delegation**: Delegate heavy multi-file exploration and exploratory research to subagents (`invoke_subagent`). Subagents absorb intermediate steps and return high-signal summaries.
 - **Benchmark / Evaluator Integrity**: Never mutate benchmark definitions, prompt templates, or scoring artifacts during an active evaluation without explicit user confirmation.
 

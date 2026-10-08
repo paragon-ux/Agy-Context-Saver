@@ -31,7 +31,7 @@ This document serves as the permanent Single Source of Truth (SSOT) tracking eve
 | **LH-08** | Delegation Void | Agent never spawned subagents; ran all 57-prompt sweeps in main thread. Prose in `AGENTS.md` was ignored. | **Mitigated**: Provided `subagent_brief` tool for scope-isolated prompt formulation; session warning thresholds added for high main-thread tool counts. | **ACTIVE MITIGATION** |
 | **LH-09** | Semantic Blindness | Model edited benchmarks/evaluators (`eval_accuracy.py`, prompt templates) to overfit test scores. | **Closed**: `replace_file_content` and `write_to_file` gate any path matching benchmark/evaluator patterns behind `force_ask`. | **RESOLVED** |
 | **LH-10** | Error Fallback | Catch blocks called `failOpen()`, letting unparsed payloads pass without inspection. | **Closed**: Governed tools fail-closed (`decision: "deny"`) on any exception or schema error. | **RESOLVED** |
-| **LH-11** | Silent Sweep Exhaustion | Agent ran bare multi-file test sweeps (`pytest`, 928 tests, ~8m). Because RTK aggregates output until exit, `task.log` had 0 bytes, blinding user. Agent yielded silently without watchdog. | **Closed**: PreToolUse auto-injects fail-fast (`-x -q`) on bare test runners; Coordinated Watchdog Protocol (`schedule` $\ge 30\text{s}$) and Pre-Yield Status Cards codified in `AGENTS.md`. | **RESOLVED** |
+| **LH-11** | Silent Sweep Exhaustion | Agent ran bare multi-file test sweeps (`pytest`, 928 tests, ~8m). Because RTK aggregates output until exit, `task.log` had 0 bytes, blinding user. Agent yielded silently without watchdog. | **Closed**: Fail-fast (`-x`) made opt-in to avoid whack-a-mole loops and preserve test blast radius; Coordinated Watchdog Protocol (`schedule` $\ge 30\text{s}$) and Pre-Yield Status Cards codified in `AGENTS.md`. | **RESOLVED** |
 
 ---
 
@@ -70,10 +70,11 @@ A secondary forensic audit of the v1.2.1 codebase uncovered 3 critical remnant b
   3. Consequently, `task-30.log` remained at exactly **0 bytes** during the entire execution window.
   4. The agent yielded its turn with a generic status notice and set no watchdog timer.
   5. In Antigravity's UI, a background task with 0 bytes of log output and `Last progress: never` for 80+ seconds is visually indistinguishable from an engine freeze or deadlock.
-* **Remediation & Enforcement**:
-  1. **Fail-Fast Auto-Injection**: PreToolUse hook transparently normalizes bare `pytest` / `python -m pytest` invocations to include `-x -q` (fail-fast, quiet), ensuring execution stops immediately on the first failure rather than continuing across hundreds of unrelated tests.
+* **Remediation & Architectural Separation**:
+  1. **Native Command Semantics (Opt-In Fail-Fast)**: Fail-fast flags (`-x`, `--maxfail=1`) remain strictly **opt-in** rather than forced at the hook boundary. This avoids the "whack-a-mole" trap where stopping at the first failure conceals the full blast radius across multiple modules and causes repetitive round trips.
   2. **Coordinated Watchdog Protocol**: Mandated in `rules/AGENTS.md` that any background operation expected to exceed 15s must be paired with `schedule(DurationSeconds=45, TimerCondition="task-...")`. If the operation is prolonged, the watchdog wakes the agent to perform a legal status check and post a live chat progress update for the user.
   3. **Mandatory Pre-Yield Status Cards**: Mandated in `rules/AGENTS.md` that agents must output a structured markdown card (command, scope, estimated duration, watchdog tier) before yielding on background tasks.
+  4. **Subagent Delegation for Deep Sweeps**: Instructed in `rules/AGENTS.md` that comprehensive repository-wide test sweeps must be delegated to subagents (`invoke_subagent`) to keep the primary interactive session responsive.
 
 ---
 

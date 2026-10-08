@@ -290,14 +290,8 @@ function rewriteCommandWithRtk(rawCmd) {
     return trimmed;
   }
 
-  // Fail-fast reinforcement for bare test runner sweeps (LH-11)
-  let cmdToRewrite = trimmed;
-  if (/^(?:(?:python(?:\.exe)?|py(?:\.exe)?)\s+(?:-m\s+)?pytest|pytest)(?:\.exe)?$/i.test(trimmed)) {
-    cmdToRewrite = `${trimmed} -x -q`;
-  }
-
-  // Fast-path bypass for shell builtins, non-rewritable binaries, and powershell cmdlets
-  const firstWord = (cmdToRewrite.match(/^[^\s"']+/)?.[0] || "").toLowerCase();
+    // Fast-path bypass for shell builtins, non-rewritable binaries, and powershell cmdlets
+  const firstWord = (trimmed.match(/^[^\s"']+/)?.[0] || "").toLowerCase();
   if (
     NON_REWRITABLE_BINARIES.has(firstWord) ||
     firstWord.startsWith("get-") ||
@@ -308,19 +302,19 @@ function rewriteCommandWithRtk(rawCmd) {
     firstWord.startsWith("remove-") ||
     firstWord.startsWith("test-")
   ) {
-    return cmdToRewrite;
+    return trimmed;
   }
 
   // Check persistent cache
   const cache = loadRewriteCache();
-  if (cache[cmdToRewrite] !== undefined) {
-    return cache[cmdToRewrite];
+  if (cache[trimmed] !== undefined) {
+    return cache[trimmed];
   }
 
-  let rewritten = cmdToRewrite;
+  let rewritten = trimmed;
   try {
     const rtkBin = getRtkBinary();
-    const res = spawnSync(rtkBin, ["rewrite", cmdToRewrite], {
+    const res = spawnSync(rtkBin, ["rewrite", trimmed], {
       encoding: "utf-8",
       timeout: 2000,
       windowsHide: true
@@ -332,7 +326,7 @@ function rewriteCommandWithRtk(rawCmd) {
     }
   } catch {}
 
-  cache[cmdToRewrite] = rewritten;
+  cache[trimmed] = rewritten;
   saveRewriteCache(cache);
   return rewritten;
 }

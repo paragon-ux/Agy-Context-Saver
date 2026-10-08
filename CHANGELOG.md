@@ -5,6 +5,15 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-10-07
+
+### Governance & Command Semantics (LH-11 Hardening)
+- **Opt-In Fail-Fast Semantics**: Reverted forced `-x -q` parameter injection on bare test runner invocations to preserve native command semantics. Fail-fast (`-x`, `--maxfail=1`) remains strictly opt-in, preventing the "whack-a-mole" repair loop and preserving complete failure blast radius visibility across multi-module test suites.
+- **Architectural Separation**: Replaced forced command mutation with the **Coordinated Watchdog Protocol** and **Mandatory Pre-Yield Status Cards** in `rules/AGENTS.md`, ensuring visibility during multi-minute full-repository sweeps without distorting test results.
+- **Loophole Ledger Synchronization**: Updated `LEDGER.md` (LH-11) documenting the trade-offs of fail-fast injection vs native command semantics.
+
+---
+
 ## [1.3.1] - 2026-10-07
 
 ### Governance & Asynchronous Execution Observability (LH-11)

@@ -144,14 +144,14 @@ function callInstalledHook(payload) {
   console.log("✓ Installed Hook: shell wrappers (cmd /c, powershell -Command) unwrapped for RTK (LH-01-B closed)");
 }
 
-// 2.4c Bare test runner fail-fast reinforcement (LH-11)
+// 2.4c Native pytest rewriting (opt-in fail-fast) (LH-11)
 {
   const res = callInstalledHook({
     toolCall: { name: "run_command", args: { CommandLine: "pytest", WaitMsBeforeAsync: 3000 } }
   });
   assert.equal(res.decision, "allow");
-  assert.equal(res.overwrite?.CommandLine, "rtk pytest -x -q");
-  console.log("✓ Installed Hook: bare pytest auto-injects fail-fast (-x -q) (LH-11 closed)");
+  assert.equal(res.overwrite?.CommandLine, "rtk pytest");
+  console.log("✓ Installed Hook: pytest rewrites to rtk pytest with native semantics (LH-11)");
 }
 
 // 2.5 Daemon run preservation
