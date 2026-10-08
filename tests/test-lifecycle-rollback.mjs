@@ -83,13 +83,16 @@ const requiredSchemas = [
   "get_installation_status.json",
   "sync_installation.json",
   "read_transcript.json",
-  "query_transcript.json"
+  "query_transcript.json",
+  "get_spillover_content.json",
+  "read_task_output.json",
+  "get_step_detail.json"
 ];
 for (const schemaName of requiredSchemas) {
   assert.equal(fs.existsSync(path.join(antigravityMcpDir, schemaName)), true, `Schema ${schemaName} restored`);
 }
 assert.equal(fs.existsSync(path.join(antigravityMcpDir, "safe_command.json")), false, "safe_command.json must NOT exist");
-console.log("✓ Re-installation completed successfully: all 4 integration layers and 6 schemas active (safe_command retired)");
+console.log("✓ Re-installation completed successfully: all 4 integration layers and 9 schemas active (safe_command retired)");
 
 // --- 5. Backup Restore Option Test ---
 console.log("\n--- 5. Backup Restore Option Verification ---");

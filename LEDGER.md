@@ -32,6 +32,7 @@ This document serves as the permanent Single Source of Truth (SSOT) tracking eve
 | **LH-09** | Semantic Blindness | Model edited benchmarks/evaluators (`eval_accuracy.py`, prompt templates) to overfit test scores. | **Closed**: `replace_file_content` and `write_to_file` gate any path matching benchmark/evaluator patterns behind `force_ask`. | **RESOLVED** |
 | **LH-10** | Error Fallback | Catch blocks called `failOpen()`, letting unparsed payloads pass without inspection. | **Closed**: Governed tools fail-closed (`decision: "deny"`) on any exception or schema error. | **RESOLVED** |
 | **LH-11** | Silent Sweep Exhaustion | Agent ran bare multi-file test sweeps (`pytest`, 928 tests, ~8m). Because RTK aggregates output until exit, `task.log` had 0 bytes, blinding user. Agent yielded silently without watchdog. | **Closed**: Fail-fast (`-x`) made opt-in to avoid whack-a-mole loops and preserve test blast radius; Coordinated Watchdog Protocol (`schedule` $\ge 30\text{s}$) and Pre-Yield Status Cards codified in `AGENTS.md`. | **RESOLVED** |
+| **LH-12** | Output Blind-Spot Catch-22 | Ephemeral spillover files ($>24\text{ KB}$) and post-mortem task logs blocked by root guard; subagent messages severed by arbitrary 80-char argument slicing. | **Closed (v1.4.0)**: Dedicated `get_spillover_content` MCP bridge, lifecycle-gated `read_task_output`, typed descriptors in `formatTranscriptItem`, `get_step_detail` surgical dereferencer, and Pointer-Over-Wire (POW) contract. | **RESOLVED** |
 
 ---
 
@@ -86,6 +87,19 @@ A secondary forensic audit of the v1.2.1 codebase uncovered 3 critical remnant b
   3. The agent is denied from checking `manage_task(status)`.
   4. The agent yields its turn into a black hole; the background process runs forever, consuming CPU and wedging the session permanently.
 * **Remediation**: Replaced the binary lifetime ban with the **Proportional Backoff Protocol**.
+
+### Remnant E (LH-12): Output Blind-Spot & Spillover Catch-22 (Audit v1.4.0)
+* **Incident Reference**: Research audit in conversation `07b0f8d8-0a2c-47ca-9330-e4ed04471a51` / [`LEDGER_OUTPUT_FIXES.md`](file:///c:/Users/USER/Desktop/Frameworks/Agy-Context-Saver/LEDGER_OUTPUT_FIXES.md).
+* **Vulnerability & Failure Mode**:
+  1. **Runtime Output Spillovers**: When MCP or tool responses exceed Antigravity's inline threshold ($>24\text{ KB}$), the engine redirects output to `.system_generated/steps/<step>/output.txt`. The PreToolUse hook unconditionally blocked all access to `.system_generated`, creating an unbreakable Catch-22 where the agent was told to inspect a file it was forbidden from reading.
+  2. **Post-Mortem Task Logs**: Completed background task outputs that exceeded inline truncation thresholds left stack traces in `tasks/task-*.log`. The hook's binary root ban prevented reading logs even after the task finished, blinding agents to build and test failure details.
+  3. **Transcript Argument Mutilation**: `formatTranscriptItem()` hardcoded `.slice(0, 80)` on all tool call arguments, destructively severing JSON structures and subagent reports passed in `send_message(Message="...")`.
+  4. **In-Band Message Truncation**: Subagents transmitting large deliverables over `send_message` hit the platform's ~16–20 KB message boundary, truncating findings before reaching parent context.
+* **Remediation & Four Architectural Pillars**:
+  1. **Governed Runtime Spillover Bridge (NFF-01 & NFF-02)**: Added MCP tool `get_spillover_content({ uri, lines, tail, filterRegex })` with a strict 12 KB / 200-line ceiling and token windowing. Updated hook to route spillover reads specifically to `get_spillover_content`.
+  2. **Lifecycle-Gated Task Output Inspection (NFF-03)**: Added MCP tool `read_task_output({ taskId, lines, tail, filterRegex })`. Access is strictly **denied** under Proportional Backoff while tasks are `RUNNING`, but permitted once `COMPLETED` for bounded stack trace retrieval.
+  3. **Semantic Step Introspection (NFF-04 & NFF-05)**: Replaced blind 80-char slicing in `formatTranscriptItem()` with typed argument descriptors (`[14.2 KB String]`, `[Array(5)]`). Added MCP tool `get_step_detail({ stepIndex, field })` for surgical, un-truncated dereferencing from `transcript_full.jsonl`.
+  4. **Pointer-Over-Wire Subagent Contract (NFF-06)**: Updated `subagent_brief` to automatically inject the POW contract: deliverables $>1\text{ KB}$ are written to workspace files (`scratch/...`), while `send_message` transmits only high-signal summaries and clickable file links.
 
 ---
 

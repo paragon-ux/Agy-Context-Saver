@@ -61,7 +61,10 @@ assert.ok(fs.existsSync(path.join(installedSchemasDir, "get_installation_status.
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "sync_installation.json")), "sync_installation.json exists");
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "read_transcript.json")), "read_transcript.json exists");
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "query_transcript.json")), "query_transcript.json exists");
-console.log("✓ Exactly 6 Antigravity tool schemas installed (safe_command permanently removed)");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "get_spillover_content.json")), "get_spillover_content.json exists");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "read_task_output.json")), "read_task_output.json exists");
+assert.ok(fs.existsSync(path.join(installedSchemasDir, "get_step_detail.json")), "get_step_detail.json exists");
+console.log("✓ Exactly 9 Antigravity tool schemas installed (safe_command permanently removed)");
 
 // Test existing installation detector
 const { detectExistingInstallation } = await import("../scripts/install-register.mjs");
@@ -276,15 +279,18 @@ function sendRpc(method, params = {}) {
   assert.ok(toolNames.includes("sync_installation"));
   assert.ok(toolNames.includes("read_transcript"));
   assert.ok(toolNames.includes("query_transcript"));
-  assert.equal(toolNames.length, 6);
-  console.log("✓ Installed MCP Server: tools/list verified [all 6 tools present, safe_command retired]");
+  assert.ok(toolNames.includes("get_spillover_content"));
+  assert.ok(toolNames.includes("read_task_output"));
+  assert.ok(toolNames.includes("get_step_detail"));
+  assert.equal(toolNames.length, 9);
+  console.log("✓ Installed MCP Server: tools/list verified [all 9 tools present, safe_command retired]");
 }
 
 // 3.3 Installation Status Tool Call
 {
   const res = await sendRpc("tools/call", { name: "get_installation_status" });
   assert.match(res.result.content[0].text, /Installation Status: HEALTHY & ACTIVE/);
-  assert.match(res.result.content[0].text, /ALL 6 SCHEMAS PRESENT/);
+  assert.match(res.result.content[0].text, /ALL 9 SCHEMAS PRESENT/);
   assert.match(res.result.content[0].text, /RTK Binary: INSTALLED/);
   console.log("✓ Installed MCP Server: get_installation_status reported healthy status + RTK");
 }

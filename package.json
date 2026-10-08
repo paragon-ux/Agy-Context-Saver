@@ -1,6 +1,6 @@
 {
   "name": "agy-context-saver",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "description": "Universal Model Context Protocol (MCP) server & lifecycle governor purpose-built for Google Antigravity",
   "main": "mcp/index.js",
   "bin": {
@@ -12,7 +12,7 @@
     "setup": "node scripts/install-register.mjs",
     "uninstall": "node scripts/install-register.mjs --uninstall",
     "status": "node scripts/install-register.mjs --status",
-    "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs && node tests/test-e2e-probes.mjs && node tests/test-performance-probes.mjs && node tests/test-installed-verification.mjs && node tests/test-lifecycle-rollback.mjs"
+    "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs && node tests/test-output-governance.mjs && node tests/test-e2e-probes.mjs && node tests/test-performance-probes.mjs && node tests/test-installed-verification.mjs && node tests/test-lifecycle-rollback.mjs"
   },
   "keywords": [
     "antigravity",

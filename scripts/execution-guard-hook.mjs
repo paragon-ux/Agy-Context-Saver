@@ -391,11 +391,31 @@ try {
 
     // LH-02-B: Direct shell access to internal Antigravity execution state (.system_generated)
     if (isProtectedInternalState(rawCmd)) {
+      if (/\.system_generated[/\\]steps[/\\]\d+[/\\]output\.txt/i.test(rawCmd)) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+            "- To inspect runtime step spillover outputs: Call MCP tool 'get_spillover_content(uri=\"...\")'."
+        });
+      }
+      const taskMatch = rawCmd.match(/\.system_generated[/\\]tasks[/\\](?:task-)?([a-zA-Z0-9_-]+)\.log/i);
+      if (taskMatch) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+            `- Once completed, inspect output using MCP tool 'read_task_output(taskId="${taskMatch[1]}")'.\n` +
+            "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+        });
+      }
       respond({
         decision: "deny",
         reason:
           "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
           "- To inspect conversation transcripts: Call MCP tool read_transcript(conversationId=\"...\", mode=\"compact\") or query_transcript(...).\n" +
+          "- To inspect runtime step spillover outputs: Call MCP tool get_spillover_content(uri=\"...\").\n" +
+          "- To inspect completed task logs: Call MCP tool read_task_output(taskId=\"...\").\n" +
           "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
       });
     }
@@ -458,11 +478,31 @@ try {
 
     // 2a. Internal State Protection by Root (LH-02)
     if (isProtectedInternalState(target) || isProtectedInternalState(JSON.stringify(args))) {
+      if (/\.system_generated[/\\]steps[/\\]\d+[/\\]output\.txt/i.test(target)) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Direct access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat.\n" +
+            `- To inspect runtime step spillover outputs: Call MCP tool 'get_spillover_content(uri="${target}")'.`
+        });
+      }
+      const taskMatch = target.match(/\.system_generated[/\\]tasks[/\\](?:task-)?([a-zA-Z0-9_-]+)\.log/i);
+      if (taskMatch) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Direct access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent polling loops.\n" +
+            `- Once completed, inspect output using MCP tool 'read_task_output(taskId="${taskMatch[1]}")'.\n` +
+            "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+        });
+      }
       respond({
         decision: "deny",
         reason:
           "Antigravity Execution Governance: Direct access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
           "- To inspect conversation transcripts: Call MCP tool read_transcript(conversationId=\"...\", mode=\"compact\") or query_transcript(...).\n" +
+          "- To inspect runtime step spillover outputs: Call MCP tool get_spillover_content(uri=\"...\").\n" +
+          "- To inspect completed task logs: Call MCP tool read_task_output(taskId=\"...\").\n" +
           "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
       });
     }

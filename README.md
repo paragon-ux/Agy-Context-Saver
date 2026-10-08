@@ -103,6 +103,33 @@ npm run status
 
 ---
 
+## Comprehensive Documentation
+
+For complete technical references, architectural specifications, and governance rules, visit our **[Zensical Documentation Site](https://paragon-ux.github.io/agy-context-saver/)**:
+
+- 📖 **[Getting Started & Installation](docs/installation.md)**: Zero-delay setup, native plugin linking, hooks registration, and verification matrix.
+- 🏗️ **[Architecture & Internals](docs/architecture.md)**: Closed Execution Topology, RTK separation of concerns, and the Four Non-Fragile Architectural Pillars.
+- 🛡️ **[Lifecycle Governance & Hooks](docs/governance.md)**: Proportional Backoff curve, Reactive Wakeup invariants, and the 5-strike circuit breaker.
+- 🧰 **[MCP Tools & CLI Reference](docs/tools.md)**: Complete specifications for all 9 autonomous MCP tools, slash commands, and diagnostic utilities.
+- 🔬 **[Forensic & Output Inspection](LEDGER_OUTPUT_FIXES.md)**: Ephemeral tool spillover resolution, post-mortem task retrieval, and Pointer-Over-Wire (POW) contracts.
+- 🚀 **[Publishing & Verification Playbook](docs/publishing.md)**: Clean-room test runs, release procedures, and multi-suite verification matrix.
+
+---
+
+## Local Documentation Server
+
+Build or serve the documentation locally using **Zensical**:
+
+```bash
+# Build static documentation site
+py -3.11 -m zensical build
+
+# Serve live preview server
+py -3.11 -m zensical serve
+```
+
+---
+
 ## Zero-Guesswork Testing & Verification Playbook
 
 To cleanly test every layer of the framework without guesswork or interactive stalls:
@@ -160,11 +187,14 @@ node tests/test-lifecycle-rollback.mjs
   - `/mcp:agy-context-saver:context_shield`: Injects 3-layer governance rules and RTK standards into any session with one click. *(MCP Prompts appear in your chat autocomplete menu; MCP Tools are called autonomously by the agent).*
 * **Agent MCP Tools**:
   1. `check_context_health`: Diagnoses conversation transcript turn budgets, payload size, RTK status, and polling loops.
-  2. `subagent_brief`: Formulates scope-isolated prompts for delegated subagents.
+  2. `subagent_brief`: Formulates scope-isolated prompts for delegated subagents with Pointer-Over-Wire delivery contract.
   3. `read_transcript`: Reads recent conversation history in clean Markdown format (compact/full).
   4. `query_transcript`: Forensic filtering and regex search engine for conversation logs.
   5. `get_installation_status`: Inspects live Antigravity plugin link, hook, MCP server, tool schemas, and RTK binary.
   6. `sync_installation`: Re-verifies and repairs all integration layers in ~25ms.
+  7. `get_spillover_content`: Safely inspects runtime step output spillovers with token windowing and filtering.
+  8. `read_task_output`: Inspects output logs of completed tasks with ANSI stripping and token windowing.
+  9. `get_step_detail`: Surgically dereferences un-truncated step content, tool arguments, and thinking from transcript_full.jsonl.
 
 ---
 

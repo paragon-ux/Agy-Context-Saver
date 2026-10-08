@@ -1,7 +1,7 @@
 # MCP Tool, Prompt & CLI Reference
 
 `Agy-Context-Saver` implements standard Model Context Protocol (MCP) capabilities purpose-built for Antigravity:
-- **6 Agent-Facing Tools**: Invoked autonomously by the AI during coding sessions to govern lifecycles, stream transcripts, and audit installations.
+- **9 Agent-Facing Tools**: Invoked autonomously by the AI during coding sessions to govern lifecycles, stream transcripts, safely inspect spillovers, retrieve post-mortem task logs, dereference full steps, and audit installations.
 - **1 User-Facing Prompt (`context_shield`)**: Appears as a slash command (`/mcp:agy-context-saver:context_shield`) in the chat autocomplete menu to inject 3-layer governance rules with a single click.
 - **RTK (Rust Token Killer)**: Transparent CLI proxy that reduces terminal and inspection token consumption by 60–99%.
 
@@ -106,6 +106,51 @@ Programmatically reconciles and repairs all installation layers and tool schemas
 | Name | Type | Required | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `checkOnly` | `boolean` | No | `false` | If `true`, performs dry-run audit without writing changes. |
+
+---
+
+## 7. `get_spillover_content`
+
+Safely inspects ephemeral tool output spillover files (`.system_generated/steps/<step>/output.txt`) created when Antigravity redirects oversized tool outputs to disk. Applies token windowing and filtering to prevent context blowouts.
+
+### Parameters
+
+| Name | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `uri` | `string` | **Yes** | — | File URI or absolute path provided by Antigravity runtime. |
+| `lines` | `number` | No | `80` | Number of lines to return (max 200). |
+| `tail` | `boolean` | No | `false` | If `true`, returns last N lines; if `false`, returns first N lines. |
+| `filterRegex` | `string` | No | — | Optional regex filter to match relevant output lines. |
+
+---
+
+## 8. `read_task_output`
+
+Inspects the output log of a background task. Strictly gated by lifecycle state: calls are **denied** under Proportional Backoff while the task is `RUNNING`, but permitted once the task has `COMPLETED` for post-mortem analysis (e.g., retrieving truncated build or test stack traces).
+
+### Parameters
+
+| Name | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `taskId` | `string` | **Yes** | — | The task ID (e.g. `task-1004` or full task path). |
+| `lines` | `number` | No | `80` | Number of lines to return (max 200). |
+| `tail` | `boolean` | No | `true` | If `true`, returns last N lines (most recent errors/summary). |
+| `filterRegex` | `string` | No | — | Optional regex filter to isolate specific errors or lines. |
+| `conversationId` | `string` | No | active | Conversation UUID or folder name. |
+
+---
+
+## 9. `get_step_detail`
+
+Surgically retrieves the full, un-truncated content of a specific conversation step directly from `transcript_full.jsonl`. Eliminates data loss from summary truncations and extracts large subagent messages, thinking blocks, or tool arguments without loading surrounding turns into context.
+
+### Parameters
+
+| Name | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `stepIndex` | `number` | **Yes** | — | Exact `step_index` to inspect. |
+| `conversationId` | `string` | No | active | Conversation UUID or path. |
+| `field` | `string` | No | `"all"` | Field to extract: `"content"`, `"thinking"`, `"tool_calls"`, `"tool_args"`, or `"tool_args:<argName>"`. |
 
 ---
 
