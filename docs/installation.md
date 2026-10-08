@@ -26,7 +26,7 @@ This automated command:
 1. Links the package into your active Antigravity plugins directory (`~/.gemini/config/plugins/agy-context-saver`).
 2. Registers the `execution-guard` hook in `~/.gemini/config/hooks.json` (with automatic backup).
 3. Adds `agy-context-saver` to `~/.gemini/config/mcp_config.json` (with automatic backup).
-4. Mirrors all 7 tool schemas into `~/.gemini/antigravity/mcp/agy-context-saver/`.
+4. Mirrors all 6 canonical tool schemas into `~/.gemini/antigravity/mcp/agy-context-saver/`.
 
 ### Option 2: Local Repository Setup
 

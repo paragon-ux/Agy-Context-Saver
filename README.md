@@ -111,7 +111,7 @@ For complete technical references, architectural specifications, and governance 
 - 🏗️ **[Architecture & Internals](docs/architecture.md)**: Closed Execution Topology, RTK separation of concerns, and the Four Non-Fragile Architectural Pillars.
 - 🛡️ **[Lifecycle Governance & Hooks](docs/governance.md)**: Proportional Backoff curve, Reactive Wakeup invariants, and the 5-strike circuit breaker.
 - 🧰 **[MCP Tools & CLI Reference](docs/tools.md)**: Complete specifications for all 6 canonical autonomous MCP tools, slash commands, and diagnostic utilities.
-- 🔬 **[Forensic & Output Inspection](LEDGER_OUTPUT_FIXES.md)**: Ephemeral tool spillover resolution, post-mortem task retrieval, and Pointer-Over-Wire (POW) contracts.
+- 🔬 **[Forensic & Output Inspection](docs/architecture.md#6-output-governance--spillover-safe-harbor-0-new-tools)**: Ephemeral tool spillover resolution, post-mortem task retrieval, and Pointer-Over-Wire (POW) contracts.
 - 🚀 **[Publishing & Verification Playbook](docs/publishing.md)**: Clean-room test runs, release procedures, and multi-suite verification matrix.
 
 ---
@@ -122,10 +122,10 @@ Build or serve the documentation locally using **Zensical**:
 
 ```bash
 # Build static documentation site
-py -3.11 -m zensical build
+zensical build
 
 # Serve live preview server
-py -3.11 -m zensical serve
+zensical serve
 ```
 
 ---
@@ -146,7 +146,7 @@ node mcp/index.js status
 ```bash
 npm test
 ```
-*Runs all 5 test suites (28 hook tests, MCP protocol tests, E2E probes, installed verification, lifecycle rollback).*
+*Runs all 7 test suites (hook governance, MCP protocol, output inspection governance, E2E probes, performance probes, installed verification, lifecycle rollback).*
 
 ### 3. Run Targeted Tests Individually
 ```bash
@@ -156,8 +156,14 @@ node tests/test-hook.mjs
 # MCP server protocol & method tests
 node tests/test-mcp.mjs
 
+# Output inspection & lifecycle gating tests
+node tests/test-output-governance.mjs
+
 # End-to-end edge case & probe tests
 node tests/test-e2e-probes.mjs
+
+# Performance, streaming & memory probes
+node tests/test-performance-probes.mjs
 
 # Live installed environment verification
 node tests/test-installed-verification.mjs

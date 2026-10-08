@@ -78,3 +78,38 @@ Historical loopholes exploited per-task cooldown resets and fuzzy keywords. Agy 
 
 ### 5. Benchmark & Evaluator Mutation Protection
 During active evaluation sessions, mutating benchmark definitions, prompt templates, or scoring files requires explicit user confirmation via `force_ask`, preventing prompt contamination and benchmark overfitting.
+
+---
+
+## 6. Output Governance & Spillover Safe Harbor (0 New Tools)
+
+To resolve the Output Blind-Spot Trap without bloating the tool registry or taxing model prompts, `Agy-Context-Saver` implements four streamlined output governance pillars:
+
+1. **Safe-Harbor `rtk read` for Runtime Step Spillovers**:
+   When Antigravity spills large tool outputs to disk (`.system_generated/steps/<step>/output.txt`), the PreToolUse hook safe-harbors `rtk read <path>`. Native `view_file` calls are automatically routed to `rtk read`, leveraging RTK's native line clamping, head/tail windowing, and token truncation.
+2. **Lifecycle-Gated Task Output Inspection**:
+   When an agent inspects background task logs (`tasks/<taskId>.log`):
+   - While `RUNNING`: Strictly denied under Proportional Backoff to eliminate busy-waiting polling loops.
+   - When `COMPLETED` / `TERMINATED`: Allowed via `rtk read` under lifecycle governance for bounded error and stack trace retrieval.
+3. **Folded Surgical Step Dereferencing in `query_transcript`**:
+   Rather than creating redundant tools, single-step extraction is folded directly into `query_transcript(stepIndex, field)`. Recovers un-truncated payloads from `transcript_full.jsonl` with zero surrounding context bloat.
+4. **Pointer-Over-Wire (POW) Subagent Delivery Contract**:
+   `subagent_brief` automatically injects the POW protocol into all subagent instructions: research reports $>1\text{ KB}$ are written to workspace files (`scratch/...`), while `send_message` transmits only executive summaries and clickable file links, eliminating in-band message bus truncations.
+
+---
+
+## 7. Performance & Resource Optimization Invariants
+
+1. **Guaranteed Stream Destruction (PERF-01, PERF-02)**:
+   All readline and transcript stream readers wrap iteration in `try / finally` with explicit `fileStream.destroy()`. Probe tests verify zero open file descriptor leakage across early exits and line caps.
+2. **Subprocess Spawn Elimination (PERF-03)**:
+   The PreToolUse hook drops redundant version probes, spawning `rtk rewrite` directly and falling back to plugin binaries only on `ENOENT`, cutting cache miss latency by over 50ms.
+3. **Surgical 256KB Tail-Window Task State Resolution (PERF-04, PERF-07)**:
+   Task lifecycle checking uses a single unified resolver scanning the last 256KB of `transcript.jsonl` with literal needle matching, reducing inspection time on 10MB transcripts from 123ms to 2ms (-98%).
+4. **Atomic Concurrency-Safe Rewrite Caching (PERF-05, PERF-09)**:
+   Rewrite caches filter out non-zero exits, spawn errors, and timeouts. Updates re-read disk state to merge concurrent processes and write atomically via temporary files and `renameSync`.
+5. **Pre-Rewrite Fast Denial Ordering (PERF-10)**:
+   Raw command checks (internal state access and running task log denials) execute before invoking `rtk rewrite`, eliminating subprocess overhead for denied commands.
+6. **Bounded Query Memory & Raw-Line Prefiltering (PERF-11, PERF-12)**:
+   `query_transcript` bounds memory using a fixed-size ring buffer with `matchedCount`, and filters plain ASCII keywords on the raw line before JSON parsing.
+

@@ -45,12 +45,14 @@ Ensures plugin links, hook scripts, and tool schemas exist and match versions.
 ```bash
 npm test
 ```
-Executes all 5 verification suites:
-1. Intelligent hook decision tests (18 assertions)
-2. MCP server protocol tests (12 assertions)
-3. End-to-end fail-open probes (6 assertions)
-4. Live installed system validation
-5. Full lifecycle installation, rollback, and restoration test
+Executes all 7 verification suites:
+1. Intelligent hook governance & closed-topology tests (`tests/test-hook.mjs`)
+2. MCP server protocol & method tests (`tests/test-mcp.mjs`)
+3. Output inspection governance & lifecycle gating tests (`tests/test-output-governance.mjs`)
+4. End-to-end edge case & fail-closed probes (`tests/test-e2e-probes.mjs`)
+5. Performance, streaming & memory probes (`tests/test-performance-probes.mjs`)
+6. Live installed system validation (`tests/test-installed-verification.mjs`)
+7. Full lifecycle installation, rollback, and restoration test (`tests/test-lifecycle-rollback.mjs`)
 
 ### Stage 3: Tarball Dry-Run Inspection
 ```bash

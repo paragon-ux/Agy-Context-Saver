@@ -37,48 +37,52 @@ sequenceDiagram
 
 ## Governed Lifecycle Rules
 
-### 1. The Polling Governor
-- **Blocked**: Consecutive `manage_task(Action='status')` polling loops spaced <30 seconds apart.
-- **Blocked**: Short artificial timers (`schedule(...)` with `DurationSeconds < 120`).
-- **Allowed (Safe Harbors)**:
-  - Initial `status` call (gives agents an immediate diagnostic peek).
-  - Explicit debugging context (e.g. searching for deadlocks, checking hung processes).
-  - Multi-agent coordination (`/teamwork-preview` workflows).
-  - Watchdog timers (`DurationSeconds >= 120`).
-  - Native termination (`manage_task(Action='kill')`).
+### 1. The Proportional Backoff Engine
+To prevent polling spam without creating deadlock traps, `Agy-Context-Saver` calculates cooldown intervals proportional to diagnostic status inspections:
 
-### 2. The Transcript Guard
-- **Blocked**: Direct `view_file` calls targeting `transcript.jsonl` or `transcript_full.jsonl`.
-- **Redirected**: Automatically responds with clear instructions guiding the model to use `read_transcript` or `query_transcript`.
-- **Permanent Compaction Immunity**: Because the hook intercepts at the execution boundary, it prevents post-compaction amnesia from re-polluting the active context window.
+$$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5^{\max(0, \text{pollCount} - 1)}\right)\right)$$
 
-### 3. Synchronous Window Expansion
+| Check # | Required Cooldown | Lifecycle Phase / Purpose | Action if Premature |
+| :---: | :---: | :--- | :--- |
+| **Check 1** | **0s (Immediate)** | Baseline check upon launch | **ALLOWED** (`pollCount = 1`) |
+| **Check 2** | **30s** | Quick check for fast tasks | **DENIED** with countdown |
+| **Check 3** | **75s (~1.25m)** | Standard build progress | **DENIED** with countdown |
+| **Check 4** | **188s (~3.1m)** | Heavy test suite | **DENIED** with countdown |
+| **Check 5** | **469s (~7.8m)** | Deep build / hung process | **DENIED** with countdown |
+| **Check 6+** | **600s (10m)** | Prolonged process | Denied; trips circuit breaker |
+
+- **Immediate Operations**: `manage_task(Action='kill')` and `manage_task(Action='send_input')` are **always allowed immediately** (0s cooldown, zero penalties).
+- **Watchdog Coordination**: Any `schedule` task watchdog timer must be $\ge$ the current required backoff window.
+
+### 2. Task Output Log Lifecycle Gating
+- **While RUNNING**: Inspecting `tasks/<taskId>.log` via native tools or shell commands is strictly **DENIED** under Proportional Backoff to prevent polling loops.
+- **When COMPLETED**: Inspecting completed task logs is **ALLOWED** via `rtk read tasks/<taskId>.log` under lifecycle governance. Native `view_file` calls are automatically routed to `rtk read`.
+- **Silent Running Tasks**: Tasks with transcript start notices remain `RUNNING` regardless of log quiet duration until an explicit finish notice appears, ensuring hung or slow tasks are not prematurely treated as finished.
+
+### 3. Step Output Spillover Safe Harbor
+- Antigravity runtime step output spillovers (`.system_generated/steps/<step>/output.txt`) are safe-harbored via `rtk read <path>`, providing automatic line clamping and token windowing.
+- Native `view_file` calls on spillovers automatically route to `rtk read`.
+
+### 4. The Transcript Guard
+- **Blocked**: Direct `view_file` or shell access targeting `.system_generated/logs/transcript.jsonl`.
+- **Redirected**: Automatically guides the agent to `read_transcript` or `query_transcript`.
+
+### 5. Synchronous Window Expansion
 - On native `run_command` invocations, the hook automatically upgrades `WaitMsBeforeAsync` from the default ~5,000ms to **10,000ms** (unless `IsDaemon: true`).
-- Fast builds, test runs, and git commands complete synchronously in-turn rather than detaching into asynchronous background tasks.
 
 ---
 
-## 3-Tier Circuit Breaker
+## 5-Strike Circuit Breaker
 
-To prevent pathological loops where a model persistently ignores denial guidance:
-
-```text
-Denial 1-2: Tier 1 (Guidance)
-            "Stop polling; yield execution to Reactive Wakeup."
-            
-Denial 3-4: Tier 2 (Critical Warning)
-            "CRITICAL: Polling is wasting context. You must yield your turn."
-            
-Denial 5+:  Tier 3 (Circuit Breaker: force_ask)
-            Execution is immediately halted and control is returned
-            to the human user via an interactive prompt.
-```
+To halt runaway autonomous loops where an agent persistently ignores backoff guidance:
+- Each premature polling attempt or watchdog violation records a denial in the session ledger (`agy-session-${safeId}.json`).
+- At **5 cumulative denials**, the governor trips a `force_ask` circuit breaker: execution is suspended and control is returned to the user via an interactive prompt.
 
 ---
 
-## Safety Guarantees & Non-Destructive Operation
+## Safety Guarantees & Operational Invariants
 
-1. **Fail-Open Invariant**: If an unexpected exception occurs inside the hook script, the governor immediately defaults to `decision: "allow"`. The agent is never frozen or crashed by the governor.
-2. **Sub-5ms Execution**: Written in native Node.js without imports, compiling and deciding in under 5 milliseconds.
-3. **Foreign Configuration Preservation**: Non-Agy hooks (e.g. `waymark-continuity`) and third-party MCP servers (e.g. `waymark-engine`) are strictly preserved during installation, synchronization, and uninstallation.
-4. **Automatic `.bak` Backups**: Modifying `hooks.json` or `mcp_config.json` always writes timestamped backups before applying diffs.
+1. **Fail-Closed on Governed Operations (LH-10)**: If an exception occurs while evaluating a governed tool, the governor denies the action (`decision: "deny"`) to prevent security bypasses. Unmonitored non-governed tools fail-open.
+2. **Sub-5ms Evaluation**: Written in optimized Node.js, compiling and deciding in under 5 milliseconds.
+3. **Foreign Configuration Preservation**: Non-Agy hooks (e.g. `waymark-continuity`) and third-party MCP servers (e.g. `waymark-engine`) are strictly preserved during setup, synchronization, and rollback.
+4. **Automatic Backups**: Modifying `hooks.json` or `mcp_config.json` automatically writes timestamped `.bak` backups before applying changes.

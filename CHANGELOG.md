@@ -5,7 +5,7 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0] - 2026-10-08
 
 ### Performance & Memory Optimizations
 - **File-Descriptor Leak Fixes (PERF-01, PERF-02)**: Ensured guaranteed stream destruction via `finally { rl.close(); fileStream.destroy(); }` across `batchFindFullSteps`, `handleCheckContextHealth`, `handleReadTranscript`, and `handleQueryTranscript`, eliminating open handle leaks on early exits and line caps (verified 0/20 leaked).
