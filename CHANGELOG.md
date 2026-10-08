@@ -8,17 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.4.0] - 2026-10-08
 
 ### Added (Output Inspection Governance & Forensic Dereferencing - LH-12)
-- **`get_spillover_content` MCP Tool (NFF-01)**: Governed bridge to inspect runtime step output spillover files (`.system_generated/steps/<step>/output.txt`) generated when tool outputs exceed Antigravity's inline threshold ($>24\text{ KB}$). Applies safe token windowing (max 200 lines / 12 KB ceiling) and regex filtering, eliminating the spillover Catch-22 without risking context blowouts.
-- **`read_task_output` MCP Tool (NFF-03)**: Lifecycle-gated reader for background task logs (`.system_generated/tasks/task-*.log`). Strictly **denied** under Proportional Backoff while tasks are `RUNNING` to prevent polling loops, but permitted once `COMPLETED` for bounded stack trace and failure inspection.
-- **`get_step_detail` MCP Tool (NFF-05)**: Surgical dereferencer for `transcript_full.jsonl`. Extracts un-truncated fields (`content`, `thinking`, `tool_calls`, `tool_args:<name>`) for any given `step_index` without loading surrounding conversation turns.
+- **Folded Surgical Step Dereferencing in `query_transcript` (NFF-05)**: Added optional `stepIndex` (number) and `field` (string) parameters to `query_transcript`, allowing surgical single-step extraction from `transcript_full.jsonl` without creating redundant tools. Recovers un-truncated subagent messages and arguments with zero surrounding context bloat.
+- **Safe-Harbor `rtk read` for Step Output Spillovers (NFF-01 & NFF-02)**: Provided a safe harbor in `execution-guard-hook.mjs` allowing `rtk read` on runtime step output spillovers (`.system_generated/steps/<step>/output.txt`). Native `view_file` and shell `cat` invocations are automatically routed to `rtk read <path>`, leveraging `rtk read`'s built-in line clamping, head/tail windowing, and token truncation.
+- **Lifecycle-Gated Task Output Inspection (NFF-03)**: Added lifecycle governance for background task logs (`tasks/<taskId>.log`) in `execution-guard-hook.mjs`. Invocations are strictly **denied** under Proportional Backoff while tasks are `RUNNING` to stop polling loops, but allowed via `rtk read` once `COMPLETED` / `TERMINATED` for bounded stack trace and failure inspection.
 - **Pointer-Over-Wire (POW) Subagent Contract (NFF-06)**: Integrated the POW protocol into `subagent_brief`. Research findings $>1\text{ KB}$ are written to workspace artifacts (`scratch/...`), while `send_message` transmits only executive summaries and clickable file links, preventing message bus truncations.
-- **Comprehensive Documentation Hub**: Added comprehensive Zensical documentation reference section to `README.md` and updated `docs/tools.md` with complete specifications for all 9 autonomous MCP tools.
-- **Output Governance Test Suite**: Added `tests/test-output-governance.mjs` verifying spillover windowing, task output lifecycle gating, forensic step extraction, and hook routing.
+- **Output Governance Test Suite**: Added `tests/test-output-governance.mjs` verifying spillover safe-harbor access, task output lifecycle gating, forensic step extraction, and hook routing.
 
 ### Changed
-- **Hook Output Routing (NFF-02)**: Updated `execution-guard-hook.mjs` so direct inspection attempts on runtime step spillovers or completed task logs deny with actionable MCP tool guidance instead of generic internal state blocks.
+- **Streamlined Tool Architecture (0 New Tools)**: Eliminated tool proliferation by consolidating capabilities into existing tools and hooks, maintaining strictly the 6 core canonical MCP tools (zero prompt token bloat, zero tool-selection ambiguity).
 - **Typed Argument Descriptors (NFF-04)**: Replaced blind `JSON.stringify().slice(0, 80)` in `formatTranscriptItem()` with typed argument descriptors (`[14.2 KB String]`, `[Array(5)]`, `{Object(3 keys)}`), preserving JSON payload integrity and transcript legibility.
-- **Autonomous Tool Fleet Expansion**: Expanded registered Antigravity tool schemas from 6 to 9 across all installation and verification layers.
 
 ---
 

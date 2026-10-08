@@ -147,9 +147,9 @@ console.log("✓ MCP Server initialized");
   const res = await callRpc("tools/call", { name: "get_installation_status" });
   const text = res.result.content[0].text;
   assert.match(text, /Installation Status: HEALTHY & ACTIVE/);
-  assert.match(text, /ALL 9 SCHEMAS PRESENT/);
+  assert.match(text, /ALL 6 SCHEMAS PRESENT/);
   assert.match(text, /RTK Binary: INSTALLED/);
-  console.log("✓ get_installation_status reported healthy status with 9 schemas and RTK");
+  console.log("✓ get_installation_status reported healthy status with 6 schemas and RTK");
 }
 
 // Probe 2.d: subagent_brief format validation

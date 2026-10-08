@@ -46,7 +46,7 @@ function send(method, params = {}) {
   console.log("✓ initialize handshake succeeded");
 }
 
-// 2. tools/list (9 tools, safe_command permanently retired)
+// 2. tools/list (6 tools, safe_command permanently retired)
 {
   const res = await send("tools/list");
   const toolNames = res.result.tools.map((t) => t.name);
@@ -57,11 +57,11 @@ function send(method, params = {}) {
   assert.ok(toolNames.includes("sync_installation"));
   assert.ok(toolNames.includes("read_transcript"));
   assert.ok(toolNames.includes("query_transcript"));
-  assert.ok(toolNames.includes("get_spillover_content"));
-  assert.ok(toolNames.includes("read_task_output"));
-  assert.ok(toolNames.includes("get_step_detail"));
-  assert.equal(toolNames.length, 9, "Must expose exactly 9 canonical tools");
-  console.log("✓ tools/list returned all 9 governance & transcript tools (safe_command retired)");
+  assert.equal(toolNames.includes("get_spillover_content"), false);
+  assert.equal(toolNames.includes("read_task_output"), false);
+  assert.equal(toolNames.includes("get_step_detail"), false);
+  assert.equal(toolNames.length, 6, "Must expose exactly 6 canonical tools");
+  console.log("✓ tools/list returned all 6 governance & transcript tools (safe_command and extra tools retired)");
 }
 
 // 3. tools/call: safe_command must fail as tool not found
@@ -91,7 +91,7 @@ function send(method, params = {}) {
 {
   const res = await send("tools/call", { name: "get_installation_status" });
   assert.match(res.result.content[0].text, /Installation Status: HEALTHY & ACTIVE/);
-  assert.match(res.result.content[0].text, /ALL 9 SCHEMAS PRESENT/);
+  assert.match(res.result.content[0].text, /ALL 6 SCHEMAS PRESENT/);
   assert.match(res.result.content[0].text, /RTK Binary: INSTALLED/);
   console.log("✓ tools/call (get_installation_status) reported live 4-layer health + RTK");
 }
@@ -159,52 +159,10 @@ function send(method, params = {}) {
   console.log("✓ tools/call (query_transcript with summaryOnly: true) returned compact 1-line bullet summaries");
 }
 
-// 8c. tools/call: get_spillover_content
-{
-  // Test invalid file denial (non-spillover)
-  const resDenied = await send("tools/call", {
-    name: "get_spillover_content",
-    arguments: { uri: "C:/Users/USER/.gemini/antigravity/brain/session/secret.env" }
-  });
-  assert.equal(resDenied.result.isError, true);
-  assert.match(resDenied.result.content[0].text, /GOVERNANCE DENIAL/);
-
-  // Test reading simulated spillover file
-  const testSpilloverDir = path.resolve(__dirname, "../tmp_test/.system_generated/steps/999");
-  fs.mkdirSync(testSpilloverDir, { recursive: true });
-  const testFile = path.join(testSpilloverDir, "output.txt");
-  fs.writeFileSync(testFile, "Line 1: Build started\nLine 2: 12 tests passed\nLine 3: Build finished\n", "utf-8");
-
-  const resAllowed = await send("tools/call", {
-    name: "get_spillover_content",
-    arguments: { uri: `file:///${testFile.replace(/\\/g, "/")}`, lines: 2, tail: true }
-  });
-  assert.equal(resAllowed.result.isError, undefined);
-  const allowedText = resAllowed.result.content[0].text;
-  assert.match(allowedText, /Runtime Step Output Spillover/);
-  assert.match(allowedText, /12 tests passed/);
-  assert.match(allowedText, /Build finished/);
-
-  // Clean up
-  try { fs.rmSync(path.resolve(__dirname, "../tmp_test"), { recursive: true, force: true }); } catch {}
-  console.log("✓ tools/call (get_spillover_content) enforced spillover boundary and windowed output");
-}
-
-// 8d. tools/call: read_task_output
-{
-  // Test missing task
-  const resMissing = await send("tools/call", {
-    name: "read_task_output",
-    arguments: { taskId: "task-nonexistent-9999" }
-  });
-  assert.equal(resMissing.result.isError, true);
-  console.log("✓ tools/call (read_task_output) handled missing/running task lifecycle gating");
-}
-
-// 8e. tools/call: get_step_detail
+// 8c. tools/call: query_transcript with surgical stepIndex dereferencing
 {
   const resStep = await send("tools/call", {
-    name: "get_step_detail",
+    name: "query_transcript",
     arguments: {
       conversationId: "fcda194f-62d6-46aa-b545-b2de8fa5774e",
       stepIndex: 1
@@ -212,7 +170,22 @@ function send(method, params = {}) {
   });
   assert.equal(resStep.result.isError, undefined);
   assert.match(resStep.result.content[0].text, /Step 1/);
-  console.log("✓ tools/call (get_step_detail) surgically dereferenced step content");
+  console.log("✓ tools/call (query_transcript with stepIndex) surgically dereferenced step content");
+}
+
+// 8d. tools/call: query_transcript with surgical field extraction
+{
+  const resField = await send("tools/call", {
+    name: "query_transcript",
+    arguments: {
+      conversationId: "fcda194f-62d6-46aa-b545-b2de8fa5774e",
+      stepIndex: 1,
+      field: "content"
+    }
+  });
+  assert.equal(resField.result.isError, undefined);
+  assert.match(resField.result.content[0].text, /Step 1 Content/);
+  console.log("✓ tools/call (query_transcript with stepIndex and field) extracted specific field");
 }
 
 // 9. resources/read

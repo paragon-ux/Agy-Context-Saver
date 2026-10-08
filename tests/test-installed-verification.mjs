@@ -61,10 +61,10 @@ assert.ok(fs.existsSync(path.join(installedSchemasDir, "get_installation_status.
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "sync_installation.json")), "sync_installation.json exists");
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "read_transcript.json")), "read_transcript.json exists");
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "query_transcript.json")), "query_transcript.json exists");
-assert.ok(fs.existsSync(path.join(installedSchemasDir, "get_spillover_content.json")), "get_spillover_content.json exists");
-assert.ok(fs.existsSync(path.join(installedSchemasDir, "read_task_output.json")), "read_task_output.json exists");
-assert.ok(fs.existsSync(path.join(installedSchemasDir, "get_step_detail.json")), "get_step_detail.json exists");
-console.log("✓ Exactly 9 Antigravity tool schemas installed (safe_command permanently removed)");
+assert.equal(fs.existsSync(path.join(installedSchemasDir, "get_spillover_content.json")), false, "get_spillover_content.json must NOT exist");
+assert.equal(fs.existsSync(path.join(installedSchemasDir, "read_task_output.json")), false, "read_task_output.json must NOT exist");
+assert.equal(fs.existsSync(path.join(installedSchemasDir, "get_step_detail.json")), false, "get_step_detail.json must NOT exist");
+console.log("✓ Exactly 6 canonical Antigravity tool schemas installed (0 bespoke extra tools, safe_command retired)");
 
 // Test existing installation detector
 const { detectExistingInstallation } = await import("../scripts/install-register.mjs");
@@ -279,18 +279,18 @@ function sendRpc(method, params = {}) {
   assert.ok(toolNames.includes("sync_installation"));
   assert.ok(toolNames.includes("read_transcript"));
   assert.ok(toolNames.includes("query_transcript"));
-  assert.ok(toolNames.includes("get_spillover_content"));
-  assert.ok(toolNames.includes("read_task_output"));
-  assert.ok(toolNames.includes("get_step_detail"));
-  assert.equal(toolNames.length, 9);
-  console.log("✓ Installed MCP Server: tools/list verified [all 9 tools present, safe_command retired]");
+  assert.equal(toolNames.includes("get_spillover_content"), false);
+  assert.equal(toolNames.includes("read_task_output"), false);
+  assert.equal(toolNames.includes("get_step_detail"), false);
+  assert.equal(toolNames.length, 6);
+  console.log("✓ Installed MCP Server: tools/list verified [all 6 canonical tools present, safe_command and extra tools retired]");
 }
 
 // 3.3 Installation Status Tool Call
 {
   const res = await sendRpc("tools/call", { name: "get_installation_status" });
   assert.match(res.result.content[0].text, /Installation Status: HEALTHY & ACTIVE/);
-  assert.match(res.result.content[0].text, /ALL 9 SCHEMAS PRESENT/);
+  assert.match(res.result.content[0].text, /ALL 6 SCHEMAS PRESENT/);
   assert.match(res.result.content[0].text, /RTK Binary: INSTALLED/);
   console.log("✓ Installed MCP Server: get_installation_status reported healthy status + RTK");
 }

@@ -1,3 +1,18 @@
+#!/usr/bin/env node
+
+/**
+ * Agy-Context-Saver Output Governance & Forensic Dereferencing Tests (Simplified Architecture)
+ *
+ * Verifies:
+ * 1. Safe-Harbor rtk read on runtime step spillover files (.system_generated/steps/<step>/output.txt) (0 New Tools)
+ * 2. Native view_file on spillover denies and routes to rtk read
+ * 3. Lifecycle-gated rtk read on task logs (0 New Tools):
+ *    - Denied with Proportional Backoff countdown while RUNNING
+ *    - Allowed when TERMINATED
+ * 4. Surgical single-step extraction folded into query_transcript(stepIndex, field) (0 New Tools)
+ * 5. Pointer-Over-Wire (POW) contract in subagent_brief
+ */
+
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,10 +22,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const mcpServer = path.resolve(__dirname, "../mcp/index.js");
 const hookScript = path.resolve(__dirname, "../scripts/execution-guard-hook.mjs");
+const mcpServer = path.resolve(__dirname, "../mcp/index.js");
 
-console.log("Running Agy-Context-Saver Output Inspection Governance Tests...\n");
+console.log("Running Agy-Context-Saver Output Inspection Governance Tests (Simplified Architecture)...\n");
 
 // Helper to invoke hook script via stdin JSON
 function invokeHook(payload) {
@@ -55,10 +70,10 @@ function callMcp(method, params = {}) {
 await callMcp("initialize", { protocolVersion: "2024-11-05" });
 console.log("✓ MCP handshake established");
 
-// --- Group 1: Hook Redirection for Runtime Output Files ---
-console.log("\n--- Group 1: Hook Redirection for Runtime Spillover & Task Logs ---");
+// --- Group 1: Safe-Harbor rtk read for Runtime Spillover Files ---
+console.log("\n--- Group 1: Safe-Harbor rtk read for Runtime Spillover Files ---");
 
-// 1.1 view_file on runtime step spillover
+// 1.1 view_file on runtime step spillover routes to rtk read
 {
   const out = invokeHook({
     toolCall: {
@@ -67,26 +82,23 @@ console.log("\n--- Group 1: Hook Redirection for Runtime Spillover & Task Logs -
     }
   });
   assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Direct access to internal Antigravity execution state \(\.system_generated\)/);
-  assert.match(out.reason, /get_spillover_content\(uri="/);
-  console.log("✓ view_file on step output spillover denies with get_spillover_content routing");
+  assert.match(out.reason, /rtk read/);
+  console.log("✓ view_file on step output spillover denies and routes to 'rtk read'");
 }
 
-// 1.2 view_file on task log
+// 1.2 run_command with rtk read on step spillover is ALLOWED
 {
   const out = invokeHook({
     toolCall: {
-      name: "view_file",
-      args: { AbsolutePath: "C:/Users/USER/.gemini/antigravity/brain/session-123/.system_generated/tasks/task-409.log" }
+      name: "run_command",
+      args: { CommandLine: "rtk read .system_generated/steps/102/output.txt" }
     }
   });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Direct access to internal Antigravity execution state \(\.system_generated\)/);
-  assert.match(out.reason, /read_task_output\(taskId="409"\)/);
-  console.log("✓ view_file on task log denies with read_task_output routing");
+  assert.equal(out.decision, "allow");
+  console.log("✓ run_command with 'rtk read' on step output spillover is ALLOWED under safe harbor");
 }
 
-// 1.3 run_command shell access to step spillover
+// 1.3 run_command shell access (cat) is rewritten to rtk read and ALLOWED
 {
   const out = invokeHook({
     toolCall: {
@@ -94,111 +106,85 @@ console.log("\n--- Group 1: Hook Redirection for Runtime Spillover & Task Logs -
       args: { CommandLine: "cat .system_generated/steps/102/output.txt" }
     }
   });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Direct shell access to internal Antigravity execution state/);
-  assert.match(out.reason, /get_spillover_content/);
-  console.log("✓ run_command shell access to step output denies with get_spillover_content routing");
+  assert.equal(out.decision, "allow");
+  assert.equal(out.overwrite?.CommandLine, "rtk read .system_generated/steps/102/output.txt");
+  console.log("✓ run_command shell access (cat) is rewritten to 'rtk read' and ALLOWED");
 }
 
-// 1.4 run_command shell access to task log
+// --- Group 2: Lifecycle-Gated Task Output Inspection ---
+console.log("\n--- Group 2: Lifecycle-Gated Task Output Inspection ---");
+
+// 2.1 view_file on actively running task log is DENIED with Proportional Backoff
 {
   const out = invokeHook({
+    conversationId: "conv-test-live",
     toolCall: {
-      name: "run_command",
-      args: { CommandLine: 'Get-Content ".system_generated/tasks/task-999.log"' }
+      name: "view_file",
+      args: { AbsolutePath: "C:/Users/USER/.gemini/antigravity/brain/conv-test-live/.system_generated/tasks/task-live-1.log" }
     }
   });
   assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Direct shell access to internal Antigravity execution state/);
-  assert.match(out.reason, /read_task_output\(taskId="999"\)/);
-  console.log("✓ run_command shell access to task log denies with read_task_output routing");
+  assert.match(out.reason, /actively RUNNING/);
+  console.log("✓ view_file on actively running task log denies with Proportional Backoff");
 }
 
-// --- Group 2: MCP get_spillover_content Governance & Windowing ---
-console.log("\n--- Group 2: MCP get_spillover_content Governance & Windowing ---");
-
-// 2.1 Unauthorized file access denial
+// 2.2 run_command on actively running task log is DENIED with Proportional Backoff
 {
-  const res = await callMcp("tools/call", {
-    name: "get_spillover_content",
-    arguments: { uri: "C:/Users/USER/.gemini/antigravity/brain/sess/transcript.jsonl" }
+  const out = invokeHook({
+    conversationId: "conv-test-live",
+    toolCall: {
+      name: "run_command",
+      args: { CommandLine: "rtk read tasks/task-live-1.log" }
+    }
   });
-  assert.equal(res.result.isError, true);
-  assert.match(res.result.content[0].text, /\[GOVERNANCE DENIAL\]/);
-  console.log("✓ get_spillover_content strictly denies non-spillover paths");
+  assert.equal(out.decision, "deny");
+  assert.match(out.reason, /actively RUNNING/);
+  console.log("✓ run_command on actively running task log denies with Proportional Backoff");
 }
 
-// 2.2 Valid spillover file head windowing and regex filtering
+// 2.3 view_file on completed task log denies and routes to rtk read
 {
-  const testDir = path.resolve(__dirname, "../tmp_spillover_test/.system_generated/steps/101");
-  fs.mkdirSync(testDir, { recursive: true });
-  const testFile = path.join(testDir, "output.txt");
+  // Create a synthetic completed task log (>15s old)
+  const tmpTaskDir = path.resolve(__dirname, "../tmp_tasks_test/.system_generated/tasks");
+  fs.mkdirSync(tmpTaskDir, { recursive: true });
+  const completedLog = path.join(tmpTaskDir, "task-done-1.log");
+  fs.writeFileSync(completedLog, "Completed output test\n", "utf-8");
+  const pastTime = (Date.now() - 30000) / 1000;
+  fs.utimesSync(completedLog, pastTime, pastTime);
 
-  const lines = [
-    "Step init: started tool execution",
-    "Debug: loading module A",
-    "Result: 42 passed",
-    "Warning: deprecated API used",
-    "Step finish: tool complete"
-  ];
-  fs.writeFileSync(testFile, lines.join("\n") + "\n", "utf-8");
-
-  // Head window
-  const resHead = await callMcp("tools/call", {
-    name: "get_spillover_content",
-    arguments: { uri: testFile, lines: 2, tail: false }
+  const out = invokeHook({
+    toolCall: {
+      name: "view_file",
+      args: { AbsolutePath: completedLog }
+    }
   });
-  assert.equal(resHead.result.isError, undefined);
-  const headText = resHead.result.content[0].text;
-  assert.match(headText, /Step init/);
-  assert.match(headText, /Debug: loading module A/);
-  assert.doesNotMatch(headText, /Step finish/);
-
-  // Tail window
-  const resTail = await callMcp("tools/call", {
-    name: "get_spillover_content",
-    arguments: { uri: testFile, lines: 2, tail: true }
-  });
-  assert.equal(resTail.result.isError, undefined);
-  const tailText = resTail.result.content[0].text;
-  assert.match(tailText, /Warning: deprecated API/);
-  assert.match(tailText, /Step finish/);
-
-  // Regex filtering
-  const resFilter = await callMcp("tools/call", {
-    name: "get_spillover_content",
-    arguments: { uri: testFile, filterRegex: "Result:" }
-  });
-  assert.equal(resFilter.result.isError, undefined);
-  const filterText = resFilter.result.content[0].text;
-  assert.match(filterText, /Result: 42 passed/);
-  assert.doesNotMatch(filterText, /Debug: loading module A/);
-
-  // Clean up
-  try { fs.rmSync(path.resolve(__dirname, "../tmp_spillover_test"), { recursive: true, force: true }); } catch {}
-  console.log("✓ get_spillover_content correctly windows head/tail and applies regex filtering");
+  assert.equal(out.decision, "deny");
+  assert.match(out.reason, /rtk read/);
+  console.log("✓ view_file on completed task log routes to 'rtk read'");
 }
 
-// --- Group 3: MCP read_task_output Lifecycle Gating ---
-console.log("\n--- Group 3: MCP read_task_output Lifecycle Gating ---");
-
-// 3.1 Missing task returns clean error
+// 2.4 run_command with rtk read on completed task log is ALLOWED
 {
-  const res = await callMcp("tools/call", {
-    name: "read_task_output",
-    arguments: { taskId: "task-unknown-5555" }
+  const completedLog = path.resolve(__dirname, "../tmp_tasks_test/.system_generated/tasks/task-done-1.log");
+  const out = invokeHook({
+    toolCall: {
+      name: "run_command",
+      args: { CommandLine: `rtk read ${completedLog}` }
+    }
   });
-  assert.equal(res.result.isError, true);
-  console.log("✓ read_task_output handles missing task IDs safely");
+  assert.equal(out.decision, "allow");
+  console.log("✓ run_command with 'rtk read' on completed task log is ALLOWED");
+
+  try { fs.rmSync(path.resolve(__dirname, "../tmp_tasks_test"), { recursive: true, force: true }); } catch {}
 }
 
-// --- Group 4: MCP get_step_detail Forensic Extraction ---
-console.log("\n--- Group 4: MCP get_step_detail Forensic Extraction ---");
+// --- Group 3: Forensic Extraction Folded into query_transcript ---
+console.log("\n--- Group 3: Forensic Extraction Folded into query_transcript ---");
 
-// 4.1 Surgical field extraction
+// 3.1 Surgical field extraction via query_transcript(stepIndex, field)
 {
   const resContent = await callMcp("tools/call", {
-    name: "get_step_detail",
+    name: "query_transcript",
     arguments: {
       conversationId: "fcda194f-62d6-46aa-b545-b2de8fa5774e",
       stepIndex: 1,
@@ -207,10 +193,10 @@ console.log("\n--- Group 4: MCP get_step_detail Forensic Extraction ---");
   });
   assert.equal(resContent.result.isError, undefined);
   assert.match(resContent.result.content[0].text, /Step 1 Content/);
-  console.log("✓ get_step_detail extracts specific content field");
+  console.log("✓ query_transcript(stepIndex, field='content') surgically extracts content field");
 
   const resAll = await callMcp("tools/call", {
-    name: "get_step_detail",
+    name: "query_transcript",
     arguments: {
       conversationId: "fcda194f-62d6-46aa-b545-b2de8fa5774e",
       stepIndex: 1
@@ -218,11 +204,11 @@ console.log("\n--- Group 4: MCP get_step_detail Forensic Extraction ---");
   });
   assert.equal(resAll.result.isError, undefined);
   assert.match(resAll.result.content[0].text, /Step 1/);
-  console.log("✓ get_step_detail returns full step formatted as Markdown");
+  console.log("✓ query_transcript(stepIndex) returns full un-truncated step formatted as Markdown");
 }
 
-// --- Group 5: Pointer-Over-Wire Contract in subagent_brief ---
-console.log("\n--- Group 5: Pointer-Over-Wire Contract in subagent_brief ---");
+// --- Group 4: Pointer-Over-Wire Contract in subagent_brief ---
+console.log("\n--- Group 4: Pointer-Over-Wire Contract in subagent_brief ---");
 {
   const res = await callMcp("tools/call", {
     name: "subagent_brief",

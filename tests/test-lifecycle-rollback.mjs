@@ -76,23 +76,28 @@ const recoveredMcp = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
 assert.ok(recoveredMcp.mcpServers?.["agy-context-saver"], "agy-context-saver restored in mcp_config.json");
 assert.ok(recoveredMcp.mcpServers?.["waymark-engine"], "waymark-engine still preserved");
 
-// Verify all 6 schemas exist and safe_command is absent
+// Verify all 6 schemas exist and retired schemas are absent
 const requiredSchemas = [
   "check_context_health.json",
   "subagent_brief.json",
   "get_installation_status.json",
   "sync_installation.json",
   "read_transcript.json",
-  "query_transcript.json",
-  "get_spillover_content.json",
-  "read_task_output.json",
-  "get_step_detail.json"
+  "query_transcript.json"
 ];
 for (const schemaName of requiredSchemas) {
   assert.equal(fs.existsSync(path.join(antigravityMcpDir, schemaName)), true, `Schema ${schemaName} restored`);
 }
-assert.equal(fs.existsSync(path.join(antigravityMcpDir, "safe_command.json")), false, "safe_command.json must NOT exist");
-console.log("✓ Re-installation completed successfully: all 4 integration layers and 9 schemas active (safe_command retired)");
+const retiredSchemas = [
+  "safe_command.json",
+  "get_spillover_content.json",
+  "read_task_output.json",
+  "get_step_detail.json"
+];
+for (const retired of retiredSchemas) {
+  assert.equal(fs.existsSync(path.join(antigravityMcpDir, retired)), false, `${retired} must NOT exist`);
+}
+console.log("✓ Re-installation completed successfully: all 4 integration layers and 6 canonical schemas active (0 extra tools)");
 
 // --- 5. Backup Restore Option Test ---
 console.log("\n--- 5. Backup Restore Option Verification ---");

@@ -1,7 +1,7 @@
 # MCP Tool, Prompt & CLI Reference
 
 `Agy-Context-Saver` implements standard Model Context Protocol (MCP) capabilities purpose-built for Antigravity:
-- **9 Agent-Facing Tools**: Invoked autonomously by the AI during coding sessions to govern lifecycles, stream transcripts, safely inspect spillovers, retrieve post-mortem task logs, dereference full steps, and audit installations.
+- **6 Canonical Agent-Facing Tools**: Invoked autonomously by the AI during coding sessions to audit context health, formulate subagent delegations, stream Markdown transcripts, perform surgical forensic queries, and verify installations.
 - **1 User-Facing Prompt (`context_shield`)**: Appears as a slash command (`/mcp:agy-context-saver:context_shield`) in the chat autocomplete menu to inject 3-layer governance rules with a single click.
 - **RTK (Rust Token Killer)**: Transparent CLI proxy that reduces terminal and inspection token consumption by 60–99%.
 
@@ -57,7 +57,7 @@ Reads recent conversation turns from Antigravity transcripts in clean, formatted
 
 ## 3. `query_transcript`
 
-Forensic query and search engine across Antigravity conversation trajectories.
+Forensic query, search engine, and surgical step dereferencer across Antigravity conversation trajectories.
 
 ### Parameters
 
@@ -68,6 +68,13 @@ Forensic query and search engine across Antigravity conversation trajectories.
 | `roles` | `array` | No | `["user", "assistant"]` | Filter by role: `"user"`, `"assistant"`, `"tool"`, `"error"`, `"all"`. |
 | `maxResults` | `number` | No | `5` | Maximum number of matching steps to return. |
 | `summaryOnly` | `boolean` | No | `false` | If `true`, formats results as 1-line bullet summaries per matched step. |
+| `stepIndex` | `number` | No | — | Exact step index to surgically extract un-truncated from `transcript_full.jsonl`. |
+| `field` | `string` | No | — | Optional field projection when `stepIndex` is provided (e.g. `"content"`, `"thinking"`, `"tool_calls"`). |
+
+### Usage Modes
+- **Keyword / Role Search**: Call with `query="pattern"` to filter historical turns without context bloat.
+- **Summary Mode**: Set `summaryOnly=true` for 1-line bullet summaries.
+- **Surgical Step Extraction**: Pass `stepIndex=974` (and optional `field="content"`) to dereference the un-truncated payload directly from `transcript_full.jsonl`.
 
 ---
 
@@ -109,48 +116,20 @@ Programmatically reconciles and repairs all installation layers and tool schemas
 
 ---
 
-## 7. `get_spillover_content`
+## Streamlined Output & Task Log Governance (0 New Tools)
 
-Safely inspects ephemeral tool output spillover files (`.system_generated/steps/<step>/output.txt`) created when Antigravity redirects oversized tool outputs to disk. Applies token windowing and filtering to prevent context blowouts.
+Rather than introducing redundant MCP tools that inflate the prompt schema and create tool-selection ambiguity, `Agy-Context-Saver` leverages canonical tools and the PreToolUse hook to solve output blind spots:
 
-### Parameters
+### 1. Runtime Step Output Spillovers
+When tool outputs exceed Antigravity's inline threshold ($>24\text{ KB}$), the engine redirects output to `.system_generated/steps/<step>/output.txt`.
+- **Safe-Harbor `rtk read`**: The PreToolUse hook grants safe-harbor access for `rtk read` on `/\.system_generated\/steps\/\d+\/output\.txt$/`.
+- **Automatic Routing**: Native `view_file` or `cat` calls on spillover paths are automatically routed to `rtk read <path>`.
+- `rtk read` natively applies line clamping, head/tail windowing, and token truncation without custom MCP tool overhead.
 
-| Name | Type | Required | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `uri` | `string` | **Yes** | — | File URI or absolute path provided by Antigravity runtime. |
-| `lines` | `number` | No | `80` | Number of lines to return (max 200). |
-| `tail` | `boolean` | No | `false` | If `true`, returns last N lines; if `false`, returns first N lines. |
-| `filterRegex` | `string` | No | — | Optional regex filter to match relevant output lines. |
-
----
-
-## 8. `read_task_output`
-
-Inspects the output log of a background task. Strictly gated by lifecycle state: calls are **denied** under Proportional Backoff while the task is `RUNNING`, but permitted once the task has `COMPLETED` for post-mortem analysis (e.g., retrieving truncated build or test stack traces).
-
-### Parameters
-
-| Name | Type | Required | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `taskId` | `string` | **Yes** | — | The task ID (e.g. `task-1004` or full task path). |
-| `lines` | `number` | No | `80` | Number of lines to return (max 200). |
-| `tail` | `boolean` | No | `true` | If `true`, returns last N lines (most recent errors/summary). |
-| `filterRegex` | `string` | No | — | Optional regex filter to isolate specific errors or lines. |
-| `conversationId` | `string` | No | active | Conversation UUID or folder name. |
-
----
-
-## 9. `get_step_detail`
-
-Surgically retrieves the full, un-truncated content of a specific conversation step directly from `transcript_full.jsonl`. Eliminates data loss from summary truncations and extracts large subagent messages, thinking blocks, or tool arguments without loading surrounding turns into context.
-
-### Parameters
-
-| Name | Type | Required | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `stepIndex` | `number` | **Yes** | — | Exact `step_index` to inspect. |
-| `conversationId` | `string` | No | active | Conversation UUID or path. |
-| `field` | `string` | No | `"all"` | Field to extract: `"content"`, `"thinking"`, `"tool_calls"`, `"tool_args"`, or `"tool_args:<argName>"`. |
+### 2. Completed Background Task Logs
+When background tasks detach and produce output exceeding inline display limits, the full execution log resides at `.system_generated/tasks/<taskId>.log`.
+- **Active Task Protection**: While a task is `RUNNING`, all attempts to read the log (via `view_file` or `rtk read`) are strictly **DENIED** under the Proportional Backoff curve, stopping busy-wait polling loops cold.
+- **Post-Mortem Retrieval**: Once the task is `COMPLETED` or `TERMINATED`, `rtk read tasks/<taskId>.log` is permitted, allowing bounded stack trace inspection and test failure analysis.
 
 ---
 
