@@ -276,6 +276,20 @@ function rewriteCommandWithRtk(rawCmd) {
     return trimmed;
   }
 
+  // Unwrap shell wrappers (e.g. cmd /c "...", powershell -Command "...", bash -c "...") (LH-01-B)
+  const shellWrapperMatch = trimmed.match(
+    /^(cmd(?:\.exe)?\s+\/[cC]|(?:powershell|pwsh)(?:\.exe)?\s+(?:-Command|-c)|(?:bash|sh)\s+-c)\s+["']?(.+?)["']?$/i
+  );
+  if (shellWrapperMatch) {
+    const wrapperPrefix = shellWrapperMatch[1];
+    const innerCmd = shellWrapperMatch[2].trim();
+    const rewrittenInner = rewriteCommandWithRtk(innerCmd);
+    if (rewrittenInner !== innerCmd) {
+      return `${wrapperPrefix} "${rewrittenInner}"`;
+    }
+    return trimmed;
+  }
+
   // Fast-path bypass for shell builtins, non-rewritable binaries, and powershell cmdlets
   const firstWord = (trimmed.match(/^[^\s"']+/)?.[0] || "").toLowerCase();
   if (
@@ -315,6 +329,17 @@ function rewriteCommandWithRtk(rawCmd) {
   cache[trimmed] = rewritten;
   saveRewriteCache(cache);
   return rewritten;
+}
+
+/**
+ * Calculates the required minimum cooldown interval (in seconds)
+ * proportional to the number of diagnostic status inspections already performed.
+ * Formula: Math.min(600, Math.round(30 * Math.pow(2.5, Math.max(0, pollCount - 1))))
+ * Levels: Level 0 -> 0s (baseline), Level 1 -> 30s, Level 2 -> 75s, Level 3 -> 188s, Level 4 -> 469s, Level 5+ -> 600s
+ */
+function getRequiredBackoffSeconds(pollCount) {
+  if (pollCount <= 0) return 0;
+  return Math.min(600, Math.round(30 * Math.pow(2.5, Math.max(0, pollCount - 1))));
 }
 
 // --- Main Hook Entrypoint ---
@@ -361,6 +386,29 @@ try {
       respond({
         decision: "deny",
         reason: "Antigravity Governance: Missing or empty CommandLine in run_command."
+      });
+    }
+
+    // LH-02-B: Direct shell access to internal Antigravity execution state (.system_generated)
+    if (isProtectedInternalState(rawCmd)) {
+      respond({
+        decision: "deny",
+        reason:
+          "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+          "- To inspect conversation transcripts: Call MCP tool read_transcript(conversationId=\"...\", mode=\"compact\") or query_transcript(...).\n" +
+          "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
+      });
+    }
+
+    // LH-09-B: Shell command mutation of protected benchmark artifacts
+    if (
+      (rawCmd.includes(">") || /\b(?:rm|del|Remove-Item)\b/i.test(rawCmd)) &&
+      isProtectedBenchmarkPath(rawCmd)
+    ) {
+      respond({
+        decision: "force_ask",
+        reason:
+          "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination."
       });
     }
 
@@ -486,33 +534,43 @@ try {
       session.taskIds.push(taskId);
     }
 
-    // First inspection check in the session is permitted
-    if (session.pollCount === 0) {
-      session.pollCount = 1;
+    const now = Date.now();
+    const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(session.pollCount));
+    const requiredBackoffMs = requiredBackoffSec * 1000;
+    const elapsedMs = session.lastPollTime ? (now - session.lastPollTime) : Infinity;
+    const elapsedSec = Math.floor(elapsedMs / 1000);
+
+    // Premature check before backoff interval has elapsed
+    if (elapsedMs < requiredBackoffMs) {
+      session.denials++;
       saveSessionState(convId, session);
-      respond({ decision: "allow" });
-    }
 
-    // Any subsequent polling checks in the session are strictly denied
-    session.denials++;
-    saveSessionState(convId, session);
+      if (session.denials >= 5) {
+        respond({
+          decision: "force_ask",
+          reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: manage_task('${action}') called prematurely ${session.denials} times during active backoff window across tasks [${session.taskIds.join(", ")}]. Stop calling tools and yield the turn for native Reactive Wakeup (<SYSTEM_MESSAGE>). User confirmation required to proceed.`
+        });
+      }
 
-    if (session.denials >= 5) {
+      const remainingSec = Math.ceil((requiredBackoffMs - elapsedMs) / 1000);
       respond({
-        decision: "force_ask",
-        reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: manage_task('${action}') has been denied ${session.denials} times across tasks [${session.taskIds.join(", ")}]. Stop calling tools and yield the turn for native Reactive Wakeup (<SYSTEM_MESSAGE>). User confirmation required to proceed.`
+        decision: "deny",
+        reason: `Antigravity Execution Governance: Proportional Backoff Active (Level ${session.pollCount}, ${session.denials} denial${session.denials > 1 ? "s" : ""}). Diagnostic check #${session.pollCount + 1} requires at least ${requiredBackoffSec}s elapsed since previous check (${elapsedSec}s elapsed, ${remainingSec}s remaining). Tasks execute asynchronously and notify you automatically via native Reactive Wakeup (<SYSTEM_MESSAGE>) upon completion. Stop calling tools and yield your turn now.`
       });
     }
 
-    respond({
-      decision: "deny",
-      reason: `Antigravity Execution Governance: Background task polling is prohibited (${session.denials} denial). Tasks execute asynchronously and notify you automatically via native Reactive Wakeup (<SYSTEM_MESSAGE>) upon completion. Stop calling tools and yield your turn now.`
-    });
+    // Backoff window satisfied! Allow diagnostic check and advance level:
+    session.pollCount++;
+    session.lastPollTime = now;
+    session.denials = 0;
+    saveSessionState(convId, session);
+    respond({ decision: "allow" });
   }
 
   if (toolName === "schedule") {
     const prompt = String(args.Prompt || args.prompt || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
     const cond = String(args.TimerCondition || args.timerCondition || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+    const duration = Number(args.DurationSeconds || args.durationSeconds || args.duration || 0);
 
     const isTaskPoll =
       cond.startsWith("task-") ||
@@ -525,23 +583,30 @@ try {
       ((prompt.includes("check") || prompt.includes("status") || prompt.includes("poll") || prompt.includes("monitor") || prompt.includes("wait")) &&
        (prompt.includes("task") || prompt.includes("process") || prompt.includes("job") || prompt.includes("test") || prompt.includes("command") || prompt.includes("suite")));
 
-    // All polling timers are strictly denied regardless of duration (LH-03)
     if (isTaskPoll) {
       const session = getSessionState(convId);
-      session.denials++;
-      saveSessionState(convId, session);
+      const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(session.pollCount));
 
-      if (session.denials >= 5) {
+      // Task watchdog timers must be AT LEAST the required backoff window!
+      if (duration < requiredBackoffSec) {
+        session.denials++;
+        saveSessionState(convId, session);
+
+        if (session.denials >= 5) {
+          respond({
+            decision: "force_ask",
+            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: schedule polling timer has been denied ${session.denials} times. Background tasks notify you automatically upon completion. User confirmation required to proceed.`
+          });
+        }
+
         respond({
-          decision: "force_ask",
-          reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: schedule polling timer has been denied ${session.denials} times. Background tasks notify you automatically upon completion. User confirmation required to proceed.`
+          decision: "deny",
+          reason: `Antigravity Execution Governance: Task watchdog timer duration too short (${duration}s, ${session.denials} denial${session.denials > 1 ? "s" : ""}). Under Proportional Backoff (Level ${session.pollCount}), watchdog timer must be at least ${requiredBackoffSec}s. Tasks notify you automatically via native Reactive Wakeup (<SYSTEM_MESSAGE>). Stop calling tools and yield the turn instead.`
         });
       }
 
-      respond({
-        decision: "deny",
-        reason: "Antigravity Execution Governance: Scheduling timers to poll or monitor background tasks is prohibited regardless of duration. Background tasks notify you automatically via native Reactive Wakeup (<SYSTEM_MESSAGE>). Stop calling tools and yield the turn instead."
-      });
+      // If duration >= requiredBackoffSec, watchdog timer is permitted!
+      respond({ decision: "allow" });
     }
 
     // Non-polling timers (e.g. user-requested reminders) are allowed

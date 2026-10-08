@@ -90,6 +90,23 @@ console.log("--- Group A: RTK Integration & Command Rewriting ---");
   console.log("✓ run_command fast-path bypasses non-rewritable shell builtins and utilities");
 }
 
+// 3b. run_command: shell wrapper unwrapping (cmd /c, powershell -Command) (LH-01-B)
+{
+  const outCmd = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: 'cmd /c "git status"', WaitMsBeforeAsync: 1000 } }
+  });
+  assert.equal(outCmd.decision, "allow");
+  assert.equal(outCmd.overwrite?.CommandLine, 'cmd /c "rtk git status"');
+
+  const outPs = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: 'powershell -Command "git status"', WaitMsBeforeAsync: 1000 } }
+  });
+  assert.equal(outPs.decision, "allow");
+  assert.equal(outPs.overwrite?.CommandLine, 'powershell -Command "rtk git status"');
+
+  console.log("✓ run_command unwraps shell wrappers (cmd /c, powershell -Command) for RTK (LH-01-B closed)");
+}
+
 // 3b. run_command: rewrite caching in tmpdir
 {
   const cacheFile = path.join(os.tmpdir(), "agy-rtk-rewrite-cache.json");
@@ -215,6 +232,23 @@ console.log("\n--- Group C: Protected Antigravity State vs Special Files ---");
   console.log("✓ view_file on task-1521.log strictly denied (LH-02 closed)");
 }
 
+// 13b. run_command: direct shell access to .system_generated is DENIED (LH-02-B)
+{
+  const outCat = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: "cat .system_generated/logs/transcript.jsonl" } }
+  });
+  assert.equal(outCat.decision, "deny");
+  assert.match(outCat.reason, /Direct shell access to internal Antigravity execution state/);
+
+  const outGc = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: 'Get-Content "C:/brain/.system_generated/tasks/task-1.log"' } }
+  });
+  assert.equal(outGc.decision, "deny");
+  assert.match(outGc.reason, /Direct shell access to internal Antigravity execution state/);
+
+  console.log("✓ run_command direct shell access to .system_generated denied (LH-02-B closed)");
+}
+
 // 14. view_file on arbitrary future .system_generated file: HARD DENIAL
 {
   const p = "C:/Users/USER/.gemini/antigravity/brain/sess-123/.system_generated/scheduler/future_state.json";
@@ -272,19 +306,20 @@ const convId = "conv-replay-lifecycle";
   console.log("✓ manage_task initial status check in session allowed");
 }
 
-// 20. manage_task status: second check on same task is DENIED
+// 20. manage_task status: second check on same task is DENIED (proportional backoff)
 {
   const out = runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-A" } } });
   assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Background task polling is prohibited/);
-  console.log("✓ manage_task second check on same task denied (1 denial)");
+  assert.match(out.reason, /Proportional Backoff Active/);
+  assert.match(out.reason, /1 denial/);
+  console.log("✓ manage_task second check on same task denied under Proportional Backoff (1 denial)");
 }
 
 // 21. LH-06: Changing task ID does NOT reset session denial counter!
 {
   const out = runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-B" } } });
   assert.equal(out.decision, "deny");
-  assert.match(out.reason, /2 denial/);
+  assert.match(out.reason, /2 denials/);
   console.log("✓ changing TaskId does NOT reset session ledger (LH-06 closed)");
 }
 
@@ -298,22 +333,23 @@ const convId = "conv-replay-lifecycle";
     }
   });
   assert.equal(out.decision, "deny");
-  assert.match(out.reason, /3 denial/);
+  assert.match(out.reason, /3 denials/);
   console.log("✓ debug/stuck/timeout keywords do NOT bypass governance (LH-04 closed)");
 }
 
-// 23. LH-03: Long schedule timers (>= 120s, e.g. 180s) on tasks are DENIED!
+// 23. LH-03: Task watchdog timer shorter than required backoff (< 30s) is DENIED!
 {
   const out = runHook({
     conversationId: convId,
     toolCall: {
       name: "schedule",
-      args: { DurationSeconds: 180, Prompt: "Check on background task-1542", TimerCondition: "task-1542" }
+      args: { DurationSeconds: 15, Prompt: "Check on background task-1542", TimerCondition: "task-1542" }
     }
   });
   assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Scheduling timers to poll or monitor background tasks is prohibited regardless of duration/);
-  console.log("✓ schedule timer with duration >= 120s is strictly denied (LH-03 closed)");
+  assert.match(out.reason, /Task watchdog timer duration too short/);
+  assert.match(out.reason, /4 denials/);
+  console.log("✓ task watchdog timer < 30s is strictly denied (LH-03 closed)");
 }
 
 // 24. Circuit Breaker Tier 3: 5th cumulative denial triggers force_ask!
@@ -338,6 +374,19 @@ const convId = "conv-replay-lifecycle";
   });
   assert.equal(out.decision, "allow");
   console.log("✓ standard non-polling user reminder is allowed");
+}
+
+// 25b. Task watchdog timer meeting backoff requirement (>= 30s) is ALLOWED
+{
+  const out = runHook({
+    conversationId: "conv-watchdog-allowed",
+    toolCall: {
+      name: "schedule",
+      args: { DurationSeconds: 60, Prompt: "Check on background task-1542", TimerCondition: "task-1542" }
+    }
+  });
+  assert.equal(out.decision, "allow");
+  console.log("✓ task watchdog timer meeting backoff requirement (>= 30s) is allowed");
 }
 
 // ============================================================================
@@ -369,6 +418,19 @@ console.log("\n--- Group E: Benchmark Mutation Protection ---");
   assert.equal(out.decision, "force_ask");
   assert.match(out.reason, /BENCHMARK MUTATION DETECTED/);
   console.log("✓ mutation of prompt template artifact triggers force_ask");
+}
+
+// 27b. run_command mutation of evaluator triggers force_ask (LH-09-B)
+{
+  const out = runHook({
+    toolCall: {
+      name: "run_command",
+      args: { CommandLine: 'echo "score=1.0" > c:/project/evaluators/eval_accuracy.py' }
+    }
+  });
+  assert.equal(out.decision, "force_ask");
+  assert.match(out.reason, /BENCHMARK MUTATION DETECTED/);
+  console.log("✓ shell command mutation of evaluator triggers force_ask (LH-09-B closed)");
 }
 
 // 28. Normal workspace code edit is ALLOWED
@@ -423,16 +485,17 @@ const s3 = runHook({
 assert.equal(s3.decision, "deny");
 console.log("  Replay Step 3: view_file on task-1521.log -> blocked by root guard");
 
-// Step 4: Model tried long watchdog timer (180s) to wait in foreground -> BLOCKED
+// Step 4: Model tried short watchdog timer (15s) to wait in foreground -> BLOCKED
 const s4 = runHook({
   conversationId: incidentConv,
   toolCall: {
     name: "schedule",
-    args: { DurationSeconds: 180, Prompt: "Check on task-1542", TimerCondition: "task-1542" }
+    args: { DurationSeconds: 15, Prompt: "Check on task-1542", TimerCondition: "task-1542" }
   }
 });
 assert.equal(s4.decision, "deny");
-console.log("  Replay Step 4: 180s schedule timer on task -> blocked regardless of duration");
+assert.match(s4.reason, /Task watchdog timer duration too short/);
+console.log("  Replay Step 4: short schedule timer on task (< 30s) -> blocked by backoff coordination");
 
 // Step 5: Model tried switching task IDs to task-1581 -> BLOCKED (session ledger)
 const s5 = runHook({

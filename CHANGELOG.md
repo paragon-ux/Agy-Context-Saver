@@ -5,6 +5,18 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-10-07
+
+### Governance & Loophole Elimination
+- **Proportional Backoff Engine**: Eliminated the "Pendulum Freeze Trap" (where total bans on task polling caused hung/deadlocked background commands to run unmonitored forever) by implementing an exponential backoff curve ($0\text{s} \to 30\text{s} \to 75\text{s} \to 188\text{s} \to 469\text{s} \to 600\text{s}$). Tasks can be safely diagnosed when silent without enabling busy-waiting loops.
+- **Watchdog Timer Coordination**: Coordinated `schedule` watchdog timers with the active proportional backoff window. Timers shorter than the backoff cooldown are rejected with detailed feedback, while legitimate watchdog timers ($\ge 30\text{s}$) are permitted and auto-cancel via native Reactive Wakeup.
+- **Shell Wrapper Unwrapping (LH-01-B)**: Added recursive shell wrapper unwrapping (`cmd /c`, `powershell -Command`, `pwsh -c`, `bash -c`) inside `run_command` so wrapped commands are transparently rewritten to RTK equivalents instead of bypassing token optimization.
+- **Internal State Shell Guard (LH-02-B)**: Added strict shell command guards blocking direct shell access (`cat`, `Get-Content`, `type`) to internal Antigravity execution state (`.system_generated/`), routing transcript queries to MCP tools.
+- **Benchmark Shell Mutation Protection (LH-09-B)**: Extended benchmark and evaluator protections to shell redirect and removal operations (`>`, `rm`, `del`, `Remove-Item`), preventing benchmark tampering via the terminal.
+- **Single Source of Truth Ledger**: Authored comprehensive `LEDGER.md` tracking all 10 historical loopholes (LH-01 to LH-10), remnant escape routes, backoff mathematical formulas, and architectural invariants.
+
+---
+
 ## [1.2.1] - 2026-10-07
 
 ### Documentation & Developer Experience

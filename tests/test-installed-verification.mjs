@@ -97,15 +97,15 @@ function callInstalledHook(payload) {
   console.log("✓ Installed Hook: Initial manage_task(status) -> ALLOWED");
 }
 
-// 2.2 Rapid consecutive status check: DENIED
+// 2.2 Rapid consecutive status check: DENIED under Proportional Backoff
 {
   const res = callInstalledHook({
     conversationId: "installed-conv-1",
     toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-live-1" } }
   });
   assert.equal(res.decision, "deny");
-  assert.match(res.reason, /Background task polling is prohibited/);
-  console.log("✓ Installed Hook: Subsequent manage_task(status) -> DENIED");
+  assert.match(res.reason, /Proportional Backoff Active/);
+  console.log("✓ Installed Hook: Subsequent manage_task(status) -> DENIED (Proportional Backoff)");
 }
 
 // 2.3 Task kill allowance
@@ -128,6 +128,22 @@ function callInstalledHook(payload) {
   console.log("✓ Installed Hook: run_command('git status') rewritten to 'rtk git status' & wait 10000ms");
 }
 
+// 2.4b Shell wrapper unwrapping (cmd /c, powershell -Command)
+{
+  const resCmd = callInstalledHook({
+    toolCall: { name: "run_command", args: { CommandLine: 'cmd /c "git status"', WaitMsBeforeAsync: 3000 } }
+  });
+  assert.equal(resCmd.decision, "allow");
+  assert.equal(resCmd.overwrite?.CommandLine, 'cmd /c "rtk git status"');
+
+  const resPs = callInstalledHook({
+    toolCall: { name: "run_command", args: { CommandLine: 'powershell -Command "git status"', WaitMsBeforeAsync: 3000 } }
+  });
+  assert.equal(resPs.decision, "allow");
+  assert.equal(resPs.overwrite?.CommandLine, 'powershell -Command "rtk git status"');
+  console.log("✓ Installed Hook: shell wrappers (cmd /c, powershell -Command) unwrapped for RTK (LH-01-B closed)");
+}
+
 // 2.5 Daemon run preservation
 {
   const res = callInstalledHook({
@@ -138,14 +154,25 @@ function callInstalledHook(payload) {
   console.log("✓ Installed Hook: run_command with IsDaemon:true preserves wait window");
 }
 
-// 2.6 Schedule task polling denial
+// 2.6 Schedule task polling denial (< 30s)
 {
   const res = callInstalledHook({
-    toolCall: { name: "schedule", args: { DurationSeconds: 180, Prompt: "Check on background task-99", TimerCondition: "task-99" } }
+    conversationId: "installed-conv-1",
+    toolCall: { name: "schedule", args: { DurationSeconds: 15, Prompt: "Check on background task-99", TimerCondition: "task-99" } }
   });
   assert.equal(res.decision, "deny");
-  assert.match(res.reason, /Scheduling timers to poll or monitor background tasks is prohibited/);
-  console.log("✓ Installed Hook: schedule task polling (180s) -> DENIED (no watchdog loophole)");
+  assert.match(res.reason, /Task watchdog timer duration too short/);
+  console.log("✓ Installed Hook: schedule task polling (< 30s) -> DENIED (no watchdog loophole)");
+}
+
+// 2.6b Schedule watchdog timer meeting backoff (>= 30s): ALLOWED
+{
+  const res = callInstalledHook({
+    conversationId: "installed-conv-watchdog",
+    toolCall: { name: "schedule", args: { DurationSeconds: 60, Prompt: "Check on background task-99", TimerCondition: "task-99" } }
+  });
+  assert.equal(res.decision, "allow");
+  console.log("✓ Installed Hook: schedule watchdog timer (60s >= 30s backoff) -> ALLOWED");
 }
 
 // 2.7 Schedule user timer allowance
@@ -178,6 +205,16 @@ function callInstalledHook(payload) {
   assert.equal(res.decision, "deny");
   assert.match(res.reason, /Direct access to internal Antigravity execution state \(\.system_generated\)/);
   console.log("✓ Installed Hook: view_file on .system_generated -> STRICTLY DENIED by root");
+}
+
+// 2.9 Direct shell access to .system_generated denied
+{
+  const resCat = callInstalledHook({
+    toolCall: { name: "run_command", args: { CommandLine: "cat .system_generated/logs/transcript.jsonl" } }
+  });
+  assert.equal(resCat.decision, "deny");
+  assert.match(resCat.reason, /Direct shell access to internal Antigravity execution state/);
+  console.log("✓ Installed Hook: direct shell access to .system_generated -> DENIED (LH-02-B closed)");
 }
 
 // --- 3. Live Installed MCP Server Verification ---
