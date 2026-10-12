@@ -51,7 +51,7 @@ if (cliArg === "install" || cliArg === "--install") {
 
 function printHelp() {
   console.log(`
-Agy-Context-Saver 🛡️ (v1.2.1)
+Agy-Context-Saver 🛡️ (v1.6.0)
 Universal MCP Server & Lifecycle Governor for Google Antigravity (Powered by RTK)
 
 Usage:

@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Broadened Multi-Agent Positioning**: Shifted documentation and positioning from a narrow coding focus to affordable, reliable multi-agent workflows across general tasks (development, deep research, operations, analysis, and document drafting).
 - **Subagent Brief Schema Freeze**: Formally froze `subagent_brief` as a lightweight ergonomic utility adhering strictly to YAGNI principles; rejected feature creep (finding ledgers, citation judges, blinding switches).
 - **Zensical Documentation Navigation**: Registered `docs/roadmap.md` in navigation and validated zero dead anchors across the entire documentation site (`zensical build`).
+- **Release-Readiness & Hero Positioning**: Elevated Pointer-Over-Wire (POW) and the Enterprise Non-Destructive Guarantee to landing hero sections, added the flagship before/after comparison table to `README.md`, unified the 3-Layer Governance taxonomy, and completed 100% parameter tables in `docs/tools.md`.
 
 ## [1.5.1] - 2026-10-11
 
@@ -145,3 +146,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial release of Agy-Context-Saver.
 - Antigravity Model Context Protocol (MCP) server.
 - Background task lifecycle governance and reactive wakeup enforcement.
+
+[1.6.0]: https://github.com/paragon-ux/agy-context-saver/compare/v1.5.1...v1.6.0
+[1.5.1]: https://github.com/paragon-ux/agy-context-saver/compare/v1.5.0...v1.5.1
+[1.5.0]: https://github.com/paragon-ux/agy-context-saver/compare/v1.4.0...v1.5.0
+[1.4.0]: https://github.com/paragon-ux/agy-context-saver/compare/v1.3.2...v1.4.0
+[1.3.2]: https://github.com/paragon-ux/agy-context-saver/compare/v1.3.1...v1.3.2
+[1.3.1]: https://github.com/paragon-ux/agy-context-saver/compare/v1.3.0...v1.3.1
+[1.3.0]: https://github.com/paragon-ux/agy-context-saver/compare/v1.2.1...v1.3.0
+[1.2.1]: https://github.com/paragon-ux/agy-context-saver/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/paragon-ux/agy-context-saver/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/paragon-ux/agy-context-saver/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/paragon-ux/agy-context-saver/releases/tag/v1.0.0

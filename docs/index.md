@@ -25,6 +25,13 @@ Install and activate the governor across your Antigravity environment in seconds
     npm run status
     ```
 
+!!! success "Enterprise Non-Destructive Guarantee"
+    Installing `Agy-Context-Saver` is 100% non-destructive and zero-churn:
+    - **Zero Runtime Dependencies**: Built entirely with native Node.js standard library; 0 external npm dependencies.
+    - **Foreign Hook & MCP Preservation**: Existing third-party hooks (e.g. `waymark-continuity`) and MCP servers (e.g. `waymark-engine`) are strictly preserved.
+    - **Automatic Atomic Backups**: Creates timestamped `.bak` configuration backups before any edit.
+    - **One-Command Rollback**: Clean uninstallation via `npx agy-context-saver uninstall` or `uninstall --restore-backups`.
+
 ---
 
 ## Why Agy-Context-Saver + RTK?
@@ -32,7 +39,7 @@ Install and activate the governor across your Antigravity environment in seconds
 `Agy-Context-Saver` leverages the **open Model Context Protocol (MCP)** specification alongside native Antigravity lifecycle hooks, integrating seamlessly with RTK:
 
 - **RTK owns command optimization**: Supported shell commands are transparently rewritten via `rtk rewrite` before execution, yielding 60–90% token reduction across git, pytest, cargo, npm, docker, and linters.
-- **Agy owns Antigravity integrity**: Hard-routes native inspection tools to canonical RTK shell commands, enforces Reactive Wakeup, blocks direct access to internal `.system_generated` state, and provides zero-JSON Markdown transcript extraction.
+- **Agy owns Antigravity integrity**: Hard-routes native inspection tools to canonical RTK shell commands, enforces Reactive Wakeup, blocks direct access to internal `.system_generated` state, enforces Pointer-Over-Wire for subagents, and provides zero-JSON Markdown transcript extraction.
 
 Any developer running Antigravity on macOS, Linux, or Windows can install and activate the governor immediately without external cloud dependencies.
 
@@ -74,6 +81,10 @@ When an agent initiates a shell command exceeding `WaitMsBeforeAsync` (~5 second
 - **The Problem**: Direct `view_file` on `.system_generated/logs/transcript.jsonl` floods working memory with raw JSON syntax.
 - **The Solution**: Agy blocks direct reads of `.system_generated` by root and provides streaming Markdown tools (`read_transcript`, `query_transcript`).
 
+### 5. The Subagent Transport Truncation Trap
+- **The Problem**: When delegating deep research, test audits, or wide exploration to subagents, returning raw audits or large diffs in-band over `send_message` exceeds the ~16 KB transport payload limit, resulting in truncated messages and immediate parent context amnesia.
+- **The Solution**: Pointer-Over-Wire (POW) architecture generated via `subagent_brief`: subagents write detailed deliverables to disk (`scratch/<task>_findings.md` or artifacts) and transmit only an Executive Summary, a Scoreboard table, and a clickable `file:///` link.
+
 ---
 
 ## Core Value Proposition
@@ -84,6 +95,8 @@ When an agent initiates a shell command exceeding `WaitMsBeforeAsync` (~5 second
 | **Workspace File Inspection** | Massive uncompressed view_file dumps | Compact `rtk read`, `rtk grep`, `rtk find` |
 | **Long Command Execution** | Detached after 5s $\to$ busy-wait loop | Synchronous window expanded to 10s $\to$ finishes in-turn |
 | **Background Task Monitoring** | Repetitive busy-polling loops | Enforced Reactive Wakeup with 5-strike circuit breaker |
+| **Subagent Delegation** | In-band truncated >16KB JSON dumps | Pointer-Over-Wire (POW) protocols via `subagent_brief` |
+| **Configuration Safety** | Risk of third-party config clobber | Non-destructive preservation of foreign hooks/MCP with `.bak` backups |
 | **Transcript Review** | Raw JSONL dumped into context | Clean human-readable Markdown via `read_transcript` |
 | **Runtime Dependencies** | N/A | **Zero** external npm dependencies (100% Node.js stdlib) + native RTK binary |
 

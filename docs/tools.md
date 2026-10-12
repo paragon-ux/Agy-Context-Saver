@@ -179,6 +179,12 @@ A multi-mode forensic search engine and surgical step dereferencer across conver
 | `conversationId` | `string` | **Yes** | — | Conversation UUID or transcript file path. |
 | `query` | `string` | No | `""` | Case-insensitive keyword or substring to filter steps. |
 | `roles` | `array` | No | `["user", "assistant"]` | Roles to filter: `"user"`, `"assistant"`, `"tool"`, `"error"`, or `["all"]`. |
+| `mode` | `string` | No | `"auto"` | Retrieval mode: `"auto"` (auto-dereferences truncated steps), `"compact"`, or `"full"`. |
+| `startStep` | `number` | No | — | Start `step_index` boundary (inclusive). |
+| `endStep` | `number` | No | — | End `step_index` boundary (inclusive). |
+| `lastTurns` | `number` | No | — | Limit matching steps to the last N conversation turns. |
+| `includeThinking` | `boolean` | No | `false` | Whether to include internal model thinking blocks in output. |
+| `includeToolCalls` | `boolean` | No | `false` | Whether to include tool call arguments and results in output. |
 | `maxResults` | `number` | No | `5` | Maximum matching entries to return. |
 | `summaryOnly` | `boolean` | No | `false` | When `true`, formats results as 1-line bullet summaries. |
 | `stepIndex` | `number` | No | — | Exact step index to dereference un-truncated from `transcript_full.jsonl`. |
@@ -261,6 +267,9 @@ Generates scope-isolated, anti-bloat prompts and ready-to-use `invoke_subagent` 
 | `instructions` | `string` | No | Specific operational instructions, test cases, or constraints. |
 | `scopeFiles` | `array` | No | Bounded list of workspace file paths the subagent is authorized to inspect. |
 | `expectedDeliverable` | `string` | No | Format of deliverable (default: `'Synthesized factual findings'`). |
+| `typeName` | `string` | No | Subagent type name: `'self'` (inherits tools/prompt/model) or `'research'` (read-only). |
+| `model` | `string` | No | Target model: `'inherit'`, `'flash'`, or `'pro'` (default: `'inherit'`). |
+| `workspace` | `string` | No | Workspace sandbox mode: `'inherit'`, `'branch'`, or `'share'` (default: `'inherit'`). |
 | `subagents` | `array` | Conditional | Array of subagent configuration objects for multi-role batch generation. |
 
 Each entry in the `subagents` array accepts:
@@ -292,7 +301,7 @@ When subagents execute broad searches, test sweeps, or forensic data analysis, s
 | Parent Agent Turn (send_message / return)             |
 | - Executive Summary (3-5 high-signal sentences)       |
 | - Scoreboard / Verdict Table                          |
-| - Clickable File Link: [Deliverable](file:///...)     |
+| - Clickable File Link: `[Deliverable](file:///...)`   |
 +-------------------------------------------------------+
 ```
 
@@ -435,6 +444,12 @@ When tool outputs exceed inline thresholds ($>24\text{ KB}$), Antigravity spills
 When detached tasks finish, full logs reside in `.system_generated/tasks/<taskId>.log`.
 - **While RUNNING**: Reading task logs is strictly **DENIED** under the Proportional Backoff curve, eliminating busy-polling loops.
 - **When COMPLETED**: Inspecting completed task logs is safe-harbored via `rtk read tasks/<taskId>.log` via `run_command`, enabling post-mortem stack trace inspection.
+
+### 3. Permanently Retired Tools (Superseded by PreToolUse Proxies)
+To eliminate tool registry bloat and agent hesitation, legacy tools from earlier versions are permanently retired and cleanly purged:
+- **`safe_command`** *(Retired in v1.2.0)*: Replaced by transparent PreToolUse hook rewriting of native `run_command` via RTK (`rtk git`, `rtk pytest`, etc.) and synchronous window expansion to 10s. Invocations return JSON-RPC error `-32601` (*Tool not found*).
+- **`get_spillover_content` & `read_task_output`** *(Retired in v1.5.0)*: Replaced by the zero-new-tools safe-harbor pattern routing `view_file` to `rtk read`.
+- **`get_step_detail`** *(Retired in v1.5.0)*: Consolidated surgically into `query_transcript(stepIndex, field)`.
 
 ---
 

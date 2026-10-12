@@ -13,6 +13,29 @@ It permanently eliminates session degradation, memory bloat, and context window 
 
 ---
 
+## Core Value Proposition
+
+| Metric / Capability | Without Governor | With Agy-Context-Saver + RTK |
+| :--- | :--- | :--- |
+| **Command Output Bloat** | Unlimited raw test dots, ANSI dumps | RTK transparent reduction (60–90% token savings) |
+| **Workspace File Inspection** | Massive uncompressed view_file dumps | Compact `rtk read`, `rtk grep`, `rtk find` |
+| **Long Command Execution** | Detached after 5s $\to$ busy-wait loop | Synchronous window expanded to 10s $\to$ finishes in-turn |
+| **Background Task Monitoring** | Repetitive busy-polling loops | Enforced Reactive Wakeup with 5-strike circuit breaker |
+| **Subagent Delegation** | In-band truncated >16KB JSON dumps | Pointer-Over-Wire (POW) protocols via `subagent_brief` |
+| **Configuration Safety** | Risk of third-party config clobber | Non-destructive preservation of foreign hooks/MCP with `.bak` backups |
+| **Transcript Review** | Raw JSONL dumped into context | Clean human-readable Markdown via `read_transcript` |
+| **Runtime Dependencies** | N/A | **Zero** external npm dependencies (100% Node.js stdlib) + native RTK binary |
+
+---
+
+## Canonical 3-Layer Governance Architecture
+
+1. **Layer 1: Reactive Lifecycle & Polling Immunity**: Replaces destructive busy-polling loops with native Antigravity **Reactive Wakeup**, governed by an exponential Proportional Backoff curve and a 5-strike circuit breaker.
+2. **Layer 2: Transparent CLI & Codebase Streamlining**: Intercepts shell execution via PreToolUse hooks, transparently rewriting commands to RTK (`rtk git`, `rtk pytest`), hard-routing workspace searches to `rtk read`/`find`/`rg`, and shielding internal `.system_generated` state.
+3. **Layer 3: Orchestration, Delegation & Pointer-Over-Wire (POW)**: Expands synchronous execution windows to 10s and enforces Pointer-Over-Wire contracts across subagent teams (`subagent_brief`).
+
+---
+
 ## Quickstart (Instant Install)
 
 Install and synchronize the governor and RTK across your Antigravity environment:
@@ -27,6 +50,9 @@ npm run setup
 # Audit health across all layers at any time
 npm run status
 ```
+
+> [!TIP]
+> **Enterprise Non-Destructive Guarantee**: Agy-Context-Saver requires **zero external npm dependencies** (100% native Node.js standard library), strictly preserves existing foreign hooks (e.g. `waymark-continuity`) and foreign MCP servers, automatically writes atomic `.bak` configuration backups, and supports clean 1-step rollback.
 
 ---
 
@@ -79,12 +105,14 @@ npm run status
 2. **The Terminal Bloat Trap**: Routine test runs and git operations dump hundreds of lines of noise into context. RTK compresses these outputs natively before they enter model context.
 3. **The Raw Transcript Trap**: Reading `transcript.jsonl` dumps megabytes of raw JSON into context. Agy blocks direct reads of `.system_generated` and provides high-density Markdown streaming tools.
 4. **Native Inspection Bypass**: Native inspection tools (`view_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token reduction. Agy hard-routes workspace inspection to RTK's canonical CLI (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`).
+5. **The Subagent Truncation Trap**: When subagents return massive audits or code in-band over `send_message`, payloads exceed transport limits (~16 KB) and pollute parent context. Agy enforces **Pointer-Over-Wire (POW)**: subagents dump detailed reports to disk and transmit only high-signal summaries and clickable links.
 
 ---
 
 ## Key Capabilities
 
 - **Transparent RTK Rewriting**: Native `run_command` calls are automatically rewritten (e.g. `pytest` $\to$ `rtk pytest`) via Antigravity PreToolUse hooks.
+- **Pointer-Over-Wire (POW) Subagent Architecture**: Equips `subagent_brief` payloads with isolated workspaces and file-pointer reporting, eliminating context pollution and message truncation during multi-agent workflows.
 - **Canonical Codebase Inspection**:
   - `rtk read <file>`: Read file with intelligent token filtering and line ranges.
   - `rtk find <path>`: Compact file search tree and directory listing (cross-platform, works on Windows & POSIX).
@@ -111,7 +139,7 @@ For complete technical references, architectural specifications, and governance 
 - 🏗️ **[Architecture & Internals](docs/architecture.md)**: Closed Execution Topology, RTK separation of concerns, and the Four Non-Fragile Architectural Pillars.
 - 🛡️ **[Lifecycle Governance & Hooks](docs/governance.md)**: Proportional Backoff curve, Reactive Wakeup invariants, and the 5-strike circuit breaker.
 - 🧰 **[MCP Tools & CLI Reference](docs/tools.md)**: Complete specifications for all 6 canonical autonomous MCP tools, slash commands, and diagnostic utilities.
-- 🔬 **[Forensic & Output Inspection](docs/architecture.md#6-output-governance--spillover-safe-harbor-0-new-tools)**: Ephemeral tool spillover resolution, post-mortem task retrieval, and Pointer-Over-Wire (POW) contracts.
+- 🔬 **[Forensic & Output Inspection](docs/architecture.md#6-output-governance-spillover-safe-harbor-0-new-tools)**: Ephemeral tool spillover resolution, post-mortem task retrieval, and Pointer-Over-Wire (POW) contracts.
 - 🚀 **[Publishing & Verification Playbook](docs/publishing.md)**: Clean-room test runs, release procedures, and multi-suite verification matrix.
 - 🗺️ **[Product Roadmap](docs/roadmap.md)**: Phased strategic roadmap focusing on affordable and reliable multi-agent workflows across general tasks.
 
@@ -147,7 +175,7 @@ node mcp/index.js status
 ```bash
 npm test
 ```
-*Runs all 7 test suites (hook governance, MCP protocol, output inspection governance, E2E probes, performance probes, installed verification, lifecycle rollback).*
+*Runs all 8 test suites (hook governance, MCP protocol, output inspection governance, E2E probes, performance probes, installed verification, lifecycle rollback, subagent delegation trials).*
 
 ### 3. Run Targeted Tests Individually
 ```bash
@@ -171,6 +199,9 @@ node tests/test-installed-verification.mjs
 
 # Clean install/uninstall/restore lifecycle test
 node tests/test-lifecycle-rollback.mjs
+
+# Subagent delegation trials & batching
+node tests/test-subagent-trials.mjs
 ```
 
 ### 4. Test MCP Tools from Antigravity Agent

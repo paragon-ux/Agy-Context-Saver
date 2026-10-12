@@ -10,6 +10,7 @@ The published npm package is strictly constrained via the `"files"` whitelist in
 
 ```json
 "files": [
+  "assets",
   "mcp",
   "scripts",
   "rules",
@@ -20,6 +21,7 @@ The published npm package is strictly constrained via the `"files"` whitelist in
   "install.ps1",
   "install.sh",
   "README.md",
+  "CHANGELOG.md",
   "LICENSE"
 ]
 ```
@@ -45,7 +47,7 @@ Ensures plugin links, hook scripts, and tool schemas exist and match versions.
 ```bash
 npm test
 ```
-Executes all 7 verification suites:
+Executes all 8 verification suites:
 1. Intelligent hook governance & closed-topology tests (`tests/test-hook.mjs`)
 2. MCP server protocol & method tests (`tests/test-mcp.mjs`)
 3. Output inspection governance & lifecycle gating tests (`tests/test-output-governance.mjs`)
@@ -53,19 +55,20 @@ Executes all 7 verification suites:
 5. Performance, streaming & memory probes (`tests/test-performance-probes.mjs`)
 6. Live installed system validation (`tests/test-installed-verification.mjs`)
 7. Full lifecycle installation, rollback, and restoration test (`tests/test-lifecycle-rollback.mjs`)
+8. Subagent delegation & batching trials (`tests/test-subagent-trials.mjs`)
 
 ### Stage 3: Tarball Dry-Run Inspection
 ```bash
 npm pack --dry-run
 ```
 Verifies that:
-- Total unpacked size is ~160 KB (compressed <50 KB).
+- Total unpacked size is ~170 KB (compressed <50 KB).
 - Exactly 17 canonical runtime files are present (including `assets/logo.svg`).
 - Zero development/test files leak into distribution.
 
 ### Stage 4: Documentation Build
 ```bash
-py -3.11 -m zensical build
+zensical build
 ```
 Validates Markdown syntax, navigation structure, and asset paths with zero build warnings.
 
@@ -77,8 +80,8 @@ Once all 4 verification stages pass:
 
 ```bash
 # 1. Commit and tag release
-git commit -m "chore(release): prepare v1.0.0"
-git tag -a v1.0.0 -m "Release v1.0.0"
+git commit -m "chore(release): prepare v1.6.0"
+git tag -a v1.6.0 -m "Release v1.6.0"
 
 # 2. Publish to npm registry
 npm publish --access public

@@ -55,12 +55,14 @@
   - **Fail-Fast Flags are Opt-In**: Fail-fast flags (`-x`, `--maxfail=1`) are opt-in. Use them when quickly debugging a localized failure, but omit them when assessing the full blast radius across the codebase to avoid the "whack-a-mole" loop.
   - **Coordinated Watchdog Mandatory for Full Sweeps**: When running full multi-minute test sweeps without `-x`, agents **MUST** pair execution with the **Coordinated Watchdog Protocol** (`schedule(DurationSeconds=45, ...)`) and output a **Pre-Yield Status Card**. Never yield silently.
   - **Subagent Delegation for Deep Audits**: When a comprehensive repository-wide test audit is required, delegate the sweep to a subagent (`invoke_subagent`) to keep the main thread responsive.
-- **Subagent Delegation**: Delegate heavy multi-file exploration and exploratory research to subagents (`invoke_subagent`). Subagents absorb intermediate steps and return high-signal summaries.
+- **Subagent Delegation & Pointer-Over-Wire (POW)**:
+  - Delegate heavy multi-file exploration, deep research, and repo sweeps to subagents (`invoke_subagent`). Subagents absorb intermediate steps and return high-signal summaries.
+  - **POW Protocol**: Payloads or deliverables exceeding 1 KB must be written to workspace scratch files (e.g. `scratch/<task>_findings.md` or artifacts). Transmit **ONLY** an Executive Summary (3–5 sentences), a Scoreboard / Verdict table, and a clickable file link (`file:///...`) in `send_message` to prevent transport truncation and parent context bloat.
 - **Benchmark / Evaluator Integrity**: Never mutate benchmark definitions, prompt templates, or scoring artifacts during an active evaluation without explicit user confirmation.
 
 ---
 
-## Layer 4: Zero-Guesswork Testing & Verification Playbook
+## Appendix: Zero-Guesswork Testing & Verification Playbook
 When an agent or developer tests this framework, follow this exact sequence without guessing:
 
 1. **Verify Live Registration & Health (Fast, non-blocking)**:
@@ -75,14 +77,17 @@ When an agent or developer tests this framework, follow this exact sequence with
    ```bash
    npm test
    ```
-   *Expected*: All 5 test suites pass (Hook unit tests, MCP protocol tests, E2E probes, live system validation, lifecycle rollback).
+   *Expected*: All 8 test suites pass (Hook unit tests, MCP protocol tests, output governance, E2E probes, performance probes, live system validation, lifecycle rollback, subagent trials).
 
 3. **Verify Individual Layers On-Demand**:
    - Governance Hook: `node tests/test-hook.mjs`
    - MCP Protocol & JSON-RPC: `node tests/test-mcp.mjs`
+   - Output Governance: `node tests/test-output-governance.mjs`
    - E2E Probes: `node tests/test-e2e-probes.mjs`
+   - Performance Probes: `node tests/test-performance-probes.mjs`
    - Live System Checks: `node tests/test-installed-verification.mjs`
    - Lifecycle & Rollback: `node tests/test-lifecycle-rollback.mjs`
+   - Subagent Delegation Trials: `node tests/test-subagent-trials.mjs`
 
 4. **Verify MCP Tools in Antigravity**:
    - `get_installation_status`: Inspect live integration layers.
