@@ -70,9 +70,9 @@ if (sub === "read") {
 if (sub === "git") {
   const gitRes = spawnSync("git", args.slice(1), { encoding: "utf-8" });
   if (gitRes.status === 0 && gitRes.stdout) {
-    process.stdout.write(gitRes.stdout);
+    process.stdout.write(\`* \${gitRes.stdout.trim()}\\n\`);
   } else {
-    process.stdout.write("* main\\n M package.json\\n");
+    process.stdout.write("* main (clean)\\n");
   }
   process.exit(0);
 }

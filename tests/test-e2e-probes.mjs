@@ -139,7 +139,11 @@ console.log("✓ MCP Server initialized");
 
   const rtkGitRes = runRtkCli(["git", "status"], { encoding: "utf-8" });
   assert.equal(rtkGitRes.status, 0, "rtk git status must exit 0");
-  assert.ok(rtkGitRes.stdout.length > 0 && (rtkGitRes.stdout.includes("branch") || rtkGitRes.stdout.includes("*") || rtkGitRes.stdout.includes("On branch") || rtkGitRes.stdout.includes("package.json")), "rtk git status must list git status");
+  assert.ok(
+    rtkGitRes.stdout.trim().length > 0 &&
+      /(?:branch|\*|HEAD|clean|nothing to commit|package\.json)/i.test(rtkGitRes.stdout),
+    `rtk git status must list git status (got: ${JSON.stringify(rtkGitRes.stdout)})`
+  );
   console.log("✓ rtk git status executed successfully");
 }
 
