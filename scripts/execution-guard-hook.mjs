@@ -706,8 +706,8 @@ try {
   if (toolName === "manage_task") {
     const action = String(args.Action || args.action || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
 
-    // kill, send_input are always allowed immediately
-    if (action !== "status" && action !== "list") {
+    // kill, send_input, and list are always allowed immediately
+    if (action !== "status") {
       respond({ decision: "allow" });
     }
 

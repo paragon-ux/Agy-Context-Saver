@@ -59,8 +59,8 @@ Executes all 7 verification suites:
 npm pack --dry-run
 ```
 Verifies that:
-- Total unpacked size is <120 KB.
-- Exactly 13 runtime files are present.
+- Total unpacked size is ~160 KB (compressed <50 KB).
+- Exactly 17 canonical runtime files are present (including `assets/logo.svg`).
 - Zero development/test files leak into distribution.
 
 ### Stage 4: Documentation Build
