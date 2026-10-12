@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,6 +30,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: Ensure tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
           package_version="$(node -p "require('./package.json').version")"
@@ -47,7 +49,6 @@ jobs:
     name: Publish and create release
     needs: verify
     runs-on: ubuntu-latest
-    environment: npm-release
     permissions:
       contents: write
       id-token: write
@@ -71,17 +72,27 @@ jobs:
           package_name="$(node -p "require('./package.json').name")"
           package_version="$(node -p "require('./package.json').version")"
           tarball="${package_name}-${package_version}.tgz"
+          release_tag="v${package_version}"
           npm pack
           test -f "${tarball}"
           echo "tarball=${tarball}" >> "$GITHUB_OUTPUT"
-      - name: Publish to npm using OIDC trusted publishing
-        run: npm publish --access public --provenance
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+      - name: Publish to npm (OIDC Trusted Publishing or NPM_TOKEN)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            unset NODE_AUTH_TOKEN
+            npm config delete //registry.npmjs.org/:_authToken || true
+          fi
+          npm publish --access public --provenance
       - name: Create or update GitHub Release and attach npm tarball
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" "${{ steps.pack.outputs.tarball }}" --clobber
+          tag="${{ steps.pack.outputs.release_tag }}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${{ steps.pack.outputs.tarball }}" --clobber
           else
-            gh release create "${GITHUB_REF_NAME}" "${{ steps.pack.outputs.tarball }}" --verify-tag --generate-notes
+            gh release create "${tag}" "${{ steps.pack.outputs.tarball }}" --verify-tag --generate-notes
           fi
