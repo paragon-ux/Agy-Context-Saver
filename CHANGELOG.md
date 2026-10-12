@@ -5,6 +5,15 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-10-11
+
+### Added
+- **Bounded Slice Safe Harbor for `view_file`**: Added support for bounded line slice inspection (`StartLine` & `EndLine` $\le 150$ lines) directly in `execution-guard-hook.mjs`. Enables surgical, token-efficient code inspections (e.g. reviewing specific function bodies, classes, or test spans) natively without triggering hook denials or requiring subagents to fall back to custom Node.js reading scripts.
+
+### Changed
+- **Anti-Gaming Inspection Guidance**: Preserved the original denial message (`Run 'rtk read <file>' via run_command instead`) for standard unbounded `view_file` calls with zero slice advertisement, preventing LLM agents from systematically gaming the system with synthetic line slices to bypass RTK. Oversized slice guidance is surfaced only when the caller explicitly attempts an inspection exceeding 150 lines.
+- **Root Protection Integrity**: Maintained absolute root-level denial on internal execution state (`.system_generated/`) ahead of the slice safe harbor, ensuring bounded ranges cannot be used to inspect raw transcripts or active task logs.
+
 ## [1.5.0] - 2026-10-08
 
 ### Performance & Memory Optimizations

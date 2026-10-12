@@ -177,6 +177,48 @@ console.log("\n--- Group B: Native Inspection Hard-Routing to RTK ---");
   console.log("✓ view_file on workspace file hard-routed to 'rtk read'");
 }
 
+// 6b. view_file with bounded slice (<= 150 lines) is ALLOWED under safe harbor
+{
+  const out = runHook({
+    toolCall: {
+      name: "view_file",
+      args: { AbsolutePath: "c:/project/src/session_engine.py", StartLine: 10, EndLine: 50 }
+    }
+  });
+  assert.equal(out.decision, "allow");
+  console.log("✓ view_file with bounded slice (StartLine: 10, EndLine: 50) is ALLOWED");
+}
+
+// 6c. view_file with oversized slice (> 150 lines) is DENIED and routed to rtk read
+{
+  const out = runHook({
+    toolCall: {
+      name: "view_file",
+      args: { AbsolutePath: "c:/project/src/session_engine.py", StartLine: 1, EndLine: 200 }
+    }
+  });
+  assert.equal(out.decision, "deny");
+  assert.match(out.reason, /Oversized file slice via 'view_file'/);
+  console.log("✓ view_file with oversized slice (> 150 lines) is DENIED");
+}
+
+// 6d. view_file with bounded slice on .system_generated remains strictly denied by root
+{
+  const out = runHook({
+    toolCall: {
+      name: "view_file",
+      args: {
+        AbsolutePath: "C:/Users/USER/.gemini/antigravity/brain/abc/.system_generated/logs/transcript.jsonl",
+        StartLine: 1,
+        EndLine: 10
+      }
+    }
+  });
+  assert.equal(out.decision, "deny");
+  assert.match(out.reason, /Direct access to internal Antigravity execution state \(\.system_generated\)/);
+  console.log("✓ view_file with bounded slice on .system_generated remains STRICTLY DENIED");
+}
+
 // 7. read_file is hard-routed to rtk read
 {
   const out = runHook({

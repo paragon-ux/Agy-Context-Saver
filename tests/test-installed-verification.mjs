@@ -209,6 +209,15 @@ function callInstalledHook(payload) {
   console.log("✓ Installed Hook: view_file on workspace file -> DENIED & routed to 'rtk read'");
 }
 
+// 2.8b Native inspection bounded slice: view_file with bounded slice -> ALLOWED
+{
+  const res = callInstalledHook({
+    toolCall: { name: "view_file", args: { AbsolutePath: "c:/project/src/index.js", StartLine: 10, EndLine: 50 } }
+  });
+  assert.equal(res.decision, "allow");
+  console.log("✓ Installed Hook: view_file with bounded slice -> ALLOWED");
+}
+
 // 2.9 Protected internal state: view_file on transcript.jsonl
 {
   const res = callInstalledHook({

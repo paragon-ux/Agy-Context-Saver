@@ -655,11 +655,54 @@ try {
       respond({ decision: "allow" });
     }
 
-    // 2c. Hard-Route Workspace Code/Data Inspection to Canonical RTK Commands (LH-07)
-    if (toolName === "view_file" || toolName === "read_file") {
+    // 2e. Bounded Slice Safe Harbor for view_file
+    // Allow view_file IF AND ONLY IF it is a bounded slice inspection (StartLine and EndLine <= 150 lines)
+    if (toolName === "view_file") {
+      const rawStart = args.StartLine !== undefined ? args.StartLine : args.start_line;
+      const rawEnd = args.EndLine !== undefined ? args.EndLine : args.end_line;
+      const hasSliceParams = typeof rawStart !== "undefined" || typeof rawEnd !== "undefined";
+
+      if (hasSliceParams) {
+        const startLine = Number(rawStart);
+        const endLine = Number(rawEnd);
+
+        if (
+          typeof rawStart !== "undefined" &&
+          typeof rawEnd !== "undefined" &&
+          Number.isInteger(startLine) &&
+          Number.isInteger(endLine) &&
+          startLine > 0 &&
+          endLine >= startLine
+        ) {
+          const span = endLine - startLine + 1;
+          const MAX_SAFE_SLICE_LINES = 150;
+          if (span <= MAX_SAFE_SLICE_LINES) {
+            respond({ decision: "allow" });
+          }
+          respond({
+            decision: "deny",
+            reason: `Antigravity Governance: Oversized file slice via 'view_file' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe window). Reduce line range or run 'rtk read ${target || "<file>"}' via run_command instead.`
+          });
+        }
+
+        respond({
+          decision: "deny",
+          reason: `Antigravity Governance: Invalid slice range via 'view_file'. Ensure StartLine and EndLine are positive integers with EndLine >= StartLine (max 150 lines), or run 'rtk read ${target || "<file>"}' via run_command instead.`
+        });
+      }
+
+      // Default when no slice attempted: keep hook identical to original behavior (zero slice advertisement)
       respond({
         decision: "deny",
         reason: `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run 'rtk read ${target || "<file>"}' via run_command instead.`
+      });
+    }
+
+    // 2f. Hard-Route Full-File / Other Workspace Code Inspection to Canonical RTK Commands (LH-07)
+    if (toolName === "read_file") {
+      respond({
+        decision: "deny",
+        reason: `Antigravity Governance: Native file inspection via 'read_file' bypasses token optimization. Run 'rtk read ${target || "<file>"}' via run_command instead.`
       });
     }
 
