@@ -1,7 +1,7 @@
 {
   "name": "agy-context-saver",
   "displayName": "Antigravity Context Shield & Governor",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Deterministic background polling governor, RTK terminal optimizer, and subagent context preservation shield for Antigravity.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [

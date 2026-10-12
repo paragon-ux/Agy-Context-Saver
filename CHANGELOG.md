@@ -5,6 +5,14 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-10-12
+
+### Added
+- **Dual-MCP Waymark Code Intelligence & Subagent Synergy Suite (`tests/test-waymark-synergy.mjs`)**: Added a 6-trial automated integration and benchmark suite (`npm run test:synergy` / `npm test`) spawning both `agy-context-saver` and `waymark-engine` over concurrent JSON-RPC 2.0 stdio streams (with a deterministic `WAYMARK_FORCE_SHIM=1` fallback for standalone CI runners). Validates AST-narrowed `subagent_brief` generation, Pointer-Over-Wire (POW) to `waymark_memory` consensus charting with Anti-Hallucination Guard checks, 4-layer token compression benchmarking, combined context health + Semantic Repo Map status audits, missing-facet multi-subagent orchestration, and `.mjs` Tree-sitter AST extraction.
+- **Aggressive RTK Read Shim Support (`tests/helpers/hermetic-fixture.mjs`)**: Enhanced the hermetic RTK CLI shim to support `rtk read --level aggressive` comment stripping for deterministic cross-platform token compression benchmarks.
+
+---
+
 ## [1.6.0] - 2026-10-12
 
 ### Added
@@ -154,6 +162,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Antigravity Model Context Protocol (MCP) server.
 - Background task lifecycle governance and reactive wakeup enforcement.
 
+[1.6.1]: https://github.com/paragon-ux/agy-context-saver/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/paragon-ux/agy-context-saver/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/paragon-ux/agy-context-saver/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/paragon-ux/agy-context-saver/compare/v1.4.0...v1.5.0

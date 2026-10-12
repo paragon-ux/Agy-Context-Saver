@@ -1,6 +1,6 @@
 {
   "name": "agy-context-saver",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Universal Model Context Protocol (MCP) server & lifecycle governor purpose-built for Google Antigravity",
   "main": "mcp/index.js",
   "bin": {
@@ -13,7 +13,8 @@
     "uninstall": "node scripts/install-register.mjs --uninstall",
     "status": "node scripts/install-register.mjs --status",
     "preflight": "node scripts/release-preflight.mjs",
-    "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs && node tests/test-output-governance.mjs && node tests/test-e2e-probes.mjs && node tests/test-performance-probes.mjs && node tests/test-installed-verification.mjs && node tests/test-lifecycle-rollback.mjs && node tests/test-subagent-trials.mjs && node tests/test-check-only-readonly.mjs && node tests/test-malformed-config-preservation.mjs"
+    "test:synergy": "node tests/test-waymark-synergy.mjs",
+    "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs && node tests/test-output-governance.mjs && node tests/test-e2e-probes.mjs && node tests/test-performance-probes.mjs && node tests/test-installed-verification.mjs && node tests/test-lifecycle-rollback.mjs && node tests/test-subagent-trials.mjs && node tests/test-check-only-readonly.mjs && node tests/test-malformed-config-preservation.mjs && node tests/test-waymark-synergy.mjs"
   },
   "repository": {
     "type": "git",

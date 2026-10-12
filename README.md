@@ -175,7 +175,7 @@ node mcp/index.js status
 ```bash
 npm test
 ```
-*Runs all 10 test suites (hook governance, MCP protocol, output inspection governance, E2E probes, performance probes, installed verification, lifecycle rollback, subagent delegation trials, check-only read-only safety, and malformed configuration preservation).*
+*Runs all 11 test suites (hook governance, MCP protocol, output inspection governance, E2E probes, performance probes, installed verification, lifecycle rollback, subagent delegation trials, check-only read-only safety, malformed configuration preservation, and Waymark dual-MCP synergy).*
 
 ### 3. Run Targeted Tests Individually
 ```bash
@@ -208,6 +208,9 @@ node tests/test-check-only-readonly.mjs
 
 # Malformed config preservation fail-closed regression test
 node tests/test-malformed-config-preservation.mjs
+
+# Dual-MCP Waymark code intelligence + subagent synergy suite
+node tests/test-waymark-synergy.mjs
 ```
 
 ### 4. Test MCP Tools from Antigravity Agent

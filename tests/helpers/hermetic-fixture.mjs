@@ -58,12 +58,18 @@ if (sub === "rewrite") {
 }
 
 if (sub === "read") {
-  const target = args[1];
+  const rest = args.slice(1);
+  const isAggressive = rest.includes("aggressive") || rest.includes("--aggressive");
+  const target = rest.find((a, idx) => !a.startsWith("-") && rest[idx - 1] !== "--level" && rest[idx - 1] !== "-l");
   if (!target || !fs.existsSync(target)) {
     process.stderr.write(\`File not found: \${target}\\n\`);
     process.exit(1);
   }
-  process.stdout.write(fs.readFileSync(target, "utf-8"));
+  let content = fs.readFileSync(target, "utf-8");
+  if (isAggressive) {
+    content = content.replace(/\\/\\*[\\s\\S]*?\\*\\//g, "").replace(/^\\s*\\/\\/.*$/gm, "").replace(/\\n{3,}/g, "\\n\\n");
+  }
+  process.stdout.write(content);
   process.exit(0);
 }
 
