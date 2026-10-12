@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import readline from "node:readline";
@@ -76,6 +77,30 @@ function send(method, params = {}) {
   console.log("✓ tools/call (safe_command) correctly rejected (-32601 tool not found)");
 }
 
+// 3b. tools/call: check_context_health
+{
+  const tempTranscript = path.join(os.tmpdir(), "mcp-test-transcript.jsonl");
+  fs.writeFileSync(tempTranscript, [
+    JSON.stringify({ type: "USER_INPUT", content: "test query" }),
+    JSON.stringify({ type: "PLANNER_RESPONSE", content: "test response" })
+  ].join("\n"), "utf-8");
+
+  const res = await send("tools/call", {
+    name: "check_context_health",
+    arguments: { transcriptPath: tempTranscript }
+  });
+  assert.equal(res.result.isError, undefined);
+  const text = res.result.content[0].text;
+  assert.match(text, /### Context Health Report: HEALTHY/);
+  assert.match(text, /#### \[Active Session Metrics\]/);
+  assert.match(text, /- Total Steps: 2/);
+  assert.match(text, /#### \[Local RTK Environment\]/);
+  assert.match(text, /- RTK Command Optimizer: Active/);
+  assert.match(text, /cumulative machine-wide host savings/);
+  try { fs.unlinkSync(tempTranscript); } catch {}
+  console.log("✓ tools/call (check_context_health) reported labeled [Active Session Metrics] and [Local RTK Environment]");
+}
+
 // 4. tools/call: subagent_brief
 {
   const res = await send("tools/call", {
@@ -84,7 +109,42 @@ function send(method, params = {}) {
   });
   assert.match(res.result.content[0].text, /Analyze test failures/);
   assert.match(res.result.content[0].text, /POINTER-OVER-WIRE/);
+  assert.match(res.result.content[0].text, /READY-TO-USE invoke_subagent PAYLOAD/);
   console.log("✓ tools/call (subagent_brief) generated scope-isolated brief");
+}
+
+// 4b. tools/call: subagent_brief (custom role & multiple subagents batch)
+{
+  const res = await send("tools/call", {
+    name: "subagent_brief",
+    arguments: {
+      subagents: [
+        {
+          role: "Performance Benchmark Engineer",
+          objective: "Profile CPU bottlenecks",
+          typeName: "self"
+        },
+        {
+          role: "Security Audit Specialist",
+          objective: "Verify token encryption",
+          typeName: "research"
+        }
+      ]
+    }
+  });
+  const text = res.result.content[0].text;
+  assert.match(text, /Performance Benchmark Engineer/);
+  assert.match(text, /Security Audit Specialist/);
+  assert.match(text, /READY-TO-USE invoke_subagent PAYLOAD/);
+  const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/);
+  assert.ok(jsonMatch, "Must contain JSON block");
+  const payload = JSON.parse(jsonMatch[1]);
+  assert.equal(payload.Subagents.length, 2);
+  assert.equal(payload.Subagents[0].Role, "Performance Benchmark Engineer");
+  assert.equal(payload.Subagents[0].TypeName, "self");
+  assert.equal(payload.Subagents[1].Role, "Security Audit Specialist");
+  assert.equal(payload.Subagents[1].TypeName, "research");
+  console.log("✓ tools/call (subagent_brief) handled multi-subagent batch with custom roles");
 }
 
 // 5. tools/call: get_installation_status

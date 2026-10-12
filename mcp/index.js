@@ -98,7 +98,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rulesPath = path.resolve(__dirname, "../rules/AGENTS.md");
 
 const SERVER_NAME = "agy-context-saver";
-const SERVER_VERSION = "1.5.1";
+const SERVER_VERSION = "1.6.0";
 
 // --- Tools Specification ---
 const TOOLS = [
@@ -121,13 +121,21 @@ const TOOLS = [
   },
   {
     name: "subagent_brief",
-    description: "Generates a scope-isolated, anti-bloat prompt for invoking a subagent. Instructs the subagent to absorb all intermediate file reads/searches and return only high-signal findings.",
+    description: "Generates scope-isolated, anti-bloat prompts and ready-to-use invoke_subagent JSON payloads for single or multiple delegated subagents. Instructs subagents to absorb intermediate file reads/searches and return only high-signal findings.",
     inputSchema: {
       type: "object",
       properties: {
         objective: {
           type: "string",
-          description: "The core research or investigative objective."
+          description: "The core research or investigative objective (for single subagent)."
+        },
+        role: {
+          type: "string",
+          description: "2-5 word role description (e.g. 'Comprehensive Test Engineer', 'Codebase Security Auditor'). Defaults to 'Scope-Isolated Deep Research Subagent'."
+        },
+        instructions: {
+          type: "string",
+          description: "Optional step-by-step instructions or specialized directives."
         },
         scopeFiles: {
           type: "array",
@@ -137,9 +145,40 @@ const TOOLS = [
         expectedDeliverable: {
           type: "string",
           description: "The concise format expected back by the parent agent."
+        },
+        typeName: {
+          type: "string",
+          description: "Subagent type name: 'self' (default, inherits parent tools/prompt/model) or 'research' (read-only)."
+        },
+        model: {
+          type: "string",
+          enum: ["inherit", "flash_lite", "flash", "pro"],
+          description: "Model tier: 'inherit' (default), 'flash_lite', 'flash', or 'pro'."
+        },
+        workspace: {
+          type: "string",
+          enum: ["inherit", "branch", "share"],
+          description: "Workspace isolation: 'inherit' (default), 'branch', or 'share'."
+        },
+        subagents: {
+          type: "array",
+          description: "Optional array of subagent configurations to formulate multiple subagents at once.",
+          items: {
+            type: "object",
+            properties: {
+              role: { type: "string", description: "2-5 word role description." },
+              objective: { type: "string", description: "The core objective for this subagent." },
+              instructions: { type: "string", description: "Optional step-by-step instructions." },
+              scopeFiles: { type: "array", items: { type: "string" }, description: "Files/directories to investigate." },
+              expectedDeliverable: { type: "string", description: "Expected deliverable format." },
+              typeName: { type: "string", description: "Subagent type name: 'self' or 'research'." },
+              model: { type: "string", enum: ["inherit", "flash_lite", "flash", "pro"], description: "Model tier." },
+              workspace: { type: "string", enum: ["inherit", "branch", "share"], description: "Workspace isolation." }
+            },
+            required: ["objective"]
+          }
         }
-      },
-      required: ["objective"]
+      }
     }
   },
   {
@@ -365,18 +404,24 @@ async function handleCheckContextHealth(args = {}) {
     const rtkInfo = findExistingRtk();
     const reportLines = [
       `### Context Health Report: ${healthStatus}`,
+      "",
+      "#### [Active Session Metrics]",
       `- Total Steps: ${totalSteps}`,
       `- User Turns: ${userTurns}`,
       `- Assistant Responses: ${modelTurns}`,
       `- Tool Calls: ${toolCalls}`,
       `- Detected Busy-Polling Events: ${pollingEvents}`,
-      `- Approximate Raw Transcript Size: ${kb} KB`,
-      `- RTK Command Optimizer: ${rtkInfo ? `Active (${rtkInfo.version})` : "Missing (run sync_installation)"}`
+      `- Approximate Raw Transcript Size: ${kb} KB`
     ];
 
     if (corruptLines > 0) {
       reportLines.push(`- Corrupted/Unparsed Lines: ${corruptLines}`);
     }
+
+    reportLines.push("");
+    reportLines.push("#### [Local RTK Environment]");
+    reportLines.push(`- RTK Command Optimizer: ${rtkInfo ? `Active (${rtkInfo.version})` : "Missing (run sync_installation)"}`);
+    reportLines.push(`- Note: Lifetime token gains from 'rtk gain' represent cumulative machine-wide host savings, not single-session metrics.`);
 
     reportLines.push("");
     if (pollingEvents > 0) {
@@ -397,11 +442,18 @@ async function handleCheckContextHealth(args = {}) {
   }
 }
 
-function handleSubagentBrief({ objective, scopeFiles = [], expectedDeliverable = "Synthesized factual findings" }) {
-  const scopeStr = scopeFiles.length ? `\n\nTarget files:\n${scopeFiles.map(f => `- ${f}`).join("\n")}` : "";
-  const prompt = [
-    `ROLE: Scope-Isolated Deep Research Subagent`,
-    `OBJECTIVE: ${objective}${scopeStr}`,
+function formatSingleBrief({
+  role = "Scope-Isolated Deep Research Subagent",
+  objective = "",
+  instructions = "",
+  scopeFiles = [],
+  expectedDeliverable = "Synthesized factual findings"
+} = {}) {
+  const scopeStr = scopeFiles && scopeFiles.length ? `\n\nTarget files:\n${scopeFiles.map(f => `- ${f}`).join("\n")}` : "";
+  const instrStr = instructions && instructions.trim() ? `\n\nSPECIFIC INSTRUCTIONS:\n${instructions.trim()}` : "";
+  return [
+    `ROLE: ${role}`,
+    `OBJECTIVE: ${objective}${scopeStr}${instrStr}`,
     ``,
     `CRITICAL CONTEXT GOVERNANCE INSTRUCTIONS (POINTER-OVER-WIRE):`,
     `1. Isolated Workspace: Do all necessary multi-file exploration, searches, and analysis in this subagent sandbox.`,
@@ -415,8 +467,71 @@ function handleSubagentBrief({ objective, scopeFiles = [], expectedDeliverable =
     `4. Format: ${expectedDeliverable}`,
     `5. Citation Mandate: Keep your final response concise, structured, and cite exact file:line references.`
   ].join("\n");
+}
 
-  return { content: [{ type: "text", text: prompt }] };
+function handleSubagentBrief(args = {}) {
+  let specs = [];
+  if (Array.isArray(args.subagents) && args.subagents.length > 0) {
+    specs = args.subagents;
+  } else if (args.objective || args.role || args.instructions) {
+    specs = [args];
+  } else {
+    return {
+      isError: true,
+      content: [{ type: "text", text: "subagent_brief error: provide either 'objective' (for a single subagent) or 'subagents' array (for multiple subagents)." }]
+    };
+  }
+
+  const subagentsPayload = [];
+  const renderedBriefs = [];
+
+  for (let i = 0; i < specs.length; i++) {
+    const spec = specs[i] || {};
+    const role = spec.role || spec.Role || "Scope-Isolated Deep Research Subagent";
+    const objective = spec.objective || spec.Objective || "";
+    const instructions = spec.instructions || spec.Instructions || "";
+    const scopeFiles = spec.scopeFiles || spec.ScopeFiles || [];
+    const expectedDeliverable = spec.expectedDeliverable || spec.ExpectedDeliverable || "Synthesized factual findings";
+    const typeName = spec.typeName || spec.TypeName || "self";
+    const model = spec.model || spec.Model || "inherit";
+    const workspace = spec.workspace || spec.Workspace || "inherit";
+
+    const promptText = formatSingleBrief({
+      role,
+      objective,
+      instructions,
+      scopeFiles,
+      expectedDeliverable
+    });
+
+    subagentsPayload.push({
+      TypeName: typeName,
+      Role: role,
+      Model: model,
+      Workspace: workspace,
+      Prompt: promptText
+    });
+
+    if (specs.length === 1) {
+      renderedBriefs.push(promptText);
+    } else {
+      renderedBriefs.push(`### Subagent ${i + 1}: ${role}\n${promptText}`);
+    }
+  }
+
+  const payloadJson = JSON.stringify({ Subagents: subagentsPayload }, null, 2);
+
+  const fullText = [
+    renderedBriefs.join("\n\n---\n\n"),
+    "",
+    "==================================================",
+    "READY-TO-USE invoke_subagent PAYLOAD:",
+    "```json",
+    payloadJson,
+    "```"
+  ].join("\n");
+
+  return { content: [{ type: "text", text: fullText }] };
 }
 
 function handleGetInstallationStatus() {

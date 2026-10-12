@@ -124,6 +124,7 @@ const liveLog = path.join(convDir, "tasks", "task-live-1.log");
 const transcriptFile = path.join(convDir, "logs", "transcript.jsonl");
 
 // Reset session state for conv-test-live
+try { fs.unlinkSync(path.join(os.tmpdir(), "agy-session-conv-test-live.json")); } catch {}
 try { fs.unlinkSync(path.join(os.tmpdir(), "agy-session-conv_test_live.json")); } catch {}
 
 fs.writeFileSync(liveLog, "Running output in progress...\n", "utf-8");

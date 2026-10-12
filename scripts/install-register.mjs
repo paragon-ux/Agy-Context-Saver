@@ -318,7 +318,7 @@ Agy-Context-Saver is the universal Model Context Protocol server and lifecycle g
 
 ## Available MCP Tools
 - \`check_context_health\`: Diagnoses transcript turn counts, byte payload, and polling loops. Accepts \`transcriptPath\` or \`conversationId\`.
-- \`subagent_brief\`: Generates scope-isolated instructions for delegated subagents with Pointer-Over-Wire delivery contract.
+- \`subagent_brief\`: Formulates scope-isolated prompts and ready-to-use invoke_subagent JSON payloads for single or multiple delegated subagents with Pointer-Over-Wire delivery contract.
 - \`read_transcript\`: Streams recent turns from \`transcript.jsonl\` or \`transcript_full.jsonl\` formatted as clean Markdown.
 - \`query_transcript\`: Forensic regex search and filtering engine across transcript steps with optional \`summaryOnly: true\`, and surgical step extraction via \`stepIndex\` and \`field\`.
 - \`get_installation_status\`: Audits live health of the plugin link, hook, MCP server, tool schemas, and RTK.
@@ -351,15 +351,37 @@ Agy-Context-Saver is the universal Model Context Protocol server and lifecycle g
 
   const subagentBriefSchema = {
     name: "subagent_brief",
-    description: "Generates a scope-isolated, anti-bloat prompt for invoking a subagent. Instructs the subagent to absorb all intermediate file reads/searches and return only high-signal findings.",
+    description: "Generates scope-isolated, anti-bloat prompts and ready-to-use invoke_subagent JSON payloads for single or multiple delegated subagents. Instructs subagents to absorb intermediate file reads/searches and return only high-signal findings.",
     parameters: {
       type: "object",
       properties: {
-        objective: { type: "string", description: "The core research or investigative objective." },
+        objective: { type: "string", description: "The core research or investigative objective (for single subagent)." },
+        role: { type: "string", description: "2-5 word role description (e.g. 'Comprehensive Test Engineer', 'Codebase Security Auditor'). Defaults to 'Scope-Isolated Deep Research Subagent'." },
+        instructions: { type: "string", description: "Optional step-by-step instructions or specialized directives." },
         scopeFiles: { type: "array", items: { type: "string" }, description: "List of files or directories to investigate." },
-        expectedDeliverable: { type: "string", description: "The concise format expected back by the parent agent." }
-      },
-      required: ["objective"]
+        expectedDeliverable: { type: "string", description: "The concise format expected back by the parent agent." },
+        typeName: { type: "string", description: "Subagent type name: 'self' (default, inherits parent tools/prompt/model) or 'research' (read-only)." },
+        model: { type: "string", enum: ["inherit", "flash_lite", "flash", "pro"], description: "Model tier: 'inherit' (default), 'flash_lite', 'flash', or 'pro'." },
+        workspace: { type: "string", enum: ["inherit", "branch", "share"], description: "Workspace isolation: 'inherit' (default), 'branch', or 'share'." },
+        subagents: {
+          type: "array",
+          description: "Optional array of subagent configurations to formulate multiple subagents at once.",
+          items: {
+            type: "object",
+            properties: {
+              role: { type: "string", description: "2-5 word role description." },
+              objective: { type: "string", description: "The core objective for this subagent." },
+              instructions: { type: "string", description: "Optional step-by-step instructions." },
+              scopeFiles: { type: "array", items: { type: "string" }, description: "Files/directories to investigate." },
+              expectedDeliverable: { type: "string", description: "Expected deliverable format." },
+              typeName: { type: "string", description: "Subagent type name: 'self' or 'research'." },
+              model: { type: "string", enum: ["inherit", "flash_lite", "flash", "pro"], description: "Model tier." },
+              workspace: { type: "string", enum: ["inherit", "branch", "share"], description: "Workspace isolation." }
+            },
+            required: ["objective"]
+          }
+        }
+      }
     }
   };
 

@@ -5,6 +5,19 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-10-12
+
+### Added
+- **Full Cycle Product Development (FCPD) Strategic Roadmap**: Published `docs/roadmap.md` establishing a phased product architecture grounded in FCPD methodology: MVP hardening (shipped in v1.6.0), public validation & bug triage loop, and Antigravity ecosystem scale.
+- **Multi-Role Subagent Batching & Pointer-Over-Wire (POW)**: Added turnkey multi-agent batch configuration in `subagent_brief` (`subagents` array) with per-agent role, model, and workspace customizability. Validated across single-subagent, multi-role, and error-recovery trials (`tests/test-subagent-trials.mjs`).
+- **Comprehensive MCP Tool, Prompt & CLI Reference**: Authored an exhaustive handbook in `docs/tools.md` detailing all 6 canonical MCP tools with parameter tables, concrete JSON-RPC payloads, sample outputs, forensic search walkthroughs, and diagnostic triage playbooks.
+- **Labeled Diagnostic Telemetry**: Refined `check_context_health` with explicit labeled sections (`[Active Session Metrics]` vs. `[Local RTK Environment]`), eliminating metric ambiguity between active conversation byte weight and machine-wide cumulative `rtk gain` host tokens.
+
+### Changed
+- **Broadened Multi-Agent Positioning**: Shifted documentation and positioning from a narrow coding focus to affordable, reliable multi-agent workflows across general tasks (development, deep research, operations, analysis, and document drafting).
+- **Subagent Brief Schema Freeze**: Formally froze `subagent_brief` as a lightweight ergonomic utility adhering strictly to YAGNI principles; rejected feature creep (finding ledgers, citation judges, blinding switches).
+- **Zensical Documentation Navigation**: Registered `docs/roadmap.md` in navigation and validated zero dead anchors across the entire documentation site (`zensical build`).
+
 ## [1.5.1] - 2026-10-11
 
 ### Added

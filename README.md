@@ -113,6 +113,7 @@ For complete technical references, architectural specifications, and governance 
 - 🧰 **[MCP Tools & CLI Reference](docs/tools.md)**: Complete specifications for all 6 canonical autonomous MCP tools, slash commands, and diagnostic utilities.
 - 🔬 **[Forensic & Output Inspection](docs/architecture.md#6-output-governance--spillover-safe-harbor-0-new-tools)**: Ephemeral tool spillover resolution, post-mortem task retrieval, and Pointer-Over-Wire (POW) contracts.
 - 🚀 **[Publishing & Verification Playbook](docs/publishing.md)**: Clean-room test runs, release procedures, and multi-suite verification matrix.
+- 🗺️ **[Product Roadmap](docs/roadmap.md)**: Phased strategic roadmap focusing on affordable and reliable multi-agent workflows across general tasks.
 
 ---
 

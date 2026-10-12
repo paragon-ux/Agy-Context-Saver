@@ -89,7 +89,7 @@ When an agent or developer tests this framework, follow this exact sequence with
    - `check_context_health`: Pass `{ "transcriptPath": "<path-to-transcript.jsonl>" }`.
    - `read_transcript`: Pass `{ "conversationId": "<uuid>", "lastTurns": 3, "mode": "compact" }`.
    - `query_transcript`: Pass `{ "conversationId": "<uuid>", "query": "<pattern>", "summaryOnly": true }`.
-   - `subagent_brief`: Pass `{ "objective": "<goal>", "scopeFiles": ["..."] }`.
+   - `subagent_brief`: Pass `{ "objective": "<goal>", "role": "<role>", "scopeFiles": ["..."] }` or pass multiple via `{ "subagents": [...] }` to generate ready-to-use `invoke_subagent` JSON payloads.
 
 5. **Operational Anti-Patterns (What NOT to do)**:
    - ❌ **Do NOT run `npm start` or `node mcp/index.js` interactively**: It starts the stdio JSON-RPC daemon and waits indefinitely on stdin.
