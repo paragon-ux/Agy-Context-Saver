@@ -6,7 +6,7 @@
 
 ## Prerequisites
 
-- **Node.js**: Version 18.0.0 or later (v22.5+ recommended for native SQLite integration).
+- **Node.js**: Version 22.0.0 or later (`>=22` required; tested on Node 22 and 24 across Windows, macOS, and Linux).
 - **Google Antigravity**: Antigravity 2.0+ (Windows, macOS, or Linux).
 
 ---

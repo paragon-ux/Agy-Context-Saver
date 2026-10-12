@@ -4,11 +4,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
+import { setupHermeticTestEnv } from "./helpers/hermetic-fixture.mjs";
 
 console.log("=================================================");
 console.log("Agy-Context-Saver Live Installed System Validation");
 console.log("=================================================\n");
 
+await setupHermeticTestEnv();
 const homeDir = process.env.AGY_TEST_PROFILE_DIR || process.env.USERPROFILE || process.env.HOME || os.homedir();
 const geminiConfigDir = path.join(homeDir, ".gemini", "config");
 const hooksJsonPath = path.join(geminiConfigDir, "hooks.json");

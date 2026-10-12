@@ -1,28 +1,21 @@
-# Installer hardening notes
+# Installer hardening policy
 
-These are implementation requirements for the maintainers; they are not a patch automatically applied to the upstream code.
+ This document summarizes the enforced installer safety contracts and regression verification suites in `Agy-Context-Saver`.
 
-## Required behavior before any user-profile write
+## Enforced behavior before any user-profile write
 
-`runInstall()` should have a clear preflight phase and a separate mutation phase. The preflight phase should:
+`runInstall()` in `scripts/install-register.mjs` and the Windows wrapper `install.ps1` enforce a strict preflight phase before mutating any user configuration:
 
-1. Check that required project files exist and the platform has a supported RTK asset or a compatible RTK already installed.
-2. Validate any existing `hooks.json` and `mcp_config.json`. If an existing file is malformed, stop and preserve its bytes; do not replace it with an empty object.
-3. Determine whether the existing RTK version is within the declared supported range.
-4. Verify any downloaded RTK asset's checksum/signature before extraction.
-5. Produce a plan/status result without writing when `--check` is requested.
+1. **Read-only configuration validation (`parseAndValidateJsonConfig`)**: Existing `hooks.json` and `mcp_config.json` files are parsed and verified to be non-null JSON objects (and `mcpServers`, if present, must be a JSON object) **before** `--check` returns or any disk writes occur. Malformed or non-object JSON immediately aborts installation and preserves the user's original file bytes unchanged.
+2. **Strict read-only `--check` and `--status`**: When `--check` (`-c`), `--status`, or `--help` is passed, zero files or directories are created and zero network calls are made. Conflicting flags (such as `--check --restore-backups` or `--check --uninstall`) are explicitly rejected with a non-zero exit code.
+3. **RTK version & SHA-256 supply-chain verification**: `findExistingRtk()` validates that any local or `PATH` RTK binary satisfies `[>=0.50.0 <0.52.0]`. Downloaded RTK archives are verified against pinned SHA-256 digests (`RTK_CHECKSUMS`) before disk extraction.
+4. **Fail-closed provisioning**: If RTK provisioning fails, installation aborts before touching `hooks.json`, `mcp_config.json`, plugin links, or `node.cmd` (unless `--allow-degraded` is explicitly passed).
+5. **Windows `node.cmd` wrapper safety**: `install.ps1` executes `scripts/install-register.mjs` first and only writes `node.cmd` after registration succeeds with exit code `0` in install mode, backing up any pre-existing unmanaged `node.cmd` to `node.cmd.bak` and delegating non-governor calls to `node.exe`.
 
-Only after successful validation should install make backups and apply changes. If RTK is mandatory, provisioning or verification failure must abort before config mutation. Any intentionally supported degraded mode should require an explicit flag and produce a partial/unhealthy status.
+## Regression test coverage
 
-## Two essential regression tests
+The automated test suite (`npm test`) verifies these contracts across isolated `AGY_TEST_PROFILE_DIR` sandboxes:
 
-The supplied black-box templates in `templates/tests/` are designed to fail on the current risky paths:
-
-- `test-check-only-readonly.mjs`: runs `--check` with a clean temporary home and a fake RTK on PATH, then asserts the profile and copied source tree remain unmodified.
-- `test-malformed-config-preservation.mjs`: gives the installer malformed `hooks.json` plus an unrelated MCP server, runs install in an isolated copy, then asserts install failed before changing either file or creating the plugin.
-
-Copy them into `tests/`, add them to the end of `package.json`'s `test` chain, and update the README count/list. These are black-box tests; adapt their fixture assumptions if the installer gains an explicit config-root override, but retain the same safety assertions.
-
-## UX recommendation
-
-Add an explicit `--dry-run` or make `--check` meet the stronger no-write contract above. Print the exact target paths that would be changed, explain whether the plugin will be linked or copied, identify the pinned RTK version and the required network access, and ask for confirmation before writing in interactive installs. Use a separate explicit `--yes` flag for automation rather than silently bypassing confirmation.
+- `tests/test-check-only-readonly.mjs`: Verifies `--check` on a clean temporary home leaves the profile and source tree untouched, fails closed on malformed existing config without writing, and rejects conflicting `--check --restore-backups` flags.
+- `tests/test-malformed-config-preservation.mjs`: Verifies malformed `hooks.json` and non-object JSON shapes abort installation before modifying `hooks.json`, `mcp_config.json`, or `node.cmd`.
+- `tests/test-lifecycle-rollback.mjs`: Verifies foreign hook/MCP preservation, backup creation/restoration, upgrade idempotency, incompatible `PATH` RTK rejection, and symlink/junction fallback to directory copy.

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { setupHermeticTestEnv, runRtkCli } from "./helpers/hermetic-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const hookScript = path.resolve(__dirname, "../scripts/execution-guard-hook.mjs");
@@ -13,6 +14,7 @@ const mcpServer = path.resolve(__dirname, "../mcp/index.js");
 console.log("=================================================");
 console.log("Agy-Context-Saver + RTK End-to-End Governance Probes");
 console.log("=================================================\n");
+await setupHermeticTestEnv();
 
 // --- Section 1: PreToolUse Hook Robustness Probes ---
 console.log("--- Section 1: PreToolUse Hook Robustness Probes ---");
@@ -130,12 +132,12 @@ console.log("✓ MCP Server initialized");
 // Probe 2.b: RTK CLI commands functional and verified
 {
   console.log("\nTesting RTK CLI functionality (rtk read, rtk git)...");
-  const rtkReadRes = spawnSync("rtk", ["read", "package.json"], { encoding: "utf-8" });
+  const rtkReadRes = runRtkCli(["read", "package.json"], { encoding: "utf-8" });
   assert.equal(rtkReadRes.status, 0, "rtk read package.json must exit 0");
   assert.ok(rtkReadRes.stdout.includes('"name": "agy-context-saver"'), "rtk read must output file content");
   console.log("✓ rtk read package.json executed successfully");
 
-  const rtkGitRes = spawnSync("rtk", ["git", "status"], { encoding: "utf-8" });
+  const rtkGitRes = runRtkCli(["git", "status"], { encoding: "utf-8" });
   assert.equal(rtkGitRes.status, 0, "rtk git status must exit 0");
   assert.ok(rtkGitRes.stdout.length > 0 && (rtkGitRes.stdout.includes("branch") || rtkGitRes.stdout.includes("*") || rtkGitRes.stdout.includes("On branch") || rtkGitRes.stdout.includes("package.json")), "rtk git status must list git status");
   console.log("✓ rtk git status executed successfully");

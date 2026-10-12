@@ -54,22 +54,29 @@ export function getRtkPlatformAsset() {
 }
 
 export function findExistingRtk(options = {}) {
-  // Check local binDir first
-  const info = getRtkPlatformAsset();
-  const localExe = info ? path.join(binDir, info.exeName) : null;
-  if (localExe && fs.existsSync(localExe)) {
-    try {
-      const out = execSync(`"${localExe}" --version`, { encoding: "utf-8", timeout: 5000 }).trim();
-      if (isCompatibleRtkVersion(out) || process.env.AGY_ALLOW_ANY_RTK === "1") {
-        return { path: localExe, version: out, isLocal: true };
+  const names = os.platform() === "win32" ? ["rtk.exe", "rtk.cmd"] : ["rtk"];
+  const profileHome = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
+  const pluginBinDir = path.join(profileHome, ".gemini", "config", "plugins", "agy-context-saver", "bin");
+  const candidateDirs = [binDir, pluginBinDir];
+
+  for (const dir of candidateDirs) {
+    for (const exeName of names) {
+      const localExe = path.join(dir, exeName);
+      if (fs.existsSync(localExe)) {
+        try {
+          const out = execSync(`"${localExe}" --version`, { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+          if (isCompatibleRtkVersion(out)) {
+            return { path: localExe, version: out, isLocal: true };
+          }
+        } catch {}
       }
-    } catch {}
+    }
   }
 
   // Check PATH
   try {
-    const out = execSync("rtk --version", { encoding: "utf-8", timeout: 5000 }).trim();
-    if (isCompatibleRtkVersion(out) || process.env.AGY_ALLOW_ANY_RTK === "1") {
+    const out = execSync("rtk --version", { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (isCompatibleRtkVersion(out)) {
       return { path: "rtk", version: out, isLocal: false };
     } else {
       if (!options.silent) {
