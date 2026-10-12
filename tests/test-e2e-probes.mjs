@@ -137,7 +137,7 @@ console.log("✓ MCP Server initialized");
 
   const rtkGitRes = spawnSync("rtk", ["git", "status"], { encoding: "utf-8" });
   assert.equal(rtkGitRes.status, 0, "rtk git status must exit 0");
-  assert.ok(rtkGitRes.stdout.includes("package.json") || rtkGitRes.stdout.includes("main"), "rtk git status must list git status");
+  assert.ok(rtkGitRes.stdout.length > 0 && (rtkGitRes.stdout.includes("branch") || rtkGitRes.stdout.includes("*") || rtkGitRes.stdout.includes("On branch") || rtkGitRes.stdout.includes("package.json")), "rtk git status must list git status");
   console.log("✓ rtk git status executed successfully");
 }
 

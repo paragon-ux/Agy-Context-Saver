@@ -1,118 +1,141 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import {
-  runInstall,
-  runUninstall,
-  detectExistingInstallation,
-  pluginDest,
-  destHook,
-  hooksJsonPath,
-  hooksBakPath,
-  mcpJsonPath,
-  mcpBakPath,
-  antigravityMcpDir
-} from "../scripts/install-register.mjs";
 
 console.log("=================================================");
 console.log("Agy-Context-Saver Lifecycle & Rollback Test Suite");
 console.log("=================================================\n");
 
-// --- 1. Pre-flight Validation Test ---
-console.log("--- 1. Pre-flight Validation Audit ---");
-const preflightResult = await runInstall({ checkOnly: true, silent: true });
-assert.ok(preflightResult, "Pre-flight audit should return status object");
-console.log("✓ Pre-flight audit completed without throwing write errors");
+// Isolate test in temporary sandbox to protect operator's live profile
+const testProfileDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-lifecycle-test-"));
+process.env.AGY_TEST_PROFILE_DIR = testProfileDir;
 
-// --- 2. Initial State Verification ---
-console.log("\n--- 2. Initial State Verification ---");
-const initial = detectExistingInstallation();
-assert.equal(initial.isComplete, true, "Initial installation must be complete and healthy");
-assert.ok(fs.existsSync(hooksBakPath), "hooks.json.bak must exist");
-assert.ok(fs.existsSync(mcpBakPath), "mcp_config.json.bak must exist");
-console.log("✓ Initial installation verified healthy with configuration backups present");
+try {
+  const configDir = path.join(testProfileDir, ".gemini", "config");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "hooks.json"), JSON.stringify({
+    "foreign-preservation-hook": { PreToolUse: [] }
+  }, null, 2));
+  fs.writeFileSync(path.join(configDir, "mcp_config.json"), JSON.stringify({
+    mcpServers: { "foreign-preservation-server": { command: "node" } }
+  }, null, 2));
 
-// --- 3. Clean Uninstallation Test ---
-console.log("\n--- 3. Clean Uninstallation Verification ---");
-await runUninstall({ silent: true });
+  // Dynamically import install-register so it resolves to testProfileDir
+  const {
+    runInstall,
+    runUninstall,
+    detectExistingInstallation,
+    pluginDest,
+    destHook,
+    hooksJsonPath,
+    hooksBakPath,
+    mcpJsonPath,
+    mcpBakPath,
+    antigravityMcpDir
+  } = await import("../scripts/install-register.mjs");
 
-// Check filesystem cleanup
-assert.equal(fs.existsSync(pluginDest), false, "Plugin link must be removed");
-assert.equal(fs.existsSync(destHook), false, "Mirrored hook script must be removed");
-assert.equal(fs.existsSync(antigravityMcpDir), false, "Mirrored MCP schemas dir must be removed");
+  // Initial installation into isolated sandbox
+  await runInstall({ silent: true, allowDegraded: true });
 
-// Check configuration preservation
-const uninstalledHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
-assert.equal(uninstalledHooks["execution-guard"], undefined, "execution-guard must be removed from hooks.json");
-assert.ok(uninstalledHooks["waymark-continuity"], "waymark-continuity MUST remain preserved in hooks.json");
+  // --- 1. Pre-flight Validation Test ---
+  console.log("--- 1. Pre-flight Validation Audit ---");
+  const preflightResult = await runInstall({ checkOnly: true, silent: true, allowDegraded: true });
+  assert.ok(preflightResult, "Pre-flight audit should return status object");
+  console.log("✓ Pre-flight audit completed without throwing write errors");
 
-const uninstalledMcp = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
-assert.equal(uninstalledMcp.mcpServers?.["agy-context-saver"], undefined, "agy-context-saver must be removed from mcp_config.json");
-assert.ok(uninstalledMcp.mcpServers?.["waymark-engine"], "waymark-engine MUST remain preserved in mcp_config.json");
+  // --- 2. Initial State Verification ---
+  console.log("\n--- 2. Initial State Verification ---");
+  const initial = detectExistingInstallation();
+  assert.equal(initial.isComplete, true, "Initial installation must be complete and healthy");
+  assert.ok(fs.existsSync(hooksBakPath), "hooks.json.bak must exist");
+  assert.ok(fs.existsSync(mcpBakPath), "mcp_config.json.bak must exist");
+  console.log("✓ Initial installation verified healthy with configuration backups present");
 
-const uninstalledDetect = detectExistingInstallation();
-assert.equal(uninstalledDetect.isInstalled, false, "detectExistingInstallation must report isInstalled: false after uninstallation");
-console.log("✓ Clean uninstallation verified: all artifacts removed and foreign configurations preserved");
+  // --- 3. Clean Uninstallation Test ---
+  console.log("\n--- 3. Clean Uninstallation Verification ---");
+  await runUninstall({ silent: true });
 
-// --- 4. Re-Installation & Recovery Test ---
-console.log("\n--- 4. Re-Installation & Synchronization Recovery ---");
-const reinstallResult = await runInstall({ silent: true });
-assert.equal(reinstallResult.isInstalled, true, "Re-installation should succeed");
+  // Check filesystem cleanup
+  assert.equal(fs.existsSync(pluginDest), false, "Plugin link must be removed");
+  assert.equal(fs.existsSync(destHook), false, "Mirrored hook script must be removed");
+  assert.equal(fs.existsSync(antigravityMcpDir), false, "Mirrored MCP schemas dir must be removed");
 
-const recoveredDetect = detectExistingInstallation();
-assert.equal(recoveredDetect.isInstalled, true, "detectExistingInstallation must report isInstalled: true");
-assert.equal(recoveredDetect.isComplete, true, "detectExistingInstallation must report isComplete: true");
+  // Check configuration preservation
+  const uninstalledHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
+  assert.equal(uninstalledHooks["execution-guard"], undefined, "execution-guard must be removed from hooks.json");
+  assert.ok(uninstalledHooks["foreign-preservation-hook"], "foreign-preservation-hook MUST remain preserved in hooks.json");
 
-// Verify all restored files
-assert.equal(fs.existsSync(pluginDest), true, "Plugin link restored");
-assert.equal(fs.existsSync(destHook), true, "Mirrored hook script restored");
-assert.equal(fs.existsSync(antigravityMcpDir), true, "Mirrored MCP schemas dir restored");
+  const uninstalledMcp = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
+  assert.equal(uninstalledMcp.mcpServers?.["agy-context-saver"], undefined, "agy-context-saver must be removed from mcp_config.json");
+  assert.ok(uninstalledMcp.mcpServers?.["foreign-preservation-server"], "foreign-preservation-server MUST remain preserved in mcp_config.json");
 
-const recoveredHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
-assert.ok(recoveredHooks["execution-guard"], "execution-guard restored in hooks.json");
-assert.ok(recoveredHooks["waymark-continuity"], "waymark-continuity still preserved");
+  const uninstalledDetect = detectExistingInstallation();
+  assert.equal(uninstalledDetect.isInstalled, false, "detectExistingInstallation must report isInstalled: false after uninstallation");
+  console.log("✓ Clean uninstallation verified: all artifacts removed and foreign configurations preserved");
 
-const recoveredMcp = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
-assert.ok(recoveredMcp.mcpServers?.["agy-context-saver"], "agy-context-saver restored in mcp_config.json");
-assert.ok(recoveredMcp.mcpServers?.["waymark-engine"], "waymark-engine still preserved");
+  // --- 4. Re-Installation & Recovery Test ---
+  console.log("\n--- 4. Re-Installation & Synchronization Recovery ---");
+  const reinstallResult = await runInstall({ silent: true, allowDegraded: true });
+  assert.equal(reinstallResult.isInstalled, true, "Re-installation should succeed");
 
-// Verify all 6 schemas exist and retired schemas are absent
-const requiredSchemas = [
-  "check_context_health.json",
-  "subagent_brief.json",
-  "get_installation_status.json",
-  "sync_installation.json",
-  "read_transcript.json",
-  "query_transcript.json"
-];
-for (const schemaName of requiredSchemas) {
-  assert.equal(fs.existsSync(path.join(antigravityMcpDir, schemaName)), true, `Schema ${schemaName} restored`);
+  const recoveredDetect = detectExistingInstallation();
+  assert.equal(recoveredDetect.isInstalled, true, "detectExistingInstallation must report isInstalled: true");
+  assert.equal(recoveredDetect.isComplete, true, "detectExistingInstallation must report isComplete: true");
+
+  // Verify all restored files
+  assert.equal(fs.existsSync(pluginDest), true, "Plugin link restored");
+  assert.equal(fs.existsSync(destHook), true, "Mirrored hook script restored");
+  assert.equal(fs.existsSync(antigravityMcpDir), true, "Mirrored MCP schemas dir restored");
+
+  const recoveredHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
+  assert.ok(recoveredHooks["execution-guard"], "execution-guard restored in hooks.json");
+  assert.ok(recoveredHooks["foreign-preservation-hook"], "foreign-preservation-hook still preserved");
+
+  const recoveredMcp = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
+  assert.ok(recoveredMcp.mcpServers?.["agy-context-saver"], "agy-context-saver restored in mcp_config.json");
+  assert.ok(recoveredMcp.mcpServers?.["foreign-preservation-server"], "foreign-preservation-server still preserved");
+
+  // Verify all 6 schemas exist and retired schemas are absent
+  const requiredSchemas = [
+    "check_context_health.json",
+    "subagent_brief.json",
+    "get_installation_status.json",
+    "sync_installation.json",
+    "read_transcript.json",
+    "query_transcript.json"
+  ];
+  for (const schemaName of requiredSchemas) {
+    assert.equal(fs.existsSync(path.join(antigravityMcpDir, schemaName)), true, `Schema ${schemaName} restored`);
+  }
+  const retiredSchemas = [
+    "safe_command.json",
+    "get_spillover_content.json",
+    "read_task_output.json",
+    "get_step_detail.json"
+  ];
+  for (const retired of retiredSchemas) {
+    assert.equal(fs.existsSync(path.join(antigravityMcpDir, retired)), false, `${retired} must NOT exist`);
+  }
+  console.log("✓ Re-installation completed successfully: all 4 integration layers and 6 canonical schemas active (0 extra tools)");
+
+  // --- 5. Backup Restore Option Test ---
+  console.log("\n--- 5. Backup Restore Option Verification ---");
+  await runUninstall({ silent: true, restoreBackups: true });
+  assert.equal(fs.existsSync(pluginDest), false, "Plugin link removed");
+  assert.equal(fs.existsSync(destHook), false, "Mirrored hook script removed");
+
+  // Re-install to leave sandbox in healthy state before cleanup
+  await runInstall({ silent: true, allowDegraded: true });
+  const finalCheck = detectExistingInstallation();
+  assert.equal(finalCheck.isComplete, true, "Final state must be complete and healthy");
+  console.log("✓ Backup restoration option verified and sandbox returned to clean healthy state");
+
+  console.log("\n=================================================");
+  console.log("ALL LIFECYCLE & ROLLBACK TESTS PASSED 100%!");
+  console.log("=================================================\n");
+} finally {
+  try {
+    fs.rmSync(testProfileDir, { recursive: true, force: true });
+  } catch {}
 }
-const retiredSchemas = [
-  "safe_command.json",
-  "get_spillover_content.json",
-  "read_task_output.json",
-  "get_step_detail.json"
-];
-for (const retired of retiredSchemas) {
-  assert.equal(fs.existsSync(path.join(antigravityMcpDir, retired)), false, `${retired} must NOT exist`);
-}
-console.log("✓ Re-installation completed successfully: all 4 integration layers and 6 canonical schemas active (0 extra tools)");
-
-// --- 5. Backup Restore Option Test ---
-console.log("\n--- 5. Backup Restore Option Verification ---");
-// Simulate custom uninstallation with restoreBackups
-await runUninstall({ silent: true, restoreBackups: true });
-assert.equal(fs.existsSync(pluginDest), false, "Plugin link removed");
-assert.equal(fs.existsSync(destHook), false, "Mirrored hook script removed");
-
-// Re-install to leave system in clean healthy state
-await runInstall({ silent: true });
-const finalCheck = detectExistingInstallation();
-assert.equal(finalCheck.isComplete, true, "Final state must be complete and healthy");
-console.log("✓ Backup restoration option verified and system returned to clean healthy state");
-
-console.log("\n=================================================");
-console.log("ALL LIFECYCLE & ROLLBACK TESTS PASSED 100%!");
-console.log("=================================================\n");
-process.exit(0);

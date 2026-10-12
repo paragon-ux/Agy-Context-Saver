@@ -1,0 +1,82 @@
+name: Publish npm package and GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Release gate — Node ${{ matrix.node }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22, 24]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Ensure tag matches package version
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "package.json: ${package_version}"
+          echo "git tag:      ${tag_version}"
+          test "${package_version}" = "${tag_version}"
+      - name: Run non-destructive release preflight
+        run: node scripts/release-preflight.mjs
+      - name: Run automated test suites
+        run: npm test
+      - name: Verify npm package can be assembled
+        run: npm pack --dry-run --json
+
+  publish:
+    name: Publish and create release
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: npm-release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Ensure npm supports trusted publishing
+        run: |
+          npm install --global 'npm@^11.5.1'
+          node --version
+          npm --version
+      - name: Build publish tarball
+        id: pack
+        shell: bash
+        run: |
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          tarball="${package_name}-${package_version}.tgz"
+          npm pack
+          test -f "${tarball}"
+          echo "tarball=${tarball}" >> "$GITHUB_OUTPUT"
+      - name: Publish to npm using OIDC trusted publishing
+        run: npm publish --access public --provenance
+      - name: Create GitHub Release and attach npm tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" "${{ steps.pack.outputs.tarball }}" --verify-tag --generate-notes
