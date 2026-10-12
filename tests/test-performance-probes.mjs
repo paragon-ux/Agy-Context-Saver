@@ -6,6 +6,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { safeWriteFileIfChanged, safeCopyFileIfChanged } from "../scripts/install-register.mjs";
+import { setupHermeticTestEnv } from "./helpers/hermetic-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const mcpServer = path.resolve(__dirname, "../mcp/index.js");
@@ -14,6 +15,7 @@ const hookScript = path.resolve(__dirname, "../scripts/execution-guard-hook.mjs"
 console.log("==========================================================");
 console.log("Agy-Context-Saver Performance & Diagnostic Verification");
 console.log("==========================================================\n");
+await setupHermeticTestEnv();
 
 // --- Probe 1: Idempotent File Operations (Copilot Churn Recommendation) ---
 console.log("--- Probe 1: Idempotent Config & Schema Writes ---");
@@ -137,7 +139,7 @@ function send(method, params = {}) {
 // 3.3 Batch Full-Transcript Dereferencing (Fixes Copilot Issue #6)
 {
   const syntheticConvId = `conv-perf-batch-${Date.now()}`;
-  const logsDir = path.join(os.homedir(), ".gemini", "antigravity", "brain", syntheticConvId, ".system_generated", "logs");
+  const logsDir = path.join(process.env.AGY_TEST_PROFILE_DIR || os.homedir(), ".gemini", "antigravity", "brain", syntheticConvId, ".system_generated", "logs");
   fs.mkdirSync(logsDir, { recursive: true });
 
   const compactFile = path.join(logsDir, "transcript.jsonl");
@@ -197,14 +199,14 @@ function send(method, params = {}) {
 
   // Clean up
   try {
-    fs.rmSync(path.join(os.homedir(), ".gemini", "antigravity", "brain", syntheticConvId), { recursive: true, force: true });
+    fs.rmSync(path.join(process.env.AGY_TEST_PROFILE_DIR || os.homedir(), ".gemini", "antigravity", "brain", syntheticConvId), { recursive: true, force: true });
   } catch {}
 }
 
 // 3.4 Sliding-Window Turn Retention on Large Transcript (Fixes Copilot Issue #5)
 {
   const syntheticConvId = `conv-perf-window-${Date.now()}`;
-  const logsDir = path.join(os.homedir(), ".gemini", "antigravity", "brain", syntheticConvId, ".system_generated", "logs");
+  const logsDir = path.join(process.env.AGY_TEST_PROFILE_DIR || os.homedir(), ".gemini", "antigravity", "brain", syntheticConvId, ".system_generated", "logs");
   fs.mkdirSync(logsDir, { recursive: true });
 
   const compactFile = path.join(logsDir, "transcript.jsonl");
@@ -243,7 +245,7 @@ function send(method, params = {}) {
 
   // Clean up
   try {
-    fs.rmSync(path.join(os.homedir(), ".gemini", "antigravity", "brain", syntheticConvId), { recursive: true, force: true });
+    fs.rmSync(path.join(process.env.AGY_TEST_PROFILE_DIR || os.homedir(), ".gemini", "antigravity", "brain", syntheticConvId), { recursive: true, force: true });
   } catch {}
 }
 

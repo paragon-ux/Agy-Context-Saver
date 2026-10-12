@@ -12,7 +12,22 @@
     "setup": "node scripts/install-register.mjs",
     "uninstall": "node scripts/install-register.mjs --uninstall",
     "status": "node scripts/install-register.mjs --status",
-    "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs && node tests/test-output-governance.mjs && node tests/test-e2e-probes.mjs && node tests/test-performance-probes.mjs && node tests/test-installed-verification.mjs && node tests/test-lifecycle-rollback.mjs && node tests/test-subagent-trials.mjs"
+    "preflight": "node scripts/release-preflight.mjs",
+    "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs && node tests/test-output-governance.mjs && node tests/test-e2e-probes.mjs && node tests/test-performance-probes.mjs && node tests/test-installed-verification.mjs && node tests/test-lifecycle-rollback.mjs && node tests/test-subagent-trials.mjs && node tests/test-check-only-readonly.mjs && node tests/test-malformed-config-preservation.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/paragon-ux/Agy-Context-Saver.git"
+  },
+  "homepage": "https://paragon-ux.github.io/agy-context-saver/",
+  "bugs": {
+    "url": "https://github.com/paragon-ux/Agy-Context-Saver/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "antigravity",

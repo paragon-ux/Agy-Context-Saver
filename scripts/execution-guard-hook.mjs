@@ -32,6 +32,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 function respond(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
@@ -207,8 +208,12 @@ function getTaskLogMatch(text) {
 const TASK_TAIL_BYTES = 262144; // transcript tail scanned first (256 KB)
 const TASK_QUIET_MS = 300000;   // log-mtime fallback: quiet for 5 min => treated as finished
 
+function getProfileHomeDir() {
+  return process.env.AGY_TEST_PROFILE_DIR || os.homedir();
+}
+
 function getBrainDir() {
-  return process.env.AGY_BRAIN_DIR || path.join(os.homedir(), ".gemini", "antigravity", "brain");
+  return process.env.AGY_BRAIN_DIR || path.join(getProfileHomeDir(), ".gemini", "antigravity", "brain");
 }
 
 /** Reads the last `bytes` of a file. Returns { text, whole } or null. */
@@ -280,19 +285,54 @@ function getTaskState(match, convId) {
   return "UNKNOWN";
 }
 
-/**
- * Runs `rtk rewrite <cmd>`. Spawns the PATH binary directly (a separate `--version` probe doubled
- * the cost of every cache miss); falls back to the plugin-local binary only when PATH has none.
- */
-function runRtkRewrite(cmd) {
-  const opts = { encoding: "utf-8", timeout: 2000, windowsHide: true };
-  const res = spawnSync("rtk", ["rewrite", cmd], opts);
-  if (res.error && res.error.code === "ENOENT") {
-    const exeName = os.platform() === "win32" ? "rtk.exe" : "rtk";
-    const pluginBin = path.join(os.homedir(), ".gemini", "config", "plugins", "agy-context-saver", "bin", exeName);
-    if (fs.existsSync(pluginBin)) return spawnSync(pluginBin, ["rewrite", cmd], opts);
+function isCompatibleRtkVersion(versionStr) {
+  if (!versionStr || typeof versionStr !== "string") return false;
+  const match = versionStr.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return false;
+  const major = parseInt(match[1], 10);
+  const minor = parseInt(match[2], 10);
+  return major === 0 && (minor === 50 || minor === 51);
+}
+
+function getLocalRtkCandidate() {
+  const names = os.platform() === "win32" ? ["rtk.exe", "rtk.cmd"] : ["rtk"];
+  const hookDir = path.dirname(fileURLToPath(import.meta.url));
+  for (const exeName of names) {
+    const pluginBin = path.join(getProfileHomeDir(), ".gemini", "config", "plugins", "agy-context-saver", "bin", exeName);
+    if (fs.existsSync(pluginBin)) return pluginBin;
   }
-  return res;
+  for (const exeName of names) {
+    const repoBin = path.resolve(hookDir, "..", "bin", exeName);
+    if (fs.existsSync(repoBin)) return repoBin;
+  }
+  return "";
+}
+
+function findFirstRtkOnPath() {
+  const pathEnv = process.env.PATH || process.env.Path || "";
+  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
+  const exts = os.platform() === "win32" ? [".exe", ".cmd", ".bat"] : [""];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const candidate = path.join(dir, `rtk${ext}`);
+      try {
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return candidate;
+        }
+      } catch {}
+    }
+  }
+  return "";
+}
+
+function spawnRtk(bin, args, opts) {
+  if (!bin) return { error: Object.assign(new Error("ENOENT"), { code: "ENOENT" }), status: null, stdout: "", stderr: "" };
+  if (os.platform() === "win32" && /\.(cmd|bat)$/i.test(bin)) {
+    const quotedBin = /\s/.test(bin) ? `"${bin}"` : bin;
+    const quotedArgs = args.map((a) => (/\s|["&|<>^]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ");
+    return spawnSync("cmd.exe", ["/d", "/s", "/c", `"${quotedBin} ${quotedArgs}"`], { ...opts, windowsVerbatimArguments: true });
+  }
+  return spawnSync(bin, args, opts);
 }
 
 const NON_REWRITABLE_BINARIES = new Set([
@@ -332,18 +372,77 @@ function loadRewriteCache() {
   return inMemoryRewriteCache;
 }
 
+function resolveCompatibleRtk() {
+  const localCandidate = getLocalRtkCandidate();
+  const pathCandidate = findFirstRtkOnPath();
+  const envSig = `${pathCandidate}::${localCandidate}`;
+  const cache = loadRewriteCache();
+  if (cache.__envSig === envSig && cache.__rtkResolved !== undefined) {
+    return cache.__rtkResolved;
+  }
+
+  for (const k of Object.keys(cache)) delete cache[k];
+
+  const opts = { encoding: "utf-8", timeout: 2000, windowsHide: true };
+  let resolved = null;
+
+  const pathRes = pathCandidate ? spawnRtk(pathCandidate, ["--version"], opts) : { status: 1, stdout: "" };
+  const pathCompatible = !pathRes.error && pathRes.status === 0 && isCompatibleRtkVersion(pathRes.stdout);
+
+  if (pathCompatible) {
+    resolved = { exe: pathCandidate, prefix: "rtk" };
+  } else if (localCandidate) {
+    const localRes = spawnRtk(localCandidate, ["--version"], opts);
+    const localCompatible = !localRes.error && localRes.status === 0 && isCompatibleRtkVersion(localRes.stdout);
+    if (localCompatible) {
+      const normalizedLocal = localCandidate.replace(/\\/g, "/");
+      const prefix = /\s/.test(normalizedLocal) ? `"${normalizedLocal}"` : normalizedLocal;
+      resolved = { exe: localCandidate, prefix };
+    }
+  }
+
+  cache.__envSig = envSig;
+  cache.__rtkResolved = resolved;
+  try {
+    const tmp = `${REWRITE_CACHE_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cache), "utf-8");
+    try {
+      fs.renameSync(tmp, REWRITE_CACHE_FILE);
+    } catch {
+      fs.writeFileSync(REWRITE_CACHE_FILE, JSON.stringify(cache), "utf-8");
+      try { fs.unlinkSync(tmp); } catch {}
+    }
+  } catch {}
+
+  return resolved;
+}
+
+function runRtkRewrite(cmd, resolvedRtk) {
+  const rtk = resolvedRtk || resolveCompatibleRtk();
+  if (!rtk) return { status: 1, stdout: "", stderr: "No compatible RTK binary available" };
+  const opts = { encoding: "utf-8", timeout: 2000, windowsHide: true };
+  return spawnRtk(rtk.exe, ["rewrite", cmd], opts);
+}
+
 /**
  * Persists one rewrite result. Re-reads the file first so concurrent hook processes merge instead
  * of overwriting each other, trims to the newest entries, and writes atomically (temp + rename).
  */
 function rememberRewrite(cmd, rewritten) {
-  loadRewriteCache()[cmd] = rewritten;
+  const cache = loadRewriteCache();
+  cache[cmd] = rewritten;
   try {
     const disk = readRewriteCacheFile();
+    const envSig = cache.__envSig ?? disk.__envSig;
+    const rtkResolved = cache.__rtkResolved ?? disk.__rtkResolved;
+    delete disk.__envSig;
+    delete disk.__rtkResolved;
     delete disk[cmd];
     disk[cmd] = rewritten;
     const keys = Object.keys(disk);
     for (const k of keys.slice(0, Math.max(0, keys.length - REWRITE_CACHE_MAX))) delete disk[k];
+    if (envSig !== undefined) disk.__envSig = envSig;
+    if (rtkResolved !== undefined) disk.__rtkResolved = rtkResolved;
     const tmp = `${REWRITE_CACHE_FILE}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(disk), "utf-8");
     try {
@@ -364,7 +463,11 @@ function rewriteCommandWithRtk(rawCmd) {
   if (!trimmed) return rawCmd;
 
   // Already prefixed with rtk
-  if (/^rtk(?:\.exe)?\s+/i.test(trimmed)) {
+  if (/^rtk(?:\.exe)?(?=\s|$)/i.test(trimmed)) {
+    const rtk = resolveCompatibleRtk();
+    if (rtk && rtk.prefix !== "rtk") {
+      return trimmed.replace(/^rtk(?:\.exe)?(?=\s|$)/i, rtk.prefix);
+    }
     return trimmed;
   }
 
@@ -382,7 +485,7 @@ function rewriteCommandWithRtk(rawCmd) {
     return trimmed;
   }
 
-    // Fast-path bypass for shell builtins, non-rewritable binaries, and powershell cmdlets
+  // Fast-path bypass for shell builtins, non-rewritable binaries, and powershell cmdlets
   const firstWord = (trimmed.match(/^[^\s"']+/)?.[0] || "").toLowerCase();
   if (
     NON_REWRITABLE_BINARIES.has(firstWord) ||
@@ -397,6 +500,9 @@ function rewriteCommandWithRtk(rawCmd) {
     return trimmed;
   }
 
+  const rtk = resolveCompatibleRtk();
+  if (!rtk) return trimmed;
+
   // Check persistent cache
   const cache = loadRewriteCache();
   if (cache[trimmed] !== undefined) {
@@ -406,7 +512,7 @@ function rewriteCommandWithRtk(rawCmd) {
   let rewritten = trimmed;
   let cacheable = false;
   try {
-    const res = runRtkRewrite(trimmed);
+    const res = runRtkRewrite(trimmed, rtk);
     // Never cache timeouts, spawn errors or signals: a transient failure must not pin a command
     // to "no rewrite" for the lifetime of the cache.
     cacheable = !res.error && !res.signal && typeof res.status === "number" && res.status >= 0 && res.status <= 3;
@@ -414,6 +520,9 @@ function rewriteCommandWithRtk(rawCmd) {
     // RTK exits 0 or 3 when rewritten, with new command on stdout
     if ((res.status === 0 || res.status === 3) && res.stdout && res.stdout.trim()) {
       rewritten = res.stdout.trim();
+      if (rtk.prefix !== "rtk") {
+        rewritten = rewritten.replace(/^rtk(?:\.exe)?(?=\s|$)/i, rtk.prefix);
+      }
     }
   } catch {}
 
@@ -542,7 +651,7 @@ try {
 
     const rewritten = rewriteCommandWithRtk(rawCmd);
     const effectiveCmd = rewritten;
-    const isRtkRead = /^rtk(?:\.exe)?\s+read\b/i.test(effectiveCmd);
+    const isRtkRead = /^(?:["']?[^\s"']*[/\\])?rtk(?:\.exe|\.cmd|\.bat)?["']?\s+read\b/i.test(effectiveCmd);
 
     // Check 3: Step Output Spillover Safe Harbor (rtk read only; it clamps + windows output)
     if (isSpillover && !isRtkRead) {

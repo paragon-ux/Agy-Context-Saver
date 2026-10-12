@@ -5,11 +5,13 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { setupHermeticTestEnv } from "./helpers/hermetic-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const mcpServer = path.resolve(__dirname, "../mcp/index.js");
 
 console.log("Running Agy-Context-Saver MCP Server tests...\n");
+await setupHermeticTestEnv();
 
 const proc = spawn(process.execPath, [mcpServer], {
   stdio: ["pipe", "pipe", "inherit"]

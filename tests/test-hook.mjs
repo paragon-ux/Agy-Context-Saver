@@ -4,10 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { setupHermeticTestEnv, createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const hookScript = path.resolve(__dirname, "../scripts/execution-guard-hook.mjs");
 const stateFile = path.join(os.tmpdir(), "agy-session-governance-state.json");
+const hermetic = await setupHermeticTestEnv({ installProfile: false });
 
 function resetState() {
   try {
@@ -22,10 +24,11 @@ function resetState() {
   } catch {}
 }
 
-function runHook(payload) {
+function runHook(payload, customEnv = process.env) {
   const result = spawnSync(process.execPath, [hookScript], {
     input: JSON.stringify(payload),
-    encoding: "utf-8"
+    encoding: "utf-8",
+    env: customEnv
   });
   assert.equal(result.status, 0, `Hook exited with code ${result.status}: ${result.stderr}`);
   return JSON.parse(result.stdout.trim());
@@ -140,6 +143,36 @@ console.log("--- Group A: RTK Integration & Command Rewriting ---");
   assert.equal(outCached.decision, "allow");
   assert.equal(outCached.overwrite?.CommandLine, "rtk git status");
   console.log("✓ run_command uses LRU rewrite cache on repeat invocations");
+}
+
+// 3c. run_command: incompatible PATH rtk falls back to compatible local binary with explicit path (D-03, D-09)
+{
+  const tempFallbackRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agy-rtk-fallback-"));
+  try {
+    const badPathDir = path.join(tempFallbackRoot, "bad-path-bin");
+    const tempProfile = path.join(tempFallbackRoot, "profile");
+    const localPluginBin = path.join(tempProfile, ".gemini", "config", "plugins", "agy-context-saver", "bin");
+    createRtkShim(badPathDir, "0.60.0");
+    const localGoodBin = createRtkShim(localPluginBin, "0.51.0");
+    const expectedPrefix = localGoodBin.replace(/\\/g, "/");
+
+    const customEnv = { ...process.env, AGY_TEST_PROFILE_DIR: tempProfile };
+    prependToPath(badPathDir, customEnv);
+
+    const outFallback = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: "git status", WaitMsBeforeAsync: 1000 } } },
+      customEnv
+    );
+    assert.equal(outFallback.decision, "allow");
+    assert.ok(
+      outFallback.overwrite?.CommandLine?.includes(expectedPrefix),
+      `Expected rewritten command to use compatible local binary (${expectedPrefix}), got: ${outFallback.overwrite?.CommandLine}`
+    );
+    console.log("✓ run_command bypasses incompatible PATH rtk (0.60.0) and rewrites with compatible local binary path");
+  } finally {
+    resetState();
+    try { fs.rmSync(tempFallbackRoot, { recursive: true, force: true }); } catch {}
+  }
 }
 
 // 4. run_command: daemon process preserves custom wait window

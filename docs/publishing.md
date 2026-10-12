@@ -47,7 +47,7 @@ Ensures plugin links, hook scripts, and tool schemas exist and match versions.
 ```bash
 npm test
 ```
-Executes all 8 verification suites:
+Executes all 10 verification suites:
 1. Intelligent hook governance & closed-topology tests (`tests/test-hook.mjs`)
 2. MCP server protocol & method tests (`tests/test-mcp.mjs`)
 3. Output inspection governance & lifecycle gating tests (`tests/test-output-governance.mjs`)
@@ -56,6 +56,8 @@ Executes all 8 verification suites:
 6. Live installed system validation (`tests/test-installed-verification.mjs`)
 7. Full lifecycle installation, rollback, and restoration test (`tests/test-lifecycle-rollback.mjs`)
 8. Subagent delegation & batching trials (`tests/test-subagent-trials.mjs`)
+9. Check-only read-only isolation regression test (`tests/test-check-only-readonly.mjs`)
+10. Malformed config preservation fail-closed regression test (`tests/test-malformed-config-preservation.mjs`)
 
 ### Stage 3: Tarball Dry-Run Inspection
 ```bash

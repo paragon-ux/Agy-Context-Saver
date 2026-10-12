@@ -20,12 +20,14 @@ import path from "node:path";
 import readline from "node:readline";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { setupHermeticTestEnv } from "./helpers/hermetic-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const hookScript = path.resolve(__dirname, "../scripts/execution-guard-hook.mjs");
 const mcpServer = path.resolve(__dirname, "../mcp/index.js");
 
 console.log("Running Agy-Context-Saver Output Inspection Governance Tests (Simplified Architecture)...\n");
+await setupHermeticTestEnv();
 
 // Helper to invoke hook script via stdin JSON
 function invokeHook(payload) {

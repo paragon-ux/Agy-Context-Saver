@@ -28,24 +28,45 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import { runInstall, runUninstall, runStatus, detectExistingInstallation } from "../scripts/install-register.mjs";
+import { runInstall, runUninstall, runStatus, runRestoreBackups, detectExistingInstallation } from "../scripts/install-register.mjs";
 import { findExistingRtk } from "../scripts/provision-rtk.mjs";
 
 // Handle CLI subcommands (e.g. npx agy-context-saver install)
-const cliArg = process.argv[2];
-const checkFlag = process.argv.includes("--check") || process.argv.includes("-c");
-if (cliArg === "install" || cliArg === "--install") {
-  await runInstall({ checkOnly: checkFlag });
+const cliArgs = process.argv.slice(2);
+const cliArg = cliArgs[0];
+const checkFlag = cliArgs.includes("--check") || cliArgs.includes("-c");
+const statusFlag = cliArgs.includes("--status") || cliArgs.includes("status");
+const uninstallFlag = cliArgs.includes("--uninstall") || cliArgs.includes("uninstall");
+const restoreFlag = cliArgs.includes("--restore-backups") || cliArgs.includes("restore-backups");
+const helpFlag = cliArgs.includes("--help") || cliArgs.includes("-h") || cliArgs.includes("help");
+const allowDegraded = cliArgs.includes("--allow-degraded");
+
+if (helpFlag) {
+  printHelp();
   process.exit(0);
-} else if (cliArg === "uninstall" || cliArg === "--uninstall") {
-  const restoreBackups = process.argv.includes("--restore-backups");
-  await runUninstall({ restoreBackups });
+}
+if ((checkFlag || statusFlag) && (uninstallFlag || restoreFlag)) {
+  console.error("Error: Read-only flags (--check, --status) cannot be combined with mutating flags (--uninstall, --restore-backups).");
+  process.exit(1);
+}
+if (checkFlag && statusFlag) {
+  console.error("Error: Conflicting flags: specify either --check or --status, not both.");
+  process.exit(1);
+}
+if (checkFlag) {
+  await runInstall({ checkOnly: true, allowDegraded });
   process.exit(0);
-} else if (cliArg === "status" || cliArg === "--status") {
+} else if (statusFlag) {
   runStatus();
   process.exit(0);
-} else if (cliArg === "--help" || cliArg === "-h" || cliArg === "help") {
-  printHelp();
+} else if (uninstallFlag) {
+  await runUninstall({ restoreBackups: restoreFlag });
+  process.exit(0);
+} else if (restoreFlag) {
+  await runRestoreBackups();
+  process.exit(0);
+} else if (cliArg === "install" || cliArg === "--install") {
+  await runInstall({ allowDegraded });
   process.exit(0);
 }
 
@@ -593,6 +614,14 @@ function extractConvId(p) {
 let cachedActiveConv = null;
 let cachedActiveConvTime = 0;
 
+function getProfileHomeDir() {
+  return process.env.AGY_TEST_PROFILE_DIR || os.homedir();
+}
+
+function getBrainDir() {
+  return process.env.AGY_BRAIN_DIR || path.join(getProfileHomeDir(), ".gemini", "antigravity", "brain");
+}
+
 function resolveTranscriptPath(target, mode = "compact") {
   const isFull = mode === "full";
   const fileName = isFull ? "transcript_full.jsonl" : "transcript.jsonl";
@@ -607,7 +636,7 @@ function resolveTranscriptPath(target, mode = "compact") {
       if (cachedActiveConv && (now - cachedActiveConvTime) < 5000) {
         raw = cachedActiveConv;
       } else {
-        const brainDir = path.join(os.homedir(), ".gemini", "antigravity", "brain");
+        const brainDir = getBrainDir();
         try {
           const entries = fs.readdirSync(brainDir, { withFileTypes: true });
           let bestMtime = 0;
@@ -659,14 +688,14 @@ function resolveTranscriptPath(target, mode = "compact") {
     }
   }
 
-  // 4. UUID / Directory resolution under ~/.gemini/antigravity/brain/<id>
-  const homeDir = os.homedir();
-  const brainCandidate = path.join(homeDir, ".gemini", "antigravity", "brain", normalized, ".system_generated", "logs", fileName);
+  // 4. UUID / Directory resolution under <brainDir>/<id>
+  const primaryBrainDir = getBrainDir();
+  const brainCandidate = path.join(primaryBrainDir, normalized, ".system_generated", "logs", fileName);
   if (fs.existsSync(brainCandidate)) {
     return { filePath: brainCandidate, convId: normalized };
   }
   if (isFull) {
-    const compactFallback = path.join(homeDir, ".gemini", "antigravity", "brain", normalized, ".system_generated", "logs", "transcript.jsonl");
+    const compactFallback = path.join(primaryBrainDir, normalized, ".system_generated", "logs", "transcript.jsonl");
     if (fs.existsSync(compactFallback)) {
       return { filePath: compactFallback, convId: normalized };
     }
