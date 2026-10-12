@@ -69,6 +69,32 @@ try {
     'Plugin was installed even though configuration preflight should have failed.',
   );
   console.log('PASS: malformed hooks.json is preserved and install aborts before changing configuration.');
+
+  // D-04: On Windows, install.ps1 must run install-register.mjs preflight BEFORE touching node.cmd
+  if (process.platform === 'win32') {
+    const customNodeCmdPath = path.join(configDir, 'node.cmd');
+    const customNodeCmdContent = '@echo off\r\nREM custom-operator-node-wrapper\r\n';
+    fs.writeFileSync(customNodeCmdPath, customNodeCmdContent, 'utf8');
+
+    const psResult = spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(isolatedRepo, 'install.ps1')],
+      {
+        cwd: isolatedRepo,
+        env: { ...env, AGY_TEST_PROFILE_DIR: isolatedHome },
+        encoding: 'utf8',
+        timeout: 30000,
+      }
+    );
+    assert.notEqual(psResult.status, 0, 'install.ps1 must fail closed when hooks.json is malformed (D-04).');
+    assert.equal(
+      fs.readFileSync(customNodeCmdPath, 'utf8'),
+      customNodeCmdContent,
+      'install.ps1 overwrote pre-existing node.cmd despite preflight failure (D-04).'
+    );
+    assert.equal(fs.readFileSync(hooksPath, 'utf8'), malformedHooks, 'hooks.json must remain untouched after install.ps1 abort.');
+    console.log('PASS: install.ps1 aborts on malformed hooks.json before writing or overwriting node.cmd (D-04).');
+  }
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true });
 }

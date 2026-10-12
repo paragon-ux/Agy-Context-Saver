@@ -163,6 +163,11 @@ export async function runInstall(options = {}) {
   const warn = options.silent ? () => {} : console.warn;
 
   const startTime = performance.now();
+
+  // Pre-flight Fail-Closed Validation: Verify existing configs BEFORE ANY DISK MUTATION OR CHECK RETURN
+  const validatedHooks = parseAndValidateJsonConfig(hooksJsonPath, "hooks");
+  const validatedMcp = parseAndValidateJsonConfig(mcpJsonPath, "mcp");
+
   const existing = detectExistingInstallation();
 
   // If checkOnly is requested, execute strictly read-only inspection (zero disk writes, zero network calls)
@@ -188,10 +193,6 @@ export async function runInstall(options = {}) {
     }
     return existing;
   }
-
-  // Pre-flight Fail-Closed Validation: Verify existing configs BEFORE ANY DISK MUTATION
-  const validatedHooks = parseAndValidateJsonConfig(hooksJsonPath, "hooks");
-  const validatedMcp = parseAndValidateJsonConfig(mcpJsonPath, "mcp");
 
   if (existing.isInstalled) {
     log("🔍 Existing installation detected:");
@@ -238,10 +239,16 @@ export async function runInstall(options = {}) {
   await fsPromises.mkdir(pluginsDir, { recursive: true });
   const isGitRepo = fs.existsSync(path.join(repoRoot, ".git"));
   const isTempOrNpx = !isGitRepo || repoRoot.includes("_npx") || repoRoot.includes("npm-cache") || repoRoot.includes("node_modules");
+  const copyFilter = (src) => {
+    const rel = path.relative(repoRoot, src);
+    if (!rel) return true;
+    const topSegment = rel.split(path.sep)[0];
+    return ![".git", "node_modules", ".venv", "scratch", "site"].includes(topSegment);
+  };
 
   if (!fs.existsSync(pluginDest)) {
-    if (isTempOrNpx) {
-      await fsPromises.cp(repoRoot, pluginDest, { recursive: true });
+    if (isTempOrNpx || options.forceCopyFallback) {
+      await fsPromises.cp(repoRoot, pluginDest, { recursive: true, filter: copyFilter });
       log(`[OK] Native Antigravity Plugin installed to: ${pluginDest}`);
     } else {
       try {
@@ -249,14 +256,14 @@ export async function runInstall(options = {}) {
         fs.symlinkSync(repoRoot, pluginDest, isWin ? "junction" : "dir");
         log(`[OK] Native Antigravity Plugin linked: ${pluginDest} -> ${repoRoot}`);
       } catch (err) {
-        await fsPromises.cp(repoRoot, pluginDest, { recursive: true });
+        await fsPromises.cp(repoRoot, pluginDest, { recursive: true, filter: copyFilter });
         log(`[OK] Native Antigravity Plugin copied to: ${pluginDest}`);
       }
     }
   } else {
-    if (isTempOrNpx) {
+    if (isTempOrNpx || options.forceCopyFallback) {
       try {
-        await fsPromises.cp(repoRoot, pluginDest, { recursive: true });
+        await fsPromises.cp(repoRoot, pluginDest, { recursive: true, filter: copyFilter });
       } catch {}
     }
     log(`[OK] Native Antigravity Plugin verified: ${pluginDest}`);
@@ -279,6 +286,9 @@ export async function runInstall(options = {}) {
   }
 
   const alreadyHadHook = Boolean(hooksConfig["execution-guard"]);
+  if (hooksConfig["agy-context-saver"]) {
+    delete hooksConfig["agy-context-saver"];
+  }
   hooksConfig["execution-guard"] = {
     PreToolUse: [
       {
@@ -559,7 +569,8 @@ Agy-Context-Saver is the universal Model Context Protocol server and lifecycle g
   const elapsed = (performance.now() - startTime).toFixed(1);
   const statusVerb = existing.isInstalled ? "synchronized & up-to-date" : "completed";
   log(`\n✓ Installation ${statusVerb} in ${elapsed}ms (Zero Delay)!\n`);
-  return { ...existing, isInstalled: true, elapsedMs: elapsed };
+  const postInstall = detectExistingInstallation();
+  return { ...postInstall, isInstalled: true, elapsedMs: elapsed };
 }
 
 export async function runUninstall(options = {}) {
@@ -715,14 +726,26 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (isHelp) {
     printCliHelp();
     process.exit(0);
+  }
+
+  // Reject conflicting read-only and mutating flags explicitly
+  if ((isCheck || isStatus) && (isUninstall || isRestoreBackups)) {
+    console.error("Error: Read-only flags (--check, --status) cannot be combined with mutating flags (--uninstall, --restore-backups).");
+    process.exit(1);
+  }
+  if (isCheck && isStatus) {
+    console.error("Error: Conflicting flags: specify either --check or --status, not both.");
+    process.exit(1);
+  }
+
+  if (isCheck) {
+    await runInstall({ checkOnly: true, allowDegraded });
+  } else if (isStatus) {
+    runStatus();
   } else if (isUninstall) {
     await runUninstall({ restoreBackups: isRestoreBackups });
   } else if (isRestoreBackups) {
     await runRestoreBackups();
-  } else if (isStatus) {
-    runStatus();
-  } else if (isCheck) {
-    await runInstall({ checkOnly: true, allowDegraded });
   } else {
     await runInstall({ allowDegraded });
   }

@@ -110,6 +110,20 @@ Build finished in 0.94s
 
 ---
 
+## Stacked PR #2: Devin Review Remediation & Post-Check Verification (`D-01` through `D-09`)
+
+- **Base Branch**: `release/hardening-v1.6.0` ([PR #1](https://github.com/paragon-ux/Agy-Context-Saver/pull/1))
+- **Stacked Branch**: `release/hardening-v1.6.0-review-fixes` (PR #2)
+- **Preflight Audit Reports**:
+  - **PRE-D1 (Installer & CLI Safety)**: [`scratch/pre_d1_installer_cli.md`](file:///c:/Users/USER/Desktop/Frameworks/Agy-Context-Saver/scratch/pre_d1_installer_cli.md)
+  - **PRE-D2 (RTK Version & Hook Resolution)**: [`scratch/pre_d2_rtk_hook_docs.md`](file:///c:/Users/USER/Desktop/Frameworks/Agy-Context-Saver/scratch/pre_d2_rtk_hook_docs.md)
+  - **PRE-D3 (Clean Runner Hermeticity)**: [`scratch/pre_d3_ci_hermetic_tests.md`](file:///c:/Users/USER/Desktop/Frameworks/Agy-Context-Saver/scratch/pre_d3_ci_hermetic_tests.md)
+- **Independent Post-Check Reports**:
+  - **POST-D1 (Installer & CLI Verifier)**: [`scratch/post_d1_installer_cli.md`](file:///c:/Users/USER/Desktop/Frameworks/Agy-Context-Saver/scratch/post_d1_installer_cli.md) — **4/4 PASS (`D-04`, `D-05`, `D-06`, `D-09`)**
+  - **POST-D2 (RTK, Hermetic CI & Docs Verifier)**: [`scratch/post_d2_rtk_hermetic_docs.md`](file:///c:/Users/USER/Desktop/Frameworks/Agy-Context-Saver/scratch/post_d2_rtk_hermetic_docs.md) — **5/5 PASS (`D-01`, `D-02`, `D-03`, `D-07`, `D-08`)**
+
+---
+
 ## Decision Gate
 
 - **Open Blockers / Residual Risks**: **None**

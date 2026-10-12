@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
 
 console.log("=================================================");
 console.log("Agy-Context-Saver Lifecycle & Rollback Test Suite");
@@ -12,6 +13,11 @@ const testProfileDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-lifecycle-test
 process.env.AGY_TEST_PROFILE_DIR = testProfileDir;
 
 try {
+  // Ensure deterministic RTK shim is on PATH for clean offline CI runners
+  const shimDir = path.join(testProfileDir, "rtk-shim-bin");
+  createRtkShim(shimDir, "0.51.0");
+  prependToPath(shimDir);
+
   const configDir = path.join(testProfileDir, ".gemini", "config");
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(path.join(configDir, "hooks.json"), JSON.stringify({
@@ -130,6 +136,76 @@ try {
   const finalCheck = detectExistingInstallation();
   assert.equal(finalCheck.isComplete, true, "Final state must be complete and healthy");
   console.log("✓ Backup restoration option verified and sandbox returned to clean healthy state");
+
+  // --- 6. Upgrade Idempotency & Legacy Cleanup Test (D-09) ---
+  console.log("\n--- 6. Upgrade Idempotency & Legacy Cleanup Verification (D-09) ---");
+  const customBakSentinel = JSON.stringify({ sentinelBackup: true }, null, 2);
+  fs.writeFileSync(hooksBakPath, customBakSentinel, "utf-8");
+
+  // Seed legacy hook key and retired schema to verify upgrade cleanup
+  const hooksBeforeUpgrade = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
+  hooksBeforeUpgrade["agy-context-saver"] = { PreToolUse: [] };
+  fs.writeFileSync(hooksJsonPath, JSON.stringify(hooksBeforeUpgrade, null, 2), "utf-8");
+  const retiredSchemaFile = path.join(antigravityMcpDir, "safe_command.json");
+  fs.writeFileSync(retiredSchemaFile, "{}", "utf-8");
+
+  await runInstall({ silent: true, allowDegraded: true });
+  const hooksAfterUpgrade = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
+  assert.equal(hooksAfterUpgrade["agy-context-saver"], undefined, "Legacy 'agy-context-saver' hook key must be removed on upgrade");
+  assert.ok(hooksAfterUpgrade["execution-guard"], "Canonical 'execution-guard' hook key must be present");
+  assert.ok(hooksAfterUpgrade["foreign-preservation-hook"], "Foreign hook must survive upgrade");
+  assert.equal(fs.existsSync(retiredSchemaFile), false, "Retired safe_command.json schema must be pruned on upgrade");
+  assert.equal(fs.readFileSync(hooksBakPath, "utf-8"), customBakSentinel, "Existing hooks.json.bak must not be overwritten on repeat install");
+  console.log("✓ Upgrade idempotency verified: legacy keys/schemas pruned, foreign entries & initial .bak preserved");
+
+  // --- 7. Copy Fallback Verification (D-09) ---
+  console.log("\n--- 7. Plugin Directory Copy Fallback Verification (D-09) ---");
+  await runUninstall({ silent: true });
+  const fallbackInstall = await runInstall({ silent: true, allowDegraded: true, forceCopyFallback: true });
+  assert.equal(fallbackInstall.isInstalled, true, "Install with forceCopyFallback must succeed");
+  const destStat = fs.lstatSync(pluginDest);
+  assert.equal(destStat.isDirectory(), true, "Fallback pluginDest must be a directory");
+  assert.equal(destStat.isSymbolicLink(), false, "Fallback pluginDest must be a real directory copy, not a symlink/junction");
+  assert.equal(fs.existsSync(path.join(pluginDest, "package.json")), true, "Copied plugin directory must contain package.json");
+  assert.equal(fs.existsSync(path.join(pluginDest, ".git")), false, "Copied plugin directory must exclude .git");
+  console.log("✓ Plugin directory copy fallback verified (excludes .git and passes health check)");
+
+  // --- 8. RTK Version Gate & AGY_ALLOW_ANY_RTK Removal Verification (D-01, D-09) ---
+  console.log("\n--- 8. RTK Semver Compatibility Gate & Bypass Removal Verification (D-01, D-09) ---");
+  const { isCompatibleRtkVersion, findExistingRtk } = await import("../scripts/provision-rtk.mjs");
+  assert.equal(isCompatibleRtkVersion("rtk 0.49.9"), false, "0.49.9 must be rejected");
+  assert.equal(isCompatibleRtkVersion("rtk 0.50.0"), true, "0.50.0 must be accepted");
+  assert.equal(isCompatibleRtkVersion("rtk 0.51.0"), true, "0.51.0 must be accepted");
+  assert.equal(isCompatibleRtkVersion("rtk 0.51.9"), true, "0.51.9 must be accepted");
+  assert.equal(isCompatibleRtkVersion("rtk 0.52.0"), false, "0.52.0 must be rejected");
+  assert.equal(isCompatibleRtkVersion("rtk 0.60.0"), false, "0.60.0 must be rejected");
+
+  // Verify that an incompatible PATH rtk (0.60.0) is rejected even if AGY_ALLOW_ANY_RTK=1 is set
+  const badRtkDir = path.join(testProfileDir, "bad-rtk-bin");
+  createRtkShim(badRtkDir, "0.60.0");
+  const origPath = process.env.PATH;
+  const origAllow = process.env.AGY_ALLOW_ANY_RTK;
+  try {
+    process.env.PATH = badRtkDir;
+    for (const k of Object.keys(process.env)) {
+      if (k.toLowerCase() === "path") process.env[k] = badRtkDir;
+    }
+    process.env.AGY_ALLOW_ANY_RTK = "1";
+    const found = findExistingRtk({ silent: true });
+    // Either null (if no local repo bin/rtk exists) or local compatible binary, NEVER the 0.60.0 PATH binary
+    if (found) {
+      assert.equal(found.isLocal, true, "Must not accept incompatible PATH rtk even when AGY_ALLOW_ANY_RTK=1");
+      assert.equal(isCompatibleRtkVersion(found.version), true);
+    }
+  } finally {
+    process.env.PATH = origPath;
+    for (const k of Object.keys(process.env)) {
+      if (k.toLowerCase() === "path") process.env[k] = origPath;
+    }
+    if (origAllow === undefined) delete process.env.AGY_ALLOW_ANY_RTK;
+    else process.env.AGY_ALLOW_ANY_RTK = origAllow;
+  }
+  console.log("✓ RTK semver boundaries [>=0.50.0 <0.52.0] and removal of AGY_ALLOW_ANY_RTK bypass verified");
 
   console.log("\n=================================================");
   console.log("ALL LIFECYCLE & ROLLBACK TESTS PASSED 100%!");
