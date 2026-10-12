@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Zensical Documentation Navigation**: Registered `docs/roadmap.md` in navigation and validated zero dead anchors across the entire documentation site (`zensical build`).
 - **Release-Readiness & Hero Positioning**: Elevated Pointer-Over-Wire (POW) and the Enterprise Non-Destructive Guarantee to landing hero sections, added the flagship before/after comparison table to `README.md`, unified the 3-Layer Governance taxonomy, and completed 100% parameter tables in `docs/tools.md`.
 
+### Security, Installer Hardening & Hermetic CI
+- **Strict Read-Only `--check` & CLI Flag Validation (`scripts/install-register.mjs`, `mcp/index.js`, `install.ps1`)**: Hoisted `--check` pre-flight validation ahead of all filesystem and network operations, added fail-closed `parseAndValidateJsonConfig()` checks on existing `hooks.json` and `mcp_config.json` before any writes or `--check` success returns, and rejected conflicting read-only + mutating CLI flags (`--check --restore-backups`, `--check --uninstall`, `--check --status`) with exit code `1`.
+- **Windows `install.ps1` Wrapper Safety (`install.ps1`)**: Reordered `install.ps1` to execute `scripts/install-register.mjs` validation **before** writing `node.cmd`, added automatic backup (`.bak`) for pre-existing unmanaged `node.cmd` wrappers, and added clean wrapper removal/restoration during `--uninstall`.
+- **RTK Supply-Chain SHA-256 Verification & Semver Pinning (`scripts/provision-rtk.mjs`, `scripts/execution-guard-hook.mjs`)**: Pinned RTK provisioning to `v0.51.0` with precomputed SHA-256 archive digest verification across all 5 supported OS/arch targets, enforced strict `[>=0.50.0 <0.52.0]` runtime compatibility without bypasses, and updated `execution-guard-hook.mjs` (`resolveCompatibleRtk()`) to fall back to the compatible local binary path when `PATH` contains an incompatible RTK version.
+- **10-Suite Hermetic Test Matrix & Cross-OS CI (`tests/helpers/hermetic-fixture.mjs`, `.github/workflows/ci-matrix.yml`)**: Expanded automated verification from 8 to 10 hermetic test suites (`test-check-only-readonly.mjs`, `test-malformed-config-preservation.mjs`, and shared `setupHermeticTestEnv()` fixtures) running with zero host-profile mutation across Ubuntu, macOS, and Windows on Node.js 22 and 24.
+- **Release Engineering & Governance Policies (`scripts/release-preflight.mjs`, `.github/workflows/release-tag.yml`)**: Added non-destructive release preflight validation, tag-gated npm Trusted Publishing (`--provenance`), and repository governance policies (`SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `docs/INSTALLER-HARDENING.md`, `docs/RTK-SUPPORT-MATRIX.md`).
+
 ## [1.5.1] - 2026-10-11
 
 ### Added
