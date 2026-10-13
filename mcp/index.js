@@ -72,7 +72,7 @@ if (checkFlag) {
 
 function printHelp() {
   console.log(`
-Agy-Context-Saver 🛡️ (v1.6.1)
+Agy-Context-Saver 🛡️ (v1.7.0)
 Universal MCP Server & Lifecycle Governor for Google Antigravity (Powered by RTK)
 
 Usage:
@@ -119,7 +119,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rulesPath = path.resolve(__dirname, "../rules/AGENTS.md");
 
 const SERVER_NAME = "agy-context-saver";
-const SERVER_VERSION = "1.6.1";
+const SERVER_VERSION = "1.7.0";
 
 // --- Tools Specification ---
 const TOOLS = [
@@ -472,14 +472,20 @@ function formatSingleBrief({
 } = {}) {
   const scopeStr = scopeFiles && scopeFiles.length ? `\n\nTarget files:\n${scopeFiles.map(f => `- ${f}`).join("\n")}` : "";
   const instrStr = instructions && instructions.trim() ? `\n\nSPECIFIC INSTRUCTIONS:\n${instructions.trim()}` : "";
+  const hasBrainUuidPath = /[/\\]\.gemini[/\\]antigravity[/\\]brain[/\\][0-9a-f-]{36}/i.test(`${objective}\n${instructions}\n${expectedDeliverable}`);
+  const brainPathWarning = hasBrainUuidPath
+    ? `\n\n⚠️ ARTIFACT DIRECTORY WRITE GUARD: Any 'brain/<uuid>/' path referenced above belongs to another conversation. You may READ from it via 'view_file', but when calling 'write_to_file' or 'replace_file_content', you MUST either write to workspace '<workspace>/scratch/...' (OMIT ArtifactMetadata) or substitute YOUR OWN Artifact Directory Path from <user_information> (INCLUDE ArtifactMetadata).`
+    : "";
   return [
     `ROLE: ${role}`,
-    `OBJECTIVE: ${objective}${scopeStr}${instrStr}`,
+    `OBJECTIVE: ${objective}${scopeStr}${instrStr}${brainPathWarning}`,
     ``,
     `CRITICAL CONTEXT GOVERNANCE INSTRUCTIONS (POINTER-OVER-WIRE):`,
-    `1. Isolated Workspace: Do all necessary multi-file exploration, searches, and analysis in this subagent sandbox.`,
+    `1. Isolated Workspace & Bounded File Slices: Do all multi-file exploration in this subagent sandbox. Prefer 'view_file' with bounded slices (StartLine and EndLine, max 150 lines) over 'rtk read' so line numbers are preserved and terminal buffers never truncate file headers.`,
     `2. Pointer-Over-Wire (POW) Protocol: In-band messaging channels (send_message) have strict transport payload limits (~16-20 KB). If your findings or deliverable exceed 1 KB:`,
-    `   a. Write the full comprehensive deliverable or raw output to a file in the workspace (e.g., 'scratch/<task>_findings.md' or an artifact).`,
+    `   a. Write the full comprehensive deliverable using 'write_to_file' following Antigravity's strict path rules:`,
+    `      - Option A (Workspace 'scratch/' — Recommended): Set TargetFile to '<workspace>/scratch/<task>_findings.md' and OMIT ArtifactMetadata completely (passing ArtifactMetadata on a workspace path throws "files must be written to the correct artifact directory").`,
+    `      - Option B (Your Own Brain 'scratch/'): Set TargetFile to '<your-Artifact-Directory-Path>/scratch/<task>_findings.md' using the exact Artifact Directory Path from YOUR <user_information> block (NEVER a parent's brain/<other-uuid>/ path) and INCLUDE ArtifactMetadata: { Summary: "...", UserFacing: false, RequestFeedback: false }.`,
     `   b. In 'send_message', transmit ONLY:`,
     `      - Executive Summary (3-5 high-signal sentences)`,
     `      - Verdict / Scoreboard Table`,

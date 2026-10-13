@@ -12,8 +12,9 @@ Agy-Context-Saver is the universal Model Context Protocol server and lifecycle g
    - Access to `.system_generated/` via `view_file` is strictly denied to prevent transcript explosion.
    - Use `read_transcript` or `query_transcript` to inspect conversation history cleanly.
 3. **Platform-Aware Codebase Inspection**:
-   - **Windows**: Use `rtk read <file>`, `rtk find <path>`, and `rtk rg "<pattern>" .` (the trailing `.` is required to avoid stdin stalls).
-   - **POSIX**: Use `rtk read <file>`, `rtk ls <path>`, and `rtk grep "<pattern>"` or `rtk rg "<pattern>"`.
+   - **File Reading**: Prefer `view_file` with bounded slices (`StartLine` and `EndLine`, max 150 lines) to preserve line numbers and avoid terminal truncation.
+   - **Windows Search/Listing**: Use `rtk find <path>` and `rtk rg "<pattern>" .` (the trailing `.` is required to avoid stdin stalls).
+   - **POSIX Search/Listing**: Use `rtk ls <path>` and `rtk grep "<pattern>"` or `rtk rg "<pattern>"`.
 
 ## Available MCP Tools
 - `check_context_health`: Diagnoses transcript turn counts, byte payload, and polling loops. Accepts `transcriptPath` or `conversationId`.

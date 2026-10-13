@@ -18,9 +18,9 @@ Agy-Context-Saver and RTK protect session transcript health and LLM attention by
 
 ## Codebase Inspection via RTK
 
-Native Antigravity file and search tools (`view_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token compression and are hard-routed to RTK shell commands:
+Unbounded full-file `view_file` calls and unoptimized search tools (`grep_search`, `find_by_name`, `list_dir`) bypass token compression and are guarded:
 
-- `rtk read <file>`: Reads file with intelligent token filtering and line ranges.
+- `view_file` with bounded slices (`StartLine` and `EndLine`, max 150 lines): **Preferred for reading files**—returns exact 1-indexed line numbers without terminal stdout truncation.
 - `rtk find <path>`: Compact file search tree and directory listings (cross-platform, works on Windows & POSIX).
 - Search commands by platform:
   - **Windows**: Use `rtk rg "<pattern>" .` (explicit target `.` is required to avoid child process stdin pipe stalls) or `rg "<pattern>" .`.
@@ -31,7 +31,7 @@ Native Antigravity file and search tools (`view_file`, `grep_search`, `find_by_n
 - `rtk err <cmd>`: Runs command and displays only errors/warnings.
 - `rtk summary <cmd>`: Runs command and produces a 2-line technical summary.
 
-*Safe Harbor*: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/`) may be viewed directly via `view_file`.
+*Safe Harbor*: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/`) may be viewed directly via `view_file` without slice bounds.
 
 ---
 

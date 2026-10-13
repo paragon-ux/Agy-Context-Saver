@@ -83,8 +83,8 @@ Once all 4 verification stages pass:
 
 ```bash
 # 1. Commit and tag release
-git commit -m "chore(release): prepare v1.6.1"
-git tag -a v1.6.1 -m "Release v1.6.1"
+git commit -m "chore(release): prepare v1.7.0"
+git tag -a v1.7.0 -m "Release v1.7.0"
 
 # 2. Publish to npm registry
 npm publish --access public

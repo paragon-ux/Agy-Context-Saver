@@ -5,6 +5,18 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-10-13
+
+### Added
+- **Subagent Artifact Directory Write Guard (`subagent_brief`)**: Added automated path analysis in `formatSingleBrief` that detects when an objective or instruction references a foreign `brain/<uuid>/` directory. Warns subagents proactively to prevent Antigravity's fatal `write_to_file` error ("files must reside within the designated artifact directory").
+- **Pointer-Over-Wire (POW) File Delivery Clarification**: Codified explicit two-option guidance for subagent deliverables:
+  - *Option A (Workspace `scratch/` — Recommended)*: Write to `<workspace>/scratch/<task>_findings.md` and omit `ArtifactMetadata`.
+  - *Option B (Own Brain `scratch/`)*: Write to `<your-Artifact-Directory-Path>/scratch/...` using the subagent's own `<user_information>` block and include `ArtifactMetadata: { Summary, UserFacing: false, RequestFeedback: false }`.
+- **Bounded Slice Reading Safe Harbor (`view_file`)**: Prioritized `view_file` with bounded slices (`StartLine` and `EndLine`, max 150 lines) over `rtk read` across `rules/AGENTS.md`, `skills/context-governance/SKILL.md`, and `mcp/instructions.md` to preserve exact 1-indexed line numbers without stdout buffer truncation.
+- **Subagent Delegation Trial 4 (`tests/test-subagent-trials.mjs`)**: Added automated trial verifying `subagent_brief` emits the artifact directory write guard, bounded slice guidance, and Option A/Option B file delivery rules.
+
+---
+
 ## [1.6.1] - 2026-10-12
 
 ### Added
@@ -162,6 +174,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Antigravity Model Context Protocol (MCP) server.
 - Background task lifecycle governance and reactive wakeup enforcement.
 
+[1.7.0]: https://github.com/paragon-ux/agy-context-saver/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/paragon-ux/agy-context-saver/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/paragon-ux/agy-context-saver/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/paragon-ux/agy-context-saver/compare/v1.5.0...v1.5.1

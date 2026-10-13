@@ -207,6 +207,29 @@ console.log("\n--- Trial 3: Agent Error Tolerance ---");
   console.log("✓ Trial 3 Passed: Actionable error guidance on empty parameters");
 }
 
+// -----------------------------------------------------------------
+// Trial 4: Artifact Directory Write Guard & Option A/B Guidance
+// -----------------------------------------------------------------
+console.log("\n--- Trial 4: Artifact Directory Write Guard & Option A/B Guidance ---");
+{
+  const resp = await client.send("tools/call", {
+    name: "subagent_brief",
+    arguments: {
+      role: "Deliverable Path Verifier",
+      objective: "Verify subagent deliverable path guidance",
+      instructions: "Write report to C:/Users/USER/.gemini/antigravity/brain/bfb10271-99c6-4002-b82c-7aac414ebe48/scratch/report.md"
+    }
+  });
+
+  const text = resp.result.content[0].text;
+  assert.ok(text.includes("ARTIFACT DIRECTORY WRITE GUARD"), "Must warn when parent brain/<uuid> path is referenced");
+  assert.ok(text.includes("Option A (Workspace 'scratch/' — Recommended)"), "Must include Option A workspace scratch guidance");
+  assert.ok(text.includes("OMIT ArtifactMetadata"), "Must instruct omitting ArtifactMetadata on workspace paths");
+  assert.ok(text.includes("Option B (Your Own Brain 'scratch/')"), "Must include Option B own brain directory guidance");
+  assert.ok(text.includes("Prefer 'view_file' with bounded slices"), "Must instruct bounded view_file slices over rtk read");
+  console.log("✓ Trial 4 Passed: Artifact directory write guard & Option A/B write_to_file rules verified");
+}
+
 client.kill();
 
 console.log("\n=================================================");

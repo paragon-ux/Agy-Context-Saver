@@ -32,8 +32,8 @@
 
 ## Layer 2: Transparent Shell Execution & Codebase Inspection via RTK
 - **Native Shell Commands**: Run shell commands normally using `run_command`. The PreToolUse hook transparently rewrites supported commands via RTK (`git`, `pytest`, `cargo`, `npm`, etc.) to produce ultra-compact outputs.
-- **Canonical Codebase Inspection**: Native file and search inspection tools (`view_file`, `grep_search`, `find_by_name`, `list_dir`) that bypass RTK are blocked for workspace files. Use RTK's canonical CLI interfaces via `run_command`:
-  - `rtk read <file>`: Read file with intelligent token filtering and line ranges.
+- **Canonical Codebase Inspection**: Unbounded full-file reads and unoptimized search tools (`grep_search`, `find_by_name`, `list_dir`) are blocked for workspace files. Use bounded slices and RTK's canonical CLI interfaces:
+  - `view_file` with bounded slices (`StartLine` and `EndLine`, max 150 lines): **Preferred for reading files**—preserves 1-indexed line numbers and avoids terminal stdout truncation. Pair with `waymark_ask` to locate exact symbol line ranges first.
   - `rtk find <path>`: Compact file search tree and directory listings (cross-platform, works on Windows & POSIX).
   - Search commands by platform:
     - **Windows**: Use `rtk rg "<pattern>" .` (explicit target `.` is required to prevent stdin pipe hanging) or `rg "<pattern>" .`.
@@ -43,7 +43,7 @@
     - **POSIX / Linux / macOS**: Use `rtk ls <path>` or `rtk tree`.
   - `rtk err <cmd>`: Run command and show only errors/warnings.
   - `rtk summary <cmd>`: Run command and produce a 2-line heuristic summary.
-- **Antigravity Special Files Safe Harbor**: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/` configs) are permitted via `view_file`.
+- **Antigravity Special Files Safe Harbor**: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/` configs) are permitted via `view_file` without slice bounds.
 - **Protected Internal State**: Direct native inspection of `.system_generated/` (transcripts, task logs, progress files) is strictly forbidden. Use Agy MCP tools `read_transcript` and `query_transcript`.
 
 ---
@@ -57,7 +57,7 @@
   - **Subagent Delegation for Deep Audits**: When a comprehensive repository-wide test audit is required, delegate the sweep to a subagent (`invoke_subagent`) to keep the main thread responsive.
 - **Subagent Delegation & Pointer-Over-Wire (POW)**:
   - Delegate heavy multi-file exploration, deep research, and repo sweeps to subagents (`invoke_subagent`). Subagents absorb intermediate steps and return high-signal summaries.
-  - **POW Protocol**: Payloads or deliverables exceeding 1 KB must be written to workspace scratch files (e.g. `scratch/<task>_findings.md` or artifacts). Transmit **ONLY** an Executive Summary (3–5 sentences), a Scoreboard / Verdict table, and a clickable file link (`file:///...`) in `send_message` to prevent transport truncation and parent context bloat.
+  - **POW Protocol & `write_to_file` Isolation**: Payloads or deliverables exceeding 1 KB must be written either to workspace scratch files (`<workspace>/scratch/<task>_findings.md` with `ArtifactMetadata` **omitted**) or to the **subagent's own** `<Artifact Directory Path>/scratch/<task>_findings.md` (with `ArtifactMetadata: { Summary, UserFacing: false, RequestFeedback: false }`). Never instruct a subagent to `write_to_file` into the parent conversation's `brain/<parent-uuid>/` directory, as Antigravity enforces per-conversation `brain/<uuid>` write isolation. Transmit **ONLY** an Executive Summary (3–5 sentences), a Scoreboard / Verdict table, and a clickable file link (`file:///...`) in `send_message` to prevent transport truncation and parent context bloat.
 - **Benchmark / Evaluator Integrity**: Never mutate benchmark definitions, prompt templates, or scoring artifacts during an active evaluation without explicit user confirmation.
 
 ---
