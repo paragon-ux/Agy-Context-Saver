@@ -47,24 +47,75 @@ const ALL_FACETS = ["lifecycle", "data_state", "boundaries", "invariants", "fail
 
 function extractAstSymbols(filePath, relPath) {
   const ext = path.extname(relPath).toLowerCase();
-  if (![".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py"].includes(ext)) {
+  const validExts = [
+    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py",
+    ".md", ".markdown", ".json", ".toml", ".yaml", ".yml", ".sh", ".bash"
+  ];
+  if (!validExts.includes(ext)) {
     return { ok: false, code: "UNSUPPORTED_LANGUAGE", message: \`Unsupported discovery language: \${relPath}\` };
   }
-  const language = [".js", ".jsx", ".mjs", ".cjs"].includes(ext) ? "javascript" : ext === ".py" ? "python" : "typescript";
+  let language = "typescript";
+  if ([".js", ".jsx", ".mjs", ".cjs"].includes(ext)) language = "javascript";
+  else if (ext === ".py") language = "python";
+  else if ([".md", ".markdown"].includes(ext)) language = "markdown";
+  else if (ext === ".json") language = "json";
+  else if (ext === ".toml") language = "toml";
+  else if ([".yaml", ".yml"].includes(ext)) language = "yaml";
+  else if ([".sh", ".bash"].includes(ext)) language = "bash";
   const text = fs.readFileSync(filePath, "utf-8");
   const lines = text.split(/\\r?\\n/);
   const symbols = [];
+  let currentTable = "";
+  let currentYamlRoot = "";
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const classMatch = line.match(/^\\s*export\\s+class\\s+([A-Za-z0-9_]+)/);
     const fnMatch = line.match(/^\\s*(?:export\\s+)?(?:async\\s+)?function\\s+([A-Za-z0-9_]+)/);
     const methodMatch = line.match(/^\\s{2,}(?:async\\s+)?([A-Za-z0-9_]+)\\s*\\([^)]*\\)\\s*(?::|\\{)/);
+    const mdHMatch = line.match(/^(#{1,6})\\s+(.+)$/);
+    const mdTableMatch = line.match(/^\\|(.+)\\|$/);
+    const jsonKeyMatch = line.match(/^\\s*"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"\\s*:/);
+    const tomlTableArrayMatch = line.match(/^\\\[\\\[([A-Za-z0-9_.-]+)\\\]\\\]/);
+    const tomlTableMatch = line.match(/^\\\[([A-Za-z0-9_.-]+)\\\]/);
+    const tomlKeyMatch = line.match(/^([A-Za-z0-9_.-]+)\\s*=/);
+    const yamlRootMatch = line.match(/^([A-Za-z0-9_.-]+):/);
+    const yamlSubMatch = line.match(/^\\s{2}([A-Za-z0-9_.-]+):/);
+    const shFnMatch = line.match(/^\\s*(?:function\\s+)?([A-Za-z0-9_]+)\\s*\\(\\s*\\)/);
+    const shVarMatch = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
+
     if (classMatch) {
       symbols.push({ name: classMatch[1], kind: "class", start: { line: i + 1, column: 1 }, end: { line: Math.min(lines.length, i + 55), column: 1 } });
     } else if (fnMatch) {
       symbols.push({ name: fnMatch[1], kind: "function", start: { line: i + 1, column: 1 }, end: { line: Math.min(lines.length, i + 25), column: 1 } });
     } else if (methodMatch && !["if", "for", "while", "switch", "catch"].includes(methodMatch[1])) {
       symbols.push({ name: methodMatch[1], kind: "method", start: { line: i + 1, column: 2 }, end: { line: Math.min(lines.length, i + 22), column: 3 } });
+    } else if (mdHMatch) {
+      symbols.push({ name: \`\${mdHMatch[1]} \${mdHMatch[2].trim()}\`, kind: "section", start: { line: i + 1, column: 1 }, end: { line: i + 1, column: line.length } });
+    } else if (mdTableMatch && !lines[i - 1]?.match(/^\\|(.+)\\|$/)) {
+      symbols.push({ name: \`Table (L\${i + 1}-L\${Math.min(lines.length, i + 3)})\`, kind: "table", start: { line: i + 1, column: 1 }, end: { line: Math.min(lines.length, i + 3), column: line.length } });
+    } else if (jsonKeyMatch) {
+      let k = jsonKeyMatch[1];
+      try { k = JSON.parse(\`"\${k}"\`); } catch {}
+      symbols.push({ name: k, kind: "config_block", start: { line: i + 1, column: 1 }, end: { line: i + 1, column: line.length } });
+    } else if (tomlTableArrayMatch) {
+      currentTable = tomlTableArrayMatch[1];
+      symbols.push({ name: \`[[\${currentTable}]]\`, kind: "config_block", start: { line: i + 1, column: 1 }, end: { line: i + 1, column: line.length } });
+    } else if (tomlTableMatch) {
+      currentTable = tomlTableMatch[1];
+      symbols.push({ name: \`[\${currentTable}]\`, kind: "config_block", start: { line: i + 1, column: 1 }, end: { line: i + 1, column: line.length } });
+    } else if (tomlKeyMatch) {
+      const k = tomlKeyMatch[1].trim();
+      const name = currentTable ? \`\${currentTable}.\${k}\` : k;
+      symbols.push({ name, kind: "config_block", start: { line: i + 1, column: 1 }, end: { line: i + 1, column: line.length } });
+    } else if (yamlSubMatch && currentYamlRoot) {
+      symbols.push({ name: \`\${currentYamlRoot}.\${yamlSubMatch[1].trim()}\`, kind: "config_block", start: { line: i + 1, column: 1 }, end: { line: i + 1, column: line.length } });
+    } else if (yamlRootMatch) {
+      currentYamlRoot = yamlRootMatch[1].trim();
+      symbols.push({ name: currentYamlRoot, kind: "config_block", start: { line: i + 1, column: 1 }, end: { line: i + 1, column: line.length } });
+    } else if (shFnMatch) {
+      symbols.push({ name: shFnMatch[1], kind: "function", start: { line: i + 1, column: 1 }, end: { line: Math.min(lines.length, i + 10), column: 1 } });
+    } else if (shVarMatch) {
+      symbols.push({ name: shVarMatch[1], kind: "variable", start: { line: i + 1, column: 1 }, end: { line: i + 1, column: line.length } });
     }
   }
   return { ok: true, path: relPath, language, symbols };
@@ -79,7 +130,20 @@ rl.on("line", (line) => {
     process.stdout.write(JSON.stringify({
       jsonrpc: "2.0",
       id,
-      result: { protocolVersion: "2024-11-05", serverInfo: { name: "waymark-engine", version: "2.7.3-shim" }, capabilities: { tools: {} } }
+      result: { protocolVersion: "2024-11-05", serverInfo: { name: "waymark-engine", version: "2.8.0-shim" }, capabilities: { tools: {} } }
+    }) + "\\n");
+    return;
+  }
+  if (method === "tools/list") {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      result: {
+        tools: [
+          { name: "waymark_ask", description: "Query codebase" },
+          { name: "waymark_memory", description: "Manage charted memory" }
+        ]
+      }
     }) + "\\n");
     return;
   }
@@ -90,7 +154,7 @@ rl.on("line", (line) => {
     const loadEntries = () => (fs.existsSync(entriesFile) ? JSON.parse(fs.readFileSync(entriesFile, "utf-8")) : []);
 
     if (name === "waymark_ask") {
-      if (args.path && !args.question && !args.facet) {
+      if (args.path && (args.outline || (!args.question && !args.facet))) {
         const full = path.resolve(root, args.path);
         const res = extractAstSymbols(full, args.path);
         if (!res.ok) {
