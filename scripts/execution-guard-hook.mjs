@@ -176,6 +176,7 @@ function isProtectedBenchmarkPath(targetPath) {
   );
 }
 
+
 /**
  * Checks if target path references runtime step output spillover file.
  */
@@ -616,6 +617,7 @@ try {
       });
     }
 
+
     // LH-09-B: Shell command mutation of protected benchmark artifacts
     if (
       (rawCmd.includes(">") || /\b(?:rm|del|Remove-Item)\b/i.test(rawCmd)) &&
@@ -800,10 +802,10 @@ try {
         });
       }
 
-      // Default when no slice attempted: keep hook identical to original behavior (zero slice advertisement)
+      // Default when no slice attempted: guide agent/subagent to use bounded slices or rtk read
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run 'rtk read ${target || "<file>"}' via run_command instead.`
+        reason: `Antigravity Governance: Full-file inspection via '${toolName}' bypasses token optimization. Provide bounded slices ('StartLine' and 'EndLine', max 150 lines) via 'view_file' to view code with line numbers, or Run 'rtk read ${target || "<file>"}' via run_command instead.`
       });
     }
 

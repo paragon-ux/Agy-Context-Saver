@@ -285,6 +285,44 @@ console.log("\n--- Group 4: Pointer-Over-Wire Contract in subagent_brief ---");
   console.log("✓ subagent_brief enforces Pointer-Over-Wire delivery contract");
 }
 
+// --- Group 5: Git CRLF/LF Line-Ending Warning Stripping ---
+console.log("\n--- Group 5: Git CRLF/LF Line-Ending Warning Stripping ---");
+{
+  const testBrainDir = path.join(os.tmpdir(), `agy-crlf-test-${Date.now()}`);
+  const convId = "crlf-test-conv";
+  const logDir = path.join(testBrainDir, convId, ".system_generated", "logs");
+  fs.mkdirSync(logDir, { recursive: true });
+
+  const rawTranscript = JSON.stringify({
+    step_index: 1,
+    type: "PLANNER_RESPONSE",
+    created_at: new Date().toISOString(),
+    content: "Building project...\n# warning: in the working copy of 'sample.ts', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'notes.txt', CRLF will be replaced by LF the next time Git touches it\nok 1 - build completed successfully\n"
+  }) + "\n";
+
+  fs.writeFileSync(path.join(logDir, "transcript.jsonl"), rawTranscript, "utf8");
+
+  const oldBrain = process.env.AGY_BRAIN_DIR;
+  process.env.AGY_BRAIN_DIR = testBrainDir;
+
+  const transcriptFile = path.join(logDir, "transcript.jsonl");
+
+  try {
+    const res = await callMcp("tools/call", {
+      name: "read_transcript",
+      arguments: { conversationId: transcriptFile, lastTurns: 1 }
+    });
+    const text = res.result.content[0].text;
+    assert.doesNotMatch(text, /will be replaced by/);
+    assert.match(text, /ok 1 - build completed successfully/);
+    console.log("✓ read_transcript cleanly strips Git CRLF/LF line-ending warning noise");
+  } finally {
+    if (oldBrain) process.env.AGY_BRAIN_DIR = oldBrain;
+    else delete process.env.AGY_BRAIN_DIR;
+    try { fs.rmSync(testBrainDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
 proc.kill();
 console.log("\n=================================================");
 console.log("ALL OUTPUT GOVERNANCE & FORENSIC TESTS PASSED 100%!");

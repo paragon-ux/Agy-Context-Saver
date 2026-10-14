@@ -92,6 +92,7 @@ export async function ensureRtkInstalled(options = {}) {
   const log = options.silent ? () => {} : console.log;
   const existing = options.existingRtk || findExistingRtk(options);
   if (existing) {
+    ensureRtkConfigured(options);
     log(`✓ RTK is already installed and verified: ${existing.version} (${existing.path})`);
     return existing;
   }
@@ -160,8 +161,73 @@ export async function ensureRtkInstalled(options = {}) {
     throw new Error(`RTK installation verification failed: could not run ${targetExe}`);
   }
 
+  ensureRtkConfigured(options);
+
   log(`✓ Successfully installed and verified RTK: ${verified.version} at ${verified.path}`);
   return verified;
+}
+
+export function getRtkConfigPath() {
+  const profileHome = process.env.AGY_TEST_PROFILE_DIR;
+  if (profileHome) {
+    if (os.platform() === "win32") {
+      return path.join(profileHome, "AppData", "Roaming", "rtk", "config.toml");
+    }
+    return path.join(profileHome, ".config", "rtk", "config.toml");
+  }
+  if (os.platform() === "win32") {
+    const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+    return path.join(appData, "rtk", "config.toml");
+  }
+  const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+  return path.join(configHome, "rtk", "config.toml");
+}
+
+export function ensureRtkConfigured(options = {}) {
+  const log = options.silent ? () => {} : console.log;
+  const configPath = getRtkConfigPath();
+  const configDir = path.dirname(configPath);
+
+  try {
+    if (!fs.existsSync(configDir)) {
+      fs.mkdirSync(configDir, { recursive: true });
+    }
+
+    if (!fs.existsSync(configPath)) {
+      const defaultContent = `[hooks]\nsuppress_hook_warning = true\n`;
+      fs.writeFileSync(configPath, defaultContent, "utf-8");
+      log(`✓ Initialized RTK configuration with suppress_hook_warning = true at ${configPath}`);
+    } else {
+      let content = fs.readFileSync(configPath, "utf-8");
+      if (/suppress_hook_warning\s*=\s*false/i.test(content)) {
+        content = content.replace(/suppress_hook_warning\s*=\s*false/i, "suppress_hook_warning = true");
+        fs.writeFileSync(configPath, content, "utf-8");
+        log(`✓ Updated RTK configuration to suppress_hook_warning = true in ${configPath}`);
+      } else if (!/suppress_hook_warning/i.test(content)) {
+        if (/\[hooks\]/i.test(content)) {
+          content = content.replace(/\[hooks\]/i, "[hooks]\nsuppress_hook_warning = true");
+        } else {
+          content = (content.trim() + "\n\n[hooks]\nsuppress_hook_warning = true\n").trimStart();
+        }
+        fs.writeFileSync(configPath, content, "utf-8");
+        log(`✓ Configured suppress_hook_warning = true in ${configPath}`);
+      }
+    }
+  } catch (err) {
+    if (!options.silent) {
+      console.warn(`[WARN] Could not standardize RTK config: ${err.message}`);
+    }
+  }
+
+  ensureGitLineEndingConfigured(options);
+}
+
+export function ensureGitLineEndingConfigured(options = {}) {
+  const log = options.silent ? () => {} : console.log;
+  try {
+    execSync("git config --global core.safecrlf false", { windowsHide: true, stdio: "ignore" });
+    log("✓ Standardized git core.safecrlf = false to suppress line-ending warning noise");
+  } catch {}
 }
 
 // Auto-run if executed directly

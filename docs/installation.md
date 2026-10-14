@@ -27,6 +27,10 @@ This automated command:
 2. Registers the `execution-guard` hook in `~/.gemini/config/hooks.json` (with automatic backup).
 3. Adds `agy-context-saver` to `~/.gemini/config/mcp_config.json` (with automatic backup).
 4. Mirrors all 6 canonical tool schemas into `~/.gemini/antigravity/mcp/agy-context-saver/`.
+5. Verifies or provisions the pinned RTK binary and standardizes RTK configuration (`suppress_hook_warning = true`).
+
+> [!NOTE]
+> **RTK Default Configuration Notice**: To protect agent context and prevent shell command corruption, `Agy-Context-Saver` standardizes `suppress_hook_warning = true` in RTK's user configuration (`%APPDATA%\rtk\config.toml` on Windows or `~/.config/rtk/config.toml` on POSIX). This completely silences unsolicited upstream promotional banners while non-destructively preserving all existing user settings. See [RTK Support Matrix](RTK-SUPPORT-MATRIX.md) for full details.
 
 ### Option 2: Local Repository Setup
 

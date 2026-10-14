@@ -54,6 +54,9 @@ npm run status
 > [!TIP]
 > **Enterprise Non-Destructive Guarantee**: Agy-Context-Saver requires **zero external npm dependencies** (100% native Node.js standard library), strictly preserves existing foreign hooks (e.g. `waymark-continuity`) and foreign MCP servers, automatically writes atomic `.bak` configuration backups, and supports clean 1-step rollback.
 
+> [!NOTE]
+> **RTK Default Configuration Notice**: To protect agent context and command execution from unprompted marketing banners (`[rtk] /!\ No hook installed...`), `Agy-Context-Saver` standardizes `suppress_hook_warning = true` in RTK's user configuration (`%APPDATA%\rtk\config.toml` on Windows / `~/.config/rtk/config.toml` on POSIX) during installation. Existing user configurations are safely preserved. See [RTK Support Matrix](docs/RTK-SUPPORT-MATRIX.md#rtk-configuration-standardization--default-modifications).
+
 ---
 
 ## Architectural Division of Responsibilities
@@ -175,11 +178,11 @@ node mcp/index.js status
 ```bash
 npm test
 ```
-*Runs all 11 test suites (hook governance, MCP protocol, output inspection governance, E2E probes, performance probes, installed verification, lifecycle rollback, subagent delegation trials, check-only read-only safety, malformed configuration preservation, and Waymark dual-MCP synergy).*
+*Runs all 11 test suites (hook governance, MCP protocol, output inspection governance, E2E probes, performance probes, installed verification, lifecycle rollback, subagent delegation trials, check-only read-only safety, malformed configuration preservation, and RTK ledger fresh install verification).*
 
 ### 3. Run Targeted Tests Individually
 ```bash
-# Governance hook unit tests (28 closed-topology tests)
+# Governance hook unit tests (27 closed-topology tests)
 node tests/test-hook.mjs
 
 # MCP server protocol & method tests
@@ -208,6 +211,9 @@ node tests/test-check-only-readonly.mjs
 
 # Malformed config preservation fail-closed regression test
 node tests/test-malformed-config-preservation.mjs
+
+# RTK ledger & fresh install verification test
+node tests/test-rtk-ledger-fresh-install.mjs
 ```
 
 ### 4. Test MCP Tools from Antigravity Agent

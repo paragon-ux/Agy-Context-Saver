@@ -86,6 +86,13 @@ assert.equal(detection.details.schemas.exists, true, "schemas must be detected")
 assert.ok(detection.details.rtk, "RTK must be detected");
 console.log(`✓ detectExistingInstallation() verified 4 layers + RTK (${detection.details.rtk.version})`);
 
+const { getRtkConfigPath } = await import("../scripts/provision-rtk.mjs");
+const rtkCfgPath = getRtkConfigPath();
+assert.ok(fs.existsSync(rtkCfgPath), `RTK config.toml must exist at ${rtkCfgPath}`);
+const rtkCfgContent = fs.readFileSync(rtkCfgPath, "utf-8");
+assert.match(rtkCfgContent, /suppress_hook_warning\s*=\s*true/, "RTK config must standardize suppress_hook_warning = true");
+console.log("✓ RTK config.toml standardized with suppress_hook_warning = true");
+
 // --- 2. Live Hook Execution Test (via cmd.exe /c as executed by Antigravity) ---
 console.log("\n--- 2. Live Hook Execution Verification (cmd.exe /c wrapper) ---");
 

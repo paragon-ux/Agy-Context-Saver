@@ -33,3 +33,19 @@ Run these checks on each supported OS/architecture before changing `RTK_VERSION`
 - Put an incompatible RTK version (`0.60.0`) first on `PATH` and verify `findExistingRtk()` rejects it and `execution-guard-hook.mjs` routes rewrites to the compatible local binary.
 - Exercise `rtk read`, `rtk rg`, `rtk find`, and command-rewrite paths with filenames containing spaces, Unicode, and shell metacharacters.
 - Verify re-run/idempotency and uninstall/restore using a temporary `AGY_TEST_PROFILE_DIR` sandbox, never a developer's live profile.
+
+## RTK Configuration Standardization & Default Modifications
+
+To prevent diagnostic noise and promotional banners from polluting model context and command execution, `Agy-Context-Saver` standardizes upstream RTK configuration settings during installation (`scripts/provision-rtk.mjs` via `ensureRtkConfigured()`).
+
+### Standardized Configuration Parameters
+
+| Config File | Section | Parameter | Default Upstream Value | Agy-Context-Saver Standardized Value | Rationale & Forensic Justification |
+|---|---|---|---|---|---|
+| `%APPDATA%\rtk\config.toml` *(Win)*<br>`~/.config/rtk/config.toml` *(POSIX)* | `[hooks]` | `suppress_hook_warning` | `false` (or unconfigured) | `true` | **Context & Command Protection (RTK-01 / RTK-03)**:<br>Upstream RTK emits an unsolicited promotional banner (`[rtk] /!\ No hook installed — run rtk init -g for automatic token savings`) to `stdout` whenever Claude Code hooks are uninitialized. In autonomous agent environments, this unprompted banner pollutes context tokens and corrupts shell command rewrites (`[rtk] warning ... rtk git status`). Setting `suppress_hook_warning = true` completely silences this banner natively without requiring a fork of upstream RTK. |
+
+### Configuration Lifecycle & Preservation Guarantee
+
+1. **Automatic Initialization**: On a fresh installation, if no `config.toml` exists, `ensureRtkConfigured()` initializes `config.toml` with `[hooks]\nsuppress_hook_warning = true`.
+2. **Non-Destructive Update**: If `config.toml` already exists, `ensureRtkConfigured()` safely checks whether `suppress_hook_warning` is absent or set to `false`, updating only this key while strictly preserving all existing user sections (`[general]`, `[telemetry]`, custom parameters, and comments).
+3. **Direct Root Resolution (Zero Brittle Output Filtering)**: By standardizing `suppress_hook_warning = true` directly at the engine configuration layer, RTK suppresses banner output at the source. This eliminates the need for brittle regex or post-hoc line filtering in the execution hook, ensuring piped commands (`cmd1 | cmd2`), multiline scripts, and commands referencing `rtk` are delivered to the shell completely untouched.

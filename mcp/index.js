@@ -492,7 +492,8 @@ function formatSingleBrief({
     `      - Clickable File Link: [Full Deliverable](file:///absolute/path/to/findings.md)`,
     `3. Fast Turn Termination: Once 'send_message' is dispatched, stop calling tools and conclude your turn immediately so the parent agent wakes up without latency.`,
     `4. Format: ${expectedDeliverable}`,
-    `5. Citation Mandate: Keep your final response concise, structured, and cite exact file:line references.`
+    `5. Citation Mandate: Keep your final response concise, structured, and cite exact file:line references.`,
+    `6. Write Scope: You may edit only files inside your Target files (assumed disjoint from sibling subagents) or your own scratch directory. If a tool or the environment fails, report it to the parent via 'send_message' and stop; do not work around it.`
   ].join("\n");
 }
 
@@ -738,6 +739,11 @@ function cleanMessageContent(content, maxChars = MAX_TURN_CHARS) {
   if (text.includes("base64") || text.length > 200) {
     text = text.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, "[Embedded Media/Binary Omitted]");
     text = text.replace(/[A-Za-z0-9+/=]{200,}/g, "[Binary/Base64 Payload Omitted]");
+  }
+
+  // Strip Git CRLF/LF line-ending diagnostic warning noise (wastes context window tokens)
+  if (text.includes("will be replaced by")) {
+    text = text.replace(/(?:#\s*)?warning:\s*(?:in the working copy of [^,\r\n]+,\s*)?(?:CRLF will be replaced by LF|LF will be replaced by CRLF)[^\r\n]*(?:\r?\n)?/gi, "");
   }
 
   // Clamp lines exceeding MAX_LINE_CHARS only if newline exists and text is long enough

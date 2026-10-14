@@ -45,6 +45,7 @@
   - `rtk summary <cmd>`: Run command and produce a 2-line heuristic summary.
 - **Antigravity Special Files Safe Harbor**: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/` configs) are permitted via `view_file` without slice bounds.
 - **Protected Internal State**: Direct native inspection of `.system_generated/` (transcripts, task logs, progress files) is strictly forbidden. Use Agy MCP tools `read_transcript` and `query_transcript`.
+- **Git CRLF/LF Warning Hygiene**: Git's line-ending conversion notices (`warning: LF will be replaced by CRLF the next time Git touches it` / `warning: CRLF will be replaced by LF...`) are non-actionable diagnostic noise. Suppress them during repo operations (via `git -c core.safecrlf=false` or `git config --global core.safecrlf false`) and do not propagate them into subagent briefs, task outputs, or conversation context.
 
 ---
 

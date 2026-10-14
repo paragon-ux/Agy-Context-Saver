@@ -90,6 +90,7 @@ Re-verifies, repairs, and synchronizes the installation and tool schemas in ~25m
    - Shell commands transparently rewrite via RTK (`rtk git`, `rtk pytest`, `rtk cargo`, etc.).
    - Codebase inspection is hard-routed to `rtk read`, `rtk find`, and `rtk rg "<pattern>" .`.
    - Direct access to `.system_generated/` is strictly denied; use `read_transcript` and `query_transcript`.
+   - **Log Hygiene (Git CRLF/LF Notice Stripping)**: Repetitive Git line-ending notices (`warning: LF will be replaced by CRLF` / `warning: CRLF will be replaced by LF...`) are non-actionable environment noise. Agy-Context-Saver automatically strips these warning lines across forensic transcript parsers, and subagents suppress them at the source (`git -c core.safecrlf=false`) to protect context window tokens.
 
 3. **Layer 3: Orchestration, Delegation & Pointer-Over-Wire (POW)**:
    - Synchronous wait window expands to 10,000ms to eliminate unnecessary detachment.

@@ -640,5 +640,5 @@ assert.equal(s9.decision, "allow");
 console.log("  Replay Step 9: normal application code change -> allowed");
 
 resetState();
-console.log("\nAll 28 comprehensive closed-topology governance tests passed successfully!");
+console.log("\nAll 27 comprehensive closed-topology governance tests passed successfully!");
 process.exit(0);
