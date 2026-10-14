@@ -208,9 +208,6 @@ node tests/test-check-only-readonly.mjs
 
 # Malformed config preservation fail-closed regression test
 node tests/test-malformed-config-preservation.mjs
-
-# Dual-MCP Waymark code intelligence + subagent synergy suite
-node tests/test-waymark-synergy.mjs
 ```
 
 ### 4. Test MCP Tools from Antigravity Agent
