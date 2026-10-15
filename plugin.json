@@ -1,12 +1,12 @@
 {
   "name": "agy-context-saver",
   "displayName": "Antigravity Context Shield & Governor",
-  "version": "1.7.0",
-  "description": "Deterministic background polling governor, RTK terminal optimizer, and subagent context preservation shield for Antigravity.",
+  "version": "1.8.0",
+  "description": "Deterministic background polling governor, RTK terminal optimizer, and transcript context shield for Antigravity.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Audit context health and token consumption for this session",
-    "Formulate an isolated subagent brief under Pointer-Over-Wire protocol",
+    "Search this conversation's transcript for earlier tool errors",
     "Inspect recent conversation turns without raw JSON transcript bloat"
   ]
 }

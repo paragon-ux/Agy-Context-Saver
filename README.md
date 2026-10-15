@@ -21,7 +21,6 @@ It permanently eliminates session degradation, memory bloat, and context window 
 | **Workspace File Inspection** | Massive uncompressed view_file dumps | Compact `rtk read`, `rtk grep`, `rtk find` |
 | **Long Command Execution** | Detached after 5s $\to$ busy-wait loop | Synchronous window expanded to 10s $\to$ finishes in-turn |
 | **Background Task Monitoring** | Repetitive busy-polling loops | Enforced Reactive Wakeup with 5-strike circuit breaker |
-| **Subagent Delegation** | In-band truncated >16KB JSON dumps | Pointer-Over-Wire (POW) protocols via `subagent_brief` |
 | **Configuration Safety** | Risk of third-party config clobber | Non-destructive preservation of foreign hooks/MCP with `.bak` backups |
 | **Transcript Review** | Raw JSONL dumped into context | Clean human-readable Markdown via `read_transcript` |
 | **Runtime Dependencies** | N/A | **Zero** external npm dependencies (100% Node.js stdlib) + native RTK binary |
@@ -32,7 +31,9 @@ It permanently eliminates session degradation, memory bloat, and context window 
 
 1. **Layer 1: Reactive Lifecycle & Polling Immunity**: Replaces destructive busy-polling loops with native Antigravity **Reactive Wakeup**, governed by an exponential Proportional Backoff curve and a 5-strike circuit breaker.
 2. **Layer 2: Transparent CLI & Codebase Streamlining**: Intercepts shell execution via PreToolUse hooks, transparently rewriting commands to RTK (`rtk git`, `rtk pytest`), hard-routing workspace searches to `rtk read`/`find`/`rg`, and shielding internal `.system_generated` state.
-3. **Layer 3: Orchestration, Delegation & Pointer-Over-Wire (POW)**: Expands synchronous execution windows to 10s and enforces Pointer-Over-Wire contracts across subagent teams (`subagent_brief`).
+3. **Layer 3: Synchronous Execution**: Expands synchronous execution windows to 10s so routine commands finish in-turn instead of detaching.
+
+> **Subagent tools moved.** `subagent_brief` and squad dispatch now live in the separate [Agy-Squad](https://github.com/paragon-ux/agy-squad) package (under construction). Agy-Context-Saver is complete without them, and the two will install side by side.
 
 ---
 
@@ -97,7 +98,6 @@ npm run status
 - Background task polling governance & 5-strike circuit breaker
 - Antigravity internal state protection (`.system_generated/`)
 - Zero-JSON Markdown transcript extraction (`read_transcript`, `query_transcript`)
-- Subagent delegation formulation (`subagent_brief`)
 - Benchmark and evaluation artifact mutation protection
 
 ---
@@ -108,14 +108,12 @@ npm run status
 2. **The Terminal Bloat Trap**: Routine test runs and git operations dump hundreds of lines of noise into context. RTK compresses these outputs natively before they enter model context.
 3. **The Raw Transcript Trap**: Reading `transcript.jsonl` dumps megabytes of raw JSON into context. Agy blocks direct reads of `.system_generated` and provides high-density Markdown streaming tools.
 4. **Native Inspection Bypass**: Native inspection tools (`view_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token reduction. Agy hard-routes workspace inspection to RTK's canonical CLI (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`).
-5. **The Subagent Truncation Trap**: When subagents return massive audits or code in-band over `send_message`, payloads exceed transport limits (~16 KB) and pollute parent context. Agy enforces **Pointer-Over-Wire (POW)**: subagents dump detailed reports to disk and transmit only high-signal summaries and clickable links.
 
 ---
 
 ## Key Capabilities
 
 - **Transparent RTK Rewriting**: Native `run_command` calls are automatically rewritten (e.g. `pytest` $\to$ `rtk pytest`) via Antigravity PreToolUse hooks.
-- **Pointer-Over-Wire (POW) Subagent Architecture**: Equips `subagent_brief` payloads with isolated workspaces and file-pointer reporting, eliminating context pollution and message truncation during multi-agent workflows.
 - **Canonical Codebase Inspection**:
   - `rtk read <file>`: Read file with intelligent token filtering and line ranges.
   - `rtk find <path>`: Compact file search tree and directory listing (cross-platform, works on Windows & POSIX).
@@ -141,8 +139,8 @@ For complete technical references, architectural specifications, and governance 
 - 📖 **[Getting Started & Installation](docs/installation.md)**: Zero-delay setup, native plugin linking, hooks registration, and verification matrix.
 - 🏗️ **[Architecture & Internals](docs/architecture.md)**: Closed Execution Topology, RTK separation of concerns, and the Four Non-Fragile Architectural Pillars.
 - 🛡️ **[Lifecycle Governance & Hooks](docs/governance.md)**: Proportional Backoff curve, Reactive Wakeup invariants, and the 5-strike circuit breaker.
-- 🧰 **[MCP Tools & CLI Reference](docs/tools.md)**: Complete specifications for all 6 canonical autonomous MCP tools, slash commands, and diagnostic utilities.
-- 🔬 **[Forensic & Output Inspection](docs/architecture.md#6-output-governance-spillover-safe-harbor-0-new-tools)**: Ephemeral tool spillover resolution, post-mortem task retrieval, and Pointer-Over-Wire (POW) contracts.
+- 🧰 **[MCP Tools & CLI Reference](docs/tools.md)**: Complete specifications for all 5 canonical autonomous MCP tools, slash commands, and diagnostic utilities.
+- 🔬 **[Forensic & Output Inspection](docs/architecture.md#6-output-governance-spillover-safe-harbor-0-new-tools)**: Ephemeral tool spillover resolution, and post-mortem task retrieval.
 - 🚀 **[Publishing & Verification Playbook](docs/publishing.md)**: Clean-room test runs, release procedures, and multi-suite verification matrix.
 - 🗺️ **[Product Roadmap](docs/roadmap.md)**: Phased strategic roadmap focusing on affordable and reliable multi-agent workflows across general tasks.
 
@@ -178,7 +176,7 @@ node mcp/index.js status
 ```bash
 npm test
 ```
-*Runs all 11 test suites (hook governance, MCP protocol, output inspection governance, E2E probes, performance probes, installed verification, lifecycle rollback, subagent delegation trials, check-only read-only safety, malformed configuration preservation, and RTK ledger fresh install verification).*
+*Runs all 10 test suites (hook governance, MCP protocol, output inspection governance, E2E probes, performance probes, installed verification, lifecycle rollback, check-only read-only safety, malformed configuration preservation, and RTK ledger fresh install verification).*
 
 ### 3. Run Targeted Tests Individually
 ```bash
@@ -203,9 +201,6 @@ node tests/test-installed-verification.mjs
 # Clean install/uninstall/restore lifecycle test
 node tests/test-lifecycle-rollback.mjs
 
-# Subagent delegation trials & batching
-node tests/test-subagent-trials.mjs
-
 # Check-only read-only isolation regression test
 node tests/test-check-only-readonly.mjs
 
@@ -221,7 +216,6 @@ node tests/test-rtk-ledger-fresh-install.mjs
 - `check_context_health`: Call with `{ "transcriptPath": "<path-to-transcript.jsonl>" }`.
 - `read_transcript`: Call with `{ "conversationId": "<uuid>", "lastTurns": 3, "mode": "compact" }`.
 - `query_transcript`: Call with `{ "conversationId": "<uuid>", "query": "<term>", "summaryOnly": true }`.
-- `subagent_brief`: Call with `{ "objective": "<goal>", "scopeFiles": ["..."] }`.
 
 ### 5. Testing Pitfalls & Anti-Patterns to Avoid
 - ❌ **Do NOT run `npm start` or `node mcp/index.js` interactively**: It starts the stdio JSON-RPC daemon and waits indefinitely on `stdin`.
@@ -237,11 +231,10 @@ node tests/test-rtk-ledger-fresh-install.mjs
   - `/mcp:agy-context-saver:context_shield`: Injects 3-layer governance rules and RTK standards into any session with one click. *(MCP Prompts appear in your chat autocomplete menu; MCP Tools are called autonomously by the agent).*
 * **Agent MCP Tools**:
   1. `check_context_health`: Diagnoses conversation transcript turn budgets, payload size, RTK status, and polling loops.
-  2. `subagent_brief`: Formulates scope-isolated prompts for delegated subagents with Pointer-Over-Wire (POW) delivery contract.
-  3. `read_transcript`: Reads recent conversation history in clean Markdown format (compact/full).
-  4. `query_transcript`: Forensic filtering, regex search engine, and surgical single-step dereferencing (`stepIndex`, `field`) from full transcripts.
-  5. `get_installation_status`: Inspects live Antigravity plugin link, hook, MCP server, tool schemas, and RTK binary.
-  6. `sync_installation`: Re-verifies and repairs all integration layers in ~25ms.
+  2. `read_transcript`: Reads recent conversation history in clean Markdown format (compact/full).
+  3. `query_transcript`: Forensic filtering, regex search engine, and surgical single-step dereferencing (`stepIndex`, `field`) from full transcripts.
+  4. `get_installation_status`: Inspects live Antigravity plugin link, hook, MCP server, tool schemas, and RTK binary.
+  5. `sync_installation`: Re-verifies and repairs all integration layers in ~25ms.
 
 * **Streamlined Output Inspection (0 New Tools)**:
   - **Runtime Step Spillovers** (`.system_generated/steps/<step>/output.txt`): Inspected via canonical `rtk read <path>` (safe-harbored in the PreToolUse hook; native `view_file` calls automatically route to `rtk read`).

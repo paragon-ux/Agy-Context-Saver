@@ -66,7 +66,8 @@ console.log("\n--- Probe 2: Hook Fast-Path Builtin Bypass & Rewrite Caching ---"
   console.log(`✓ 20x fast-path builtin bypass checks executed in ${bypassElapsed.toFixed(1)}ms`);
 
   // Verify persistent LRU cache for rewritable commands
-  const cacheFile = path.join(os.tmpdir(), "agy-rtk-rewrite-cache.json");
+  const { getStateDir } = await import("../scripts/state-dir.mjs");
+  const cacheFile = path.join(getStateDir(), "agy-rtk-rewrite-cache.json");
   if (fs.existsSync(cacheFile)) fs.unlinkSync(cacheFile);
 
   // First call: writes to cache

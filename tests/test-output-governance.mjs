@@ -10,7 +10,6 @@
  *    - Denied with Proportional Backoff countdown while RUNNING
  *    - Allowed when TERMINATED
  * 4. Surgical single-step extraction folded into query_transcript(stepIndex, field) (0 New Tools)
- * 5. Pointer-Over-Wire (POW) contract in subagent_brief
  */
 
 import assert from "node:assert/strict";
@@ -126,8 +125,9 @@ const liveLog = path.join(convDir, "tasks", "task-live-1.log");
 const transcriptFile = path.join(convDir, "logs", "transcript.jsonl");
 
 // Reset session state for conv-test-live
-try { fs.unlinkSync(path.join(os.tmpdir(), "agy-session-conv-test-live.json")); } catch {}
-try { fs.unlinkSync(path.join(os.tmpdir(), "agy-session-conv_test_live.json")); } catch {}
+const { getStateDir } = await import("../scripts/state-dir.mjs");
+try { fs.unlinkSync(path.join(getStateDir(), "agy-session-conv-test-live.json")); } catch {}
+try { fs.unlinkSync(path.join(getStateDir(), "agy-session-conv_test_live.json")); } catch {}
 
 fs.writeFileSync(liveLog, "Running output in progress...\n", "utf-8");
 fs.writeFileSync(
@@ -269,20 +269,6 @@ console.log("\n--- Group 3: Forensic Extraction Folded into query_transcript ---
   assert.equal(resAll.result.isError, undefined);
   assert.match(resAll.result.content[0].text, /Step 1/);
   console.log("✓ query_transcript(stepIndex) returns full un-truncated step formatted as Markdown");
-}
-
-// --- Group 4: Pointer-Over-Wire Contract in subagent_brief ---
-console.log("\n--- Group 4: Pointer-Over-Wire Contract in subagent_brief ---");
-{
-  const res = await callMcp("tools/call", {
-    name: "subagent_brief",
-    arguments: { objective: "Audit compiler performance" }
-  });
-  const text = res.result.content[0].text;
-  assert.match(text, /POINTER-OVER-WIRE/);
-  assert.match(text, /transmit ONLY:\n\s+- Executive Summary/);
-  assert.match(text, /Clickable File Link/);
-  console.log("✓ subagent_brief enforces Pointer-Over-Wire delivery contract");
 }
 
 // --- Group 5: Git CRLF/LF Line-Ending Warning Stripping ---

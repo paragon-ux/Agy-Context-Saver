@@ -49,16 +49,12 @@
 
 ---
 
-## Layer 3: Synchronous Execution & Subagent Delegation
+## Layer 3: Synchronous Execution
 - **Maximum Synchronous Window**: Non-daemon `run_command` calls are automatically set to `WaitMsBeforeAsync: 10000` to complete synchronously and prevent unnecessary background detachment.
 - **Targeted Test Execution & Opt-In Fail-Fast (LH-11)**:
   - **Targeted Invocations**: In interactive turns, prefer targeting specific test files or directories (e.g. `pytest tests/test_core.py`) rather than running full multi-minute repository sweeps.
   - **Fail-Fast Flags are Opt-In**: Fail-fast flags (`-x`, `--maxfail=1`) are opt-in. Use them when quickly debugging a localized failure, but omit them when assessing the full blast radius across the codebase to avoid the "whack-a-mole" loop.
   - **Coordinated Watchdog Mandatory for Full Sweeps**: When running full multi-minute test sweeps without `-x`, agents **MUST** pair execution with the **Coordinated Watchdog Protocol** (`schedule(DurationSeconds=45, ...)`) and output a **Pre-Yield Status Card**. Never yield silently.
-  - **Subagent Delegation for Deep Audits**: When a comprehensive repository-wide test audit is required, delegate the sweep to a subagent (`invoke_subagent`) to keep the main thread responsive.
-- **Subagent Delegation & Pointer-Over-Wire (POW)**:
-  - Delegate heavy multi-file exploration, deep research, and repo sweeps to subagents (`invoke_subagent`). Subagents absorb intermediate steps and return high-signal summaries.
-  - **POW Protocol & `write_to_file` Isolation**: Payloads or deliverables exceeding 1 KB must be written either to workspace scratch files (`<workspace>/scratch/<task>_findings.md` with `ArtifactMetadata` **omitted**) or to the **subagent's own** `<Artifact Directory Path>/scratch/<task>_findings.md` (with `ArtifactMetadata: { Summary, UserFacing: false, RequestFeedback: false }`). Never instruct a subagent to `write_to_file` into the parent conversation's `brain/<parent-uuid>/` directory, as Antigravity enforces per-conversation `brain/<uuid>` write isolation. Transmit **ONLY** an Executive Summary (3–5 sentences), a Scoreboard / Verdict table, and a clickable file link (`file:///...`) in `send_message` to prevent transport truncation and parent context bloat.
 - **Benchmark / Evaluator Integrity**: Never mutate benchmark definitions, prompt templates, or scoring artifacts during an active evaluation without explicit user confirmation.
 
 ---
@@ -78,7 +74,7 @@ When an agent or developer tests this framework, follow this exact sequence with
    ```bash
    npm test
    ```
-   *Expected*: All 8 test suites pass (Hook unit tests, MCP protocol tests, output governance, E2E probes, performance probes, live system validation, lifecycle rollback, subagent trials).
+   *Expected*: All 10 test suites pass (hook unit tests, MCP protocol tests, output governance, E2E probes, performance probes, live system validation, lifecycle rollback, check-only read-only safety, malformed config preservation, RTK ledger fresh install).
 
 3. **Verify Individual Layers On-Demand**:
    - Governance Hook: `node tests/test-hook.mjs`
@@ -88,14 +84,12 @@ When an agent or developer tests this framework, follow this exact sequence with
    - Performance Probes: `node tests/test-performance-probes.mjs`
    - Live System Checks: `node tests/test-installed-verification.mjs`
    - Lifecycle & Rollback: `node tests/test-lifecycle-rollback.mjs`
-   - Subagent Delegation Trials: `node tests/test-subagent-trials.mjs`
 
 4. **Verify MCP Tools in Antigravity**:
    - `get_installation_status`: Inspect live integration layers.
    - `check_context_health`: Pass `{ "transcriptPath": "<path-to-transcript.jsonl>" }`.
    - `read_transcript`: Pass `{ "conversationId": "<uuid>", "lastTurns": 3, "mode": "compact" }`.
    - `query_transcript`: Pass `{ "conversationId": "<uuid>", "query": "<pattern>", "summaryOnly": true }`.
-   - `subagent_brief`: Pass `{ "objective": "<goal>", "role": "<role>", "scopeFiles": ["..."] }` or pass multiple via `{ "subagents": [...] }` to generate ready-to-use `invoke_subagent` JSON payloads.
 
 5. **Operational Anti-Patterns (What NOT to do)**:
    - ❌ **Do NOT run `npm start` or `node mcp/index.js` interactively**: It starts the stdio JSON-RPC daemon and waits indefinitely on stdin.

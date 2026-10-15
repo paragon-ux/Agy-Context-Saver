@@ -56,12 +56,32 @@ const GOVERNED_TOOLS = new Set([
 const STATE_TTL_MS = 3600000; // 1 hour TTL
 const MAX_STATE_ENTRIES = 50;
 
+// Per-user state folder, never the shared os.tmpdir(). Keep identical to scripts/state-dir.mjs:
+// this hook is mirrored as a standalone file, so it can't import it.
+function getStateDir() {
+  const profileHome = process.env.AGY_TEST_PROFILE_DIR;
+  if (os.platform() === "win32") {
+    const localAppData = profileHome
+      ? path.join(profileHome, "AppData", "Local")
+      : (process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"));
+    return path.join(localAppData, "agy-context-saver");
+  }
+  const stateHome = profileHome
+    ? path.join(profileHome, ".local", "state")
+    : (process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"));
+  return path.join(stateHome, "agy-context-saver");
+}
+
+function ensureStateDir() {
+  try { fs.mkdirSync(getStateDir(), { recursive: true }); } catch {}
+}
+
 function getStateFilePath(convId = "global") {
   if (!convId || convId === "global") {
-    return path.join(os.tmpdir(), "agy-session-governance-state.json");
+    return path.join(getStateDir(), "agy-session-governance-state.json");
   }
   const safeId = String(convId).replace(/[^a-zA-Z0-9_-]/g, "_");
-  return path.join(os.tmpdir(), `agy-session-${safeId}.json`);
+  return path.join(getStateDir(), `agy-session-${safeId}.json`);
 }
 
 function getSessionState(convId = "global") {
@@ -79,6 +99,7 @@ function getSessionState(convId = "global") {
 
 function saveSessionState(convId = "global", entry) {
   const file = getStateFilePath(convId);
+  ensureStateDir();
   try {
     const now = Date.now();
     entry.lastPollTime = now;
@@ -356,7 +377,7 @@ const NON_REWRITABLE_BINARIES = new Set([
   "export"
 ]);
 
-const REWRITE_CACHE_FILE = path.join(os.tmpdir(), "agy-rtk-rewrite-cache.json");
+const REWRITE_CACHE_FILE = path.join(getStateDir(), "agy-rtk-rewrite-cache.json");
 const REWRITE_CACHE_MAX = 100;
 let inMemoryRewriteCache = null;
 
@@ -404,6 +425,7 @@ function resolveCompatibleRtk() {
 
   cache.__envSig = envSig;
   cache.__rtkResolved = resolved;
+  ensureStateDir();
   try {
     const tmp = `${REWRITE_CACHE_FILE}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(cache), "utf-8");
@@ -444,6 +466,7 @@ function rememberRewrite(cmd, rewritten) {
     for (const k of keys.slice(0, Math.max(0, keys.length - REWRITE_CACHE_MAX))) delete disk[k];
     if (envSig !== undefined) disk.__envSig = envSig;
     if (rtkResolved !== undefined) disk.__rtkResolved = rtkResolved;
+    ensureStateDir();
     const tmp = `${REWRITE_CACHE_FILE}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(disk), "utf-8");
     try {

@@ -18,7 +18,6 @@ Agy-Context-Saver is the universal Model Context Protocol server and lifecycle g
 
 ## Available MCP Tools
 - `check_context_health`: Diagnoses transcript turn counts, byte payload, and polling loops. Accepts `transcriptPath` or `conversationId`.
-- `subagent_brief`: Generates scope-isolated instructions for delegated subagents to prevent parent context bloat.
 - `read_transcript`: Streams recent turns from `transcript.jsonl` or `transcript_full.jsonl` formatted as clean Markdown.
 - `query_transcript`: Forensic regex search and filtering engine across transcript steps with optional `summaryOnly: true`.
 - `get_installation_status`: Audits live health of the plugin link, hook, MCP server, tool schemas, and RTK.

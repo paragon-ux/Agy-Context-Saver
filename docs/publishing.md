@@ -47,7 +47,7 @@ Ensures plugin links, hook scripts, and tool schemas exist and match versions.
 ```bash
 npm test
 ```
-Executes all 11 verification suites:
+Executes all 10 verification suites:
 1. Intelligent hook governance & closed-topology tests (`tests/test-hook.mjs`)
 2. MCP server protocol & method tests (`tests/test-mcp.mjs`)
 3. Output inspection governance & lifecycle gating tests (`tests/test-output-governance.mjs`)
@@ -55,10 +55,9 @@ Executes all 11 verification suites:
 5. Performance, streaming & memory probes (`tests/test-performance-probes.mjs`)
 6. Live installed system validation (`tests/test-installed-verification.mjs`)
 7. Full lifecycle installation, rollback, and restoration test (`tests/test-lifecycle-rollback.mjs`)
-8. Subagent delegation & batching trials (`tests/test-subagent-trials.mjs`)
-9. Check-only read-only isolation regression test (`tests/test-check-only-readonly.mjs`)
-10. Malformed config preservation fail-closed regression test (`tests/test-malformed-config-preservation.mjs`)
-11. Dual-MCP Waymark code intelligence & subagent synergy suite (`tests/test-waymark-synergy.mjs`)
+8. Check-only read-only isolation regression test (`tests/test-check-only-readonly.mjs`)
+9. Malformed config preservation fail-closed regression test (`tests/test-malformed-config-preservation.mjs`)
+10. RTK ledger fresh-install quirks (`tests/test-rtk-ledger-fresh-install.mjs`)
 
 ### Stage 3: Tarball Dry-Run Inspection
 ```bash
@@ -83,8 +82,8 @@ Once all 4 verification stages pass:
 
 ```bash
 # 1. Commit and tag release
-git commit -m "chore(release): prepare v1.7.0"
-git tag -a v1.7.0 -m "Release v1.7.0"
+git commit -m "chore(release): prepare v1.8.0"
+git tag -a v1.8.0 -m "Release v1.8.0"
 
 # 2. Publish to npm registry
 npm publish --access public

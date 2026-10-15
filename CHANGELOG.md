@@ -5,6 +5,23 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-10-15
+
+### Removed
+- **`subagent_brief` moved to the separate [Agy-Squad](https://github.com/paragon-ux/agy-squad) package.** Agy-Context-Saver now exposes 5 MCP tools. Agy-Squad is under construction, and the two will install side by side. Removed with it: the tool schema, `tests/test-subagent-trials.mjs`, and the subagent delegation and Pointer-Over-Wire guidance in `rules/AGENTS.md`, `skills/context-governance/SKILL.md`, `mcp/instructions.md` and the docs.
+
+### Changed
+- **Hook state moved out of the shared temp folder.** The polling ledger and RTK rewrite cache now live in a per-user folder: `%LOCALAPPDATA%\agy-context-saver` on Windows, `$XDG_STATE_HOME/agy-context-saver` (default `~/.local/state/agy-context-saver`) elsewhere. Other users and processes on the machine can no longer read or tamper with them.
+- **Uninstall removes all hook state.** It deletes the state folder and any files older versions left in the temp folder (`agy-session-*.json`, `agy-rtk-rewrite-cache.json` and their temp files). Install removes those legacy temp files too. `test-lifecycle-rollback` seeds all of them and checks that they're removed, and that unrelated temp files are left alone.
+- **The installer retires stale subagent schemas.** Re-installing removes `subagent_brief.json` and `dispatch_squad.json` from `~/.gemini/antigravity/mcp/agy-context-saver/`. `test-lifecycle-rollback` seeds both and checks that they're removed.
+- **The `check_context_health` turn-budget warning** now recommends summarizing and continuing in a fresh conversation instead of delegating to subagents.
+
+### Fixed
+- **The MCP server exits when its parent goes away.** It exits on stdin end/close, on stdout `EPIPE`, and when its parent process is gone (15 s watchdog), so no orphaned server processes are left behind.
+- **`mcp/index.js` can be imported without side effects.** The CLI and the stdio loop run only when it's the entry point, and it exports `handleRequest`.
+
+---
+
 ## [1.7.0] - 2026-10-13
 
 ### Added

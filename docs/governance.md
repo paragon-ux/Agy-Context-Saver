@@ -85,17 +85,12 @@ Direct native inspection of `.system_generated/logs/transcript.jsonl` is blocked
 
 ---
 
-### Layer 3: Orchestration, Delegation & Pointer-Over-Wire (POW)
+### Layer 3: Synchronous Execution
 
 #### 1. Synchronous Window Expansion
 On native `run_command` invocations, the hook automatically upgrades `WaitMsBeforeAsync` from the default ~5,000ms to **10,000ms** (unless `IsDaemon: true`), allowing tasks to complete synchronously and preventing premature detachment.
 
-#### 2. Pointer-Over-Wire (POW) Subagent Protocol
-Heavy multi-file exploration, wide codebase searches, and repository sweeps must be delegated to subagents (`invoke_subagent`). Subagents operate under the **Pointer-Over-Wire (POW)** contract:
-- Deliverables $>1\text{ KB}$ are written to workspace scratch files (e.g. `scratch/<task>_findings.md` or artifacts).
-- In-band messaging (`send_message`) transmits **only** an Executive Summary, a Scoreboard table, and a clickable `file:///` link, eliminating context bloat and transport truncation.
-
-#### 3. Benchmark & Evaluator Safeguard
+#### 2. Benchmark & Evaluator Safeguard
 Mutations to benchmark definitions, test evaluation templates, or scoring artifacts are protected behind mandatory `force_ask` user approval.
 
 ---

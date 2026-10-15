@@ -39,7 +39,7 @@ Install and activate the governor across your Antigravity environment in seconds
 `Agy-Context-Saver` leverages the **open Model Context Protocol (MCP)** specification alongside native Antigravity lifecycle hooks, integrating seamlessly with RTK:
 
 - **RTK owns command optimization**: Supported shell commands are transparently rewritten via `rtk rewrite` before execution, yielding 60–90% token reduction across git, pytest, cargo, npm, docker, and linters.
-- **Agy owns Antigravity integrity**: Hard-routes native inspection tools to canonical RTK shell commands, enforces Reactive Wakeup, blocks direct access to internal `.system_generated` state, enforces Pointer-Over-Wire for subagents, and provides zero-JSON Markdown transcript extraction.
+- **Agy owns Antigravity integrity**: Hard-routes native inspection tools to canonical RTK shell commands, enforces Reactive Wakeup, blocks direct access to internal `.system_generated` state, and provides zero-JSON Markdown transcript extraction.
 
 Any developer running Antigravity on macOS, Linux, or Windows can install and activate the governor immediately without external cloud dependencies.
 
@@ -81,9 +81,8 @@ When an agent initiates a shell command exceeding `WaitMsBeforeAsync` (~5 second
 - **The Problem**: Direct `view_file` on `.system_generated/logs/transcript.jsonl` floods working memory with raw JSON syntax.
 - **The Solution**: Agy blocks direct reads of `.system_generated` by root and provides streaming Markdown tools (`read_transcript`, `query_transcript`).
 
-### 5. The Subagent Transport Truncation Trap
-- **The Problem**: When delegating deep research, test audits, or wide exploration to subagents, returning raw audits or large diffs in-band over `send_message` exceeds the ~16 KB transport payload limit, resulting in truncated messages and immediate parent context amnesia.
-- **The Solution**: Pointer-Over-Wire (POW) architecture generated via `subagent_brief`: subagents write detailed deliverables to disk (`scratch/<task>_findings.md` or artifacts) and transmit only an Executive Summary, a Scoreboard table, and a clickable `file:///` link.
+!!! note "Subagent tools moved to Agy-Squad"
+    `subagent_brief` and squad dispatch moved to the separate [Agy-Squad](https://paragon-ux.github.io/agy-squad/) package on 2026-10-15. Agy-Context-Saver is complete without them; Agy-Squad is under construction and will install alongside it.
 
 ---
 
@@ -95,7 +94,6 @@ When an agent initiates a shell command exceeding `WaitMsBeforeAsync` (~5 second
 | **Workspace File Inspection** | Massive uncompressed view_file dumps | Compact `rtk read`, `rtk grep`, `rtk find` |
 | **Long Command Execution** | Detached after 5s $\to$ busy-wait loop | Synchronous window expanded to 10s $\to$ finishes in-turn |
 | **Background Task Monitoring** | Repetitive busy-polling loops | Enforced Reactive Wakeup with 5-strike circuit breaker |
-| **Subagent Delegation** | In-band truncated >16KB JSON dumps | Pointer-Over-Wire (POW) protocols via `subagent_brief` |
 | **Configuration Safety** | Risk of third-party config clobber | Non-destructive preservation of foreign hooks/MCP with `.bak` backups |
 | **Transcript Review** | Raw JSONL dumped into context | Clean human-readable Markdown via `read_transcript` |
 | **Runtime Dependencies** | N/A | **Zero** external npm dependencies (100% Node.js stdlib) + native RTK binary |
@@ -110,10 +108,9 @@ When an agent initiates a shell command exceeding `WaitMsBeforeAsync` (~5 second
   - [`/mcp:agy-context-saver:context_shield`](tools.md#mcp-prompts-mcp-user-slash-commands): One-click prompt template in your chat input that injects the complete 3-layer governance rules and RTK standards into any session.
 * **Agent MCP Tools**:
   - [`check_context_health`](tools.md#1-check_context_health): Diagnoses transcript turn counts, payload size, and polling loops.
-  - [`subagent_brief`](tools.md#4-subagent_brief): Formulates scope-isolated prompts for delegated subagents.
   - [`read_transcript`](tools.md#2-read_transcript): Streams recent conversation history in clean Markdown format.
   - [`query_transcript`](tools.md#3-query_transcript): Forensic filtering and regex search engine for transcripts.
-  - [`get_installation_status`](tools.md#5-get_installation_status): Audits live plugin link, hook, MCP server, schemas, and RTK.
-  - [`sync_installation`](tools.md#6-sync_installation): Re-verifies and repairs all 4 integration layers in ~25ms.
+  - [`get_installation_status`](tools.md#4-get_installation_status): Audits live plugin link, hook, MCP server, schemas, and RTK.
+  - [`sync_installation`](tools.md#5-sync_installation): Re-verifies and repairs all 4 integration layers in ~25ms.
 
 See the complete [Tool & Prompt Reference](tools.md) for parameter details and usage examples.

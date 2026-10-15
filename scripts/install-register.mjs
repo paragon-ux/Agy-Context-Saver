@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureRtkInstalled, findExistingRtk } from "./provision-rtk.mjs";
+import { getStateDir, removeLegacyTmpState } from "./state-dir.mjs";
 
 const fsPromises = fs.promises;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -115,7 +116,6 @@ export function detectExistingInstallation() {
   const scriptExists = fs.existsSync(destHook);
   const schemasExist =
     fs.existsSync(path.join(antigravityMcpDir, "check_context_health.json")) &&
-    fs.existsSync(path.join(antigravityMcpDir, "subagent_brief.json")) &&
     fs.existsSync(path.join(antigravityMcpDir, "get_installation_status.json")) &&
     fs.existsSync(path.join(antigravityMcpDir, "sync_installation.json")) &&
     fs.existsSync(path.join(antigravityMcpDir, "read_transcript.json")) &&
@@ -338,7 +338,10 @@ export async function runInstall(options = {}) {
     "safe_command.json",
     "get_spillover_content.json",
     "read_task_output.json",
-    "get_step_detail.json"
+    "get_step_detail.json",
+    // Subagent tools moved to the separate Agy-Squad package (2026-10-15)
+    "subagent_brief.json",
+    "dispatch_squad.json"
   ];
   for (const s of retiredSchemas) {
     const sPath = path.join(antigravityMcpDir, s);
@@ -348,6 +351,11 @@ export async function runInstall(options = {}) {
         log(`[OK] Cleaned up retired schema from: ${sPath}`);
       } catch {}
     }
+  }
+
+  // Versions up to 1.7.0 kept hook state in the shared temp folder; it now lives in getStateDir()
+  for (const legacy of removeLegacyTmpState()) {
+    log(`[OK] Removed legacy temp-folder state: ${legacy}`);
   }
 
   const instructionsContent = `# Agy-Context-Saver MCP Server Instructions
@@ -371,7 +379,6 @@ Agy-Context-Saver is the universal Model Context Protocol server and lifecycle g
 
 ## Available MCP Tools
 - \`check_context_health\`: Diagnoses transcript turn counts, byte payload, and polling loops. Accepts \`transcriptPath\` or \`conversationId\`.
-- \`subagent_brief\`: Formulates scope-isolated prompts and ready-to-use invoke_subagent JSON payloads for single or multiple delegated subagents with Pointer-Over-Wire delivery contract.
 - \`read_transcript\`: Streams recent turns from \`transcript.jsonl\` or \`transcript_full.jsonl\` formatted as clean Markdown.
 - \`query_transcript\`: Forensic regex search and filtering engine across transcript steps with optional \`summaryOnly: true\`, and surgical step extraction via \`stepIndex\` and \`field\`.
 - \`get_installation_status\`: Audits live health of the plugin link, hook, MCP server, tool schemas, and RTK.
@@ -397,42 +404,6 @@ Agy-Context-Saver is the universal Model Context Protocol server and lifecycle g
         conversationId: {
           type: "string",
           description: "Conversation UUID or folder name (alternative to transcriptPath)."
-        }
-      }
-    }
-  };
-
-  const subagentBriefSchema = {
-    name: "subagent_brief",
-    description: "Generates scope-isolated, anti-bloat prompts and ready-to-use invoke_subagent JSON payloads for single or multiple delegated subagents. Instructs subagents to absorb intermediate file reads/searches and return only high-signal findings.",
-    parameters: {
-      type: "object",
-      properties: {
-        objective: { type: "string", description: "The core research or investigative objective (for single subagent)." },
-        role: { type: "string", description: "2-5 word role description (e.g. 'Comprehensive Test Engineer', 'Codebase Security Auditor'). Defaults to 'Scope-Isolated Deep Research Subagent'." },
-        instructions: { type: "string", description: "Optional step-by-step instructions or specialized directives." },
-        scopeFiles: { type: "array", items: { type: "string" }, description: "List of files or directories to investigate." },
-        expectedDeliverable: { type: "string", description: "The concise format expected back by the parent agent." },
-        typeName: { type: "string", description: "Subagent type name: 'self' (default, inherits parent tools/prompt/model) or 'research' (read-only)." },
-        model: { type: "string", enum: ["inherit", "flash_lite", "flash", "pro"], description: "Model tier: 'inherit' (default), 'flash_lite', 'flash', or 'pro'." },
-        workspace: { type: "string", enum: ["inherit", "branch", "share"], description: "Workspace isolation: 'inherit' (default), 'branch', or 'share'." },
-        subagents: {
-          type: "array",
-          description: "Optional array of subagent configurations to formulate multiple subagents at once.",
-          items: {
-            type: "object",
-            properties: {
-              role: { type: "string", description: "2-5 word role description." },
-              objective: { type: "string", description: "The core objective for this subagent." },
-              instructions: { type: "string", description: "Optional step-by-step instructions." },
-              scopeFiles: { type: "array", items: { type: "string" }, description: "Files/directories to investigate." },
-              expectedDeliverable: { type: "string", description: "Expected deliverable format." },
-              typeName: { type: "string", description: "Subagent type name: 'self' or 'research'." },
-              model: { type: "string", enum: ["inherit", "flash_lite", "flash", "pro"], description: "Model tier." },
-              workspace: { type: "string", enum: ["inherit", "branch", "share"], description: "Workspace isolation." }
-            },
-            required: ["objective"]
-          }
         }
       }
     }
@@ -559,7 +530,6 @@ Agy-Context-Saver is the universal Model Context Protocol server and lifecycle g
   await Promise.all([
     safeWriteFileIfChanged(path.join(antigravityMcpDir, "instructions.md"), instructionsContent),
     safeWriteFileIfChanged(path.join(antigravityMcpDir, "check_context_health.json"), JSON.stringify(checkHealthSchema, null, 2)),
-    safeWriteFileIfChanged(path.join(antigravityMcpDir, "subagent_brief.json"), JSON.stringify(subagentBriefSchema, null, 2)),
     safeWriteFileIfChanged(path.join(antigravityMcpDir, "get_installation_status.json"), JSON.stringify(getInstallationStatusSchema, null, 2)),
     safeWriteFileIfChanged(path.join(antigravityMcpDir, "sync_installation.json"), JSON.stringify(syncInstallationSchema, null, 2)),
     safeWriteFileIfChanged(path.join(antigravityMcpDir, "read_transcript.json"), JSON.stringify(readTranscriptSchema, null, 2)),
@@ -631,7 +601,21 @@ export async function runUninstall(options = {}) {
     }
   }
 
-  // 6. Optional: Restore configuration files from backups if requested
+  // 6. Remove hook state: the per-user state folder and anything older versions left in the temp folder
+  const stateDir = getStateDir();
+  if (fs.existsSync(stateDir)) {
+    try {
+      await fsPromises.rm(stateDir, { recursive: true, force: true });
+      log(`[OK] Removed hook state folder: ${stateDir}`);
+    } catch (err) {
+      warn(`[WARN] Could not remove hook state folder: ${err.message}`);
+    }
+  }
+  for (const legacy of removeLegacyTmpState()) {
+    log(`[OK] Removed legacy temp-folder state: ${legacy}`);
+  }
+
+  // 7. Optional: Restore configuration files from backups if requested
   if (options.restoreBackups) {
     await runRestoreBackups(options);
   }
@@ -678,7 +662,7 @@ export function runStatus(options = {}) {
   log(`- Native Plugin Link: ${existing.details.plugin.exists ? "ACTIVE (" + pluginDest + ")" : "NOT LINKED"}`);
   log(`- Execution Governor Hook: ${existing.details.hook.registered ? "REGISTERED in hooks.json" : "NOT REGISTERED"}`);
   log(`- Universal MCP Server: ${existing.details.mcp.registered ? "CONFIGURED in mcp_config.json" : "NOT CONFIGURED"}`);
-  log(`- Antigravity Tool Schemas: ${existing.details.schemas.exists ? "PRESENT (6 Schemas)" : "MISSING"}`);
+  log(`- Antigravity Tool Schemas: ${existing.details.schemas.exists ? "PRESENT (5 Schemas)" : "MISSING"}`);
   log(`- RTK Command Optimizer: ${existing.details.rtk ? "INSTALLED (" + existing.details.rtk.version + ")" : "MISSING"}`);
 
   log(`\nOverall Status: ${existing.isComplete ? "HEALTHY & ACTIVE 🛡️" : existing.isInstalled ? "PARTIAL INSTALLATION" : "NOT INSTALLED"}\n`);

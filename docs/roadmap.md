@@ -21,7 +21,7 @@ Applying the principles of **Full Cycle Product Development (FCPD)**, the produc
 ### What Agy-Context-Saver IS
 1. **Context Window Shield:** Prevents conversational context degradation and token exhaustion by offloading verbose shell and filesystem operations to RTK (Rust Token Killer).
 2. **Execution Governor:** Enforces closed execution topology, eliminates runaway polling loops (`manage_task status`), protects Antigravity internal state (`.system_generated/`), and guarantees synchronous command execution (`WaitMsBeforeAsync`).
-3. **Ergonomic Lifecycle & Diagnostics:** Provides lightweight MCP tools (`check_context_health`, `read_transcript`, `query_transcript`, `subagent_brief`, `get_installation_status`, `sync_installation`) with zero external runtime dependencies.
+3. **Ergonomic Lifecycle & Diagnostics:** Provides lightweight MCP tools (`check_context_health`, `read_transcript`, `query_transcript`, `get_installation_status`, `sync_installation`) with zero external runtime dependencies. Subagent tooling lives in the separate [Agy-Squad](https://paragon-ux.github.io/agy-squad/) package.
 
 ### What Agy-Context-Saver is NOT (Explicit Non-Goals & Anti-Patterns)
 - **NOT an Issue Tracker or Bug Ledger:** We will not bloat the engine with finding-to-disposition state machines (`FIXED_AND_VERIFIED`, `REJECTED`, `OPEN`) or Jira-style workflows. High-ceremony ledgers belong in task-specific prompt templates or Antigravity skills.
@@ -97,7 +97,7 @@ flowchart TD
 - **Implementation:**
   - Locked schema to its core purpose: generating scope-isolated prompts and turnkey `invoke_subagent` payloads under the Pointer-Over-Wire (POW) protocol.
   - Added native multi-role batch support (`subagents` array) with role, model, and workspace customizability.
-- **Status:** Shipped and verified in `v1.6.0`.
+- **Status:** Shipped and verified in `v1.6.0`. Moved to the separate Agy-Squad package on 2026-10-15.
 
 #### 1.5 Cross-Platform Execution Guard Stability *(Shipped)*
 - **Problem:** Differences between POSIX shells and Windows PowerShell can introduce command rewriting stalls or quote mismatches.

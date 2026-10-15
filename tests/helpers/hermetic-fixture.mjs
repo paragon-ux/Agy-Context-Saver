@@ -194,7 +194,8 @@ export async function setupHermeticTestEnv(options = {}) {
   }
 
   // Clear rewrite cache so hook picks up current PATH & profileDir
-  const rewriteCacheFile = path.join(os.tmpdir(), "agy-rtk-rewrite-cache.json");
+  const { getStateDir } = await import("../../scripts/state-dir.mjs");
+  const rewriteCacheFile = path.join(getStateDir(), "agy-rtk-rewrite-cache.json");
   try {
     if (fs.existsSync(rewriteCacheFile)) fs.unlinkSync(rewriteCacheFile);
   } catch {}

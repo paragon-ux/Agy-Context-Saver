@@ -60,12 +60,44 @@ try {
 
   // --- 3. Clean Uninstallation Test ---
   console.log("\n--- 3. Clean Uninstallation Verification ---");
-  await runUninstall({ silent: true });
+  // Seed hook state in the per-user state folder, plus files that versions up to 1.7.0 left in the
+  // shared temp folder. The temp folder is redirected into the sandbox so the real one is untouched.
+  const { getStateDir } = await import("../scripts/state-dir.mjs");
+  const stateDir = getStateDir();
+  assert.ok(stateDir.startsWith(testProfileDir), "State folder must resolve inside the test profile");
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, "agy-session-governance-state.json"), "{}");
+  fs.writeFileSync(path.join(stateDir, "agy-rtk-rewrite-cache.json"), "{}");
+  const sandboxTmp = path.join(testProfileDir, "tmp");
+  fs.mkdirSync(sandboxTmp, { recursive: true });
+  const legacyFiles = [
+    "agy-session-governance-state.json",
+    "agy-session-conv_1.json",
+    "agy-rtk-rewrite-cache.json",
+    "agy-rtk-rewrite-cache.json.4242.tmp"
+  ];
+  for (const f of legacyFiles) fs.writeFileSync(path.join(sandboxTmp, f), "{}");
+  fs.writeFileSync(path.join(sandboxTmp, "unrelated-file.json"), "{}");
+  const savedTmpEnv = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
+  process.env.TEMP = process.env.TMP = process.env.TMPDIR = sandboxTmp;
+  try {
+    assert.equal(os.tmpdir(), sandboxTmp, "Temp folder redirect must take effect");
+    await runUninstall({ silent: true });
+  } finally {
+    for (const [k, v] of Object.entries(savedTmpEnv)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
 
   // Check filesystem cleanup
   assert.equal(fs.existsSync(pluginDest), false, "Plugin link must be removed");
   assert.equal(fs.existsSync(destHook), false, "Mirrored hook script must be removed");
   assert.equal(fs.existsSync(antigravityMcpDir), false, "Mirrored MCP schemas dir must be removed");
+  assert.equal(fs.existsSync(stateDir), false, "Hook state folder must be removed");
+  for (const f of legacyFiles) {
+    assert.equal(fs.existsSync(path.join(sandboxTmp, f)), false, `Legacy temp-folder state ${f} must be removed`);
+  }
+  assert.ok(fs.existsSync(path.join(sandboxTmp, "unrelated-file.json")), "Unrelated temp files must be left alone");
 
   // Check configuration preservation
   const uninstalledHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
@@ -82,6 +114,11 @@ try {
 
   // --- 4. Re-Installation & Recovery Test ---
   console.log("\n--- 4. Re-Installation & Synchronization Recovery ---");
+  // Seed schemas from an older install that still shipped the subagent tools; re-install must retire them
+  fs.mkdirSync(antigravityMcpDir, { recursive: true });
+  for (const stale of ["subagent_brief.json", "dispatch_squad.json"]) {
+    fs.writeFileSync(path.join(antigravityMcpDir, stale), JSON.stringify({ name: stale.replace(".json", "") }));
+  }
   const reinstallResult = await runInstall({ silent: true, allowDegraded: true });
   assert.equal(reinstallResult.isInstalled, true, "Re-installation should succeed");
 
@@ -102,10 +139,9 @@ try {
   assert.ok(recoveredMcp.mcpServers?.["agy-context-saver"], "agy-context-saver restored in mcp_config.json");
   assert.ok(recoveredMcp.mcpServers?.["foreign-preservation-server"], "foreign-preservation-server still preserved");
 
-  // Verify all 6 schemas exist and retired schemas are absent
+  // Verify all 5 schemas exist and retired schemas are absent
   const requiredSchemas = [
     "check_context_health.json",
-    "subagent_brief.json",
     "get_installation_status.json",
     "sync_installation.json",
     "read_transcript.json",
@@ -117,13 +153,15 @@ try {
   const retiredSchemas = [
     "safe_command.json",
     "get_spillover_content.json",
+    "subagent_brief.json",
+    "dispatch_squad.json",
     "read_task_output.json",
     "get_step_detail.json"
   ];
   for (const retired of retiredSchemas) {
     assert.equal(fs.existsSync(path.join(antigravityMcpDir, retired)), false, `${retired} must NOT exist`);
   }
-  console.log("✓ Re-installation completed successfully: all 4 integration layers and 6 canonical schemas active (0 extra tools)");
+  console.log("✓ Re-installation completed successfully: all 4 integration layers and 5 canonical schemas active (0 extra tools)");
 
   // --- 5. Backup Restore Option Test ---
   console.log("\n--- 5. Backup Restore Option Verification ---");

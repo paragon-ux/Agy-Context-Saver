@@ -25,9 +25,8 @@ flowchart TD
         T1["check_context_health"]
         T2["read_transcript"]
         T3["query_transcript"]
-        T4["subagent_brief"]
-        T5["get_installation_status"]
-        T6["sync_installation"]
+        T4["get_installation_status"]
+        T5["sync_installation"]
     end
 
     Agent --> Hook
@@ -36,7 +35,7 @@ flowchart TD
 
 The system strictly divides operational responsibilities into two complementary layers:
 - **RTK (Rust Token Killer)**: Compresses terminal outputs (`rtk git`, `rtk pytest`, `rtk cargo`), executes canonical workspace searches (`rtk read`, `rtk grep`, `rtk find`), and summarizes stdout.
-- **Agy-Context-Saver**: Governs lifecycle turns, prevents runaway polling loops, provides high-density zero-JSON transcript streaming, formats subagent delegation briefs under Pointer-Over-Wire (POW), and audits environmental context health.
+- **Agy-Context-Saver**: Governs lifecycle turns, prevents runaway polling loops, provides high-density zero-JSON transcript streaming, and audits environmental context health. (Subagent briefs moved to the separate [Agy-Squad](https://paragon-ux.github.io/agy-squad/) package.)
 
 ---
 
@@ -114,7 +113,7 @@ The output is structured into two explicitly labeled sections to eliminate metri
 | Health Status | Trigger Condition | Operational Implication & Corrective Action |
 | :--- | :--- | :--- |
 | **`HEALTHY`** | Polling $= 0$, User turns $< 35$ | Context footprint is lean and well-windowed. Proceed normally. |
-| **`WARNING`** | User turns $\ge 35$ | Turn budget approaching saturation. Subagent delegation should be favored via `subagent_brief` to offload deep investigation into isolated sub-transcripts. |
+| **`WARNING`** | User turns $\ge 35$ | Turn budget approaching saturation. Summarize progress and continue in a fresh conversation to preserve context. |
 | **`CRITICAL`** | Busy-polling events $> 3$ | Active runaway polling detected (`manage_task status` or tight watchdog timers). Immediately halt polling loops and yield execution to native Reactive Wakeup (`<SYSTEM_MESSAGE>`). |
 
 ---
@@ -254,107 +253,7 @@ ALL 8 AUTOMATED TEST SUITES PASSED 100%!
 
 ---
 
-## 4. `subagent_brief`
-
-Generates scope-isolated, anti-bloat prompts and ready-to-use `invoke_subagent` JSON payloads for single or multi-role subagent delegations. Enforces the **Pointer-Over-Wire (POW)** protocol to keep parent context completely clean.
-
-### Parameter Reference
-
-| Parameter | Type | Required | Description |
-| :--- | :---: | :---: | :--- |
-| `objective` | `string` | Conditional | Core investigative or technical objective (used for single subagent brief). |
-| `role` | `string` | No | 2–5 word subagent job title (default: `'Scope-Isolated Deep Research Subagent'`). |
-| `instructions` | `string` | No | Specific operational instructions, test cases, or constraints. |
-| `scopeFiles` | `array` | No | Bounded list of workspace file paths the subagent is authorized to inspect. |
-| `expectedDeliverable` | `string` | No | Format of deliverable (default: `'Synthesized factual findings'`). |
-| `typeName` | `string` | No | Subagent type name: `'self'` (inherits tools/prompt/model) or `'research'` (read-only). |
-| `model` | `string` | No | Target model: `'inherit'`, `'flash'`, or `'pro'` (default: `'inherit'`). |
-| `workspace` | `string` | No | Workspace sandbox mode: `'inherit'`, `'branch'`, or `'share'` (default: `'inherit'`). |
-| `subagents` | `array` | Conditional | Array of subagent configuration objects for multi-role batch generation. |
-
-Each entry in the `subagents` array accepts:
-- `role` (`string`, required)
-- `objective` (`string`, required)
-- `instructions` (`string`, optional)
-- `scopeFiles` (`array`, optional)
-- `expectedDeliverable` (`string`, optional)
-- `typeName` (`string`, optional, default: `'self'`)
-- `model` (`string`, optional, default: `'inherit'`)
-- `workspace` (`string`, optional, default: `'inherit'`)
-
-### The Pointer-Over-Wire (POW) Protocol
-
-When subagents execute broad searches, test sweeps, or forensic data analysis, streaming intermediate results back into the parent channel exhausts token windows. `subagent_brief` automatically embeds the **Pointer-Over-Wire** contract into every generated prompt:
-
-```text
-+-------------------------------------------------------+
-| Subagent Sandbox Workspace                            |
-| 1. Reads/searches files using RTK                     |
-| 2. Executes tests or analysis                         |
-| 3. Writes comprehensive report to disk:               |
-|    .scratch/<task>/findings.md                        |
-+-------------------------------------------------------+
-                           |
-                           | Pointer-Over-Wire (POW) Message (< 1 KB)
-                           v
-+-------------------------------------------------------+
-| Parent Agent Turn (send_message / return)             |
-| - Executive Summary (3-5 high-signal sentences)       |
-| - Scoreboard / Verdict Table                          |
-| - Clickable File Link: `[Deliverable](file:///...)`   |
-+-------------------------------------------------------+
-```
-
-### Multi-Subagent Batch Generation Example
-
-```json
-{
-  "name": "subagent_brief",
-  "arguments": {
-    "subagents": [
-      {
-        "role": "Security Boundary Auditor",
-        "objective": "Audit HTTP input handling and authorization enforcement",
-        "scopeFiles": ["src/server.py"],
-        "typeName": "self"
-      },
-      {
-        "role": "Adversarial Test Specialist",
-        "objective": "Design regression tests covering path traversal and auth bypasses",
-        "scopeFiles": ["tests/test_server.py"],
-        "typeName": "self"
-      }
-    ]
-  }
-}
-```
-
-### Output: Turnkey `invoke_subagent` Payload
-
-```json
-{
-  "Subagents": [
-    {
-      "TypeName": "self",
-      "Role": "Security Boundary Auditor",
-      "Model": "inherit",
-      "Workspace": "inherit",
-      "Prompt": "ROLE: Security Boundary Auditor\nOBJECTIVE: Audit HTTP input handling and authorization enforcement\n\nTarget files:\n- src/server.py\n\nCRITICAL CONTEXT GOVERNANCE INSTRUCTIONS (POINTER-OVER-WIRE):\n1. Isolated Workspace: Do all analysis in this subagent sandbox.\n2. Pointer-Over-Wire (POW) Protocol: In-band messaging channels have strict transport limits. If your findings exceed 1 KB:\n   a. Write full deliverable to .scratch/.../findings.md\n   b. Transmit ONLY Executive Summary, Verdict Table, and Clickable File Link.\n3. Fast Turn Termination: Conclude turn immediately after dispatch."
-    },
-    {
-      "TypeName": "self",
-      "Role": "Adversarial Test Specialist",
-      "Model": "inherit",
-      "Workspace": "inherit",
-      "Prompt": "ROLE: Adversarial Test Specialist\nOBJECTIVE: Design regression tests covering path traversal and auth bypasses\n\nTarget files:\n- tests/test_server.py\n\nCRITICAL CONTEXT GOVERNANCE INSTRUCTIONS (POINTER-OVER-WIRE):\n..."
-    }
-  ]
-}
-```
-
----
-
-## 5. `get_installation_status`
+## 4. `get_installation_status`
 
 Performs an instant live audit of the 4 integration layers and the RTK binary directly from inside an Antigravity agent or user session.
 
@@ -377,7 +276,7 @@ Performs an instant live audit of the 4 integration layers and the RTK binary di
 - Native Plugin Link: ACTIVE (C:\Users\USER\.gemini\config\plugins\agy-context-saver)
 - Governor Lifecycle Hook: REGISTERED in hooks.json (Script: Present)
 - Universal MCP Server: CONFIGURED in mcp_config.json
-- Antigravity Tool Schemas: ALL 6 SCHEMAS PRESENT (C:\Users\USER\.gemini\antigravity\mcp\agy-context-saver)
+- Antigravity Tool Schemas: ALL 5 SCHEMAS PRESENT (C:\Users\USER\.gemini\antigravity\mcp\agy-context-saver)
 - RTK Binary: INSTALLED (rtk 0.50.0)
 - RTK Hook Optimization: ACTIVE (via PreToolUse)
 
@@ -386,7 +285,7 @@ Performs an instant live audit of the 4 integration layers and the RTK binary di
 
 ---
 
-## 6. `sync_installation`
+## 5. `sync_installation`
 
 Programmatically reconciles, repairs, and updates all installation layers (Plugin link, Lifecycle Hook, MCP config, and mirrored Antigravity tool schemas) in $<150\text{ ms}$.
 
@@ -423,7 +322,7 @@ Programmatically reconciles, repairs, and updates all installation layers (Plugi
 - Plugin Link: Verified
 - Lifecycle Hook: Registered in hooks.json
 - MCP Server: Registered in mcp_config.json
-- Tool Schemas: 6 Schemas mirrored to ~/.gemini/antigravity/mcp/agy-context-saver
+- Tool Schemas: 5 Schemas mirrored to ~/.gemini/antigravity/mcp/agy-context-saver
 - RTK Binary: Verified (rtk 0.50.0)
 
 ✓ Installation fully synchronized and up-to-date in Zero-Delay mode.
@@ -471,7 +370,7 @@ flowchart TD
     
     L1["Layer 1: Background Tasks & Reactive Wakeup\n- Forbid manage_task(status) loops\n- Eliminate busy-polling timers\n- 5-strike circuit breaker"]
     L2["Layer 2: Transparent RTK Inspection\n- Hard-route view_file/grep to rtk\n- Protect .system_generated internal state\n- Bounded slice safe harbor (<=150 lines)"]
-    L3["Layer 3: Synchronous Execution & Subagents\n- Expand WaitMsBeforeAsync to 10s\n- Enforce Pointer-Over-Wire (POW)\n- Isolate deep work into subagents"]
+    L3["Layer 3: Synchronous Execution\n- Expand WaitMsBeforeAsync to 10s\n- Targeted test runs, opt-in fail-fast"]
     
     CS --> L1
     CS --> L2
@@ -480,4 +379,4 @@ flowchart TD
 
 1. **Layer 1 (Background Tasks & Reactive Wakeup)**: Enforces native notification resumption (`<SYSTEM_MESSAGE>`). Repeated polling attempts trip a `force_ask` circuit breaker at 5 denials.
 2. **Layer 2 (Transparent Shell & RTK Inspection)**: Hard-routes full file reads to `rtk read`, directory scans to `rtk find`, and searches to `rtk rg "<pattern>" .`.
-3. **Layer 3 (Synchronous Execution & Subagent Isolation)**: Extends default command execution wait windows to 10,000ms and formats subagents under Pointer-Over-Wire contracts.
+3. **Layer 3 (Synchronous Execution)**: Extends default command execution wait windows to 10,000ms.

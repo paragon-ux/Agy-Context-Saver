@@ -17,7 +17,8 @@ const hooksJsonPath = path.join(geminiConfigDir, "hooks.json");
 const mcpJsonPath = path.join(geminiConfigDir, "mcp_config.json");
 const installedHookScript = path.join(geminiConfigDir, "scripts", "execution-guard-hook.mjs");
 const installedSchemasDir = path.join(homeDir, ".gemini", "antigravity", "mcp", "agy-context-saver");
-const stateFile = path.join(os.tmpdir(), "agy-session-governance-state.json");
+const { getStateDir } = await import("../scripts/state-dir.mjs");
+const stateFile = path.join(getStateDir(), "agy-session-governance-state.json");
 const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
 
 // Clean test state
@@ -64,7 +65,8 @@ console.log("✓ mcp_config.json.bak configuration backup verified");
 assert.ok(fs.existsSync(installedSchemasDir), `Antigravity MCP schemas dir not found at ${installedSchemasDir}`);
 assert.equal(fs.existsSync(path.join(installedSchemasDir, "safe_command.json")), false, "safe_command.json must NOT exist in MCP dir");
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "check_context_health.json")), "check_context_health.json exists");
-assert.ok(fs.existsSync(path.join(installedSchemasDir, "subagent_brief.json")), "subagent_brief.json exists");
+assert.equal(fs.existsSync(path.join(installedSchemasDir, "subagent_brief.json")), false, "subagent_brief.json must NOT exist (moved to Agy-Squad)");
+assert.equal(fs.existsSync(path.join(installedSchemasDir, "dispatch_squad.json")), false, "dispatch_squad.json must NOT exist (moved to Agy-Squad)");
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "get_installation_status.json")), "get_installation_status.json exists");
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "sync_installation.json")), "sync_installation.json exists");
 assert.ok(fs.existsSync(path.join(installedSchemasDir, "read_transcript.json")), "read_transcript.json exists");
@@ -72,7 +74,7 @@ assert.ok(fs.existsSync(path.join(installedSchemasDir, "query_transcript.json"))
 assert.equal(fs.existsSync(path.join(installedSchemasDir, "get_spillover_content.json")), false, "get_spillover_content.json must NOT exist");
 assert.equal(fs.existsSync(path.join(installedSchemasDir, "read_task_output.json")), false, "read_task_output.json must NOT exist");
 assert.equal(fs.existsSync(path.join(installedSchemasDir, "get_step_detail.json")), false, "get_step_detail.json must NOT exist");
-console.log("✓ Exactly 6 canonical Antigravity tool schemas installed (0 bespoke extra tools, safe_command retired)");
+console.log("✓ Exactly 5 canonical Antigravity tool schemas installed (0 bespoke extra tools, safe_command and subagent tools retired)");
 
 // Test existing installation detector
 const { detectExistingInstallation } = await import("../scripts/install-register.mjs");
@@ -298,13 +300,13 @@ function sendRpc(method, params = {}) {
   console.log(`✓ Installed MCP Server: Handshake succeeded (name: agy-context-saver, v${pkg.version})`);
 }
 
-// 3.2 Tools List (6 tools)
+// 3.2 Tools List (5 tools)
 {
   const res = await sendRpc("tools/list");
   const toolNames = res.result.tools.map(t => t.name);
   assert.equal(toolNames.includes("safe_command"), false);
   assert.ok(toolNames.includes("check_context_health"));
-  assert.ok(toolNames.includes("subagent_brief"));
+  assert.equal(toolNames.includes("subagent_brief"), false);
   assert.ok(toolNames.includes("get_installation_status"));
   assert.ok(toolNames.includes("sync_installation"));
   assert.ok(toolNames.includes("read_transcript"));
@@ -312,15 +314,15 @@ function sendRpc(method, params = {}) {
   assert.equal(toolNames.includes("get_spillover_content"), false);
   assert.equal(toolNames.includes("read_task_output"), false);
   assert.equal(toolNames.includes("get_step_detail"), false);
-  assert.equal(toolNames.length, 6);
-  console.log("✓ Installed MCP Server: tools/list verified [all 6 canonical tools present, safe_command and extra tools retired]");
+  assert.equal(toolNames.length, 5);
+  console.log("✓ Installed MCP Server: tools/list verified [all 5 canonical tools present, safe_command, subagent_brief and extra tools retired]");
 }
 
 // 3.3 Installation Status Tool Call
 {
   const res = await sendRpc("tools/call", { name: "get_installation_status" });
   assert.match(res.result.content[0].text, /Installation Status: HEALTHY & ACTIVE/);
-  assert.match(res.result.content[0].text, /ALL 6 SCHEMAS PRESENT/);
+  assert.match(res.result.content[0].text, /ALL 5 SCHEMAS PRESENT/);
   assert.match(res.result.content[0].text, /RTK Binary: INSTALLED/);
   console.log("✓ Installed MCP Server: get_installation_status reported healthy status + RTK");
 }

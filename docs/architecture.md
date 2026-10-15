@@ -46,7 +46,6 @@
 - Background task polling governance & 5-strike circuit breaker
 - Antigravity internal state protection (`.system_generated/`)
 - Zero-JSON Markdown transcript extraction (`read_transcript`, `query_transcript`)
-- Subagent delegation prompt formulation (`subagent_brief`)
 - Benchmark and evaluation artifact mutation protection
 
 ---
@@ -83,7 +82,7 @@ During active evaluation sessions, mutating benchmark definitions, prompt templa
 
 ## 6. Output Governance & Spillover Safe Harbor (0 New Tools)
 
-To resolve the Output Blind-Spot Trap without bloating the tool registry or taxing model prompts, `Agy-Context-Saver` implements four streamlined output governance pillars:
+To resolve the Output Blind-Spot Trap without bloating the tool registry or taxing model prompts, `Agy-Context-Saver` implements three streamlined output governance pillars:
 
 1. **Safe-Harbor `rtk read` for Runtime Step Spillovers**:
    When Antigravity spills large tool outputs to disk (`.system_generated/steps/<step>/output.txt`), the PreToolUse hook safe-harbors `rtk read <path>`. Native `view_file` calls are automatically routed to `rtk read`, leveraging RTK's native line clamping, head/tail windowing, and token truncation.
@@ -93,8 +92,6 @@ To resolve the Output Blind-Spot Trap without bloating the tool registry or taxi
    - When `COMPLETED` / `TERMINATED`: Allowed via `rtk read` under lifecycle governance for bounded error and stack trace retrieval.
 3. **Folded Surgical Step Dereferencing in `query_transcript`**:
    Rather than creating redundant tools, single-step extraction is folded directly into `query_transcript(stepIndex, field)`. Recovers un-truncated payloads from `transcript_full.jsonl` with zero surrounding context bloat.
-4. **Pointer-Over-Wire (POW) Subagent Delivery Contract**:
-   `subagent_brief` automatically injects the POW protocol into all subagent instructions: research reports $>1\text{ KB}$ are written to workspace files (`scratch/...`), while `send_message` transmits only executive summaries and clickable file links, eliminating in-band message bus truncations.
 
 ---
 

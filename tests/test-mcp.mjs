@@ -49,13 +49,13 @@ function send(method, params = {}) {
   console.log("✓ initialize handshake succeeded");
 }
 
-// 2. tools/list (6 tools, safe_command permanently retired)
+// 2. tools/list (5 tools, safe_command and subagent_brief retired)
 {
   const res = await send("tools/list");
   const toolNames = res.result.tools.map((t) => t.name);
   assert.equal(toolNames.includes("safe_command"), false, "safe_command must not be exposed in tools/list");
   assert.ok(toolNames.includes("check_context_health"));
-  assert.ok(toolNames.includes("subagent_brief"));
+  assert.equal(toolNames.includes("subagent_brief"), false, "subagent_brief moved to Agy-Squad");
   assert.ok(toolNames.includes("get_installation_status"));
   assert.ok(toolNames.includes("sync_installation"));
   assert.ok(toolNames.includes("read_transcript"));
@@ -63,8 +63,8 @@ function send(method, params = {}) {
   assert.equal(toolNames.includes("get_spillover_content"), false);
   assert.equal(toolNames.includes("read_task_output"), false);
   assert.equal(toolNames.includes("get_step_detail"), false);
-  assert.equal(toolNames.length, 6, "Must expose exactly 6 canonical tools");
-  console.log("✓ tools/list returned all 6 governance & transcript tools (safe_command and extra tools retired)");
+  assert.equal(toolNames.length, 5, "Must expose exactly 5 canonical tools");
+  console.log("✓ tools/list returned all 5 governance & transcript tools (safe_command, subagent_brief and extra tools retired)");
 }
 
 // 3. tools/call: safe_command must fail as tool not found
@@ -103,57 +103,11 @@ function send(method, params = {}) {
   console.log("✓ tools/call (check_context_health) reported labeled [Active Session Metrics] and [Local RTK Environment]");
 }
 
-// 4. tools/call: subagent_brief
-{
-  const res = await send("tools/call", {
-    name: "subagent_brief",
-    arguments: { objective: "Analyze test failures", scopeFiles: ["tests/test_foo.py"] }
-  });
-  assert.match(res.result.content[0].text, /Analyze test failures/);
-  assert.match(res.result.content[0].text, /POINTER-OVER-WIRE/);
-  assert.match(res.result.content[0].text, /READY-TO-USE invoke_subagent PAYLOAD/);
-  console.log("✓ tools/call (subagent_brief) generated scope-isolated brief");
-}
-
-// 4b. tools/call: subagent_brief (custom role & multiple subagents batch)
-{
-  const res = await send("tools/call", {
-    name: "subagent_brief",
-    arguments: {
-      subagents: [
-        {
-          role: "Performance Benchmark Engineer",
-          objective: "Profile CPU bottlenecks",
-          typeName: "self"
-        },
-        {
-          role: "Security Audit Specialist",
-          objective: "Verify token encryption",
-          typeName: "research"
-        }
-      ]
-    }
-  });
-  const text = res.result.content[0].text;
-  assert.match(text, /Performance Benchmark Engineer/);
-  assert.match(text, /Security Audit Specialist/);
-  assert.match(text, /READY-TO-USE invoke_subagent PAYLOAD/);
-  const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/);
-  assert.ok(jsonMatch, "Must contain JSON block");
-  const payload = JSON.parse(jsonMatch[1]);
-  assert.equal(payload.Subagents.length, 2);
-  assert.equal(payload.Subagents[0].Role, "Performance Benchmark Engineer");
-  assert.equal(payload.Subagents[0].TypeName, "self");
-  assert.equal(payload.Subagents[1].Role, "Security Audit Specialist");
-  assert.equal(payload.Subagents[1].TypeName, "research");
-  console.log("✓ tools/call (subagent_brief) handled multi-subagent batch with custom roles");
-}
-
 // 5. tools/call: get_installation_status
 {
   const res = await send("tools/call", { name: "get_installation_status" });
   assert.match(res.result.content[0].text, /Installation Status: HEALTHY & ACTIVE/);
-  assert.match(res.result.content[0].text, /ALL 6 SCHEMAS PRESENT/);
+  assert.match(res.result.content[0].text, /ALL 5 SCHEMAS PRESENT/);
   assert.match(res.result.content[0].text, /RTK Binary: INSTALLED/);
   console.log("✓ tools/call (get_installation_status) reported live 4-layer health + RTK");
 }

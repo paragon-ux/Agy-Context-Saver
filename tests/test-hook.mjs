@@ -5,20 +5,23 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setupHermeticTestEnv, createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
+import { getStateDir } from "../scripts/state-dir.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const hookScript = path.resolve(__dirname, "../scripts/execution-guard-hook.mjs");
-const stateFile = path.join(os.tmpdir(), "agy-session-governance-state.json");
 const hermetic = await setupHermeticTestEnv({ installProfile: false });
+// The hook keeps its state in the per-user state folder (rooted in the hermetic profile), never in os.tmpdir()
+const stateDir = getStateDir();
+const stateFile = path.join(stateDir, "agy-session-governance-state.json");
 
 function resetState() {
   try {
     if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
-    const rewriteCache = path.join(os.tmpdir(), "agy-rtk-rewrite-cache.json");
+    const rewriteCache = path.join(stateDir, "agy-rtk-rewrite-cache.json");
     if (fs.existsSync(rewriteCache)) fs.unlinkSync(rewriteCache);
-    for (const f of fs.readdirSync(os.tmpdir())) {
+    for (const f of fs.existsSync(stateDir) ? fs.readdirSync(stateDir) : []) {
       if (f.startsWith("agy-session-") && f.endsWith(".json")) {
-        try { fs.unlinkSync(path.join(os.tmpdir(), f)); } catch {}
+        try { fs.unlinkSync(path.join(stateDir, f)); } catch {}
       }
     }
   } catch {}
@@ -130,10 +133,11 @@ console.log("--- Group A: RTK Integration & Command Rewriting ---");
   console.log("✓ run_command unwraps shell wrappers (cmd /c, powershell -Command) for RTK (LH-01-B closed)");
 }
 
-// 3b. run_command: rewrite caching in tmpdir
+// 3b. run_command: rewrite caching in the per-user state folder
 {
-  const cacheFile = path.join(os.tmpdir(), "agy-rtk-rewrite-cache.json");
-  assert.ok(fs.existsSync(cacheFile), "Rewrite cache file should exist after prior rewrites");
+  const cacheFile = path.join(stateDir, "agy-rtk-rewrite-cache.json");
+  assert.ok(stateDir.startsWith(process.env.AGY_TEST_PROFILE_DIR), "State folder must resolve inside the hermetic profile");
+  assert.ok(fs.existsSync(cacheFile), "Rewrite cache file should exist in the state folder after prior rewrites (hook and scripts/state-dir.mjs must agree)");
   const cache = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
   assert.equal(cache["git status"], "rtk git status", "Cache must store git status rewrite");
 

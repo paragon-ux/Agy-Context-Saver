@@ -12,7 +12,6 @@
  * - Tools:
  *   - check_context_health: Inspects conversation transcripts using async streaming
  *     to diagnose turn count, tool polling loops, and context degradation with minimal memory.
- *   - subagent_brief: Formulates scope-isolated prompts for delegated subagents.
  *   - get_installation_status: Audits live Antigravity plugin, hook, MCP, and RTK integration.
  *   - sync_installation: Re-verifies and synchronizes installation and tool schemas.
  *   - read_transcript: Clean Markdown streaming reader for compact and full transcripts.
@@ -31,48 +30,57 @@ import { fileURLToPath } from "node:url";
 import { runInstall, runUninstall, runStatus, runRestoreBackups, detectExistingInstallation } from "../scripts/install-register.mjs";
 import { findExistingRtk } from "../scripts/provision-rtk.mjs";
 
-// Handle CLI subcommands (e.g. npx agy-context-saver install)
-const cliArgs = process.argv.slice(2);
-const cliArg = cliArgs[0];
-const checkFlag = cliArgs.includes("--check") || cliArgs.includes("-c");
-const statusFlag = cliArgs.includes("--status") || cliArgs.includes("status");
-const uninstallFlag = cliArgs.includes("--uninstall") || cliArgs.includes("uninstall");
-const restoreFlag = cliArgs.includes("--restore-backups") || cliArgs.includes("restore-backups");
-const helpFlag = cliArgs.includes("--help") || cliArgs.includes("-h") || cliArgs.includes("help");
-const allowDegraded = cliArgs.includes("--allow-degraded");
+const __filename = fileURLToPath(import.meta.url);
+const realOrSelf = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+const isEntryPoint = Boolean(
+  process.argv[1] && realOrSelf(process.argv[1]) === realOrSelf(__filename)
+);
 
-if (helpFlag) {
-  printHelp();
-  process.exit(0);
+// Handle CLI subcommands (e.g. npx agy-context-saver install)
+if (isEntryPoint) {
+  const cliArgs = process.argv.slice(2);
+  const cliArg = cliArgs[0];
+  const checkFlag = cliArgs.includes("--check") || cliArgs.includes("-c");
+  const statusFlag = cliArgs.includes("--status") || cliArgs.includes("status");
+  const uninstallFlag = cliArgs.includes("--uninstall") || cliArgs.includes("uninstall");
+  const restoreFlag = cliArgs.includes("--restore-backups") || cliArgs.includes("restore-backups");
+  const helpFlag = cliArgs.includes("--help") || cliArgs.includes("-h") || cliArgs.includes("help");
+  const allowDegraded = cliArgs.includes("--allow-degraded");
+
+  if (helpFlag) {
+    printHelp();
+    process.exit(0);
+  }
+  if ((checkFlag || statusFlag) && (uninstallFlag || restoreFlag)) {
+    console.error("Error: Read-only flags (--check, --status) cannot be combined with mutating flags (--uninstall, --restore-backups).");
+    process.exit(1);
+  }
+  if (checkFlag && statusFlag) {
+    console.error("Error: Conflicting flags: specify either --check or --status, not both.");
+    process.exit(1);
+  }
+  if (checkFlag) {
+    await runInstall({ checkOnly: true, allowDegraded });
+    process.exit(0);
+  } else if (statusFlag) {
+    runStatus();
+    process.exit(0);
+  } else if (uninstallFlag) {
+    await runUninstall({ restoreBackups: restoreFlag });
+    process.exit(0);
+  } else if (restoreFlag) {
+    await runRestoreBackups();
+    process.exit(0);
+  } else if (cliArg === "install" || cliArg === "--install") {
+    await runInstall({ allowDegraded });
+    process.exit(0);
+  }
 }
-if ((checkFlag || statusFlag) && (uninstallFlag || restoreFlag)) {
-  console.error("Error: Read-only flags (--check, --status) cannot be combined with mutating flags (--uninstall, --restore-backups).");
-  process.exit(1);
-}
-if (checkFlag && statusFlag) {
-  console.error("Error: Conflicting flags: specify either --check or --status, not both.");
-  process.exit(1);
-}
-if (checkFlag) {
-  await runInstall({ checkOnly: true, allowDegraded });
-  process.exit(0);
-} else if (statusFlag) {
-  runStatus();
-  process.exit(0);
-} else if (uninstallFlag) {
-  await runUninstall({ restoreBackups: restoreFlag });
-  process.exit(0);
-} else if (restoreFlag) {
-  await runRestoreBackups();
-  process.exit(0);
-} else if (cliArg === "install" || cliArg === "--install") {
-  await runInstall({ allowDegraded });
-  process.exit(0);
-}
+
 
 function printHelp() {
   console.log(`
-Agy-Context-Saver 🛡️ (v1.7.0)
+Agy-Context-Saver 🛡️ (v1.8.0)
 Universal MCP Server & Lifecycle Governor for Google Antigravity (Powered by RTK)
 
 Usage:
@@ -119,7 +127,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rulesPath = path.resolve(__dirname, "../rules/AGENTS.md");
 
 const SERVER_NAME = "agy-context-saver";
-const SERVER_VERSION = "1.7.0";
+const SERVER_VERSION = "1.8.0";
 
 // --- Tools Specification ---
 const TOOLS = [
@@ -136,68 +144,6 @@ const TOOLS = [
         conversationId: {
           type: "string",
           description: "Conversation UUID or folder name (alternative to transcriptPath)."
-        }
-      }
-    }
-  },
-  {
-    name: "subagent_brief",
-    description: "Generates scope-isolated, anti-bloat prompts and ready-to-use invoke_subagent JSON payloads for single or multiple delegated subagents. Instructs subagents to absorb intermediate file reads/searches and return only high-signal findings.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        objective: {
-          type: "string",
-          description: "The core research or investigative objective (for single subagent)."
-        },
-        role: {
-          type: "string",
-          description: "2-5 word role description (e.g. 'Comprehensive Test Engineer', 'Codebase Security Auditor'). Defaults to 'Scope-Isolated Deep Research Subagent'."
-        },
-        instructions: {
-          type: "string",
-          description: "Optional step-by-step instructions or specialized directives."
-        },
-        scopeFiles: {
-          type: "array",
-          items: { type: "string" },
-          description: "List of files or directories to investigate."
-        },
-        expectedDeliverable: {
-          type: "string",
-          description: "The concise format expected back by the parent agent."
-        },
-        typeName: {
-          type: "string",
-          description: "Subagent type name: 'self' (default, inherits parent tools/prompt/model) or 'research' (read-only)."
-        },
-        model: {
-          type: "string",
-          enum: ["inherit", "flash_lite", "flash", "pro"],
-          description: "Model tier: 'inherit' (default), 'flash_lite', 'flash', or 'pro'."
-        },
-        workspace: {
-          type: "string",
-          enum: ["inherit", "branch", "share"],
-          description: "Workspace isolation: 'inherit' (default), 'branch', or 'share'."
-        },
-        subagents: {
-          type: "array",
-          description: "Optional array of subagent configurations to formulate multiple subagents at once.",
-          items: {
-            type: "object",
-            properties: {
-              role: { type: "string", description: "2-5 word role description." },
-              objective: { type: "string", description: "The core objective for this subagent." },
-              instructions: { type: "string", description: "Optional step-by-step instructions." },
-              scopeFiles: { type: "array", items: { type: "string" }, description: "Files/directories to investigate." },
-              expectedDeliverable: { type: "string", description: "Expected deliverable format." },
-              typeName: { type: "string", description: "Subagent type name: 'self' or 'research'." },
-              model: { type: "string", enum: ["inherit", "flash_lite", "flash", "pro"], description: "Model tier." },
-              workspace: { type: "string", enum: ["inherit", "branch", "share"], description: "Workspace isolation." }
-            },
-            required: ["objective"]
-          }
         }
       }
     }
@@ -323,7 +269,7 @@ const RESOURCES = [
   {
     uri: "context-saver://rules/governance",
     name: "Antigravity Execution & Context Governance Rulebook",
-    description: "Authoritative 3-Layer rules preventing background polling loops, maximizing synchronous execution, and isolating context via subagents.",
+    description: "Authoritative 3-Layer rules preventing background polling loops, maximizing synchronous execution, and keeping command output compact.",
     mimeType: "text/markdown"
   }
 ];
@@ -449,7 +395,7 @@ async function handleCheckContextHealth(args = {}) {
       reportLines.push("⚠️ Recommendation: Background polling detected! Cease manage_task(status) calls and yield execution to native Reactive Wakeup.");
     }
     if (userTurns >= 35) {
-      reportLines.push("💡 Recommendation: Turn budget approaching threshold. Delegate broad research to subagents to preserve context.");
+      reportLines.push("💡 Recommendation: Turn budget approaching threshold. Summarize progress and continue in a fresh conversation to preserve context.");
     } else {
       reportLines.push("✓ Context footprint is well-managed.");
     }
@@ -463,109 +409,10 @@ async function handleCheckContextHealth(args = {}) {
   }
 }
 
-function formatSingleBrief({
-  role = "Scope-Isolated Deep Research Subagent",
-  objective = "",
-  instructions = "",
-  scopeFiles = [],
-  expectedDeliverable = "Synthesized factual findings"
-} = {}) {
-  const scopeStr = scopeFiles && scopeFiles.length ? `\n\nTarget files:\n${scopeFiles.map(f => `- ${f}`).join("\n")}` : "";
-  const instrStr = instructions && instructions.trim() ? `\n\nSPECIFIC INSTRUCTIONS:\n${instructions.trim()}` : "";
-  const hasBrainUuidPath = /[/\\]\.gemini[/\\]antigravity[/\\]brain[/\\][0-9a-f-]{36}/i.test(`${objective}\n${instructions}\n${expectedDeliverable}`);
-  const brainPathWarning = hasBrainUuidPath
-    ? `\n\n⚠️ ARTIFACT DIRECTORY WRITE GUARD: Any 'brain/<uuid>/' path referenced above belongs to another conversation. You may READ from it via 'view_file', but when calling 'write_to_file' or 'replace_file_content', you MUST either write to workspace '<workspace>/scratch/...' (OMIT ArtifactMetadata) or substitute YOUR OWN Artifact Directory Path from <user_information> (INCLUDE ArtifactMetadata).`
-    : "";
-  return [
-    `ROLE: ${role}`,
-    `OBJECTIVE: ${objective}${scopeStr}${instrStr}${brainPathWarning}`,
-    ``,
-    `CRITICAL CONTEXT GOVERNANCE INSTRUCTIONS (POINTER-OVER-WIRE):`,
-    `1. Isolated Workspace & Bounded File Slices: Do all multi-file exploration in this subagent sandbox. Prefer 'view_file' with bounded slices (StartLine and EndLine, max 150 lines) over 'rtk read' so line numbers are preserved and terminal buffers never truncate file headers.`,
-    `2. Pointer-Over-Wire (POW) Protocol: In-band messaging channels (send_message) have strict transport payload limits (~16-20 KB). If your findings or deliverable exceed 1 KB:`,
-    `   a. Write the full comprehensive deliverable using 'write_to_file' following Antigravity's strict path rules:`,
-    `      - Option A (Workspace 'scratch/' — Recommended): Set TargetFile to '<workspace>/scratch/<task>_findings.md' and OMIT ArtifactMetadata completely (passing ArtifactMetadata on a workspace path throws "files must be written to the correct artifact directory").`,
-    `      - Option B (Your Own Brain 'scratch/'): Set TargetFile to '<your-Artifact-Directory-Path>/scratch/<task>_findings.md' using the exact Artifact Directory Path from YOUR <user_information> block (NEVER a parent's brain/<other-uuid>/ path) and INCLUDE ArtifactMetadata: { Summary: "...", UserFacing: false, RequestFeedback: false }.`,
-    `   b. In 'send_message', transmit ONLY:`,
-    `      - Executive Summary (3-5 high-signal sentences)`,
-    `      - Verdict / Scoreboard Table`,
-    `      - Clickable File Link: [Full Deliverable](file:///absolute/path/to/findings.md)`,
-    `3. Fast Turn Termination: Once 'send_message' is dispatched, stop calling tools and conclude your turn immediately so the parent agent wakes up without latency.`,
-    `4. Format: ${expectedDeliverable}`,
-    `5. Citation Mandate: Keep your final response concise, structured, and cite exact file:line references.`,
-    `6. Write Scope: You may edit only files inside your Target files (assumed disjoint from sibling subagents) or your own scratch directory. If a tool or the environment fails, report it to the parent via 'send_message' and stop; do not work around it.`
-  ].join("\n");
-}
-
-function handleSubagentBrief(args = {}) {
-  let specs = [];
-  if (Array.isArray(args.subagents) && args.subagents.length > 0) {
-    specs = args.subagents;
-  } else if (args.objective || args.role || args.instructions) {
-    specs = [args];
-  } else {
-    return {
-      isError: true,
-      content: [{ type: "text", text: "subagent_brief error: provide either 'objective' (for a single subagent) or 'subagents' array (for multiple subagents)." }]
-    };
-  }
-
-  const subagentsPayload = [];
-  const renderedBriefs = [];
-
-  for (let i = 0; i < specs.length; i++) {
-    const spec = specs[i] || {};
-    const role = spec.role || spec.Role || "Scope-Isolated Deep Research Subagent";
-    const objective = spec.objective || spec.Objective || "";
-    const instructions = spec.instructions || spec.Instructions || "";
-    const scopeFiles = spec.scopeFiles || spec.ScopeFiles || [];
-    const expectedDeliverable = spec.expectedDeliverable || spec.ExpectedDeliverable || "Synthesized factual findings";
-    const typeName = spec.typeName || spec.TypeName || "self";
-    const model = spec.model || spec.Model || "inherit";
-    const workspace = spec.workspace || spec.Workspace || "inherit";
-
-    const promptText = formatSingleBrief({
-      role,
-      objective,
-      instructions,
-      scopeFiles,
-      expectedDeliverable
-    });
-
-    subagentsPayload.push({
-      TypeName: typeName,
-      Role: role,
-      Model: model,
-      Workspace: workspace,
-      Prompt: promptText
-    });
-
-    if (specs.length === 1) {
-      renderedBriefs.push(promptText);
-    } else {
-      renderedBriefs.push(`### Subagent ${i + 1}: ${role}\n${promptText}`);
-    }
-  }
-
-  const payloadJson = JSON.stringify({ Subagents: subagentsPayload }, null, 2);
-
-  const fullText = [
-    renderedBriefs.join("\n\n---\n\n"),
-    "",
-    "==================================================",
-    "READY-TO-USE invoke_subagent PAYLOAD:",
-    "```json",
-    payloadJson,
-    "```"
-  ].join("\n");
-
-  return { content: [{ type: "text", text: fullText }] };
-}
-
 function handleGetInstallationStatus() {
   const existing = detectExistingInstallation();
   const rtkInfo = findExistingRtk();
-  const schemaText = existing.details.schemas.exists ? "ALL 6 SCHEMAS PRESENT" : "MISSING";
+  const schemaText = existing.details.schemas.exists ? "ALL 5 SCHEMAS PRESENT" : "MISSING";
   const report = [
     `### Agy-Context-Saver Installation Status: ${existing.isComplete ? "HEALTHY & ACTIVE 🛡️" : existing.isInstalled ? "PARTIAL INSTALLATION ⚠️" : "NOT INSTALLED ❌"}`,
     `- Native Plugin Link: ${existing.details.plugin.exists ? `ACTIVE (${existing.details.plugin.target})` : "NOT LINKED"}`,
@@ -595,7 +442,7 @@ async function handleSyncInstallation({ checkOnly = false } = {}) {
     `- Plugin Link: ${result.details?.plugin?.exists ? "Verified" : "Updated"}`,
     `- Lifecycle Hook: Registered in hooks.json`,
     `- MCP Server: Registered in mcp_config.json`,
-    `- Tool Schemas: 6 Schemas mirrored to ~/.gemini/antigravity/mcp/agy-context-saver`,
+    `- Tool Schemas: 5 Schemas mirrored to ~/.gemini/antigravity/mcp/agy-context-saver`,
     `- RTK Binary: ${rtkInfo ? `Verified (${rtkInfo.version})` : "Provisioned"}`,
     "",
     checkOnly ? "✓ Pre-flight check complete (dry-run)." : "✓ Installation fully synchronized and up-to-date in Zero-Delay mode."
@@ -1331,8 +1178,6 @@ async function handleRequest(request) {
 
     if (name === "check_context_health") {
       toolResult = await handleCheckContextHealth(args);
-    } else if (name === "subagent_brief") {
-      toolResult = handleSubagentBrief(args);
     } else if (name === "get_installation_status") {
       toolResult = handleGetInstallationStatus();
     } else if (name === "sync_installation") {
@@ -1420,33 +1265,62 @@ async function handleRequest(request) {
   };
 }
 
-// Stdio JSON-RPC line loop
-const MAX_STDIO_PAYLOAD_BYTES = Number(process.env.AGY_MAX_STDIO_PAYLOAD_BYTES) || (10 * 1024 * 1024); // 10 MB ceiling default
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+if (isEntryPoint) {
+  // Stdio JSON-RPC line loop
+  const MAX_STDIO_PAYLOAD_BYTES = Number(process.env.AGY_MAX_STDIO_PAYLOAD_BYTES) || (10 * 1024 * 1024); // 10 MB ceiling default
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
 
-rl.on("line", async (line) => {
-  if (!line || !line.trim()) return;
-  if (line.length > MAX_STDIO_PAYLOAD_BYTES) {
-    const errResp = {
-      jsonrpc: "2.0",
-      id: null,
-      error: { code: -32600, message: "Invalid Request: Payload exceeds 10MB safety ceiling" }
-    };
-    process.stdout.write(JSON.stringify(errResp) + "\n");
-    return;
-  }
-  try {
-    const req = JSON.parse(line);
-    const resp = await handleRequest(req);
-    if (resp) {
-      process.stdout.write(JSON.stringify(resp) + "\n");
+  rl.on("line", async (line) => {
+    if (!line || !line.trim()) return;
+    if (line.length > MAX_STDIO_PAYLOAD_BYTES) {
+      const errResp = {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32600, message: "Invalid Request: Payload exceeds 10MB safety ceiling" }
+      };
+      process.stdout.write(JSON.stringify(errResp) + "\n");
+      return;
     }
-  } catch (err) {
-    const errResp = {
-      jsonrpc: "2.0",
-      id: null,
-      error: { code: -32700, message: `Parse error: ${err.message}` }
-    };
-    process.stdout.write(JSON.stringify(errResp) + "\n");
+    try {
+      const req = JSON.parse(line);
+      const resp = await handleRequest(req);
+      if (resp) {
+        process.stdout.write(JSON.stringify(resp) + "\n");
+      }
+    } catch (err) {
+      const errResp = {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32700, message: `Parse error: ${err.message}` }
+      };
+      process.stdout.write(JSON.stringify(errResp) + "\n");
+    }
+  });
+
+  // Anti-Orphan Lifecycle Governance: Prevent lingering Node processes when parent IDE closes
+  rl.on("close", () => process.exit(0));
+  process.stdin.on("end", () => process.exit(0));
+  process.stdin.on("close", () => process.exit(0));
+  process.stdout.on("error", (err) => {
+    if (err && err.code === "EPIPE") {
+      process.exit(0);
+    }
+  });
+
+  // Lightweight parent-process watchdog: If parent IDE process terminates, exit child
+  const initialPpid = process.ppid;
+  if (initialPpid && initialPpid > 1) {
+    const watchdog = setInterval(() => {
+      try {
+        process.kill(initialPpid, 0);
+      } catch (err) {
+        if (err && err.code === "ESRCH") {
+          process.exit(0);
+        }
+      }
+    }, 15000);
+    watchdog.unref();
   }
-});
+}
+
+export { handleRequest };

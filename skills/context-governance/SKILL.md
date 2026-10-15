@@ -2,12 +2,12 @@
 name: context-governance
 description: >-
   Use when running shell commands with large outputs, inspecting session transcript health,
-  preventing repetitive background polling loops, inspecting codebases with RTK, or delegating heavy research to subagents.
+  preventing repetitive background polling loops, or inspecting codebases with RTK.
 ---
 
 # Context Governance & Execution Guard (Agy-Context-Saver + RTK)
 
-Agy-Context-Saver and RTK protect session transcript health and LLM attention by transparently compressing command outputs, preventing repetitive background polling loops, routing native inspection to compact CLI interfaces, and offloading deep research to sandboxed subagents.
+Agy-Context-Saver and RTK protect session transcript health and LLM attention by transparently compressing command outputs, preventing repetitive background polling loops, and routing native inspection to compact CLI interfaces.
 
 ## Architectural Boundaries
 
@@ -42,23 +42,14 @@ Performs streaming inspection of `transcript.jsonl` to calculate turn budgets, s
 - **Parameters**:
   - `transcriptPath` (string, required): Absolute path to `transcript.jsonl`.
 
-### 2. `subagent_brief`
-Generates a strictly formatted, scope-isolated prompt for delegating research or debugging to a subagent (`invoke_subagent`). Enforces the **Pointer-Over-Wire (POW)** protocol: deliverables exceeding 1 KB must be written to workspace scratch files (e.g. `scratch/<task>_findings.md`), transmitting only an executive summary, scoreboard, and clickable `file:///` link in-band.
-- **Parameters**:
-  - `objective` (string, required): Core investigative or implementation goal.
-  - `role` (string, optional): Subagent role / title.
-  - `scopeFiles` (array of strings, optional): Specific file targets.
-  - `expectedDeliverable` (string, optional): Expected concise synthesis format.
-  - `subagents` (array, optional): Batch of subagent objects for multi-role delegation.
-
-### 3. `read_transcript`
+### 2. `read_transcript`
 Quickly reads recent conversation turns from an Antigravity transcript in clean Markdown format with zero JSON noise.
 - **Parameters**:
   - `conversationId` (string, required): Conversation UUID or path.
   - `mode` (string, default: "compact"): "compact" or "full".
   - `lastTurns` (number, default: 3): Number of turns to display.
 
-### 4. `query_transcript`
+### 3. `query_transcript`
 Granular query and forensic filtering engine for transcripts with keyword/regex search, auto-dereferencing of truncated payloads, and surgical step projection.
 - **Parameters**:
   - `conversationId` (string, required): Conversation UUID or path.
@@ -67,10 +58,10 @@ Granular query and forensic filtering engine for transcripts with keyword/regex 
   - `stepIndex` (number, optional): Specific step to dereference from `transcript_full.jsonl`.
   - `field` (string, optional): Field projection (`"content"`, `"thinking"`, `"tool_calls"`).
 
-### 5. `get_installation_status`
+### 4. `get_installation_status`
 Audits the Antigravity integration layers (Native Plugin Link, Lifecycle Hook in `hooks.json`, MCP Server in `mcp_config.json`, Tool Schemas, and RTK binary/hook).
 
-### 6. `sync_installation`
+### 5. `sync_installation`
 Re-verifies, repairs, and synchronizes the installation and tool schemas in ~25ms.
 - **Parameters**:
   - `checkOnly` (boolean, default: false): Dry-run audit mode.
@@ -90,12 +81,10 @@ Re-verifies, repairs, and synchronizes the installation and tool schemas in ~25m
    - Shell commands transparently rewrite via RTK (`rtk git`, `rtk pytest`, `rtk cargo`, etc.).
    - Codebase inspection is hard-routed to `rtk read`, `rtk find`, and `rtk rg "<pattern>" .`.
    - Direct access to `.system_generated/` is strictly denied; use `read_transcript` and `query_transcript`.
-   - **Log Hygiene (Git CRLF/LF Notice Stripping)**: Repetitive Git line-ending notices (`warning: LF will be replaced by CRLF` / `warning: CRLF will be replaced by LF...`) are non-actionable environment noise. Agy-Context-Saver automatically strips these warning lines across forensic transcript parsers, and subagents suppress them at the source (`git -c core.safecrlf=false`) to protect context window tokens.
+   - **Log Hygiene (Git CRLF/LF Notice Stripping)**: Repetitive Git line-ending notices (`warning: LF will be replaced by CRLF` / `warning: CRLF will be replaced by LF...`) are non-actionable environment noise. Agy-Context-Saver automatically strips these warning lines across forensic transcript parsers, and agents suppress them at the source (`git -c core.safecrlf=false`) to protect context window tokens.
 
-3. **Layer 3: Orchestration, Delegation & Pointer-Over-Wire (POW)**:
+3. **Layer 3: Synchronous Execution**:
    - Synchronous wait window expands to 10,000ms to eliminate unnecessary detachment.
-   - Heavy exploratory work is delegated to subagents (`invoke_subagent`).
-   - Subagents strictly follow Pointer-Over-Wire: write reports $>1\text{ KB}$ to disk; transmit only summary, scoreboard, and clickable file link.
 
 ---
 
@@ -103,5 +92,5 @@ Re-verifies, repairs, and synchronizes the installation and tool schemas in ~25m
 
 To verify installation health and run test validation:
 - **Health Check**: `npm run status` (verifies plugin link, hook, MCP config, schemas, RTK).
-- **Test Suite**: `npm test` (runs all 8 test suites).
+- **Test Suite**: `npm test` (runs all 10 test suites).
 - Detailed verification playbooks and release steps reside in `docs/publishing.md`.

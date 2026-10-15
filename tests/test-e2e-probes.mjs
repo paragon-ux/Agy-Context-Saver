@@ -153,30 +153,9 @@ console.log("✓ MCP Server initialized");
   const res = await callRpc("tools/call", { name: "get_installation_status" });
   const text = res.result.content[0].text;
   assert.match(text, /Installation Status: HEALTHY & ACTIVE/);
-  assert.match(text, /ALL 6 SCHEMAS PRESENT/);
+  assert.match(text, /ALL 5 SCHEMAS PRESENT/);
   assert.match(text, /RTK Binary: INSTALLED/);
-  console.log("✓ get_installation_status reported healthy status with 6 schemas and RTK");
-}
-
-// Probe 2.d: subagent_brief format validation
-{
-  console.log("\nTesting MCP subagent_brief...");
-  const resBrief = await callRpc("tools/call", {
-    name: "subagent_brief",
-    arguments: {
-      objective: "Deep audit of authentication logic",
-      scopeFiles: ["src/auth.js", "src/tokens.js"],
-      expectedDeliverable: "Markdown matrix of vulnerabilities"
-    }
-  });
-
-  const briefText = resBrief.result.content[0].text;
-  assert.ok(briefText.includes("ROLE: Scope-Isolated Deep Research Subagent"), "Must include designated role header");
-  assert.ok(briefText.includes("src/auth.js"), "Must list target file 1");
-  assert.ok(briefText.includes("src/tokens.js"), "Must list target file 2");
-  assert.ok(briefText.includes("Markdown matrix of vulnerabilities"), "Must embed expected deliverable");
-  assert.ok(briefText.includes("cite exact file:line references"), "Must include citation mandate");
-  console.log("✓ subagent_brief generated strictly formatted, scope-isolated instructions");
+  console.log("✓ get_installation_status reported healthy status with 5 schemas and RTK");
 }
 
 // Probe 2.e: Transcript streaming error tolerance and corrupt line reporting
