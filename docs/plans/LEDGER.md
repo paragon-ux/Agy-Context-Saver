@@ -42,21 +42,21 @@ This file is the **single source of truth** for Agy-Context-Saver's cross-cuttin
 | ID | Item | Source | Status | Decision | Link |
 |---|---|---|---|---|---|
 | L32 | The user's zero-trust invariants bind this repo too | user, 2026-10-14 | decided | Agy-Squad's L1 (zero trust), L2 (no regex security perimeter), L4 (no shared state in `os.tmpdir()`) and L7 (tests never start real agents) apply to Agy-Context-Saver's hook and tests. | Agy-Squad ledger |
-| L33 | The hook's governance state lived in `os.tmpdir()` | main, 2026-10-15; user accepted 2026-10-15, on condition that uninstall removes every leftover | decided | Built for 1.8.0, not yet committed. The polling ledger and RTK rewrite cache now live in `%LOCALAPPDATA%\agy-context-saver\` (`$XDG_STATE_HOME/agy-context-saver` on POSIX). Install removes the legacy temp-folder files; uninstall removes the state folder and the legacy files. `test-lifecycle-rollback` checks both. | `scripts/state-dir.mjs` |
+| L33 | The hook's governance state lived in `os.tmpdir()` | main, 2026-10-15; user accepted 2026-10-15, on condition that uninstall removes every leftover | done (`dd94778`) | The polling ledger and RTK rewrite cache now live in `%LOCALAPPDATA%\agy-context-saver\` (`$XDG_STATE_HOME/agy-context-saver` on POSIX). Install removes the legacy temp-folder files; uninstall removes the state folder and the legacy files. `test-lifecycle-rollback` checks both. | `scripts/state-dir.mjs` |
 
 ### Breach cleanup (2026-10-14)
 
 | ID | Item | Source | Status | Decision | Link |
 |---|---|---|---|---|---|
 | L13 | Root cause | main, 2026-10-15 | decided | `tests/test-mcp.mjs` ran `dispatch_squad` with `mode: "direct"`, which spawned 14 live host agents through the private language-server RPC. | — |
-| L14 | Remove direct mode | user, 2026-10-15 | decided | Built, not yet committed. `mcp/direct-rpc.mjs`, the direct test block and the `BypassSandbox` hook overwrite are gone from `main`. They survive only on the local branch `wip/subagent-squad` (never pushed) and were not carried into Agy-Squad. | Agy-Squad plan P0 |
-| L15 | Remove every subagent tool and script | user, 2026-10-15 | decided | Built, not yet committed. `subagent_brief`, its schema, the subagent tests and the subagent guidance are gone. The installer retires `subagent_brief.json` and `dispatch_squad.json` from existing installs. Kept: the anti-orphan exit handlers and the `isEntryPoint` guard. (This replaces two earlier versions of the row: keep everything, then keep the simple brief. The user's words win.) | Agy-Squad plan P0 |
+| L14 | Remove direct mode | user, 2026-10-15 | done (`dd94778`) | `mcp/direct-rpc.mjs`, the direct test block and the `BypassSandbox` hook overwrite are gone from `main`. They survive only on the local branch `wip/subagent-squad` (never pushed) and were not carried into Agy-Squad. | Agy-Squad plan P0 |
+| L15 | Remove every subagent tool and script | user, 2026-10-15 | done (`dd94778`) | `subagent_brief`, its schema, the subagent tests and the subagent guidance are gone. The installer retires `subagent_brief.json` and `dispatch_squad.json` from existing installs. Kept: the anti-orphan exit handlers and the `isEntryPoint` guard. (This replaces two earlier versions of the row: keep everything, then keep the simple brief. The user's words win.) | Agy-Squad plan P0 |
 
 ### Repository and docs
 
 | ID | Item | Source | Status | Decision | Link |
 |---|---|---|---|---|---|
-| L25 | Plans live in `docs/plans/` | user, 2026-10-15 | decided | Docs stay a Zensical site, as in waymark-engine and PDLt; plans and this ledger sit under `docs/plans/`, outside the nav. | `zensical.toml` |
-| L26 | Subagent orchestration and the sandbox live in a separate repository | user, 2026-10-15 | decided | Agy-Context-Saver already fulfills its purpose without subagents, so keep what works separate from what's under construction. Each repo ships as its own installable package, like waymark-engine. | Agy-Squad |
-| L27 | Name and location of the new repository | user, 2026-10-15 | decided | `Frameworks/Agy-Squad`. | Agy-Squad |
-| L34 | Version for the release without `subagent_brief` | user, 2026-10-15 | decided | 1.8.0, a minor bump: the release adds no features. | `CHANGELOG.md` |
+| L25 | Plans live in `docs/plans/` | user, 2026-10-15 | done (`dd94778`) | Docs stay a Zensical site, as in waymark-engine and PDLt; plans and this ledger sit under `docs/plans/`, outside the nav. | `zensical.toml` |
+| L26 | Subagent orchestration and the sandbox live in a separate repository | user, 2026-10-15 | done (`dd94778`, Agy-Squad `8e461bf`) | Agy-Context-Saver already fulfills its purpose without subagents, so keep what works separate from what's under construction. Each repo ships as its own installable package, like waymark-engine. | Agy-Squad |
+| L27 | Name and location of the new repository | user, 2026-10-15 | done (Agy-Squad `8e461bf`) | `Frameworks/Agy-Squad`. | Agy-Squad |
+| L34 | Version for the release without `subagent_brief` | user, 2026-10-15 | done (`dd94778`) | 1.8.0, a minor bump: the release adds no features. | `CHANGELOG.md` |
