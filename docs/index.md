@@ -74,8 +74,8 @@ When an agent initiates a shell command exceeding `WaitMsBeforeAsync` (~5 second
 - **The Solution**: RTK transparently intercepts and optimizes commands via PreToolUse hooks, collapsing passes and preserving failures.
 
 ### 3. The Native Inspection Bypass Trap
-- **The Problem**: Native file and search tools (`view_file`, `grep_search`, `find_by_name`, `list_dir`) bypass RTK command optimization.
-- **The Solution**: Agy hard-routes workspace inspection to canonical RTK CLI interfaces (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`).
+- **The Problem**: Unbounded native file and search tools (`view_file` without slices, `grep_search`, `find_by_name`, `list_dir`) bypass RTK command optimization.
+- **The Solution**: Agy enforces bounded `view_file` slices (`StartLine` / `EndLine <= 150`, paired with `waymark_ask(..., plain: true)` across 23 languages) and routes directory/prose search and spillover reads to canonical RTK CLI interfaces (`rtk find`, `rtk rg`, `rtk grep`, `rtk read`).
 
 ### 4. The Raw Transcript Reading Trap
 - **The Problem**: Direct `view_file` on `.system_generated/logs/transcript.jsonl` floods working memory with raw JSON syntax.
@@ -91,7 +91,7 @@ When an agent initiates a shell command exceeding `WaitMsBeforeAsync` (~5 second
 | Metric / Feature | Without Governor | With Agy-Context-Saver + RTK |
 | :--- | :--- | :--- |
 | **Command Output Bloat** | Unlimited raw test dots, ANSI dumps | RTK transparent reduction (60–90% token savings) |
-| **Workspace File Inspection** | Massive uncompressed view_file dumps | Compact `rtk read`, `rtk grep`, `rtk find` |
+| **Workspace File Inspection** | Massive uncompressed `view_file` dumps | `waymark_ask(..., plain: true)` $\to$ bounded `view_file` slices ($\le 150$ lines) + `rtk find` / `rtk rg` |
 | **Long Command Execution** | Detached after 5s $\to$ busy-wait loop | Synchronous window expanded to 10s $\to$ finishes in-turn |
 | **Background Task Monitoring** | Repetitive busy-polling loops | Enforced Reactive Wakeup with 5-strike circuit breaker |
 | **Configuration Safety** | Risk of third-party config clobber | Non-destructive preservation of foreign hooks/MCP with `.bak` backups |

@@ -80,7 +80,7 @@ if (isEntryPoint) {
 
 function printHelp() {
   console.log(`
-Agy-Context-Saver 🛡️ (v1.8.0)
+Agy-Context-Saver 🛡️ (v1.8.1)
 Universal MCP Server & Lifecycle Governor for Google Antigravity (Powered by RTK)
 
 Usage:
@@ -107,19 +107,17 @@ MCP Server Stdio Mode:
 
 Testing & Verification Playbook:
   npm run status               Verify live 4-layer integration status
-  npm test                     Run complete 5-suite automated test suite
-  node tests/test-hook.mjs     Run 28 closed-topology governance rule tests
+  npm test                     Run complete 10-suite automated test suite
+  node tests/test-hook.mjs     Run 27 closed-topology governance rule tests
   node tests/test-mcp.mjs      Run MCP protocol, method, and schema tests
 
-Platform-Aware Inspection Directives (RTK):
-  Windows:
-    - Search:     rtk rg "<pattern>" .   (trailing dot is required to prevent stdin pipe stalls)
-    - Read:       rtk read <file>
-    - Directory:  rtk find <path>        (cross-platform; avoids missing ls.exe)
-  POSIX (macOS/Linux):
-    - Search:     rtk grep "<pattern>"  or  rtk rg "<pattern>"
-    - Read:       rtk read <file>
-    - Directory:  rtk ls <path>         or  rtk tree
+Unified 3-Tier Inspection Directives (Waymark + Hybrid view_file + RTK):
+  Tier 1 (Structure):  waymark_ask(..., plain: true) across all 23 supported formats
+  Tier 2 (Read/Edit):  view_file(StartLine, EndLine) (1-150L default; or explicit 1..TotalLines full-file audit <= 800L & <= 45 KiB)
+  Tier 3 (RTK CLI):
+    - Spillovers/Logs: rtk read <path> (--head-lines / --tail-lines)
+    - Directory:       rtk find <path> (Windows & POSIX) or rtk ls <path> (POSIX)
+    - Prose Search:    rtk rg "<pattern>" . (Windows trailing dot required) or rtk grep "<pattern>" (POSIX)
 `);
 }
 
@@ -127,7 +125,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rulesPath = path.resolve(__dirname, "../rules/AGENTS.md");
 
 const SERVER_NAME = "agy-context-saver";
-const SERVER_VERSION = "1.8.0";
+const SERVER_VERSION = "1.8.1";
 
 // --- Tools Specification ---
 const TOOLS = [
@@ -200,7 +198,7 @@ const TOOLS = [
   },
   {
     name: "query_transcript",
-    description: "Granular query and forensic filtering engine for Antigravity conversation transcripts. Searches by keyword or regex, filters by role (user, assistant, tool, error), slices step ranges, and automatically dereferences full content when truncated.",
+    description: "Granular query and forensic filtering engine for Antigravity conversation transcripts. Searches by keyword or regex, filters by role (user, assistant, subagent, tool, error), slices step ranges, and automatically dereferences full content when truncated.",
     inputSchema: {
       type: "object",
       properties: {
@@ -215,7 +213,7 @@ const TOOLS = [
         roles: {
           type: "array",
           items: { type: "string" },
-          description: "Filter steps by role/source: 'user', 'assistant', 'tool', 'error', or 'all' (default: ['user', 'assistant'])."
+          description: "Filter steps by role/source: 'user', 'assistant', 'subagent', 'tool', 'error', or 'all' (default: ['user', 'assistant'])."
         },
         mode: {
           type: "string",
@@ -811,13 +809,20 @@ async function handleReadTranscript({ conversationId, mode = "compact", lastTurn
   const formattedBlocks = [];
   let currentLength = header.length;
   let clamped = false;
+  const maxWindowChars = mode === "compact" ? 3800 : MAX_OUTPUT_CHARS;
 
   for (let i = selected.length - 1; i >= 0; i--) {
-    const block = formatTranscriptItem(selected[i], {
+    const item = selected[i];
+    const isDialogueTurn =
+      item.type === "USER_INPUT" ||
+      item.type === "PLANNER_RESPONSE" ||
+      item.type === "SUBAGENT_RESPONSE";
+    const block = formatTranscriptItem(item, {
       includeThinking,
-      includeToolCalls: true
+      includeToolCalls: true,
+      maxContentChars: mode === "compact" && !isDialogueTurn ? 300 : MAX_TURN_CHARS
     });
-    if (currentLength + block.length + 6 > MAX_OUTPUT_CHARS) {
+    if (currentLength + block.length + 6 > maxWindowChars && formattedBlocks.length > 0) {
       clamped = true;
       break;
     }
@@ -827,7 +832,8 @@ async function handleReadTranscript({ conversationId, mode = "compact", lastTurn
 
   let fullOutput = header + formattedBlocks.join("\n\n---\n\n");
   if (clamped) {
-    fullOutput += "\n\n... [Transcript display clamped at 24 KB safety ceiling] ...";
+    const ceilingLabel = mode === "compact" ? "3.8 KB inline" : "24 KB";
+    fullOutput += `\n\n... [Transcript display clamped at ${ceilingLabel} safety ceiling; use query_transcript(stepIndex: N) for specific steps] ...`;
   }
 
   return { content: [{ type: "text", text: fullOutput }] };

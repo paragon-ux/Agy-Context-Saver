@@ -9,10 +9,11 @@
  *    - Intercepts native run_command and calls `rtk rewrite <cmd>`.
  *    - Non-daemon commands maintain WaitMsBeforeAsync=10000 for synchronous completion.
  * 2. Hard-Routed Native File/Search Inspection (LH-07):
- *    - view_file, read_file, read_many_files -> Deny and route to `rtk read <file>`.
- *    - grep_search -> Deny and route to `rtk grep <pattern>`.
+ *    - view_file -> Allow bounded slices (<= 150 lines, paired with waymark_ask); deny unbounded dumps.
+ *    - read_file, read_many_files -> Deny and route to bounded view_file or `rtk read <file>`.
+ *    - grep_search -> Deny and route to `rtk rg "<pattern>" .` / `rtk grep <pattern>`.
  *    - find_by_name -> Deny and route to `rtk find <path>`.
- *    - list_dir -> Deny and route to `rtk ls` or `rtk tree`.
+ *    - list_dir -> Deny and route to `rtk find` (Win) or `rtk ls` / `rtk tree` (POSIX).
  *    - Safe Harbor: Documented Antigravity special files (SKILL.md, brain artifacts, configs) are allowed.
  * 3. Root-Based Antigravity Internal State Protection (LH-02):
  *    - Hard denial for any inspection of `.system_generated/` (transcripts, task logs, progress).
@@ -789,9 +790,56 @@ try {
       respond({ decision: "allow" });
     }
 
-    // 2e. Bounded Slice Safe Harbor for view_file
-    // Allow view_file IF AND ONLY IF it is a bounded slice inspection (StartLine and EndLine <= 150 lines)
+    // 2e. Hybrid Slice & Guarded Full-File Policy for view_file
+    // - 1..150 line slice -> ALLOW
+    // - Explicit full-file read (StartLine=1, EndLine=actualFileLines) of an existing file <= 800 lines AND <= 45 KiB -> ALLOW
+    // - Partial slice of 151..800+ lines -> DENY (discover target with waymark_ask and narrow the slice)
+    // - Explicit full-file read exceeding 800 lines or 45 KiB -> DENY
+    // - Unbounded view_file (missing StartLine/EndLine) -> DENY
     if (toolName === "view_file") {
+      const MAX_SAFE_SLICE_LINES = 150;
+      const MAX_FULL_FILE_LINES = 800;
+      const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes)
+
+      const waymarkAvailable = (() => {
+        if (process.env.AGY_FORCE_WAYMARK === "0") return false;
+        if (process.env.AGY_FORCE_WAYMARK === "1") return true;
+        try {
+          const home = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
+          const schemaPath = path.join(home, ".gemini", "antigravity", "mcp", "waymark-engine", "waymark_ask.json");
+          if (fs.existsSync(schemaPath)) return true;
+          const mcpConfigPath = path.join(home, ".gemini", "config", "mcp_config.json");
+          if (fs.existsSync(mcpConfigPath)) {
+            const raw = fs.readFileSync(mcpConfigPath, "utf-8");
+            if (raw.includes('"waymark-engine"')) return true;
+          }
+        } catch {}
+        return false;
+      })();
+
+      const getFileMetrics = (filePath) => {
+        if (!filePath || typeof filePath !== "string") return null;
+        try {
+          if (!fs.existsSync(filePath)) return null;
+          const stat = fs.statSync(filePath);
+          if (!stat.isFile()) return null;
+          const bytes = stat.size;
+          const content = fs.readFileSync(filePath, "utf-8");
+          if (content.length === 0) {
+            return { bytes: 0, lineCount: 0, rawSplitCount: 1 };
+          }
+          const rawSplitCount = content.split(/\r?\n/).length;
+          const lineCount = /\r?\n$/.test(content) ? Math.max(1, rawSplitCount - 1) : rawSplitCount;
+          return { bytes, lineCount, rawSplitCount };
+        } catch {
+          return null;
+        }
+      };
+
+      const discoveryGuidance = waymarkAvailable
+        ? `Locate the target symbol, heading, or config key first with 'waymark_ask(..., plain: true)' and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'view_file'`
+        : `Provide bounded slices ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) via 'view_file', or run 'rtk read ${target || "<file>"}' via run_command instead`;
+
       const rawStart = args.StartLine !== undefined ? args.StartLine : args.start_line;
       const rawEnd = args.EndLine !== undefined ? args.EndLine : args.end_line;
       const hasSliceParams = typeof rawStart !== "undefined" || typeof rawEnd !== "undefined";
@@ -809,30 +857,47 @@ try {
           endLine >= startLine
         ) {
           const span = endLine - startLine + 1;
-          const MAX_SAFE_SLICE_LINES = 150;
           if (span <= MAX_SAFE_SLICE_LINES) {
             respond({ decision: "allow" });
           }
+
+          const metrics = startLine === 1 ? getFileMetrics(target) : null;
+          const isExplicitFullFile = Boolean(
+            metrics &&
+              startLine === 1 &&
+              (endLine === metrics.lineCount || endLine === metrics.rawSplitCount)
+          );
+
+          if (isExplicitFullFile) {
+            if (metrics.lineCount <= MAX_FULL_FILE_LINES && metrics.bytes <= MAX_FULL_FILE_BYTES) {
+              respond({ decision: "allow" });
+            }
+            const kib = (metrics.bytes / 1024).toFixed(1);
+            respond({
+              decision: "deny",
+              reason: `Antigravity Governance: Explicit full-file read via 'view_file' (${metrics.lineCount} lines, ${kib} KiB) exceeds the full-file audit ceiling (max ${MAX_FULL_FILE_LINES} lines and 45 KiB). ${discoveryGuidance}.`
+            });
+          }
+
           respond({
             decision: "deny",
-            reason: `Antigravity Governance: Oversized file slice via 'view_file' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe window). Reduce line range or run 'rtk read ${target || "<file>"}' via run_command instead.`
+            reason: `Antigravity Governance: Oversized partial file slice via 'view_file' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window). Partial slices above ${MAX_SAFE_SLICE_LINES} lines are denied; full-file reads are only permitted when explicitly covering line 1 through the actual end of a file <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${discoveryGuidance}.`
           });
         }
 
         respond({
           decision: "deny",
-          reason: `Antigravity Governance: Invalid slice range via 'view_file'. Ensure StartLine and EndLine are positive integers with EndLine >= StartLine (max 150 lines), or run 'rtk read ${target || "<file>"}' via run_command instead.`
+          reason: `Antigravity Governance: Invalid slice range via 'view_file'. Ensure StartLine and EndLine are positive integers with EndLine >= StartLine. ${discoveryGuidance}.`
         });
       }
 
-      // Default when no slice attempted: guide agent/subagent to use bounded slices or rtk read
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Full-file inspection via '${toolName}' bypasses token optimization. Provide bounded slices ('StartLine' and 'EndLine', max 150 lines) via 'view_file' to view code with line numbers, or Run 'rtk read ${target || "<file>"}' via run_command instead.`
+        reason: `Antigravity Governance: Full-file inspection via '${toolName}' without explicit bounds is denied. ${discoveryGuidance} (or pass explicit StartLine=1, EndLine=<TotalLines> for a one-pass audit when the file is <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB).`
       });
     }
 
-    // 2f. Hard-Route Full-File / Other Workspace Code Inspection to Canonical RTK Commands (LH-07)
+    // 2f. Hard-Route Other Native File/Search Tools (LH-07)
     if (toolName === "read_file") {
       respond({
         decision: "deny",

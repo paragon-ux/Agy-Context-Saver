@@ -30,22 +30,23 @@
 
 ---
 
-## Layer 2: Transparent Shell Execution & Codebase Inspection via RTK
+## Layer 2: Transparent Shell Execution & Unified 3-Tier Codebase Inspection
 - **Native Shell Commands**: Run shell commands normally using `run_command`. The PreToolUse hook transparently rewrites supported commands via RTK (`git`, `pytest`, `cargo`, `npm`, etc.) to produce ultra-compact outputs.
-- **Canonical Codebase Inspection**: Unbounded full-file reads and unoptimized search tools (`grep_search`, `find_by_name`, `list_dir`) are blocked for workspace files. Use bounded slices and RTK's canonical CLI interfaces:
-  - `view_file` with bounded slices (`StartLine` and `EndLine`, max 150 lines): **Preferred for reading files**—preserves 1-indexed line numbers and avoids terminal stdout truncation. Pair with `waymark_ask` to locate exact symbol line ranges first.
-  - `rtk find <path>`: Compact file search tree and directory listings (cross-platform, works on Windows & POSIX).
-  - Search commands by platform:
-    - **Windows**: Use `rtk rg "<pattern>" .` (explicit target `.` is required to prevent stdin pipe hanging) or `rg "<pattern>" .`.
-    - **POSIX / Linux / macOS**: Use `rtk grep "<pattern>"` or `rtk rg "<pattern>"`.
-  - Directory listing by platform:
-    - **Windows**: Use `rtk find <path>` or PowerShell `dir` / `Get-ChildItem`. (Avoid `rtk ls` or `rtk tree` on Windows as they rely on POSIX binaries/flags).
-    - **POSIX / Linux / macOS**: Use `rtk ls <path>` or `rtk tree`.
-  - `rtk err <cmd>`: Run command and show only errors/warnings.
-  - `rtk summary <cmd>`: Run command and produce a 2-line heuristic summary.
+- **Canonical 3-Tier Codebase & File Inspection**: Unbounded full-file reads and unoptimized search tools (`grep_search`, `find_by_name`, `list_dir`) are blocked for workspace files. Follow the 3-tier hierarchy:
+  1. **Tier 1 — Structural Discovery (`waymark_ask` with `plain: true`)**: Locate exact `[StartLine, EndLine]` coordinates via `waymark_ask(..., plain: true)` across all 23 supported formats (code ASTs + `markdown`, `yaml`, `json`, `toml`, `bash`). Always pass `plain: true` (~19–466 tokens, zero shell quoting or stdin hazards).
+  2. **Tier 2 — Precision Workspace File Reading (`view_file` Hybrid Slice Policy)**: Pass the exact `StartLine` and `EndLine` from `waymark_ask` into `view_file` (bounded slices of `1–150` lines) to preserve 1-indexed line numbers for `replace_file_content` and avoid terminal stdout truncation. Partial slices of `151–800` lines are denied; an explicit one-pass full-file audit (`StartLine: 1, EndLine: <TotalLines>`) is permitted only when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
+  3. **Tier 3 — RTK Boundaries (`rtk read`, `rtk find`, `rtk rg`, `rtk err`, `rtk summary`)**:
+     - **Spillovers & Task Logs**: Read `.system_generated/steps/<step>/output.txt` spillovers and completed `tasks/<taskId>.log` files via `rtk read <path>` (with `--head-lines` / `--tail-lines`). Never use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for edits.
+     - **Directory / File Discovery**:
+       - **Windows**: Use `rtk find <path>` or PowerShell `dir` / `Get-ChildItem`. (Avoid `rtk ls` or `rtk tree` on Windows as they rely on POSIX binaries/flags).
+       - **POSIX / Linux / macOS**: Use `rtk find <path>`, `rtk ls <path>`, or `rtk tree`.
+     - **Prose / Regex Search (when symbol, heading, or config key is unknown)**:
+       - **Windows**: Use `rtk rg "<pattern>" .` (explicit target `.` is required to prevent stdin pipe hanging) or `rg "<pattern>" .`.
+       - **POSIX / Linux / macOS**: Use `rtk grep "<pattern>"` or `rtk rg "<pattern>"`.
+     - **Command Diagnostics**: `rtk err <cmd>` (errors/warnings only) and `rtk summary <cmd>` (2-line heuristic summary).
 - **Antigravity Special Files Safe Harbor**: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/` configs) are permitted via `view_file` without slice bounds.
 - **Protected Internal State**: Direct native inspection of `.system_generated/` (transcripts, task logs, progress files) is strictly forbidden. Use Agy MCP tools `read_transcript` and `query_transcript`.
-- **Git CRLF/LF Warning Hygiene**: Git's line-ending conversion notices (`warning: LF will be replaced by CRLF the next time Git touches it` / `warning: CRLF will be replaced by LF...`) are non-actionable diagnostic noise. Suppress them during repo operations (via `git -c core.safecrlf=false` or `git config --global core.safecrlf false`) and do not propagate them into subagent briefs, task outputs, or conversation context.
+- **Git CRLF/LF Warning Hygiene**: Git's line-ending conversion notices (`warning: LF will be replaced by CRLF the next time Git touches it` / `warning: CRLF will be replaced by LF...`) are non-actionable diagnostic noise. Suppress them during repo operations (via `git -c core.safecrlf=false` or `git config --global core.safecrlf false`) and do not propagate them into task outputs or conversation context.
 
 ---
 

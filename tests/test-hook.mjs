@@ -10,6 +10,7 @@ import { getStateDir } from "../scripts/state-dir.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const hookScript = path.resolve(__dirname, "../scripts/execution-guard-hook.mjs");
 const hermetic = await setupHermeticTestEnv({ installProfile: false });
+process.env.AGY_FORCE_WAYMARK = "1";
 // The hook keeps its state in the per-user state folder (rooted in the hermetic profile), never in os.tmpdir()
 const stateDir = getStateDir();
 const stateFile = path.join(stateDir, "agy-session-governance-state.json");
@@ -204,17 +205,25 @@ console.log("--- Group A: RTK Integration & Command Rewriting ---");
 // ============================================================================
 console.log("\n--- Group B: Native Inspection Hard-Routing to RTK ---");
 
-// 6. view_file on workspace source file is hard-routed to rtk read
+// 6. Unbounded view_file on workspace source file: Waymark-first denial vs RTK fallback when Waymark unavailable
 {
-  const out = runHook({
+  const outWaymark = runHook({
     toolCall: { name: "view_file", args: { AbsolutePath: "c:/project/src/session_engine.py" } }
   });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Run 'rtk read c:\/project\/src\/session_engine\.py' via run_command instead/);
-  console.log("✓ view_file on workspace file hard-routed to 'rtk read'");
+  assert.equal(outWaymark.decision, "deny");
+  assert.match(outWaymark.reason, /waymark_ask\(\.\.\., plain: true\)/);
+  assert.doesNotMatch(outWaymark.reason, /rtk read/);
+
+  const outFallback = runHook(
+    { toolCall: { name: "view_file", args: { AbsolutePath: "c:/project/src/session_engine.py" } } },
+    { ...process.env, AGY_FORCE_WAYMARK: "0" }
+  );
+  assert.equal(outFallback.decision, "deny");
+  assert.match(outFallback.reason, /run 'rtk read c:\/project\/src\/session_engine\.py' via run_command instead/);
+  console.log("✓ unbounded view_file recommends waymark_ask when Waymark installed, and RTK fallback when unavailable");
 }
 
-// 6b. view_file with bounded slice (<= 150 lines) is ALLOWED under safe harbor
+// 6b. view_file with bounded slice (1-150 lines) is ALLOWED
 {
   const out = runHook({
     toolCall: {
@@ -226,20 +235,65 @@ console.log("\n--- Group B: Native Inspection Hard-Routing to RTK ---");
   console.log("✓ view_file with bounded slice (StartLine: 10, EndLine: 50) is ALLOWED");
 }
 
-// 6c. view_file with oversized slice (> 150 lines) is DENIED and routed to rtk read
+// 6c. Hybrid Full-File & Partial Slice Policy (151-800 partial deny, <=800L & <=45KiB full-file allow, >800L or >45KiB deny)
 {
-  const out = runHook({
-    toolCall: {
-      name: "view_file",
-      args: { AbsolutePath: "c:/project/src/session_engine.py", StartLine: 1, EndLine: 200 }
-    }
-  });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Oversized file slice via 'view_file'/);
-  console.log("✓ view_file with oversized slice (> 150 lines) is DENIED");
+  const tmpHybridDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-hybrid-slice-"));
+  try {
+    // Medium file: 300 lines, ~6 KiB (<= 800 lines and <= 45 KiB)
+    const mediumFile = path.join(tmpHybridDir, "medium_service.mjs");
+    fs.writeFileSync(mediumFile, Array.from({ length: 300 }, (_, i) => `export const line_${i + 1} = ${i + 1};`).join("\n") + "\n", "utf-8");
+
+    // Partial slice of 151-800 lines (e.g., 1..200 on a 300-line file, or 10..200) -> DENY
+    const outPartial1 = runHook({
+      toolCall: { name: "view_file", args: { AbsolutePath: mediumFile, StartLine: 1, EndLine: 200 } }
+    });
+    assert.equal(outPartial1.decision, "deny");
+    assert.match(outPartial1.reason, /Oversized partial file slice via 'view_file'/);
+
+    const outPartial2 = runHook({
+      toolCall: { name: "view_file", args: { AbsolutePath: mediumFile, StartLine: 50, EndLine: 300 } }
+    });
+    assert.equal(outPartial2.decision, "deny");
+    assert.match(outPartial2.reason, /Oversized partial file slice via 'view_file'/);
+
+    // Claiming EndLine larger than actual file (e.g., 1..500 on a 300-line file) -> DENY
+    const outFakeEnd = runHook({
+      toolCall: { name: "view_file", args: { AbsolutePath: mediumFile, StartLine: 1, EndLine: 500 } }
+    });
+    assert.equal(outFakeEnd.decision, "deny");
+    assert.match(outFakeEnd.reason, /Oversized partial file slice via 'view_file'/);
+
+    // Explicit full-file read (StartLine: 1, EndLine: 300) on 300-line, ~6 KiB file -> ALLOW
+    const outFullAllowed = runHook({
+      toolCall: { name: "view_file", args: { AbsolutePath: mediumFile, StartLine: 1, EndLine: 300 } }
+    });
+    assert.equal(outFullAllowed.decision, "allow");
+
+    // File exceeding 800 lines (850 lines, ~17 KiB) with explicit full-file bounds -> DENY
+    const longFile = path.join(tmpHybridDir, "long_service.mjs");
+    fs.writeFileSync(longFile, Array.from({ length: 850 }, (_, i) => `export const v_${i + 1} = ${i + 1};`).join("\n") + "\n", "utf-8");
+    const outLongDenied = runHook({
+      toolCall: { name: "view_file", args: { AbsolutePath: longFile, StartLine: 1, EndLine: 850 } }
+    });
+    assert.equal(outLongDenied.decision, "deny");
+    assert.match(outLongDenied.reason, /Explicit full-file read via 'view_file'.*exceeds the full-file audit ceiling/);
+
+    // File <= 800 lines (250 lines) but exceeding 45 KiB (~50 KiB) with explicit full-file bounds -> DENY
+    const heavyFile = path.join(tmpHybridDir, "heavy_bundle.mjs");
+    fs.writeFileSync(heavyFile, Array.from({ length: 250 }, () => "x".repeat(210)).join("\n") + "\n", "utf-8");
+    const outHeavyDenied = runHook({
+      toolCall: { name: "view_file", args: { AbsolutePath: heavyFile, StartLine: 1, EndLine: 250 } }
+    });
+    assert.equal(outHeavyDenied.decision, "deny");
+    assert.match(outHeavyDenied.reason, /Explicit full-file read via 'view_file'.*exceeds the full-file audit ceiling/);
+
+    console.log("✓ hybrid slice policy verified: 151-800 partial denied, explicit full-file <=800L & <=45KiB allowed, >800L or >45KiB denied");
+  } finally {
+    try { fs.rmSync(tmpHybridDir, { recursive: true, force: true }); } catch {}
+  }
 }
 
-// 6d. view_file with bounded slice on .system_generated remains strictly denied by root
+// 6d. view_file with bounded slice or full-file bounds on .system_generated remains strictly denied by root
 {
   const out = runHook({
     toolCall: {
@@ -612,14 +666,14 @@ const s6 = runHook({
 assert.equal(s6.decision, "deny");
 console.log("  Replay Step 6: status poll with 'diagnose timeout' -> blocked");
 
-// Step 7: Model tried reading repository files 36x via view_file -> ROUTED TO RTK READ
+// Step 7: Model tried reading repository files 36x via unbounded view_file -> ROUTED TO WAYMARK + BOUNDED SLICE
 const s7 = runHook({
   conversationId: incidentConv,
   toolCall: { name: "view_file", args: { AbsolutePath: "C:/project/session_engine.py" } }
 });
 assert.equal(s7.decision, "deny");
-assert.match(s7.reason, /rtk read/);
-console.log("  Replay Step 7: view_file('session_engine.py') -> routed to 'rtk read'");
+assert.match(s7.reason, /waymark_ask\(\.\.\., plain: true\)/);
+console.log("  Replay Step 7: unbounded view_file('session_engine.py') -> routed to 'waymark_ask' + bounded slice");
 
 // Step 8: Model tried mutating evaluator to overfit benchmark -> FORCE_ASK
 const s8 = runHook({

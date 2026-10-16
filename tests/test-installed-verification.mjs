@@ -220,14 +220,14 @@ function callInstalledHook(payload) {
   console.log("✓ Installed Hook: schedule user reminder -> ALLOWED");
 }
 
-// 2.8 Native inspection routing: view_file on workspace file -> RTK read
+// 2.8 Native inspection routing: unbounded view_file on workspace file -> Waymark + bounded slice
 {
   const res = callInstalledHook({
     toolCall: { name: "view_file", args: { AbsolutePath: "c:/project/src/index.js" } }
   });
   assert.equal(res.decision, "deny");
-  assert.match(res.reason, /rtk read/);
-  console.log("✓ Installed Hook: view_file on workspace file -> DENIED & routed to 'rtk read'");
+  assert.match(res.reason, /waymark_ask\(\.\.\., plain: true\)/);
+  console.log("✓ Installed Hook: unbounded view_file on workspace file -> DENIED & routed to 'waymark_ask' + bounded slice");
 }
 
 // 2.8b Native inspection bounded slice: view_file with bounded slice -> ALLOWED

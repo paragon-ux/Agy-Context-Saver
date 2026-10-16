@@ -14,7 +14,7 @@
 
 Applying the principles of **Full Cycle Product Development (FCPD)**, the product moves through a disciplined progression:
 - **Prototype / PoC**: Proven core hook interception and RTK token compression. *(Completed)*
-- **MVP Hardening**: Zero-dependency MCP server, 6 canonical tools, closed execution topology, and 150-line safe-harbor slice rule. *(Shipped in v1.6.0)*
+- **MVP Hardening**: Zero-dependency MCP server, 5 canonical tools, closed execution topology, and 150-line safe-harbor slice rule paired with `waymark_ask(..., plain: true)`. *(Shipped in v1.6.0–v1.8.0)*
 - **Product-Market Fit (PMF) & Validation**: Public validation, real-world bug triage, Antigravity ecosystem integration, and telemetry refinement. *(Active Phase)*
 - **Scaling & Ecosystem**: Modular skills expansion, high-throughput multi-agent orchestration, and enterprise-grade lifecycle resilience. *(Forward Roadmap)*
 
@@ -35,11 +35,11 @@ Applying the principles of **Full Cycle Product Development (FCPD)**, the produc
 
 ```mermaid
 flowchart TD
-    subgraph P1["Phase 1: Immediate & Shipped (v1.6.0 Milestone)"]
+    subgraph P1["Phase 1: Immediate & Shipped (v1.6.0 - v1.8.0 Milestone)"]
         direction TB
         P1_A["Metric Hygiene: Labeled check_context_health Telemetry"]
-        P1_B["Subagent Brief Lock: Ergonomic POW & Multi-Agent Batching"]
-        P1_C["Governance & Safe Harbor: Freeze v1.6.0 & 150-Line Slice Rule"]
+        P1_B["Subagent Decoupling: Extracted to Agy-Squad in v1.8.0"]
+        P1_C["Governance & Safe Harbor: 3-Tier Waymark + view_file + RTK"]
         P1_A --> P1_B --> P1_C
     end
 
@@ -64,9 +64,9 @@ flowchart TD
 
 ---
 
-### Phase 1: Immediate & Shipped (v1.6.0 Milestone)
+### Phase 1: Immediate & Shipped (v1.6.0–v1.8.0 Milestone)
 
-**Objective:** Deliver rock-solid context governance, transparent diagnostic telemetry, and zero-overhead subagent brief formulation with 100% test verification.
+**Objective:** Deliver rock-solid context governance, transparent diagnostic telemetry, and clean 5-tool MCP boundaries with 100% test verification.
 
 #### 1.1 Metric Hygiene & Labeled Diagnostics *(Shipped)*
 - **Problem:** Lifetime machine-wide counters reported by `rtk gain` were occasionally conflated with single-session or per-task token savings.
@@ -87,24 +87,23 @@ flowchart TD
 #### 1.3 Freeze Core Governance & Safe Harbor *(Shipped)*
 - **Problem:** Frequent changes to execution hooks risk disrupting active agent interactions.
 - **Implementation:**
-  - Bounded line slice safe harbor: permitted targeted inspections via `view_file` ($\le 150$ lines) while hard-routing oversized inspections to `rtk read`.
+  - Bounded line slice safe harbor: permitted targeted inspections via `view_file` ($\le 150$ lines, paired with `waymark_ask(..., plain: true)`) while routing spillovers and task logs to `rtk read`.
   - Maintained root-level protection of `.system_generated/` (transcripts and active task logs).
   - Preserved synchronous execution window expansion (`WaitMsBeforeAsync=10000`).
-- **Status:** Shipped and verified in `v1.6.0`.
+- **Status:** Shipped and verified in `v1.6.0`–`v1.8.0`.
 
-#### 1.4 Subagent Brief Lock & Multi-Role Batching *(Shipped)*
-- **Problem:** Feature creep pressure to turn `subagent_brief` into an issue tracker or evaluation judge.
+#### 1.4 Subagent Separation into Agy-Squad *(Shipped in v1.8.0)*
+- **Problem:** Subagent prompt generation (`subagent_brief`) and squad orchestration belong in a dedicated orchestration package rather than the core context governor.
 - **Implementation:**
-  - Locked schema to its core purpose: generating scope-isolated prompts and turnkey `invoke_subagent` payloads under the Pointer-Over-Wire (POW) protocol.
-  - Added native multi-role batch support (`subagents` array) with role, model, and workspace customizability.
-- **Status:** Shipped and verified in `v1.6.0`. Moved to the separate Agy-Squad package on 2026-10-15.
+  - Extracted `subagent_brief` and squad dispatch into the standalone `Agy-Squad` package in `v1.8.0`, streamlining `Agy-Context-Saver` to 5 focused MCP tools.
+- **Status:** Shipped and verified in `v1.8.0`.
 
 #### 1.5 Cross-Platform Execution Guard Stability *(Shipped)*
 - **Problem:** Differences between POSIX shells and Windows PowerShell can introduce command rewriting stalls or quote mismatches.
 - **Implementation:**
   - Hardened command unwrapping (`cmd /c`, `powershell -Command`) and trailing dot requirements for Windows (`rtk rg "<pattern>" .`).
-  - Automated regression testing across Windows and POSIX in 8 test suites (`npm test`).
-- **Status:** Shipped and verified in `v1.6.0`.
+  - Automated regression testing across Windows and POSIX in 10 test suites (`npm test`).
+- **Status:** Shipped and verified in `v1.8.0`.
 
 ---
 

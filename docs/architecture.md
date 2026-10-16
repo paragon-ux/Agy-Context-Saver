@@ -58,9 +58,10 @@ Antigravity's `PreToolUse` hook intercepts `run_command`. Instead of maintaining
 - Agy replaces `CommandLine` in the tool invocation arguments.
 - If unsupported or already prefixed with `rtk`, the command passes through unchanged (graceful fallback).
 
-### 2. Hard Routing of Native Inspection Tools
-Native Antigravity file and search tools (`view_file`, `read_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token reduction:
-- Agy denies workspace file inspection and hard-routes the agent to canonical RTK shell commands (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`).
+### 2. Unified 3-Tier Inspection & Hard Routing of Unbounded Tools
+Unbounded native Antigravity file and search tools (`view_file` without slices, `read_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token reduction:
+- Workspace file inspection follows `waymark_ask(..., plain: true)` (across all 23 supported formats: code ASTs + `markdown`, `yaml`, `json`, `toml`, `bash`) $\to$ bounded `view_file(StartLine, EndLine)` slices ($\le 150$ lines) to preserve 1-indexed line coordinates for `replace_file_content`.
+- Agy denies unbounded workspace dumps and routes directory discovery (`rtk find`), free-text prose regex search (`rtk rg "<pattern>" .`), and spillover/task-log inspection (`rtk read`) to canonical RTK shell commands.
 - Documented Antigravity special files (`SKILL.md`, brain artifacts, configuration files) remain accessible through a narrow safe harbor.
 
 ### 3. Root-Based Internal State Protection

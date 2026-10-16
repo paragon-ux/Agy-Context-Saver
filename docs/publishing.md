@@ -64,8 +64,8 @@ Executes all 10 verification suites:
 npm pack --dry-run
 ```
 Verifies that:
-- Total unpacked size is ~170 KB (compressed <50 KB).
-- Exactly 17 canonical runtime files are present (including `assets/logo.svg`).
+- Total unpacked size is ~213 KB (compressed ~62 KB).
+- Exactly 19 canonical runtime files are present (including `assets/logo.svg`).
 - Zero development/test files leak into distribution.
 
 ### Stage 4: Documentation Build
@@ -82,8 +82,8 @@ Once all 4 verification stages pass:
 
 ```bash
 # 1. Commit and tag release
-git commit -m "chore(release): prepare v1.8.0"
-git tag -a v1.8.0 -m "Release v1.8.0"
+git commit -m "chore(release): prepare v1.8.1"
+git tag -a v1.8.1 -m "Release v1.8.1"
 
 # 2. Publish to npm registry
 npm publish --access public

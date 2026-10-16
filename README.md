@@ -18,7 +18,7 @@ It permanently eliminates session degradation, memory bloat, and context window 
 | Metric / Capability | Without Governor | With Agy-Context-Saver + RTK |
 | :--- | :--- | :--- |
 | **Command Output Bloat** | Unlimited raw test dots, ANSI dumps | RTK transparent reduction (60–90% token savings) |
-| **Workspace File Inspection** | Massive uncompressed view_file dumps | Compact `rtk read`, `rtk grep`, `rtk find` |
+| **Workspace File Inspection** | Massive uncompressed `view_file` dumps | `waymark_ask(..., plain: true)` $\to$ bounded `view_file` slices ($\le 150$ lines) + `rtk find` / `rtk rg` |
 | **Long Command Execution** | Detached after 5s $\to$ busy-wait loop | Synchronous window expanded to 10s $\to$ finishes in-turn |
 | **Background Task Monitoring** | Repetitive busy-polling loops | Enforced Reactive Wakeup with 5-strike circuit breaker |
 | **Configuration Safety** | Risk of third-party config clobber | Non-destructive preservation of foreign hooks/MCP with `.bak` backups |
@@ -30,7 +30,7 @@ It permanently eliminates session degradation, memory bloat, and context window 
 ## Canonical 3-Layer Governance Architecture
 
 1. **Layer 1: Reactive Lifecycle & Polling Immunity**: Replaces destructive busy-polling loops with native Antigravity **Reactive Wakeup**, governed by an exponential Proportional Backoff curve and a 5-strike circuit breaker.
-2. **Layer 2: Transparent CLI & Codebase Streamlining**: Intercepts shell execution via PreToolUse hooks, transparently rewriting commands to RTK (`rtk git`, `rtk pytest`), hard-routing workspace searches to `rtk read`/`find`/`rg`, and shielding internal `.system_generated` state.
+2. **Layer 2: Transparent CLI & Codebase Streamlining**: Intercepts shell execution via PreToolUse hooks, transparently rewriting commands to RTK (`rtk git`, `rtk pytest`), enforcing bounded `view_file` slices paired with `waymark_ask(..., plain: true)`, routing spillovers/task logs to `rtk read` and directory/prose searches to `rtk find`/`rg`, and shielding internal `.system_generated` state.
 3. **Layer 3: Synchronous Execution**: Expands synchronous execution windows to 10s so routine commands finish in-turn instead of detaching.
 
 > **Subagent tools moved.** `subagent_brief` and squad dispatch now live in the separate [Agy-Squad](https://github.com/paragon-ux/agy-squad) package (under construction). Agy-Context-Saver is complete without them, and the two will install side by side.
@@ -107,24 +107,27 @@ npm run status
 1. **The Polling Trap**: When shell tasks detach to background jobs (`task-XYZ`), agents waste tokens repeatedly polling `manage_task(Action='status')` or scheduling artificial timers. Agy enforces native **Reactive Wakeup** (`<SYSTEM_MESSAGE>`).
 2. **The Terminal Bloat Trap**: Routine test runs and git operations dump hundreds of lines of noise into context. RTK compresses these outputs natively before they enter model context.
 3. **The Raw Transcript Trap**: Reading `transcript.jsonl` dumps megabytes of raw JSON into context. Agy blocks direct reads of `.system_generated` and provides high-density Markdown streaming tools.
-4. **Native Inspection Bypass**: Native inspection tools (`view_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token reduction. Agy hard-routes workspace inspection to RTK's canonical CLI (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`).
+4. **Native Inspection Bypass**: Unbounded native inspection tools (`view_file` without slices, `grep_search`, `find_by_name`, `list_dir`) bypass token reduction. Agy enforces bounded `view_file` slices (`StartLine` / `EndLine <= 150`, paired with `waymark_ask(..., plain: true)`) and routes directory/prose search and spillover reads to RTK's canonical CLI (`rtk find`, `rtk rg`, `rtk grep`, `rtk read`).
 
 ---
 
 ## Key Capabilities
 
 - **Transparent RTK Rewriting**: Native `run_command` calls are automatically rewritten (e.g. `pytest` $\to$ `rtk pytest`) via Antigravity PreToolUse hooks.
-- **Canonical Codebase Inspection**:
-  - `rtk read <file>`: Read file with intelligent token filtering and line ranges.
-  - `rtk find <path>`: Compact file search tree and directory listing (cross-platform, works on Windows & POSIX).
-  - Search by platform:
-    - **Windows**: `rtk rg "<pattern>" .` (explicit target `.` prevents child process stdin stalls) or `rg "<pattern>" .`.
-    - **POSIX / Linux / macOS**: `rtk grep "<pattern>"` or `rtk rg "<pattern>"`.
-  - Directory listing by platform:
-    - **Windows**: `rtk find <path>` or PowerShell `dir` / `Get-ChildItem`. (Avoid `rtk ls` / `rtk tree` on Windows as they rely on POSIX binaries/flags).
-    - **POSIX / Linux / macOS**: `rtk ls <path>` or `rtk tree`.
-  - `rtk err <cmd>`: Run command and show only errors/warnings.
-  - `rtk summary <cmd>`: Run command and produce a 2-line heuristic summary.
+- **Unified 3-Tier Codebase & File Inspection**:
+  1. **Tier 1 — Structural Discovery (`waymark_ask(..., plain: true)`)**: Locate exact `[StartLine, EndLine]` coordinates across all 23 supported formats (code ASTs + `markdown`, `yaml`, `json`, `toml`, `bash`) in ~19–466 tokens.
+  2. **Tier 2 — Precision Workspace Reading (`view_file` Hybrid Slice Policy)**: Pass `StartLine` and `EndLine` (`1–150` lines default; or explicit `StartLine: 1, EndLine: <TotalLines>` full-file audit when $\le 800$ lines and $\le 45\text{ KiB}$) into `view_file` to preserve 1-indexed line numbers for `replace_file_content` without terminal stdout truncation.
+  3. **Tier 3 — RTK CLI Boundaries**:
+     - `rtk read <path>`: Inspect runtime step spillovers (`.system_generated/steps/<step>/output.txt`) and completed background task logs (`tasks/<taskId>.log`) with `--head-lines` / `--tail-lines`.
+     - `rtk find <path>`: Compact file search tree and directory listing (cross-platform, works on Windows & POSIX).
+     - Prose / Regex Search (when symbol, heading, or config key is unknown):
+       - **Windows**: `rtk rg "<pattern>" .` (explicit target `.` prevents child process stdin stalls) or `rg "<pattern>" .`.
+       - **POSIX / Linux / macOS**: `rtk grep "<pattern>"` or `rtk rg "<pattern>"`.
+     - Directory listing by platform:
+       - **Windows**: `rtk find <path>` or PowerShell `dir` / `Get-ChildItem`. (Avoid `rtk ls` / `rtk tree` on Windows as they rely on POSIX binaries/flags).
+       - **POSIX / Linux / macOS**: `rtk ls <path>` or `rtk tree`.
+     - `rtk err <cmd>`: Run command and show only errors/warnings.
+     - `rtk summary <cmd>`: Run command and produce a 2-line heuristic summary.
 - **Antigravity Special Files Safe Harbor**: Direct `view_file` access to `SKILL.md`, brain artifacts, and config files is preserved.
 - **Protected Internal State**: Root-based guard prevents reading `.system_generated/` (transcripts, task logs, progress).
 - **Session-Wide Lifecycle Ledger**: Polling checks are tracked globally per session; changing task IDs or waiting does not reset governance.

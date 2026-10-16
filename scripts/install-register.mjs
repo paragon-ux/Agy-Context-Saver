@@ -358,38 +358,8 @@ export async function runInstall(options = {}) {
     log(`[OK] Removed legacy temp-folder state: ${legacy}`);
   }
 
-  const instructionsContent = `# Agy-Context-Saver MCP Server Instructions
-
-## Overview
-Agy-Context-Saver is the universal Model Context Protocol server and lifecycle governor for Google Antigravity, paired with RTK (Rust Token Killer) for transparent CLI output reduction.
-
-## Core Rules for Antigravity Agents
-1. **Reactive Wakeup (Zero Task Polling)**:
-   - When background tasks run, DO NOT call \`manage_task(Action='status')\` or \`schedule\` polling timers.
-   - Stop calling tools and yield the turn. The system notifies you automatically via \`<SYSTEM_MESSAGE>\`.
-   - Repeated polling triggers an escalating circuit breaker (frozen at 5 denials).
-2. **Never Read Internal State Directly**:
-   - Access to \`.system_generated/\` via \`view_file\` is strictly denied to prevent transcript explosion.
-   - Use \`read_transcript\` or \`query_transcript\` to inspect conversation history cleanly.
-3. **Inspect Output Files Directly with RTK**:
-   - Runtime step output spillovers (\`.system_generated/steps/<step>/output.txt\`) and completed background task logs (\`tasks/<taskId>.log\`) are read directly via \`rtk read <path>\` under hook governance.
-4. **Platform-Aware Codebase Inspection**:
-   - **Windows**: Use \`rtk read <file>\`, \`rtk find <path>\`, and \`rtk rg "<pattern>" .\` (the trailing \`.\` is required to avoid stdin stalls).
-   - **POSIX**: Use \`rtk read <file>\`, \`rtk ls <path>\`, and \`rtk grep "<pattern>"\` or \`rtk rg "<pattern>"\`.
-
-## Available MCP Tools
-- \`check_context_health\`: Diagnoses transcript turn counts, byte payload, and polling loops. Accepts \`transcriptPath\` or \`conversationId\`.
-- \`read_transcript\`: Streams recent turns from \`transcript.jsonl\` or \`transcript_full.jsonl\` formatted as clean Markdown.
-- \`query_transcript\`: Forensic regex search and filtering engine across transcript steps with optional \`summaryOnly: true\`, and surgical step extraction via \`stepIndex\` and \`field\`.
-- \`get_installation_status\`: Audits live health of the plugin link, hook, MCP server, tool schemas, and RTK.
-- \`sync_installation\`: Synchronizes and repairs all 4 integration layers in ~25ms.
-
-## Diagnostic & CLI Playbook
-- Audit Status: \`npm run status\` or \`node mcp/index.js status\`
-- Run Test Suite: \`npm test\`
-- CLI Help: \`node mcp/index.js --help\`
-- ⚠️ Warning: Do not run \`npm start\` or \`node mcp/index.js\` without subcommands interactively (it is a stdio JSON-RPC server).
-`;
+  const instructionsSourcePath = path.join(repoRoot, "mcp", "instructions.md");
+  const instructionsContent = await fsPromises.readFile(instructionsSourcePath, "utf-8");
 
   const checkHealthSchema = {
     name: "check_context_health",
@@ -464,7 +434,7 @@ Agy-Context-Saver is the universal Model Context Protocol server and lifecycle g
 
   const queryTranscriptSchema = {
     name: "query_transcript",
-    description: "Granular query and forensic filtering engine for Antigravity conversation transcripts. Searches by keyword or regex, filters by role (user, assistant, tool, error), slices step ranges, and automatically dereferences full content when truncated.",
+    description: "Granular query and forensic filtering engine for Antigravity conversation transcripts. Searches by keyword or regex, filters by role (user, assistant, subagent, tool, error), slices step ranges, and automatically dereferences full content when truncated.",
     parameters: {
       type: "object",
       properties: {
@@ -479,7 +449,7 @@ Agy-Context-Saver is the universal Model Context Protocol server and lifecycle g
         roles: {
           type: "array",
           items: { type: "string" },
-          description: "Filter steps by role/source: 'user', 'assistant', 'tool', 'error', or 'all' (default: ['user', 'assistant'])."
+          description: "Filter steps by role/source: 'user', 'assistant', 'subagent', 'tool', 'error', or 'all' (default: ['user', 'assistant'])."
         },
         mode: {
           type: "string",

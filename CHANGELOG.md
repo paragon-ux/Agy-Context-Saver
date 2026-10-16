@@ -5,6 +5,22 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-10-16
+
+### Added
+- **Hybrid `view_file` Slice Governance (`scripts/execution-guard-hook.mjs`)**: Retains the 150-line default slice ceiling (`1–150` lines allowed; partial slices of `151–800` lines denied) while adding a guarded full-file audit exception: explicit `StartLine: 1, EndLine: <TotalFileLines>` reads are permitted when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes). `.system_generated/` protections continue to take unconditional precedence.
+- **Waymark-First Denial Routing**: When `waymark-engine` is installed, `view_file` hook denials now recommend `waymark_ask(..., plain: true)` across all 23 supported formats followed by a bounded `view_file(StartLine, EndLine)` slice, falling back to `rtk read` when Waymark is unavailable.
+
+### Changed
+- **Single-Source-of-Truth MCP Instructions (`scripts/install-register.mjs`)**: Replaced the hardcoded pre-v1.7 `instructions.md` template in `install-register.mjs` with a direct read of `mcp/instructions.md`, eliminating the split-brain discrepancy between repository docs and `~/.gemini/antigravity/mcp/agy-context-saver/instructions.md`.
+- **Unified 3-Tier Inspection Documentation**: Reconciled `README.md`, `mcp/instructions.md`, `rules/AGENTS.md`, `skills/context-governance/SKILL.md`, `mcp/index.js`, and `docs/*.md` around the 3-tier hierarchy (`waymark_ask(..., plain: true)` $\to$ hybrid `view_file` $\to$ `rtk` for spillovers, task logs, and directory/prose search) and standardized references to all 10 automated test files.
+
+### Fixed
+- **Inline `read_transcript` Payload Cap (`mcp/index.js`)**: Bounded `compact` mode transcript output to `3,800` characters (`< 4 KB`) and clamped intermediate non-dialogue step bodies so `read_transcript(mode: "compact")` never triggers an Antigravity host spillover file.
+- **Complete `query_transcript` Role Schema**: Documented `'subagent'` in the `roles` filter description across `mcp/index.js`, `scripts/install-register.mjs`, `skills/context-governance/SKILL.md`, and `docs/tools.md`.
+
+---
+
 ## [1.8.0] - 2026-10-15
 
 ### Removed

@@ -74,9 +74,9 @@ Suite 4: test-e2e-probes.mjs               -> PASSED 100% (End-to-end integratio
 Suite 5: test-performance-probes.mjs       -> PASSED 100% (Performance, fast-path & streaming)
 Suite 6: test-installed-verification.mjs   -> PASSED 100% (Cross-platform installed validation)
 Suite 7: test-lifecycle-rollback.mjs       -> PASSED 100% (Isolated install/uninstall/restore)
-Suite 8: test-subagent-trials.mjs          -> PASSED 100% (Subagent delegation & POW format)
-Suite 9: test-check-only-readonly.mjs      -> PASSED 100% (R-01 regression: --check is read-only)
-Suite 10: test-malformed-config-preservation.mjs -> PASSED 100% (R-02 regression: malformed JSON preserved)
+Suite 8: test-check-only-readonly.mjs      -> PASSED 100% (R-01 regression: --check is read-only)
+Suite 9: test-malformed-config-preservation.mjs -> PASSED 100% (R-02 regression: malformed JSON preserved)
+Suite 10: test-rtk-ledger-fresh-install.mjs -> PASSED 100% (RTK ledger & fresh install verification)
 ```
 **Exit Code**: 0
 

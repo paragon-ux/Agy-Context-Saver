@@ -15,8 +15,8 @@ flowchart TD
     subgraph Governance["PreToolUse Lifecycle Hook"]
         Hook{"Execution Governor"}
         Hook -- "run_command" --> Rewrite["RTK Rewrite Proxy\n(10s synchronous window)"]
-        Hook -- "view_file (>150 lines)" --> Redirect["Route to rtk read"]
-        Hook -- "view_file (<=150 lines)" --> SliceSafe["Permit Bounded Slice"]
+        Hook -- "view_file (partial >150L or >800L/45KiB)" --> Redirect["Route to waymark_ask + bounded slice\n(or rtk read fallback)"]
+        Hook -- "view_file (<=150L slice or full <=800L/45KiB)" --> SliceSafe["Permit Bounded / Full-File Audit"]
         Hook -- "manage_task (status <30s)" --> Backoff["Deny via Proportional Backoff\n(Yield to Reactive Wakeup)"]
         Hook -- "Direct .system_generated" --> RootDeny["Deny via Root Guard"]
     end
@@ -39,19 +39,21 @@ The system strictly divides operational responsibilities into two complementary 
 
 ---
 
-## Canonical Codebase Inspection via RTK
+## Unified 3-Tier Codebase & File Inspection
 
-Native inspection tools (`view_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token filtering and dump raw text into model context. The `Agy-Context-Saver` PreToolUse hook intercepts these operations and guides agents to canonical RTK commands:
+Unbounded native inspection tools (`view_file` without slices, `grep_search`, `find_by_name`, `list_dir`) bypass token filtering and dump raw text into model context. The `Agy-Context-Saver` PreToolUse hook enforces a 3-tier inspection hierarchy with a hybrid `view_file` slice policy:
 
-| Native Tool | Target / Arguments | Canonical Governed RTK Command | Token Savings |
+| Tier / Native Tool | Target / Arguments | Canonical Governed Workflow | Token Savings |
 | :--- | :--- | :--- | :---: |
-| `view_file` | Entire file or $>150$ lines | `rtk read <file>` | **60–85%** |
-| `grep_search` | Search pattern & target | `rtk rg "<pattern>" .` *(Win)* / `rtk grep "<pattern>"` *(POSIX)* | **70–90%** |
-| `find_by_name` | Filename pattern | `rtk find <path>` | **75–92%** |
-| `list_dir` | Directory path | `rtk find <path>` *(Win)* / `rtk ls <path>` *(POSIX)* | **65–88%** |
+| **Tier 1: Structure** | Any of 23 supported formats (Code, Markdown, YAML, JSON, TOML, Bash) | `waymark_ask(..., plain: true)` $\to$ exact `[StartLine, EndLine]` (~19–466 tok) | **90–98%** |
+| **Tier 2: `view_file` (Default Slice)** | Bounded slice (`1–150` lines) | Permitted directly with 1-indexed line numbers for `replace_file_content` | **80–93%** |
+| **Tier 2: `view_file` (Full-File Audit)** | Explicit `StartLine: 1, EndLine: <TotalLines>` on files $\le 800$ lines and $\le 45\text{ KiB}$ | Permitted for justified single-pass medium-file audits; partial slices of `151–800` lines are denied | **3$\times$ vs multi-turn slices** |
+| **Tier 3: `rtk read`** | `.system_generated/steps/<step>/output.txt` & completed `tasks/<taskId>.log` | `rtk read <path>` (`--head-lines` / `--tail-lines`) | **60–85%** |
+| **Tier 3: `grep_search`** | Free-text / regex search in body prose (when symbol/heading/key is unknown) | `rtk rg "<pattern>" .` *(Win)* / `rtk grep "<pattern>"` *(POSIX)* | **70–90%** |
+| **Tier 3: `find_by_name` / `list_dir`** | Filename pattern or directory path | `rtk find <path>` *(Win & POSIX)* / `rtk ls <path>` *(POSIX)* | **75–92%** |
 
-!!! tip "Bounded Slice Safe Harbor"
-    Targeted inspections using native `view_file` with explicit `StartLine` and `EndLine` parameters ($\le 150$ lines total) are permitted directly to allow instant surgical inspection of functions, classes, and specific diff spans without triggering denials.
+!!! tip "Waymark + Hybrid Slice Safe Harbor"
+    Always locate exact `[StartLine, EndLine]` spans first using `waymark_ask(..., plain: true)` (which natively parses code ASTs, Markdown headings, and YAML/JSON/TOML keys), then pass those coordinates into `view_file` (`1–150` lines default, or explicit `1..TotalLines` when auditing an entire file $\le 800$ lines and $\le 45\text{ KiB}$).
 
 ---
 
@@ -177,7 +179,7 @@ A multi-mode forensic search engine and surgical step dereferencer across conver
 | :--- | :---: | :---: | :---: | :--- |
 | `conversationId` | `string` | **Yes** | — | Conversation UUID or transcript file path. |
 | `query` | `string` | No | `""` | Case-insensitive keyword or substring to filter steps. |
-| `roles` | `array` | No | `["user", "assistant"]` | Roles to filter: `"user"`, `"assistant"`, `"tool"`, `"error"`, or `["all"]`. |
+| `roles` | `array` | No | `["user", "assistant"]` | Roles to filter: `"user"`, `"assistant"`, `"subagent"`, `"tool"`, `"error"`, or `["all"]`. |
 | `mode` | `string` | No | `"auto"` | Retrieval mode: `"auto"` (auto-dereferences truncated steps), `"compact"`, or `"full"`. |
 | `startStep` | `number` | No | — | Start `step_index` boundary (inclusive). |
 | `endStep` | `number` | No | — | End `step_index` boundary (inclusive). |
@@ -223,7 +225,7 @@ Provides ultra-dense timeline summaries for high-level orientation:
 *Sample Output:*
 ```markdown
 ## Transcript Query Summary: `68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc`
-- [Step 1138] (assistant) Ran npm test across 8 test suites.
+- [Step 1138] (assistant) Ran npm test across 10 test suites.
 - [Step 1139] (tool) Full test suite passed 100%.
 - [Step 1140] (assistant) Formulated roadmap synthesis.
 ```
@@ -245,8 +247,8 @@ When a compact transcript indicates `truncated_fields: ["content"]`, recover the
 *Sample Output:*
 ```markdown
 ### Step 1139 Content:
-ALL 8 AUTOMATED TEST SUITES PASSED 100%!
-✓ test-hook.mjs (28/28 passed)
+ALL 10 AUTOMATED TEST SUITES PASSED 100%!
+✓ test-hook.mjs (27/27 passed)
 ✓ test-mcp.mjs (15/15 passed)
 ✓ test-output-governance.mjs (12/12 passed)
 ```
