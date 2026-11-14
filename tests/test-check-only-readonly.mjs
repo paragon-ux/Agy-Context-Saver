@@ -20,7 +20,7 @@ function copyFilter(source) {
   if (!relative) return true;
   const parts = relative.split(path.sep);
   if (parts.some((part) => part === '.git' || part === 'node_modules' || part === '.venv')) return false;
-  if (parts[0] === 'bin') return false;
+  if (parts[0] === 'bin' && parts[1] && /^rtk/i.test(parts[1])) return false;
   return true;
 }
 
@@ -37,14 +37,14 @@ try {
 
   // A deterministic fake RTK prevents the test from reaching the network.
   if (process.platform === 'win32') {
-    fs.writeFileSync(path.join(fakeBin, 'rtk.cmd'), '@echo off\r\necho RTK v0.51.0\r\n');
+    fs.writeFileSync(path.join(fakeBin, 'rtk.cmd'), '@echo off\r\necho rtk 1.1.0\r\n');
   } else {
     const fakeRtk = path.join(fakeBin, 'rtk');
-    fs.writeFileSync(fakeRtk, '#!/bin/sh\necho "RTK v0.51.0"\n');
+    fs.writeFileSync(fakeRtk, '#!/bin/sh\necho "rtk 1.1.0"\n');
     fs.chmodSync(fakeRtk, 0o755);
   }
 
-  const env = { ...process.env, HOME: isolatedHome, USERPROFILE: isolatedHome };
+  const env = { ...process.env, HOME: isolatedHome, USERPROFILE: isolatedHome, AGY_TEST_PROFILE_DIR: isolatedHome };
   prependPath(env, fakeBin);
   const result = spawnSync(process.execPath, ['scripts/install-register.mjs', '--check'], {
     cwd: isolatedRepo,
@@ -61,9 +61,9 @@ try {
     `--check modified a fresh home directory.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
   assert.equal(
-    fs.existsSync(path.join(isolatedRepo, 'bin')),
+    fs.existsSync(path.join(isolatedRepo, 'bin', 'rtk')) || fs.existsSync(path.join(isolatedRepo, 'bin', 'rtk.exe')),
     false,
-    `--check created the RTK bin directory in the isolated source tree.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    `--check provisioned an RTK binary in the isolated source tree.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
   console.log('PASS: --check leaves a fresh profile and source tree unchanged.');
 

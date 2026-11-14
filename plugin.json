@@ -1,12 +1,12 @@
 {
   "name": "agy-context-saver",
   "displayName": "Antigravity Context Shield & Governor",
-  "version": "1.8.1",
-  "description": "Deterministic background polling governor, RTK terminal optimizer, and transcript context shield for Antigravity.",
+  "version": "2.0.0",
+  "description": "CLI-first transcript forensic engine (agy-context), deterministic background polling governor, and RTK terminal optimizer for Antigravity.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
-    "Audit context health and token consumption for this session",
-    "Search this conversation's transcript for earlier tool errors",
-    "Inspect recent conversation turns without raw JSON transcript bloat"
+    "Run agy-context transcript health to audit context health and token consumption for this session",
+    "Search this conversation's transcript for earlier tool errors using agy-context transcript query",
+    "Inspect recent conversation turns cleanly without raw JSON bloat using agy-context transcript read"
   ]
 }

@@ -1,192 +1,141 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver Output Governance & Forensic Dereferencing Tests (Simplified Architecture)
+ * Agy-Context-Saver v2.0.0 Output Governance & Forensic Dereferencing Tests
  *
  * Verifies:
- * 1. Safe-Harbor rtk read on runtime step spillover files (.system_generated/steps/<step>/output.txt) (0 New Tools)
- * 2. Native view_file on spillover denies and routes to rtk read
- * 3. Lifecycle-gated rtk read on task logs (0 New Tools):
- *    - Denied with Proportional Backoff countdown while RUNNING
- *    - Allowed when TERMINATED
- * 4. Surgical single-step extraction folded into query_transcript(stepIndex, field) (0 New Tools)
+ * 1. Safe-Harbor bounded read_file (<=150 lines) and `rtk read` on `.system_generated/steps/<step>/output.txt`
+ * 2. Unbounded read_file / view_file on spillover denies and routes to bounded read_file or rtk read
+ * 3. Lifecycle-gated `rtk read` / native inspection on task logs (RUNNING backoff vs COMPLETED)
+ * 4. CLI `agy-context transcript step|read|query` CRLF stripping and field extraction
  */
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import readline from "node:readline";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { setupHermeticTestEnv } from "./helpers/hermetic-fixture.mjs";
+import { setupHermeticTestEnv, HERMETIC_CONV_ID } from "./helpers/hermetic-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const hookScript = path.resolve(__dirname, "../scripts/execution-guard-hook.mjs");
-const mcpServer = path.resolve(__dirname, "../mcp/index.js");
+const cliScript = path.resolve(__dirname, "../bin/agy-context.mjs");
 
-console.log("Running Agy-Context-Saver Output Inspection Governance Tests (Simplified Architecture)...\n");
-await setupHermeticTestEnv();
+console.log("Running Agy-Context-Saver v2.0.0 Output Inspection Governance Tests...\n");
+const hermetic = await setupHermeticTestEnv({ forceShim: true, shimVersion: "1.1.0" });
 
-// Helper to invoke hook script via stdin JSON
 function invokeHook(payload) {
-  const json = JSON.stringify(payload);
   const res = spawnSync(process.execPath, [hookScript], {
-    input: json,
-    stdio: ["pipe", "pipe", "pipe"],
+    input: JSON.stringify(payload),
     encoding: "utf-8"
   });
   assert.equal(res.status, 0, `Hook failed with status ${res.status}: ${res.stderr}`);
   return JSON.parse(res.stdout.trim());
 }
 
-// Spawn MCP server for JSON-RPC tests
-const proc = spawn(process.execPath, [mcpServer], {
-  stdio: ["pipe", "pipe", "inherit"]
-});
-
-const rl = readline.createInterface({ input: proc.stdout, terminal: false });
-
-let reqId = 1;
-const pending = new Map();
-
-rl.on("line", (line) => {
-  const msg = JSON.parse(line);
-  if (msg.id && pending.has(msg.id)) {
-    const resolve = pending.get(msg.id);
-    pending.delete(msg.id);
-    resolve(msg);
-  }
-});
-
-function callMcp(method, params = {}) {
-  const id = reqId++;
-  return new Promise((resolve) => {
-    pending.set(id, resolve);
-    proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+function invokeCli(args) {
+  const res = spawnSync(process.execPath, [cliScript, ...args], {
+    encoding: "utf-8"
   });
+  assert.equal(res.status, 0, `CLI failed (${res.status}): ${res.stderr}`);
+  return res.stdout;
 }
 
-// 1. MCP Handshake
-await callMcp("initialize", { protocolVersion: "2024-11-05" });
-console.log("✓ MCP handshake established");
-
-// --- Group 1: Safe-Harbor rtk read for Runtime Spillover Files ---
-console.log("\n--- Group 1: Safe-Harbor rtk read for Runtime Spillover Files ---");
-
-// 1.1 view_file on runtime step spillover routes to rtk read
+// --- Group 1: Safe-Harbor rtk read & Bounded read_file for Runtime Spillover Files ---
+console.log("--- Group 1: Spillover Safe Harbor ---");
 {
-  const out = invokeHook({
+  const unboundedView = invokeHook({
     toolCall: {
-      name: "view_file",
-      args: { AbsolutePath: "C:/Users/USER/.gemini/antigravity/brain/session-123/.system_generated/steps/507/output.txt" }
+      name: "read_file",
+      args: { Path: "/home/user/.gemini/antigravity/brain/session-123/.system_generated/steps/507/output.txt" }
     }
   });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /rtk read/);
-  console.log("✓ view_file on step output spillover denies and routes to 'rtk read'");
-}
+  assert.equal(unboundedView.decision, "deny");
+  assert.match(unboundedView.reason, /rtk read/);
 
-// 1.2 run_command with rtk read on step spillover is ALLOWED
-{
-  const out = invokeHook({
+  const boundedRead = invokeHook({
+    toolCall: {
+      name: "read_file",
+      args: { Path: "/home/user/.gemini/antigravity/brain/session-123/.system_generated/steps/507/output.txt", StartLine: 1, EndLine: 150 }
+    }
+  });
+  assert.equal(boundedRead.decision, "allow");
+
+  const catSpill = invokeHook({
     toolCall: {
       name: "run_command",
-      args: { CommandLine: "rtk read .system_generated/steps/102/output.txt" }
+      args: { CommandLine: "cat .system_generated/steps/102/output.txt", WaitMsBeforeAsync: 5000 }
     }
   });
-  assert.equal(out.decision, "allow");
-  console.log("✓ run_command with 'rtk read' on step output spillover is ALLOWED under safe harbor");
-}
+  assert.equal(catSpill.decision, "allow");
+  assert.equal(catSpill.overwrite?.CommandLine, "rtk read .system_generated/steps/102/output.txt");
 
-// 1.3 run_command shell access (cat) is rewritten to rtk read and ALLOWED
-{
-  const out = invokeHook({
+  const rtkSpill = invokeHook({
     toolCall: {
       name: "run_command",
-      args: { CommandLine: "cat .system_generated/steps/102/output.txt" }
+      args: { CommandLine: "rtk read .system_generated/steps/102/output.txt", WaitMsBeforeAsync: 5000 }
     }
   });
-  assert.equal(out.decision, "allow");
-  assert.equal(out.overwrite?.CommandLine, "rtk read .system_generated/steps/102/output.txt");
-  console.log("✓ run_command shell access (cat) is rewritten to 'rtk read' and ALLOWED");
+  assert.equal(rtkSpill.decision, "allow");
+  console.log("✓ Spillover bounded read_file (<=150L) and unchained `rtk read` verified");
 }
 
 // --- Group 2: Lifecycle-Gated Task Output Inspection ---
 console.log("\n--- Group 2: Lifecycle-Gated Task Output Inspection ---");
-
 const tempBrainDir = path.join(os.tmpdir(), `agy-test-brain-${Date.now()}`);
+const oldBrain = process.env.AGY_BRAIN_DIR;
 process.env.AGY_BRAIN_DIR = tempBrainDir;
-const convLive = "conv-test-live";
-const convDir = path.join(tempBrainDir, convLive, ".system_generated");
-fs.mkdirSync(path.join(convDir, "logs"), { recursive: true });
-fs.mkdirSync(path.join(convDir, "tasks"), { recursive: true });
-const liveLog = path.join(convDir, "tasks", "task-live-1.log");
-const transcriptFile = path.join(convDir, "logs", "transcript.jsonl");
 
-// Reset session state for conv-test-live
-const { getStateDir } = await import("../scripts/state-dir.mjs");
-try { fs.unlinkSync(path.join(getStateDir(), "agy-session-conv-test-live.json")); } catch {}
-try { fs.unlinkSync(path.join(getStateDir(), "agy-session-conv_test_live.json")); } catch {}
+try {
+  const convLive = "conv-test-live";
+  const convDir = path.join(tempBrainDir, convLive, ".system_generated");
+  fs.mkdirSync(path.join(convDir, "logs"), { recursive: true });
+  fs.mkdirSync(path.join(convDir, "tasks"), { recursive: true });
+  const liveLog = path.join(convDir, "tasks", "task-live-1.log");
+  const transcriptFile = path.join(convDir, "logs", "transcript.jsonl");
 
-fs.writeFileSync(liveLog, "Running output in progress...\n", "utf-8");
-fs.writeFileSync(
-  transcriptFile,
-  JSON.stringify({
-    step_index: 1,
-    type: "SYSTEM_MESSAGE",
-    content: `Tool is running as a background task with task id: ${convLive}/task-live-1\nTask logs are available at: ${liveLog}`
-  }) + "\n",
-  "utf-8"
-);
+  const { getStateDir } = await import("../scripts/state-dir.mjs");
+  try { fs.unlinkSync(path.join(getStateDir(), "agy-session-conv-test-live.json")); } catch {}
+  try { fs.unlinkSync(path.join(getStateDir(), "agy-session-conv_test_live.json")); } catch {}
 
-// 2.1 view_file on actively running task log is DENIED with Proportional Backoff
-{
-  const out = invokeHook({
+  fs.writeFileSync(liveLog, "Running output in progress...\n", "utf-8");
+  fs.writeFileSync(
+    transcriptFile,
+    JSON.stringify({
+      step_index: 1,
+      type: "SYSTEM_MESSAGE",
+      content: `Tool is running as a background task with task id: ${convLive}/task-live-1\nTask logs are available at: ${liveLog}`
+    }) + "\n",
+    "utf-8"
+  );
+
+  // RUNNING task log denied with Proportional Backoff for both read_file & run_command
+  const rfRunning = invokeHook({
     conversationId: convLive,
-    toolCall: {
-      name: "view_file",
-      args: { AbsolutePath: liveLog.replace(/\\/g, "/") }
-    }
+    toolCall: { name: "read_file", args: { Path: liveLog.replace(/\\/g, "/") } }
   });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /actively RUNNING/);
-  console.log("✓ view_file on actively running task log denies with Proportional Backoff");
-}
+  assert.equal(rfRunning.decision, "deny");
+  assert.match(rfRunning.reason, /actively RUNNING/);
 
-// 2.2 run_command on actively running task log is DENIED with Proportional Backoff
-{
-  const out = invokeHook({
+  const cmdRunning = invokeHook({
     conversationId: convLive,
-    toolCall: {
-      name: "run_command",
-      args: { CommandLine: "rtk read tasks/task-live-1.log" }
-    }
+    toolCall: { name: "run_command", args: { CommandLine: "rtk read tasks/task-live-1.log", WaitMsBeforeAsync: 5000 } }
   });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /actively RUNNING/);
-  console.log("✓ run_command on actively running task log denies with Proportional Backoff");
-}
+  assert.equal(cmdRunning.decision, "deny");
+  assert.match(cmdRunning.reason, /actively RUNNING/);
 
-// 2.2b OBS-B Regression: task quiet for >15s without finish notice remains actively RUNNING
-{
+  // Quiet >15s without finish marker stays RUNNING
   const pastTime = (Date.now() - 30000) / 1000;
   fs.utimesSync(liveLog, pastTime, pastTime);
-  const out = invokeHook({
+  const stillRunning = invokeHook({
     conversationId: convLive,
-    toolCall: {
-      name: "run_command",
-      args: { CommandLine: "rtk read tasks/task-live-1.log" }
-    }
+    toolCall: { name: "run_command", args: { CommandLine: "rtk read tasks/task-live-1.log", WaitMsBeforeAsync: 5000 } }
   });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /actively RUNNING/);
-  console.log("✓ OBS-B verified: task log quiet for >15s remains actively RUNNING if unfinished in transcript");
-}
+  assert.equal(stillRunning.decision, "deny");
+  assert.match(stillRunning.reason, /actively RUNNING/);
 
-// 2.3 view_file on completed task log denies and routes to rtk read
-{
-  // Mark finished in transcript
+  // Mark finished in transcript -> native read_file routes to rtk read, unchained rtk read ALLOWED
   fs.appendFileSync(
     transcriptFile,
     JSON.stringify({
@@ -197,120 +146,68 @@ fs.writeFileSync(
     "utf-8"
   );
 
-  const out = invokeHook({
+  const rfCompleted = invokeHook({
     conversationId: convLive,
-    toolCall: {
-      name: "view_file",
-      args: { AbsolutePath: liveLog.replace(/\\/g, "/") }
-    }
+    toolCall: { name: "read_file", args: { Path: liveLog.replace(/\\/g, "/") } }
   });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /rtk read/);
-  console.log("✓ view_file on completed task log routes to 'rtk read'");
-}
+  assert.equal(rfCompleted.decision, "deny");
+  assert.match(rfCompleted.reason, /rtk read/);
 
-// 2.4 run_command with rtk read on completed task log is ALLOWED
-{
-  const out = invokeHook({
+  const cmdCompleted = invokeHook({
     conversationId: convLive,
-    toolCall: {
-      name: "run_command",
-      args: { CommandLine: `rtk read tasks/task-live-1.log` }
-    }
+    toolCall: { name: "run_command", args: { CommandLine: "rtk read tasks/task-live-1.log", WaitMsBeforeAsync: 5000 } }
   });
-  assert.equal(out.decision, "allow");
-  console.log("✓ run_command with 'rtk read' on completed task log is ALLOWED");
-}
+  assert.equal(cmdCompleted.decision, "allow");
 
-// 2.5 Legacy task log >5m old without notices falls back to completed and is ALLOWED
-{
+  // Legacy task log > 5m quiet without markers falls back to completed
   const legacyLog = path.join(convDir, "tasks", "task-legacy-99.log");
   fs.writeFileSync(legacyLog, "Old session output\n", "utf-8");
   const oldTime = (Date.now() - 360000) / 1000;
   fs.utimesSync(legacyLog, oldTime, oldTime);
-
-  const out = invokeHook({
-    conversationId: convLive,
-    toolCall: {
-      name: "run_command",
-      args: { CommandLine: `rtk read tasks/task-legacy-99.log` }
-    }
-  });
-  assert.equal(out.decision, "allow");
-  console.log("✓ legacy task log >5m old without notices falls back to completed and is ALLOWED");
-
+  assert.equal(
+    invokeHook({
+      conversationId: convLive,
+      toolCall: { name: "run_command", args: { CommandLine: "rtk read tasks/task-legacy-99.log", WaitMsBeforeAsync: 5000 } }
+    }).decision,
+    "allow"
+  );
+  console.log("✓ Lifecycle-gated task log backoff and completion handling verified");
+} finally {
+  if (oldBrain) process.env.AGY_BRAIN_DIR = oldBrain;
+  else delete process.env.AGY_BRAIN_DIR;
   try { fs.rmSync(tempBrainDir, { recursive: true, force: true }); } catch {}
 }
 
-// --- Group 3: Forensic Extraction Folded into query_transcript ---
-console.log("\n--- Group 3: Forensic Extraction Folded into query_transcript ---");
-
-// 3.1 Surgical field extraction via query_transcript(stepIndex, field)
+// --- Group 3: CLI Forensic Extraction & Git CRLF Warning Stripping ---
+console.log("\n--- Group 3: CLI Step Extraction & CRLF Warning Stripping ---");
 {
-  const resContent = await callMcp("tools/call", {
-    name: "query_transcript",
-    arguments: {
-      conversationId: "fcda194f-62d6-46aa-b545-b2de8fa5774e",
-      stepIndex: 1,
-      field: "content"
-    }
-  });
-  assert.equal(resContent.result.isError, undefined);
-  assert.match(resContent.result.content[0].text, /Step 1 Content/);
-  console.log("✓ query_transcript(stepIndex, field='content') surgically extracts content field");
+  const stepText = invokeCli(["transcript", "step", "--id", HERMETIC_CONV_ID, "--step", "1", "--field", "content"]);
+  assert.match(stepText, /Step 1 Content/);
 
-  const resAll = await callMcp("tools/call", {
-    name: "query_transcript",
-    arguments: {
-      conversationId: "fcda194f-62d6-46aa-b545-b2de8fa5774e",
-      stepIndex: 1
-    }
-  });
-  assert.equal(resAll.result.isError, undefined);
-  assert.match(resAll.result.content[0].text, /Step 1/);
-  console.log("✓ query_transcript(stepIndex) returns full un-truncated step formatted as Markdown");
+  const crlfDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-crlf-cli-"));
+  const convId = "crlf-cli-conv";
+  const logsDir = path.join(crlfDir, convId, ".system_generated", "logs");
+  fs.mkdirSync(logsDir, { recursive: true });
+  const tFile = path.join(logsDir, "transcript.jsonl");
+  fs.writeFileSync(
+    tFile,
+    JSON.stringify({
+      step_index: 1,
+      type: "PLANNER_RESPONSE",
+      created_at: new Date().toISOString(),
+      content: "Building...\nwarning: in the working copy of 'sample.ts', LF will be replaced by CRLF the next time Git touches it\nok 1 - build passed\n"
+    }) + "\n",
+    "utf-8"
+  );
+
+  const out = invokeCli(["transcript", "read", "--file", tFile, "--last-turns", "1"]);
+  assert.equal(out.includes("will be replaced by"), false);
+  assert.match(out, /ok 1 - build passed/);
+  fs.rmSync(crlfDir, { recursive: true, force: true });
+  console.log("✓ CLI surgical step extraction and CRLF warning stripping verified");
 }
 
-// --- Group 5: Git CRLF/LF Line-Ending Warning Stripping ---
-console.log("\n--- Group 5: Git CRLF/LF Line-Ending Warning Stripping ---");
-{
-  const testBrainDir = path.join(os.tmpdir(), `agy-crlf-test-${Date.now()}`);
-  const convId = "crlf-test-conv";
-  const logDir = path.join(testBrainDir, convId, ".system_generated", "logs");
-  fs.mkdirSync(logDir, { recursive: true });
-
-  const rawTranscript = JSON.stringify({
-    step_index: 1,
-    type: "PLANNER_RESPONSE",
-    created_at: new Date().toISOString(),
-    content: "Building project...\n# warning: in the working copy of 'sample.ts', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'notes.txt', CRLF will be replaced by LF the next time Git touches it\nok 1 - build completed successfully\n"
-  }) + "\n";
-
-  fs.writeFileSync(path.join(logDir, "transcript.jsonl"), rawTranscript, "utf8");
-
-  const oldBrain = process.env.AGY_BRAIN_DIR;
-  process.env.AGY_BRAIN_DIR = testBrainDir;
-
-  const transcriptFile = path.join(logDir, "transcript.jsonl");
-
-  try {
-    const res = await callMcp("tools/call", {
-      name: "read_transcript",
-      arguments: { conversationId: transcriptFile, lastTurns: 1 }
-    });
-    const text = res.result.content[0].text;
-    assert.doesNotMatch(text, /will be replaced by/);
-    assert.match(text, /ok 1 - build completed successfully/);
-    console.log("✓ read_transcript cleanly strips Git CRLF/LF line-ending warning noise");
-  } finally {
-    if (oldBrain) process.env.AGY_BRAIN_DIR = oldBrain;
-    else delete process.env.AGY_BRAIN_DIR;
-    try { fs.rmSync(testBrainDir, { recursive: true, force: true }); } catch {}
-  }
-}
-
-proc.kill();
+hermetic.cleanup();
 console.log("\n=================================================");
 console.log("ALL OUTPUT GOVERNANCE & FORENSIC TESTS PASSED 100%!");
 console.log("=================================================");
-process.exit(0);

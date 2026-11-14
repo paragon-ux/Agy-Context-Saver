@@ -1,19 +1,20 @@
 {
   "name": "agy-context-saver",
-  "version": "1.8.1",
-  "description": "Universal Model Context Protocol (MCP) server & lifecycle governor purpose-built for Google Antigravity",
-  "main": "mcp/index.js",
+  "version": "2.0.0",
+  "description": "CLI-first transcript forensic engine & lifecycle governor purpose-built for Google Antigravity (Powered by RTK)",
+  "main": "lib/transcript-core.mjs",
   "bin": {
-    "agy-context-saver": "mcp/index.js"
+    "agy-context": "bin/agy-context.mjs",
+    "agy-context-saver": "bin/agy-context.mjs"
   },
   "type": "module",
   "scripts": {
-    "start": "node mcp/index.js",
+    "start": "node bin/agy-context.mjs --help",
     "setup": "node scripts/install-register.mjs",
     "uninstall": "node scripts/install-register.mjs --uninstall",
     "status": "node scripts/install-register.mjs --status",
     "preflight": "node scripts/release-preflight.mjs",
-    "test": "node tests/test-hook.mjs && node tests/test-mcp.mjs && node tests/test-output-governance.mjs && node tests/test-e2e-probes.mjs && node tests/test-performance-probes.mjs && node tests/test-installed-verification.mjs && node tests/test-lifecycle-rollback.mjs && node tests/test-check-only-readonly.mjs && node tests/test-malformed-config-preservation.mjs && node tests/test-rtk-ledger-fresh-install.mjs"
+    "test": "node tests/test-hook.mjs && node tests/test-transcript.mjs && node tests/test-rtk-integration.mjs && node tests/test-output-governance.mjs && node tests/test-e2e-probes.mjs && node tests/test-performance-probes.mjs && node tests/test-installed-verification.mjs && node tests/test-lifecycle-rollback.mjs && node tests/test-check-only-readonly.mjs && node tests/test-malformed-config-preservation.mjs && node tests/test-rtk-ledger-fresh-install.mjs"
   },
   "repository": {
     "type": "git",
@@ -31,8 +32,8 @@
   },
   "keywords": [
     "antigravity",
-    "mcp",
-    "model-context-protocol",
+    "cli",
+    "rtk",
     "gemini",
     "context-window",
     "lifecycle-hooks",
@@ -40,13 +41,14 @@
   ],
   "files": [
     "assets",
+    "bin",
+    "lib",
     "mcp",
     "scripts",
     "rules",
     "skills",
     "hooks.json",
     "plugin.json",
-    "mcp_config.json",
     "install.ps1",
     "install.sh",
     "README.md",

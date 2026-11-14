@@ -45,29 +45,28 @@
 - Antigravity lifecycle management & Reactive Wakeup enforcement
 - Background task polling governance & 5-strike circuit breaker
 - Antigravity internal state protection (`.system_generated/`)
-- Zero-JSON Markdown transcript extraction (`read_transcript`, `query_transcript`)
-- Benchmark and evaluation artifact mutation protection
+- Zero-JSON Markdown transcript extraction (`agy-context transcript read|query|step|health`)
+- Benchmark and evaluation artifact mutation protection (`edit_file`, `write_file`, and shell guards)
 
 ---
 
 ## Key Technical Subsystems
 
-### 1. Transparent RTK Hook Rewriting
-Antigravity's `PreToolUse` hook intercepts `run_command`. Instead of maintaining fragile regexes or custom reducers, Agy invokes `rtk rewrite "<rawCmd>"` (4ms in native Rust):
-- If the command is optimizable (`git status`, `pytest`, `cargo test`), RTK exits with 0 or 3 and returns the rewritten command.
-- Agy replaces `CommandLine` in the tool invocation arguments.
-- If unsupported or already prefixed with `rtk`, the command passes through unchanged (graceful fallback).
+### 1. Transparent RTK `>= 1.1.0` Hook Delegation
+Antigravity's `PreToolUse` hook intercepts `run_command`. After running safety and policy guards, Agy delegates command optimization to `rtk hook antigravity` via stdin JSON:
+- If the command is optimizable (`git status`, `pytest`, `cargo test`), RTK returns an updated `CommandLine` rewrite (`rtk git`, `rtk pytest`, `bash -c 'rtk ...'`).
+- Agy reverts lossy implicit `wc`/`ls`/`diff` rewrites (unless explicitly invoked as `rtk ...`), guards absent host `rg` (`rtk grep` or unprefixed fallback), and sets `WaitMsBeforeAsync: 10000` only when unset and non-daemon.
+- If unsupported or `rtk >= 1.1.0` is absent, the command passes through unchanged (graceful fallback).
 
 ### 2. Unified 3-Tier Inspection & Hard Routing of Unbounded Tools
-Unbounded native Antigravity file and search tools (`view_file` without slices, `read_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token reduction:
-- Workspace file inspection follows `waymark_ask(..., plain: true)` (across all 23 supported formats: code ASTs + `markdown`, `yaml`, `json`, `toml`, `bash`) $\to$ bounded `view_file(StartLine, EndLine)` slices ($\le 150$ lines) to preserve 1-indexed line coordinates for `replace_file_content`.
-- Agy denies unbounded workspace dumps and routes directory discovery (`rtk find`), free-text prose regex search (`rtk rg "<pattern>" .`), and spillover/task-log inspection (`rtk read`) to canonical RTK shell commands.
-- Documented Antigravity special files (`SKILL.md`, brain artifacts, configuration files) remain accessible through a narrow safe harbor.
+Unbounded native Antigravity file and search tools (`read_file` without slices, `view_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token reduction:
+- Workspace file inspection follows `rtk grep` / `rtk find` / `rtk ls` $\to$ bounded `read_file(StartLine, EndLine)` slices ($\le 150$ lines, or explicit `1..TotalLines` for files $\le 800\text{L} / 45\text{ KiB}$) to preserve 1-indexed line coordinates for `edit_file` and `write_file`.
+- Documented Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `.gemini/config/`) remain accessible without slice bounds through Safe Harbor.
 
 ### 3. Root-Based Internal State Protection
-Regex-based filename filters (`transcript.jsonl`) can be bypassed when new internal files are created. Agy enforces a directory-root guard:
-- Any path matching `/.system_generated/` is denied immediately.
-- Protects `transcript.jsonl`, `transcript_full.jsonl`, `task-*.log`, progress files, and scheduler state.
+Segment-, quote-, and heredoc-aware parsing guards `.system_generated/` commands while avoiding false denials on heredoc bodies or search patterns:
+- Direct shell access to `.system_generated/logs/transcript*` or running `tasks/*.log` is denied immediately and routed to `agy-context transcript ...`.
+- Only strictly unchained `rtk read <spillover/completed-task-log>` and strictly unchained `agy-context transcript ...` commands are exempted.
 
 ### 4. Closed Session-Wide Lifecycle Ledger
 Historical loopholes exploited per-task cooldown resets and fuzzy keywords. Agy implements a session-level lifecycle ledger:
@@ -77,22 +76,20 @@ Historical loopholes exploited per-task cooldown resets and fuzzy keywords. Agy 
 - 5 cumulative denials trigger `force_ask` to halt runaway autonomous loops.
 
 ### 5. Benchmark & Evaluator Mutation Protection
-During active evaluation sessions, mutating benchmark definitions, prompt templates, or scoring files requires explicit user confirmation via `force_ask`, preventing prompt contamination and benchmark overfitting.
+During active evaluation sessions, mutating benchmark definitions, prompt templates, or scoring files (via `edit_file`, `write_file`, `replace_file_content`, `write_to_file`, or shell redirects/deletes) requires explicit user confirmation via `force_ask`, preventing prompt contamination and benchmark overfitting.
 
 ---
 
-## 6. Output Governance & Spillover Safe Harbor (0 New Tools)
+## 6. Output Governance & Spillover Safe Harbor
 
-To resolve the Output Blind-Spot Trap without bloating the tool registry or taxing model prompts, `Agy-Context-Saver` implements three streamlined output governance pillars:
-
-1. **Safe-Harbor `rtk read` for Runtime Step Spillovers**:
-   When Antigravity spills large tool outputs to disk (`.system_generated/steps/<step>/output.txt`), the PreToolUse hook safe-harbors `rtk read <path>`. Native `view_file` calls are automatically routed to `rtk read`, leveraging RTK's native line clamping, head/tail windowing, and token truncation.
+1. **Bounded Step Output Spillovers**:
+   When Antigravity spills large tool outputs to disk (`.system_generated/steps/<step>/output.txt`), the PreToolUse hook allows bounded `read_file(StartLine, EndLine <= 150)` and single unchained `rtk read <path>` calls.
 2. **Lifecycle-Gated Task Output Inspection**:
    When an agent inspects background task logs (`tasks/<taskId>.log`):
    - While `RUNNING`: Strictly denied under Proportional Backoff to eliminate busy-waiting polling loops.
-   - When `COMPLETED` / `TERMINATED`: Allowed via `rtk read` under lifecycle governance for bounded error and stack trace retrieval.
-3. **Folded Surgical Step Dereferencing in `query_transcript`**:
-   Rather than creating redundant tools, single-step extraction is folded directly into `query_transcript(stepIndex, field)`. Recovers un-truncated payloads from `transcript_full.jsonl` with zero surrounding context bloat.
+   - When `COMPLETED` / `TERMINATED`: Allowed via single unchained `rtk read tasks/<taskId>.log`.
+3. **Surgical Step Dereferencing via CLI (`agy-context transcript step`)**:
+   Single-step extraction uses `agy-context transcript step --id <conv> --step <N> [--field ...]` to recover untruncated payloads from `transcript_full.jsonl` with zero surrounding context bloat.
 
 ---
 
@@ -104,10 +101,10 @@ To resolve the Output Blind-Spot Trap without bloating the tool registry or taxi
    The PreToolUse hook drops redundant version probes, spawning `rtk rewrite` directly and falling back to plugin binaries only on `ENOENT`, cutting cache miss latency by over 50ms.
 3. **Surgical 256KB Tail-Window Task State Resolution (PERF-04, PERF-07)**:
    Task lifecycle checking uses a single unified resolver scanning the last 256KB of `transcript.jsonl` with literal needle matching, reducing inspection time on 10MB transcripts from 123ms to 2ms (-98%).
-4. **Atomic Concurrency-Safe Rewrite Caching (PERF-05, PERF-09)**:
-   Rewrite caches filter out non-zero exits, spawn errors, and timeouts. Updates re-read disk state to merge concurrent processes and write atomically via temporary files and `renameSync`.
+4. **Safe Bounded Subprocess Delegation**:
+   Shell command rewriting delegates directly via stdin JSON to `rtk hook antigravity` (`>= 1.1.0`), avoiding custom rewrite caches while guarding absent `rg` and lossy implicit `wc`/`ls`/`diff` rewrites.
 5. **Pre-Rewrite Fast Denial Ordering (PERF-10)**:
-   Raw command checks (internal state access and running task log denials) execute before invoking `rtk rewrite`, eliminating subprocess overhead for denied commands.
+   Raw command checks (internal state access and running task log denials) execute before invoking `rtk hook antigravity`, eliminating subprocess overhead for denied commands.
 6. **Bounded Query Memory & Raw-Line Prefiltering (PERF-11, PERF-12)**:
-   `query_transcript` bounds memory using a fixed-size ring buffer with `matchedCount`, and filters plain ASCII keywords on the raw line before JSON parsing.
+   `lib/transcript-core.mjs` (`queryTranscript`) bounds memory using $O(1)$ `CircularRingBuffer` with `matchedCount`, filters plain ASCII keywords cleanly (preserving `truncated_fields` candidates for `mode: "auto"`), and streams large logs with bounded tail reads.
 

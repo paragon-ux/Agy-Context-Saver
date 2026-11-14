@@ -1,5 +1,5 @@
 # Agy-Context-Saver Universal Installer for Windows
-# Installs hook script, wrapper, and registers in ~/.gemini/config/hooks.json & mcp_config.json
+# Installs plugin link, CLI shims, RTK >= 1.1.0, and configures node.cmd for hooks
 
 $ErrorActionPreference = "Stop"
 

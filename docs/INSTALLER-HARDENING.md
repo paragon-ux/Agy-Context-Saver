@@ -8,8 +8,8 @@
 
 1. **Read-only configuration validation (`parseAndValidateJsonConfig`)**: Existing `hooks.json` and `mcp_config.json` files are parsed and verified to be non-null JSON objects (and `mcpServers`, if present, must be a JSON object) **before** `--check` returns or any disk writes occur. Malformed or non-object JSON immediately aborts installation and preserves the user's original file bytes unchanged.
 2. **Strict read-only `--check` and `--status`**: When `--check` (`-c`), `--status`, or `--help` is passed, zero files or directories are created and zero network calls are made. Conflicting flags (such as `--check --restore-backups` or `--check --uninstall`) are explicitly rejected with a non-zero exit code.
-3. **RTK version & SHA-256 supply-chain verification**: `findExistingRtk()` validates that any local or `PATH` RTK binary satisfies `[>=0.50.0 <0.52.0]`. Downloaded RTK archives are verified against pinned SHA-256 digests (`RTK_CHECKSUMS`) before disk extraction.
-4. **Fail-closed provisioning**: If RTK provisioning fails, installation aborts before touching `hooks.json`, `mcp_config.json`, plugin links, or `node.cmd` (unless `--allow-degraded` is explicitly passed).
+3. **RTK `>= 1.1.0` & SHA-256 supply-chain verification**: `findExistingRtk()` validates that any local or `PATH` RTK binary satisfies `>= 1.1.0`. Automated archive downloads fail closed unless pinned `RTK_CHECKSUMS` match before extraction.
+4. **Fail-closed provisioning & MCP retirement**: If RTK provisioning fails, installation aborts before touching `hooks.json`, `mcp_config.json`, plugin links, CLI shims, or `node.cmd` (unless `--allow-degraded` is explicitly passed). On setup/uninstall, legacy `agy-context-saver*` keys and schema directories are pruned while foreign MCP servers remain untouched.
 5. **Windows `node.cmd` wrapper safety**: `install.ps1` executes `scripts/install-register.mjs` first and only writes `node.cmd` after registration succeeds with exit code `0` in install mode, backing up any pre-existing unmanaged `node.cmd` to `node.cmd.bak` and delegating non-governor calls to `node.exe`.
 
 ## Regression test coverage

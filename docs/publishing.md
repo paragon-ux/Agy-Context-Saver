@@ -11,13 +11,14 @@ The published npm package is strictly constrained via the `"files"` whitelist in
 ```json
 "files": [
   "assets",
+  "bin",
+  "lib",
   "mcp",
   "scripts",
   "rules",
   "skills",
   "hooks.json",
   "plugin.json",
-  "mcp_config.json",
   "install.ps1",
   "install.sh",
   "README.md",
@@ -35,38 +36,37 @@ The published npm package is strictly constrained via the `"files"` whitelist in
 
 ## Clean-Room Verification Procedure
 
-Before releasing any version or publishing to npm, execute the full 4-stage audit:
+Before releasing any version or publishing to npm, execute the full release pipeline:
 
-### Stage 1: Installation Pre-flight
+### Stage 1: Release Preflight & Installation Check
 ```bash
+npm run preflight
 node scripts/install-register.mjs --check
 ```
-Ensures plugin links, hook scripts, and tool schemas exist and match versions.
+Verifies package metadata, plugin `hooks.json` schema integrity, `lib/transcript-core.mjs` / `bin/agy-context.mjs`, RTK `>= 1.1.0` requirement, and clean-profile non-mutation.
 
 ### Stage 2: Automated Test Matrix
 ```bash
 npm test
 ```
-Executes all 10 verification suites:
-1. Intelligent hook governance & closed-topology tests (`tests/test-hook.mjs`)
-2. MCP server protocol & method tests (`tests/test-mcp.mjs`)
-3. Output inspection governance & lifecycle gating tests (`tests/test-output-governance.mjs`)
-4. End-to-end edge case & fail-closed probes (`tests/test-e2e-probes.mjs`)
-5. Performance, streaming & memory probes (`tests/test-performance-probes.mjs`)
-6. Live installed system validation (`tests/test-installed-verification.mjs`)
-7. Full lifecycle installation, rollback, and restoration test (`tests/test-lifecycle-rollback.mjs`)
-8. Check-only read-only isolation regression test (`tests/test-check-only-readonly.mjs`)
-9. Malformed config preservation fail-closed regression test (`tests/test-malformed-config-preservation.mjs`)
-10. RTK ledger fresh-install quirks (`tests/test-rtk-ledger-fresh-install.mjs`)
+Executes all 11 verification suites:
+1. Hook governance & RTK `>= 1.1.0` delegation tests (`tests/test-hook.mjs`)
+2. Streaming transcript core, CLI & deprecated MCP wrapper tests (`tests/test-transcript.mjs`)
+3. Live host RTK `>= 1.1.0` integration contract tests (`tests/test-rtk-integration.mjs`)
+4. Output inspection governance & lifecycle gating tests (`tests/test-output-governance.mjs`)
+5. End-to-end edge case & fail-closed probes (`tests/test-e2e-probes.mjs`)
+6. Performance, streaming & memory probes (`tests/test-performance-probes.mjs`)
+7. Live installed system validation (`tests/test-installed-verification.mjs`)
+8. Full lifecycle installation, `ACS-HOOK-11` sweep & rollback tests (`tests/test-lifecycle-rollback.mjs`)
+9. Check-only read-only isolation regression test (`tests/test-check-only-readonly.mjs`)
+10. Malformed config preservation fail-closed regression test (`tests/test-malformed-config-preservation.mjs`)
+11. RTK ledger fresh-install quirks (`tests/test-rtk-ledger-fresh-install.mjs`)
 
 ### Stage 3: Tarball Dry-Run Inspection
 ```bash
 npm pack --dry-run
 ```
-Verifies that:
-- Total unpacked size is ~213 KB (compressed ~62 KB).
-- Exactly 19 canonical runtime files are present (including `assets/logo.svg`).
-- Zero development/test files leak into distribution.
+Verifies clean packaging of `bin/`, `lib/`, `scripts/`, `rules/`, `skills/`, and zero development/test file leaks into distribution.
 
 ### Stage 4: Documentation Build
 ```bash
@@ -82,8 +82,8 @@ Once all 4 verification stages pass:
 
 ```bash
 # 1. Commit and tag release
-git commit -m "chore(release): prepare v1.8.1"
-git tag -a v1.8.1 -m "Release v1.8.1"
+git commit -m "chore(release): prepare v2.0.0"
+git tag -a v2.0.0 -m "Release v2.0.0"
 
 # 2. Publish to npm registry
 npm publish --access public

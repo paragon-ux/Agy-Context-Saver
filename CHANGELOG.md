@@ -5,6 +5,18 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-11-14
+
+### Added
+- **CLI-First Transcript & Health Engine (`lib/transcript-core.mjs`, `bin/agy-context.mjs`)**: Extracted the streaming JSONL transcript engine into `lib/transcript-core.mjs` and exposed `agy-context` (`bin/agy-context.mjs`) with `transcript health|read|query|step` and `status|setup|uninstall|restore-backups` subcommands, $O(1)$ `CircularRingBuffer` bounded `lastTurns: 0` streaming, `mode: "auto"` full-log dereferencing for truncated search misses, structured `error` role telemetry, active swarm conversation disambiguation, and `fs.realpathSync` containment checks.
+- **RTK `>= 1.1.0` Contract Tests & Transcript Test Suite**: Added `tests/test-transcript.mjs` and `tests/test-rtk-integration.mjs` (11 total automated suites in `npm test`).
+
+### Changed
+- **RTK `>= 1.1.0` Native Hook Delegation (`scripts/provision-rtk.mjs`, `scripts/execution-guard-hook.mjs`)**: Upgraded minimum RTK version to `1.1.0`, delegated shell command rewriting to `rtk hook antigravity`, guarded absent `rg` and lossy implicit `wc`/`ls`/`diff` rewrites, removed legacy bespoke rewrite caches and `bash -c` regex wrappers, and applied `WaitMsBeforeAsync: 10000` only when `!isDaemon && waitMs === undefined`.
+- **Antigravity 2.0 Hook Policy & Shell Segment Isolation (`hooks.json`, `scripts/execution-guard-hook.mjs`)**: Standardized on single hook key `agy-context-saver` with relative CWD-safe `node ./scripts/execution-guard-hook.mjs`, added `edit_file` and `write_file` (`args.Path`) to `GOVERNED_TOOLS` and `LH-09` benchmark protection, applied `args.Path` Safe Harbor + Hybrid Slice symmetrically across `read_file` and `view_file`, and enforced segment/quote/heredoc-aware parsing with strict unchained exemption for `rtk read <spillover>` and `agy-context transcript ...`.
+- **Default MCP Retirement (`scripts/install-register.mjs`, `mcp/index.js`)**: Retired default `mcp_config.json` registration, swept legacy `agy-context-saver*` MCP entries and duplicate `~/.gemini/antigravity/mcp/agy-context-saver*` schema folders during `setup`/`uninstall`, pruned global `hooks.json` duplicates, installed `~/.gemini/antigravity/bin/agy-context` shims, and kept `mcp/index.js` only as a thin deprecated compatibility wrapper.
+- **Documentation & Governance Sync (`rules/AGENTS.md`, `skills/context-governance/SKILL.md`, `README.md`, `plugin.json`)**: Updated rules, skills, and README to Antigravity 2.0 `read_file` / `edit_file` / `write_file` tools and `agy-context` CLI commands, removing `waymark_ask` and `view_file` ghost instructions.
+
 ## [1.8.1] - 2026-10-16
 
 ### Added

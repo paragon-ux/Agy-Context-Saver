@@ -9,17 +9,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const binDir = path.join(repoRoot, "bin");
 
-export const RTK_VERSION = "v0.51.0";
-export const MIN_COMPATIBLE_RTK_VERSION = "0.50.0";
-export const MAX_COMPATIBLE_RTK_VERSION = "0.52.0";
+export const RTK_VERSION = "v1.1.0";
+export const MIN_RTK_VERSION = "1.1.0";
+export const MIN_COMPATIBLE_RTK_VERSION = MIN_RTK_VERSION;
 
-export const RTK_CHECKSUMS = {
-  "rtk-x86_64-pc-windows-msvc.zip": "1623e9b45d28b15122d69e7314776e1123a804224885ce07e7182fb40080f05c",
-  "rtk-aarch64-apple-darwin.tar.gz": "8817d8b71afc02ac8bf06eb24bcc41c306592ab735b68e8fee9db1ba0de7cb59",
-  "rtk-x86_64-apple-darwin.tar.gz": "bd39c8153f4147358360c7dc51665a8131cc9ee16f81f69a9402ffa500be3cc2",
-  "rtk-x86_64-unknown-linux-musl.tar.gz": "5028d3b19a8f0990d30fec9fbb07e32782bc5698e618fb1861aad8a9ccba4eb5",
-  "rtk-aarch64-unknown-linux-gnu.tar.gz": "8d6d1aad9e69b42481eda7039507d1f7ee93698f87713cecd873d287c1931632"
-};
+// Pinned SHA-256 checksums per release asset. Empty until verified v1.1.0 hashes are pinned;
+// ensureRtkInstalled fails closed with manual install instructions when an asset hash is absent.
+export const RTK_CHECKSUMS = {};
 
 export function isCompatibleRtkVersion(versionStr) {
   if (!versionStr || typeof versionStr !== "string") return false;
@@ -27,8 +23,7 @@ export function isCompatibleRtkVersion(versionStr) {
   if (!match) return false;
   const major = parseInt(match[1], 10);
   const minor = parseInt(match[2], 10);
-  // Compatible if 0.50.x or 0.51.x (>= 0.50.0 and < 0.52.0)
-  return major === 0 && (minor === 50 || minor === 51);
+  return major > 1 || (major === 1 && minor >= 1);
 }
 
 export function getRtkPlatformAsset() {
@@ -59,6 +54,17 @@ export function findExistingRtk(options = {}) {
   const pluginBinDir = path.join(profileHome, ".gemini", "config", "plugins", "agy-context-saver", "bin");
   const candidateDirs = [binDir, pluginBinDir];
 
+  // Check PATH first so a system rtk >= 1.1.0 is preferred over bundled binaries
+  try {
+    const out = execSync("rtk --version", { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (isCompatibleRtkVersion(out)) {
+      return { path: "rtk", version: out, isLocal: false };
+    }
+    if (!options.silent) {
+      console.warn(`[WARN] System RTK version '${out}' is below minimum supported version >=${MIN_RTK_VERSION}. Local or manual ${RTK_VERSION} installation is required.`);
+    }
+  } catch {}
+
   for (const dir of candidateDirs) {
     for (const exeName of names) {
       const localExe = path.join(dir, exeName);
@@ -72,18 +78,6 @@ export function findExistingRtk(options = {}) {
       }
     }
   }
-
-  // Check PATH
-  try {
-    const out = execSync("rtk --version", { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
-    if (isCompatibleRtkVersion(out)) {
-      return { path: "rtk", version: out, isLocal: false };
-    } else {
-      if (!options.silent) {
-        console.warn(`[WARN] System RTK version '${out}' is outside supported range [>=${MIN_COMPATIBLE_RTK_VERSION} <${MAX_COMPATIBLE_RTK_VERSION}]. Local pinned ${RTK_VERSION} will be required.`);
-      }
-    }
-  } catch {}
 
   return null;
 }
@@ -102,6 +96,19 @@ export async function ensureRtkInstalled(options = {}) {
     throw new Error(`Unsupported platform/architecture for prebuilt RTK: ${os.platform()} ${os.arch()}`);
   }
 
+  // Fail closed when the target release asset checksum is unpinned/missing instead of trusting stale hashes
+  const expectedHash = RTK_CHECKSUMS[assetInfo.asset];
+  if (!expectedHash) {
+    throw new Error(
+      `Integrity error: No pinned SHA-256 checksum configured for RTK ${RTK_VERSION} asset '${assetInfo.asset}'.\n` +
+      `Automated download aborted (fail-closed). Please install RTK >= ${MIN_RTK_VERSION} manually and ensure 'rtk' is on your PATH:\n` +
+      `  - macOS (Homebrew): brew install rtk\n` +
+      `  - Cargo:            cargo install --locked rtk\n` +
+      `  - Official script:  curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh\n` +
+      `  - GitHub Releases:  https://github.com/rtk-ai/rtk/releases/tag/${RTK_VERSION}`
+    );
+  }
+
   if (!fs.existsSync(binDir)) {
     fs.mkdirSync(binDir, { recursive: true });
   }
@@ -118,10 +125,6 @@ export async function ensureRtkInstalled(options = {}) {
   const buffer = Buffer.from(await response.arrayBuffer());
 
   // Fail-closed SHA-256 verification before writing archive to disk or extracting
-  const expectedHash = RTK_CHECKSUMS[assetInfo.asset];
-  if (!expectedHash) {
-    throw new Error(`Integrity error: No pinned SHA-256 checksum found for asset '${assetInfo.asset}'`);
-  }
   const actualHash = crypto.createHash("sha256").update(buffer).digest("hex");
   if (actualHash !== expectedHash) {
     throw new Error(

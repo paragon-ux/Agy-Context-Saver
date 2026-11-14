@@ -20,9 +20,10 @@ export function prependToPath(dir, env = process.env) {
 }
 
 /**
- * Creates a deterministic cross-platform RTK executable shim in `targetDir` reporting `version`.
+ * Creates a deterministic cross-platform RTK (>= 1.1.0) executable shim in `targetDir`.
+ * Supports `--version`, `hook antigravity`, `rewrite`, `read`, `grep`, and `git`.
  */
-export function createRtkShim(targetDir, version = "0.51.0") {
+export function createRtkShim(targetDir, version = "1.1.0") {
   fs.mkdirSync(targetDir, { recursive: true });
   const shimJsPath = path.join(targetDir, "rtk-shim-runner.mjs");
   const shimCode = `#!/usr/bin/env node
@@ -32,35 +33,83 @@ import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
 const sub = args[0] || "";
 
+function rewriteSingleSegment(seg) {
+  const t = seg.trim();
+  if (!t) return t;
+  const envMatch = t.match(/^((?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\\s]+)\\s+)|(?:env(?:\\s+-[A-Za-z]+)*(?:\\s+[A-Za-z_][A-Za-z0-9_]*=[^\\s]+)*\\s+))+)/i);
+  const envPrefix = envMatch ? envMatch[1] : "";
+  const body = envPrefix ? t.slice(envPrefix.length).trim() : t;
+  if (!body) return t;
+  if (/^(?:["']?[^\\s"']*[/\\\\])?rtk(?:\\.exe|\\.cmd|\\.bat)?["']?\\s+/i.test(body)) return t;
+  let m = body.match(/^(?:cat|type|get-content)\\s+([\\s\\S]+)$/i);
+  if (m) return envPrefix + "rtk read " + m[1].trim();
+  m = body.match(/^head\\s+-n\\s+(\\d+)\\s+([\\s\\S]+)$/i);
+  if (m) return envPrefix + "rtk read " + m[2].trim() + " --head-lines " + m[1];
+  m = body.match(/^(?:rg|grep|select-string)\\s+([\\s\\S]+)$/i);
+  if (m) return envPrefix + (/^rg\\b/i.test(body) ? "rtk rg " : "rtk grep ") + m[1].trim();
+  if (/^(?:git|pytest|cargo|vitest|jest|tsc|eslint|ruff|find|ls|wc|diff)\\b/i.test(body) || /^npm\\s+(?:test|run\\s+test)\\b/i.test(body)) {
+    return envPrefix + "rtk " + body;
+  }
+  return t;
+}
+
+function rewriteCompound(cmd) {
+  const wrapMatch = cmd.trim().match(/^(bash\\s+-c\\s+)(["'])([\\s\\S]*)\\2$/i);
+  if (wrapMatch) {
+    const inner = rewriteCompound(wrapMatch[3]);
+    return inner === wrapMatch[3] ? cmd : wrapMatch[1] + wrapMatch[2] + inner + wrapMatch[2];
+  }
+  const parts = cmd.split(/(\\s*(?:&&|\\|\\||;)\\s*)/);
+  let changed = false;
+  const out = parts.map((p, idx) => {
+    if (idx % 2 === 1) return p;
+    const rw = rewriteSingleSegment(p);
+    if (rw !== p.trim()) changed = true;
+    return rw;
+  }).join("");
+  return changed ? out : cmd;
+}
+
 if (sub === "--version" || sub === "-V" || sub === "version") {
   process.stdout.write("rtk ${version}\\n");
+  process.exit(0);
+}
+
+if (sub === "hook" && args[1] === "antigravity") {
+  let raw = "";
+  try { raw = fs.readFileSync(0, "utf-8"); } catch {}
+  let payload = {};
+  try { payload = JSON.parse(raw || "{}"); } catch {}
+  const toolCall = payload.toolCall || {};
+  const name = String(toolCall.name || "").toLowerCase();
+  const cmd = String(toolCall.args?.CommandLine || toolCall.args?.command || "");
+  if (name === "run_command" && cmd.trim()) {
+    const rewritten = rewriteCompound(cmd);
+    if (rewritten !== cmd) {
+      process.stdout.write(JSON.stringify({
+        decision: "allow",
+        overwrite: { CommandLine: rewritten }
+      }) + "\\n");
+      process.exit(0);
+    }
+  }
+  process.stdout.write('{"decision":"allow"}\\n');
   process.exit(0);
 }
 
 if (sub === "rewrite") {
   const cmd = args.slice(1).join(" ").trim();
   if (!cmd) process.exit(1);
-  const catMatch = cmd.match(/^(?:cat|head|tail|type|get-content)\\s+(.+)$/i);
-  if (catMatch) {
-    process.stdout.write(\`rtk read \${catMatch[1].trim()}\\n\`);
-    process.exit(0);
-  }
-  const grepMatch = cmd.match(/^(?:grep|rg|select-string)\\s+(.+)$/i);
-  if (grepMatch) {
-    process.stdout.write(\`rtk rg \${grepMatch[1].trim()}\\n\`);
-    process.exit(0);
-  }
-  if (/^(?:git|pytest|cargo|vitest|jest|tsc|eslint|ruff|find|ls)\\b/i.test(cmd) || /^npm\\s+(?:test|run\\s+test)\\b/i.test(cmd)) {
-    process.stdout.write(\`rtk \${cmd}\\n\`);
-    process.exit(0);
-  }
-  process.exit(1);
+  const rewritten = rewriteCompound(cmd);
+  if (rewritten === cmd) process.exit(1);
+  process.stdout.write(rewritten + "\\n");
+  process.exit(0);
 }
 
 if (sub === "read") {
   const rest = args.slice(1);
   const isAggressive = rest.includes("aggressive") || rest.includes("--aggressive");
-  const target = rest.find((a, idx) => !a.startsWith("-") && rest[idx - 1] !== "--level" && rest[idx - 1] !== "-l");
+  const target = rest.find((a, idx) => !a.startsWith("-") && rest[idx - 1] !== "--level" && rest[idx - 1] !== "-l" && rest[idx - 1] !== "--head-lines" && rest[idx - 1] !== "--tail-lines");
   if (!target || !fs.existsSync(target)) {
     process.stderr.write(\`File not found: \${target}\\n\`);
     process.exit(1);
@@ -101,7 +150,7 @@ process.exit(0);
 }
 
 /**
- * Seeds the canonical synthetic conversation fixture used across MCP and E2E tests.
+ * Seeds the canonical synthetic conversation fixture used across transcript and E2E tests.
  */
 export function seedHermeticConversationFixture(profileDir, convId = HERMETIC_CONV_ID) {
   const logsDir = path.join(profileDir, ".gemini", "antigravity", "brain", convId, ".system_generated", "logs");
@@ -125,15 +174,15 @@ export function seedHermeticConversationFixture(profileDir, convId = HERMETIC_CO
     {
       step_index: 3,
       type: "USER_INPUT",
-      content: "Step 3 Content: Confirm that check_context_health and query_transcript handle streaming JSONL cleanly.",
+      content: "Step 3 Content: Confirm that agy-context transcript health and query handle streaming JSONL cleanly.",
       created_at: "2026-10-12T12:01:00Z"
     },
     {
       step_index: 4,
       type: "PLANNER_RESPONSE",
-      thinking: "Verifying streaming readline reader and surgical stepIndex extraction.",
+      thinking: "Verifying streaming readline reader and surgical step extraction.",
       content: "Step 4 Content: Verified streaming JSONL reader and anti-overfitting safeguards with zero regressions.",
-      tool_calls: [{ name: "check_context_health", args: {} }],
+      tool_calls: [{ name: "read_file", args: { Path: "scripts/execution-guard-hook.mjs", StartLine: 1, EndLine: 50 } }],
       created_at: "2026-10-12T12:01:05Z"
     },
     {
@@ -181,29 +230,27 @@ export async function setupHermeticTestEnv(options = {}) {
   // Seed synthetic historical conversation fixture
   seedHermeticConversationFixture(profileDir);
 
-  // Ensure a compatible RTK binary or deterministic shim is on PATH
-  const { findExistingRtk } = await import("../../scripts/provision-rtk.mjs");
-  let rtkInfo = findExistingRtk({ silent: true });
-  if (!rtkInfo) {
+  if (options.forceShim) {
     const shimDir = path.join(profileDir, "rtk-shim-bin");
-    createRtkShim(shimDir, "0.51.0");
+    createRtkShim(shimDir, options.shimVersion || "1.1.0");
     prependToPath(shimDir);
-    rtkInfo = findExistingRtk({ silent: true });
-  } else if (rtkInfo.isLocal && rtkInfo.path) {
-    prependToPath(path.dirname(rtkInfo.path));
+  } else {
+    const { findExistingRtk } = await import("../../scripts/provision-rtk.mjs");
+    let rtkInfo = findExistingRtk({ silent: true });
+    if (!rtkInfo) {
+      const shimDir = path.join(profileDir, "rtk-shim-bin");
+      createRtkShim(shimDir, "1.1.0");
+      prependToPath(shimDir);
+      rtkInfo = findExistingRtk({ silent: true });
+    } else if (rtkInfo.isLocal && rtkInfo.path) {
+      prependToPath(path.dirname(rtkInfo.path));
+    }
   }
-
-  // Clear rewrite cache so hook picks up current PATH & profileDir
-  const { getStateDir } = await import("../../scripts/state-dir.mjs");
-  const rewriteCacheFile = path.join(getStateDir(), "agy-rtk-rewrite-cache.json");
-  try {
-    if (fs.existsSync(rewriteCacheFile)) fs.unlinkSync(rewriteCacheFile);
-  } catch {}
 
   if (options.installProfile !== false) {
     const configDir = path.join(profileDir, ".gemini", "config");
     fs.mkdirSync(configDir, { recursive: true });
-    // Seed baseline foreign entries so .bak backup creation and foreign preservation are exercised
+    // Seed baseline foreign entries so preservation is exercised
     fs.writeFileSync(
       path.join(configDir, "hooks.json"),
       JSON.stringify({ "waymark-continuity": { PreToolUse: [] } }, null, 2),

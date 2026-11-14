@@ -8,18 +8,17 @@ import { setupHermeticTestEnv, createRtkShim, prependToPath } from "./helpers/he
 import { getStateDir } from "../scripts/state-dir.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const hookScript = path.resolve(__dirname, "../scripts/execution-guard-hook.mjs");
-const hermetic = await setupHermeticTestEnv({ installProfile: false });
-process.env.AGY_FORCE_WAYMARK = "1";
-// The hook keeps its state in the per-user state folder (rooted in the hermetic profile), never in os.tmpdir()
+const repoRoot = path.resolve(__dirname, "..");
+const hookScript = path.resolve(repoRoot, "scripts/execution-guard-hook.mjs");
+const hooksJsonFile = path.resolve(repoRoot, "hooks.json");
+
+const hermetic = await setupHermeticTestEnv({ installProfile: false, forceShim: true, shimVersion: "1.1.0" });
 const stateDir = getStateDir();
 const stateFile = path.join(stateDir, "agy-session-governance-state.json");
 
 function resetState() {
   try {
     if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
-    const rewriteCache = path.join(stateDir, "agy-rtk-rewrite-cache.json");
-    if (fs.existsSync(rewriteCache)) fs.unlinkSync(rewriteCache);
     for (const f of fs.existsSync(stateDir) ? fs.readdirSync(stateDir) : []) {
       if (f.startsWith("agy-session-") && f.endsWith(".json")) {
         try { fs.unlinkSync(path.join(stateDir, f)); } catch {}
@@ -38,665 +37,378 @@ function runHook(payload, customEnv = process.env) {
   return JSON.parse(result.stdout.trim());
 }
 
-console.log("Running Agy-Context-Saver Closed Execution Governance Hook Tests...\n");
+console.log("Running Agy-Context-Saver v2.0.0 PreToolUse Hook Governance Tests...\n");
 resetState();
 
 // ============================================================================
-// GROUP A: RTK Integration & Command Rewriting (LH-01)
+// GROUP A: hooks.json Schema & Portability (ACS-HOOK-14, ACS-HOOK-13)
 // ============================================================================
-console.log("--- Group A: RTK Integration & Command Rewriting ---");
-
-// 1. run_command: optimizable command rewritten to rtk
+console.log("--- Group A: hooks.json Schema & Portability ---");
 {
-  const out = runHook({
+  const hooksCfg = JSON.parse(fs.readFileSync(hooksJsonFile, "utf-8"));
+  assert.ok(hooksCfg["agy-context-saver"], "Top-level hook key must be 'agy-context-saver'");
+  assert.equal(hooksCfg["execution-guard"], undefined, "Legacy 'execution-guard' key must not exist");
+  const entry = hooksCfg["agy-context-saver"].PreToolUse[0];
+  const cmd = entry.hooks[0].command;
+  assert.equal(cmd.includes("ANTIGRAVITY_PLUGIN_ROOT"), false, "Must NOT use unexpanded ANTIGRAVITY_PLUGIN_ROOT");
+  assert.match(cmd, /execution-guard-hook\.mjs/);
+  for (const t of ["read_file", "edit_file", "write_file", "run_command", "manage_task", "schedule"]) {
+    assert.ok(entry.matcher.includes(t), `Matcher must include ${t}`);
+  }
+  console.log("✓ hooks.json uses unified 'agy-context-saver' key, relative cwd-safe script path, and 2.0 tool matcher");
+}
+
+// ============================================================================
+// GROUP B: RTK >= 1.1.0 Delegation & Edge-Case Guards (ACS-HOOK-05..09, 15)
+// ============================================================================
+console.log("\n--- Group B: RTK >= 1.1.0 Delegation & Edge-Case Guards ---");
+
+// B.1: run_command delegates optimizable command and sets WaitMsBeforeAsync=10000 ONLY when unset (ACS-HOOK-05)
+{
+  const outUnset = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: "git status" } }
+  });
+  assert.equal(outUnset.decision, "allow");
+  assert.equal(outUnset.overwrite?.CommandLine, "rtk git status");
+  assert.equal(outUnset.overwrite?.WaitMsBeforeAsync, 10000, "Must apply default 10000ms when unset");
+
+  const outExplicit = runHook({
     toolCall: { name: "run_command", args: { CommandLine: "git status", WaitMsBeforeAsync: 2000 } }
   });
-  assert.equal(out.decision, "allow");
-  assert.equal(out.overwrite?.CommandLine, "rtk git status", "Must rewrite 'git status' to 'rtk git status'");
-  assert.equal(out.overwrite?.WaitMsBeforeAsync, 10000, "Must upgrade WaitMsBeforeAsync to 10000");
-  console.log("✓ run_command('git status') transparently rewritten to 'rtk git status'");
+  assert.equal(outExplicit.decision, "allow");
+  assert.equal(outExplicit.overwrite?.CommandLine, "rtk git status");
+  assert.equal(outExplicit.overwrite?.WaitMsBeforeAsync, undefined, "Must preserve caller explicit WaitMsBeforeAsync");
+
+  const outDaemon = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: "node server.js", IsDaemon: true } }
+  });
+  assert.equal(outDaemon.decision, "allow");
+  assert.equal(outDaemon.overwrite?.WaitMsBeforeAsync, undefined, "Daemon commands must not force WaitMsBeforeAsync");
+  console.log("✓ WaitMsBeforeAsync applied only when !isDaemon && waitMs === undefined (ACS-HOOK-05)");
 }
 
-// 1b. run_command: bare pytest rewrites to rtk pytest with native semantics (LH-11)
+// B.2: Compound chains & bash -c wrappers handled cleanly via `rtk hook antigravity` (ACS-HOOK-06, 07)
 {
-  const out = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: "pytest", WaitMsBeforeAsync: 2000 } }
+  const outChain = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: "git status && cat package.json", WaitMsBeforeAsync: 5000 } }
   });
-  assert.equal(out.decision, "allow");
-  assert.equal(out.overwrite?.CommandLine, "rtk pytest", "Bare pytest rewrites natively without forced -x");
-  console.log("✓ run_command('pytest') rewrites to 'rtk pytest' preserving native semantics");
+  assert.equal(outChain.decision, "allow");
+  assert.equal(outChain.overwrite?.CommandLine, "rtk git status && rtk read package.json");
+
+  const outWrap = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: "bash -c 'git status && cat package.json'", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(outWrap.decision, "allow");
+  assert.equal(outWrap.overwrite?.CommandLine, "bash -c 'rtk git status && rtk read package.json'");
+  console.log("✓ Compound chains and bash -c wrappers rewrite via rtk hook antigravity without bespoke cache/wrapper bugs");
 }
 
-// 1c. run_command: opt-in fail-fast flags (-x) are preserved cleanly (LH-11)
+// B.3: Lossy rtk wc / rtk ls / rtk diff rewrites reverted back to raw (ACS-HOOK-09)
 {
-  const out = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: "pytest -x", WaitMsBeforeAsync: 2000 } }
-  });
-  assert.equal(out.decision, "allow");
-  assert.equal(out.overwrite?.CommandLine, "rtk pytest -x", "Opt-in -x flag must be preserved");
-  console.log("✓ run_command('pytest -x') preserves opt-in fail-fast flag");
-}
-
-// 2. run_command: already prefixed with rtk is preserved
-{
-  const out = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: "rtk read src/index.js", WaitMsBeforeAsync: 5000 } }
-  });
-  assert.equal(out.decision, "allow");
-  assert.equal(out.overwrite?.CommandLine, undefined, "CommandLine must not be double-prefixed");
-  assert.equal(out.overwrite?.WaitMsBeforeAsync, 10000);
-  console.log("✓ run_command with existing 'rtk ' prefix is preserved without duplicate wrapping");
-}
-
-// 3. run_command: unsupported command falls back gracefully
-{
-  const out = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: "custom_proprietary_tool --arg1", WaitMsBeforeAsync: 500 } }
-  });
-  assert.equal(out.decision, "allow");
-  assert.equal(out.overwrite?.CommandLine, undefined, "Unsupported command must not be rewritten");
-  assert.equal(out.overwrite?.WaitMsBeforeAsync, 10000);
-  console.log("✓ run_command with unsupported command falls back gracefully to raw command");
-}
-
-// 3a. run_command: fast-path shell builtin bypass (node, powershell, dir)
-{
-  const outNode = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: "node -e 'console.log(1)'", WaitMsBeforeAsync: 1000 } }
-  });
-  assert.equal(outNode.decision, "allow");
-  assert.equal(outNode.overwrite?.CommandLine, undefined, "Node command must not be rewritten");
-  assert.equal(outNode.overwrite?.WaitMsBeforeAsync, 10000);
-
-  const outPs = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: "powershell Get-Process", WaitMsBeforeAsync: 1000 } }
-  });
-  assert.equal(outPs.decision, "allow");
-  assert.equal(outPs.overwrite?.CommandLine, undefined, "PowerShell command must not be rewritten");
-
-  console.log("✓ run_command fast-path bypasses non-rewritable shell builtins and utilities");
-}
-
-// 3b. run_command: shell wrapper unwrapping (cmd /c, powershell -Command) (LH-01-B)
-{
-  const outCmd = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: 'cmd /c "git status"', WaitMsBeforeAsync: 1000 } }
-  });
-  assert.equal(outCmd.decision, "allow");
-  assert.equal(outCmd.overwrite?.CommandLine, 'cmd /c "rtk git status"');
-
-  const outPs = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: 'powershell -Command "git status"', WaitMsBeforeAsync: 1000 } }
-  });
-  assert.equal(outPs.decision, "allow");
-  assert.equal(outPs.overwrite?.CommandLine, 'powershell -Command "rtk git status"');
-
-  console.log("✓ run_command unwraps shell wrappers (cmd /c, powershell -Command) for RTK (LH-01-B closed)");
-}
-
-// 3b. run_command: rewrite caching in the per-user state folder
-{
-  const cacheFile = path.join(stateDir, "agy-rtk-rewrite-cache.json");
-  assert.ok(stateDir.startsWith(process.env.AGY_TEST_PROFILE_DIR), "State folder must resolve inside the hermetic profile");
-  assert.ok(fs.existsSync(cacheFile), "Rewrite cache file should exist in the state folder after prior rewrites (hook and scripts/state-dir.mjs must agree)");
-  const cache = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
-  assert.equal(cache["git status"], "rtk git status", "Cache must store git status rewrite");
-
-  const outCached = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: "git status", WaitMsBeforeAsync: 1000 } }
-  });
-  assert.equal(outCached.decision, "allow");
-  assert.equal(outCached.overwrite?.CommandLine, "rtk git status");
-  console.log("✓ run_command uses LRU rewrite cache on repeat invocations");
-}
-
-// 3c. run_command: incompatible PATH rtk falls back to compatible local binary with explicit path (D-03, D-09)
-{
-  const tempFallbackRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agy-rtk-fallback-"));
-  try {
-    const badPathDir = path.join(tempFallbackRoot, "bad-path-bin");
-    const tempProfile = path.join(tempFallbackRoot, "profile");
-    const localPluginBin = path.join(tempProfile, ".gemini", "config", "plugins", "agy-context-saver", "bin");
-    createRtkShim(badPathDir, "0.60.0");
-    const localGoodBin = createRtkShim(localPluginBin, "0.51.0");
-    const expectedPrefix = localGoodBin.replace(/\\/g, "/");
-
-    const customEnv = { ...process.env, AGY_TEST_PROFILE_DIR: tempProfile };
-    prependToPath(badPathDir, customEnv);
-
-    const outFallback = runHook(
-      { toolCall: { name: "run_command", args: { CommandLine: "git status", WaitMsBeforeAsync: 1000 } } },
-      customEnv
-    );
-    assert.equal(outFallback.decision, "allow");
-    assert.ok(
-      outFallback.overwrite?.CommandLine?.includes(expectedPrefix),
-      `Expected rewritten command to use compatible local binary (${expectedPrefix}), got: ${outFallback.overwrite?.CommandLine}`
-    );
-    console.log("✓ run_command bypasses incompatible PATH rtk (0.60.0) and rewrites with compatible local binary path");
-  } finally {
-    resetState();
-    try { fs.rmSync(tempFallbackRoot, { recursive: true, force: true }); } catch {}
+  for (const cmd of ["wc -l package.json", "ls -la scripts/", "diff -u a.txt b.txt"]) {
+    const out = runHook({
+      toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(out.decision, "allow");
+    assert.equal(out.overwrite?.CommandLine, undefined, `Lossy rewrite for '${cmd}' must be reverted to raw`);
   }
+
+  // Explicit `rtk wc` typed by caller is preserved
+  const outExplicitRtk = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: "rtk wc -l package.json", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(outExplicitRtk.decision, "allow");
+  assert.equal(outExplicitRtk.overwrite?.CommandLine, undefined);
+  console.log("✓ Implicit rtk wc / rtk ls / rtk diff rewrites reverted; explicit rtk invocation preserved (ACS-HOOK-09)");
 }
 
-// 4. run_command: daemon process preserves custom wait window
+// B.4: Never emit `rtk rg` when `rg` binary is absent on PATH (ACS-HOOK-15)
 {
-  const out = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: "npm run dev", IsDaemon: true, WaitMsBeforeAsync: 500 } }
-  });
-  assert.equal(out.decision, "allow");
-  assert.equal(out.overwrite?.WaitMsBeforeAsync, undefined, "Daemon process wait must not be upgraded");
-  console.log("✓ run_command with IsDaemon: true preserves wait window");
-}
-
-// 5. run_command: missing CommandLine fails closed
-{
-  const out = runHook({
-    toolCall: { name: "run_command", args: {} }
-  });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Missing or empty CommandLine/);
-  console.log("✓ run_command with empty arguments fails closed (denied)");
-}
-
-// ============================================================================
-// GROUP B: Native Inspection Hard-Routing to RTK (LH-07)
-// ============================================================================
-console.log("\n--- Group B: Native Inspection Hard-Routing to RTK ---");
-
-// 6. Unbounded view_file on workspace source file: Waymark-first denial vs RTK fallback when Waymark unavailable
-{
-  const outWaymark = runHook({
-    toolCall: { name: "view_file", args: { AbsolutePath: "c:/project/src/session_engine.py" } }
-  });
-  assert.equal(outWaymark.decision, "deny");
-  assert.match(outWaymark.reason, /waymark_ask\(\.\.\., plain: true\)/);
-  assert.doesNotMatch(outWaymark.reason, /rtk read/);
-
-  const outFallback = runHook(
-    { toolCall: { name: "view_file", args: { AbsolutePath: "c:/project/src/session_engine.py" } } },
-    { ...process.env, AGY_FORCE_WAYMARK: "0" }
+  const emptyBinEnv = {
+    ...process.env,
+    PATH: `${path.dirname(process.execPath)}${path.delimiter}${path.join(hermetic.profileDir, "rtk-shim-bin")}`
+  };
+  const outSimpleRg = runHook(
+    { toolCall: { name: "run_command", args: { CommandLine: 'rg -n "HOOK_KEY" scripts/', WaitMsBeforeAsync: 5000 } } },
+    emptyBinEnv
   );
-  assert.equal(outFallback.decision, "deny");
-  assert.match(outFallback.reason, /run 'rtk read c:\/project\/src\/session_engine\.py' via run_command instead/);
-  console.log("✓ unbounded view_file recommends waymark_ask when Waymark installed, and RTK fallback when unavailable");
+  assert.equal(outSimpleRg.decision, "allow");
+  assert.match(outSimpleRg.overwrite?.CommandLine || "", /rtk grep/);
+  assert.equal((outSimpleRg.overwrite?.CommandLine || "").includes("rtk rg"), false, "Must NEVER emit rtk rg when rg is absent");
+
+  // Unsupported rg-only flag (-t js) falls back cleanly instead of emitting `rtk rg`
+  const outUnsupportedRg = runHook(
+    { toolCall: { name: "run_command", args: { CommandLine: 'rg -t js "HOOK_KEY" scripts/', WaitMsBeforeAsync: 5000 } } },
+    emptyBinEnv
+  );
+  assert.equal(outUnsupportedRg.decision, "allow");
+  assert.equal((outUnsupportedRg.overwrite?.CommandLine || "").includes("rtk rg"), false, "Must strip rtk prefix when rg-only flags cannot map to grep");
+
+  // Env-prefixed commands still guard absent `rg` and revert lossy `wc` (HOOK-REV-02)
+  const outEnvRg = runHook(
+    { toolCall: { name: "run_command", args: { CommandLine: 'FOO=1 rg -n "HOOK_KEY" scripts/', WaitMsBeforeAsync: 5000 } } },
+    emptyBinEnv
+  );
+  assert.equal(outEnvRg.decision, "allow");
+  assert.match(outEnvRg.overwrite?.CommandLine || "", /^FOO=1 rtk grep\b/);
+  assert.equal((outEnvRg.overwrite?.CommandLine || "").includes("rtk rg"), false, "Env-prefixed rg must never emit rtk rg when rg is absent");
+
+  const outEnvWc = runHook(
+    { toolCall: { name: "run_command", args: { CommandLine: "env FOO=1 wc -l package.json", WaitMsBeforeAsync: 5000 } } },
+    emptyBinEnv
+  );
+  assert.equal(outEnvWc.decision, "allow");
+  assert.equal(outEnvWc.overwrite?.CommandLine, undefined, "Env-prefixed implicit wc rewrite must revert cleanly");
+
+  const outExplicitEnvWc = runHook(
+    { toolCall: { name: "run_command", args: { CommandLine: "FOO=1 rtk wc -l package.json", WaitMsBeforeAsync: 5000 } } },
+    emptyBinEnv
+  );
+  assert.equal(outExplicitEnvWc.decision, "allow");
+  assert.equal(outExplicitEnvWc.overwrite?.CommandLine, undefined, "Explicit env-prefixed `FOO=1 rtk wc` must be preserved");
+
+  // grep_search hint when rg absent recommends rtk grep -rn, never rtk rg
+  const grepHint = runHook(
+    { toolCall: { name: "grep_search", args: { query: "HOOK_KEY", SearchPath: "scripts" } } },
+    emptyBinEnv
+  );
+  assert.equal(grepHint.decision, "deny");
+  assert.match(grepHint.reason, /rtk grep -rn/);
+  assert.equal(grepHint.reason.includes("rtk rg"), false);
+  console.log("✓ Absent host `rg` guarded across run_command & grep_search hints (ACS-HOOK-15)");
 }
 
-// 6b. view_file with bounded slice (1-150 lines) is ALLOWED
+// B.5: Legacy RTK < 1.1.0 is rejected (does not emit broken `rtk hook antigravity` calls)
 {
-  const out = runHook({
+  const oldBinDir = path.join(hermetic.profileDir, "old-rtk-bin");
+  createRtkShim(oldBinDir, "0.51.0");
+  const oldEnv = { ...process.env };
+  prependToPath(oldBinDir, oldEnv);
+  const out = runHook(
+    { toolCall: { name: "run_command", args: { CommandLine: "git status", WaitMsBeforeAsync: 5000 } } },
+    oldEnv
+  );
+  assert.equal(out.decision, "allow");
+  assert.equal(out.overwrite?.CommandLine, undefined, "Incompatible RTK < 1.1.0 must not be invoked");
+  console.log("✓ Legacy RTK < 1.1.0 cleanly rejected in favor of >= 1.1.0 requirement");
+}
+
+// ============================================================================
+// GROUP C: Antigravity 2.0 `read_file` Safe Harbor & Hybrid Slice (ACS-HOOK-01, 02, SWARM-02, 03)
+// ============================================================================
+console.log("\n--- Group C: read_file & view_file Safe Harbor + Hybrid Slice ---");
+
+// C.1: read_file uses `args.Path` cleanly (special files allowed without bounds, workspace files bounded)
+{
+  const skillRead = runHook({
+    toolCall: { name: "read_file", args: { Path: "/home/user/repo/.agents/skills/swarm/SKILL.md" } }
+  });
+  assert.equal(skillRead.decision, "allow", "read_file on SKILL.md via args.Path must pass Safe Harbor");
+
+  const brainRead = runHook({
+    toolCall: { name: "read_file", args: { Path: "/home/user/.gemini/antigravity/brain/conv-1/scratch/report.md" } }
+  });
+  assert.equal(brainRead.decision, "allow", "read_file on brain scratch artifact via args.Path must pass Safe Harbor");
+
+  const agentsRead = runHook({
+    toolCall: { name: "read_file", args: { Path: "/home/user/repo/AGENTS.md" } }
+  });
+  assert.equal(agentsRead.decision, "allow", "read_file on AGENTS.md must pass Safe Harbor");
+
+  const sliceRead = runHook({
+    toolCall: { name: "read_file", args: { Path: "/home/user/repo/src/app.js", StartLine: 1, EndLine: 150 } }
+  });
+  assert.equal(sliceRead.decision, "allow", "150-line bounded read_file via args.Path must be allowed");
+
+  const camelEndSlice = runHook({
+    toolCall: { name: "read_file", args: { Path: "/home/user/repo/src/app.js", startLine: 10, endLine: 40 } }
+  });
+  assert.equal(camelEndSlice.decision, "allow", "camelCase startLine/endLine read_file must be allowed");
+
+  const unboundedRead = runHook({
+    toolCall: { name: "read_file", args: { Path: "/home/user/repo/src/app.js" } }
+  });
+  assert.equal(unboundedRead.decision, "deny", "Unbounded workspace read_file must be denied");
+  assert.equal(unboundedRead.reason.includes("waymark_ask"), false, "Must NOT reference ghost waymark_ask tool");
+
+  const byteOffsetOnly = runHook({
+    toolCall: { name: "read_file", args: { Path: "/home/user/repo/src/app.js", ByteOffset: 46080 } }
+  });
+  assert.equal(byteOffsetOnly.decision, "deny", "ByteOffset-only unbounded read_file must be denied");
+
+  // Guarded full-file audit (<= 800 lines, <= 45 KiB) using explicit StartLine=1..TotalLines
+  const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-audit-file-"));
+  const smallFile = path.join(auditDir, "small.js");
+  fs.writeFileSync(smallFile, Array.from({ length: 220 }, (_, i) => `const x${i} = ${i};`).join("\n"), "utf-8");
+  const fullSmallAudit = runHook({
+    toolCall: { name: "read_file", args: { Path: smallFile, StartLine: 1, EndLine: 220 } }
+  });
+  assert.equal(fullSmallAudit.decision, "allow", "Explicit full-file read_file (<=800L & <=45KiB) allowed");
+
+  const partialOver = runHook({
+    toolCall: { name: "read_file", args: { Path: smallFile, StartLine: 1, EndLine: 180 } }
+  });
+  assert.equal(partialOver.decision, "deny", "Partial slice 1..180 of 220-line file must be denied");
+
+  // Step spillover bounded read_file <= 150 lines allowed, > 150 or unbounded denied
+  const boundedSpillover = runHook({
     toolCall: {
-      name: "view_file",
-      args: { AbsolutePath: "c:/project/src/session_engine.py", StartLine: 10, EndLine: 50 }
+      name: "read_file",
+      args: { Path: "/home/user/.gemini/antigravity/brain/conv-1/.system_generated/steps/42/output.txt", StartLine: 1, EndLine: 150 }
     }
   });
-  assert.equal(out.decision, "allow");
-  console.log("✓ view_file with bounded slice (StartLine: 10, EndLine: 50) is ALLOWED");
-}
+  assert.equal(boundedSpillover.decision, "allow", "Bounded read_file <=150 lines on step spillover allowed");
 
-// 6c. Hybrid Full-File & Partial Slice Policy (151-800 partial deny, <=800L & <=45KiB full-file allow, >800L or >45KiB deny)
-{
-  const tmpHybridDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-hybrid-slice-"));
-  try {
-    // Medium file: 300 lines, ~6 KiB (<= 800 lines and <= 45 KiB)
-    const mediumFile = path.join(tmpHybridDir, "medium_service.mjs");
-    fs.writeFileSync(mediumFile, Array.from({ length: 300 }, (_, i) => `export const line_${i + 1} = ${i + 1};`).join("\n") + "\n", "utf-8");
-
-    // Partial slice of 151-800 lines (e.g., 1..200 on a 300-line file, or 10..200) -> DENY
-    const outPartial1 = runHook({
-      toolCall: { name: "view_file", args: { AbsolutePath: mediumFile, StartLine: 1, EndLine: 200 } }
-    });
-    assert.equal(outPartial1.decision, "deny");
-    assert.match(outPartial1.reason, /Oversized partial file slice via 'view_file'/);
-
-    const outPartial2 = runHook({
-      toolCall: { name: "view_file", args: { AbsolutePath: mediumFile, StartLine: 50, EndLine: 300 } }
-    });
-    assert.equal(outPartial2.decision, "deny");
-    assert.match(outPartial2.reason, /Oversized partial file slice via 'view_file'/);
-
-    // Claiming EndLine larger than actual file (e.g., 1..500 on a 300-line file) -> DENY
-    const outFakeEnd = runHook({
-      toolCall: { name: "view_file", args: { AbsolutePath: mediumFile, StartLine: 1, EndLine: 500 } }
-    });
-    assert.equal(outFakeEnd.decision, "deny");
-    assert.match(outFakeEnd.reason, /Oversized partial file slice via 'view_file'/);
-
-    // Explicit full-file read (StartLine: 1, EndLine: 300) on 300-line, ~6 KiB file -> ALLOW
-    const outFullAllowed = runHook({
-      toolCall: { name: "view_file", args: { AbsolutePath: mediumFile, StartLine: 1, EndLine: 300 } }
-    });
-    assert.equal(outFullAllowed.decision, "allow");
-
-    // File exceeding 800 lines (850 lines, ~17 KiB) with explicit full-file bounds -> DENY
-    const longFile = path.join(tmpHybridDir, "long_service.mjs");
-    fs.writeFileSync(longFile, Array.from({ length: 850 }, (_, i) => `export const v_${i + 1} = ${i + 1};`).join("\n") + "\n", "utf-8");
-    const outLongDenied = runHook({
-      toolCall: { name: "view_file", args: { AbsolutePath: longFile, StartLine: 1, EndLine: 850 } }
-    });
-    assert.equal(outLongDenied.decision, "deny");
-    assert.match(outLongDenied.reason, /Explicit full-file read via 'view_file'.*exceeds the full-file audit ceiling/);
-
-    // File <= 800 lines (250 lines) but exceeding 45 KiB (~50 KiB) with explicit full-file bounds -> DENY
-    const heavyFile = path.join(tmpHybridDir, "heavy_bundle.mjs");
-    fs.writeFileSync(heavyFile, Array.from({ length: 250 }, () => "x".repeat(210)).join("\n") + "\n", "utf-8");
-    const outHeavyDenied = runHook({
-      toolCall: { name: "view_file", args: { AbsolutePath: heavyFile, StartLine: 1, EndLine: 250 } }
-    });
-    assert.equal(outHeavyDenied.decision, "deny");
-    assert.match(outHeavyDenied.reason, /Explicit full-file read via 'view_file'.*exceeds the full-file audit ceiling/);
-
-    console.log("✓ hybrid slice policy verified: 151-800 partial denied, explicit full-file <=800L & <=45KiB allowed, >800L or >45KiB denied");
-  } finally {
-    try { fs.rmSync(tmpHybridDir, { recursive: true, force: true }); } catch {}
-  }
-}
-
-// 6d. view_file with bounded slice or full-file bounds on .system_generated remains strictly denied by root
-{
-  const out = runHook({
+  const fakeSpillover = runHook({
     toolCall: {
-      name: "view_file",
-      args: {
-        AbsolutePath: "C:/Users/USER/.gemini/antigravity/brain/abc/.system_generated/logs/transcript.jsonl",
-        StartLine: 1,
-        EndLine: 10
+      name: "read_file",
+      args: { Path: "/home/user/.gemini/antigravity/brain/conv-1/.system_generated/steps/42/output_bak.txt", StartLine: 1, EndLine: 50 }
+    }
+  });
+  assert.equal(fakeSpillover.decision, "deny", "Non-output.txt spillover lookalike must be denied");
+
+  // Symmetrical `view_file` Safe Harbor, bounded slice, unbounded deny, and spillover deny (HOOK-REV-03)
+  assert.equal(
+    runHook({ toolCall: { name: "view_file", args: { AbsolutePath: "/home/user/repo/.agents/skills/swarm/SKILL.md" } } }).decision,
+    "allow",
+    "view_file on SKILL.md must pass Safe Harbor"
+  );
+  assert.equal(
+    runHook({ toolCall: { name: "view_file", args: { AbsolutePath: "/home/user/repo/src/app.js", StartLine: 1, EndLine: 150 } } }).decision,
+    "allow",
+    "view_file 150-line slice must be allowed"
+  );
+  assert.equal(
+    runHook({ toolCall: { name: "view_file", args: { AbsolutePath: "/home/user/repo/src/app.js" } } }).decision,
+    "deny",
+    "view_file unbounded read must be denied"
+  );
+  assert.equal(
+    runHook({
+      toolCall: {
+        name: "view_file",
+        args: { AbsolutePath: "/home/user/.gemini/antigravity/brain/conv-1/.system_generated/steps/42/output.txt", StartLine: 1, EndLine: 50 }
       }
-    }
-  });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Direct access to internal Antigravity execution state \(\.system_generated\)/);
-  console.log("✓ view_file with bounded slice on .system_generated remains STRICTLY DENIED");
-}
+    }).decision,
+    "deny",
+    "view_file on step spillover must stay denied (use read_file or rtk read)"
+  );
 
-// 7. read_file is hard-routed to rtk read
-{
-  const out = runHook({
-    toolCall: { name: "read_file", args: { targetFile: "c:/project/src/index.js" } }
-  });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Run 'rtk read c:\/project\/src\/index\.js' via run_command instead/);
-  console.log("✓ read_file hard-routed to 'rtk read'");
-}
-
-// 8. read_many_files is hard-routed to rtk read
-{
-  const out = runHook({
-    toolCall: { name: "read_many_files", args: { paths: ["a.js", "b.js"] } }
-  });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /read_many_files.*Run 'rtk read <file>'/);
-  console.log("✓ read_many_files hard-routed to 'rtk read'");
-}
-
-// 9. grep_search is hard-routed to rtk grep / rtk rg
-{
-  const out = runHook({
-    toolCall: { name: "grep_search", args: { query: "export function handleRequest" } }
-  });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Run '(?:rtk rg "export function handleRequest" \.|rtk grep "export function handleRequest")' via run_command instead/);
-  console.log("✓ grep_search hard-routed to 'rtk grep' / 'rtk rg'");
-}
-
-// 10. find_by_name is hard-routed to rtk find
-{
-  const out = runHook({
-    toolCall: { name: "find_by_name", args: { query: "*.py" } }
-  });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Run 'rtk find \*\.py' via run_command instead/);
-  console.log("✓ find_by_name hard-routed to 'rtk find'");
-}
-
-// 11. list_dir is hard-routed to rtk ls / rtk find
-{
-  const out = runHook({
-    toolCall: { name: "list_dir", args: { dirPath: "c:/project/tests" } }
-  });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Run '(?:rtk find c:\/project\/tests|rtk ls c:\/project\/tests)'/);
-  console.log("✓ list_dir hard-routed to 'rtk find' / 'rtk ls'");
+  fs.rmSync(auditDir, { recursive: true, force: true });
+  console.log("✓ Symmetrical read_file / view_file Safe Harbor, Hybrid Slice, and spillover bounds verified");
 }
 
 // ============================================================================
-// GROUP C: Protected Antigravity State vs Special Files (LH-02)
+// GROUP D: Quote/Heredoc Shell Parser & CLI Exemption (ACS-HOOK-03, 04, 16, SWARM-07, 08)
 // ============================================================================
-console.log("\n--- Group C: Protected Antigravity State vs Special Files ---");
-
-// 12. view_file on transcript.jsonl: HARD DENIAL
+console.log("\n--- Group D: Quote/Heredoc Shell Parser & agy-context CLI Exemption ---");
 {
-  const p = "C:/Users/USER/.gemini/antigravity/brain/sess-123/.system_generated/logs/transcript.jsonl";
-  const out = runHook({ toolCall: { name: "view_file", args: { AbsolutePath: p } } });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Direct access to internal Antigravity execution state \(\.system_generated\) is strictly prohibited/);
-  assert.match(out.reason, /read_transcript/);
-  console.log("✓ view_file on transcript.jsonl strictly denied by root");
-}
+  const brainDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain");
+  const validBrainTranscript = path.join(brainDir, "fcda194f-62d6-46aa-b545-b2de8fa5774e", ".system_generated", "logs", "transcript.jsonl");
 
-// 13. view_file on task-1521.log: HARD DENIAL (LH-02 permanently closed)
-{
-  const p = "C:/Users/USER/.gemini/antigravity/brain/sess-123/.system_generated/tasks/task-1521.log";
-  const out = runHook({ toolCall: { name: "view_file", args: { AbsolutePath: p } } });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /\.system_generated/);
-  assert.match(out.reason, /rely on native Reactive Wakeup/);
-  console.log("✓ view_file on task-1521.log strictly denied (LH-02 closed)");
-}
-
-// 13b. run_command: direct shell access to .system_generated is DENIED (LH-02-B)
-{
-  const outCat = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: "cat .system_generated/logs/transcript.jsonl" } }
+  // D.1: Heredoc body mentioning .system_generated prose is ALLOWED (not false-blocked)
+  const heredocCmd = `node - <<'EOF'\nCheck .system_generated/logs/transcript.jsonl rules in prompt text\nEOF`;
+  const outHeredoc = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: heredocCmd, WaitMsBeforeAsync: 5000 } }
   });
-  assert.equal(outCat.decision, "deny");
-  assert.match(outCat.reason, /Direct shell access to internal Antigravity execution state/);
+  assert.equal(outHeredoc.decision, "allow", "Heredoc prose containing .system_generated must NOT be false-blocked");
 
-  const outGc = runHook({
-    toolCall: { name: "run_command", args: { CommandLine: 'Get-Content "C:/brain/.system_generated/tasks/task-1.log"' } }
+  // D.2: Echo/printf mentioning .system_generated (without redirecting into it) is ALLOWED
+  const outEcho = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: 'echo "Never touch .system_generated directly"', WaitMsBeforeAsync: 5000 } }
   });
-  assert.equal(outGc.decision, "deny");
-  assert.match(outGc.reason, /Direct shell access to internal Antigravity execution state/);
+  assert.equal(outEcho.decision, "allow", "echo prose containing .system_generated must be allowed");
 
-  console.log("✓ run_command direct shell access to .system_generated denied (LH-02-B closed)");
-}
-
-// 14. view_file on arbitrary future .system_generated file: HARD DENIAL
-{
-  const p = "C:/Users/USER/.gemini/antigravity/brain/sess-123/.system_generated/scheduler/future_state.json";
-  const out = runHook({ toolCall: { name: "view_file", args: { AbsolutePath: p } } });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /\.system_generated/);
-  console.log("✓ view_file on future internal .system_generated file denied by root");
-}
-
-// 15. view_file on SKILL.md: ALLOWED (special file safe harbor)
-{
-  const p = "C:/Users/USER/.gemini/antigravity/builtin/skills/antigravity_guide/SKILL.md";
-  const out = runHook({ toolCall: { name: "view_file", args: { AbsolutePath: p } } });
-  assert.equal(out.decision, "allow");
-  console.log("✓ view_file on SKILL.md allowed under special file safe harbor");
-}
-
-// 16. view_file on brain markdown artifact: ALLOWED
-{
-  const p = "C:/Users/USER/.gemini/antigravity/brain/sess-123/implementation_report.md";
-  const out = runHook({ toolCall: { name: "view_file", args: { AbsolutePath: p } } });
-  assert.equal(out.decision, "allow");
-  console.log("✓ view_file on brain artifact allowed");
-}
-
-// 17. view_file on AGENTS.md rulebook: ALLOWED
-{
-  const p = "C:/Users/USER/Desktop/Frameworks/Agy-Context-Saver/rules/AGENTS.md";
-  const out = runHook({ toolCall: { name: "view_file", args: { AbsolutePath: p } } });
-  assert.equal(out.decision, "allow");
-  console.log("✓ view_file on AGENTS.md rulebook allowed");
-}
-
-// ============================================================================
-// GROUP D: Lifecycle Governance & Reactive Wakeup (LH-03, LH-04, LH-05, LH-06)
-// ============================================================================
-console.log("\n--- Group D: Lifecycle Governance & Reactive Wakeup ---");
-resetState();
-
-const convId = "conv-replay-lifecycle";
-
-// 18. manage_task kill & send_input: ALWAYS ALLOWED
-{
-  const k = runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "kill", TaskId: "t1" } } });
-  const s = runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "send_input", TaskId: "t1", Input: "y" } } });
-  assert.equal(k.decision, "allow");
-  assert.equal(s.decision, "allow");
-  console.log("✓ manage_task kill and send_input are always allowed");
-}
-
-// 19. manage_task status: initial check in session is allowed
-{
-  const out = runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-A" } } });
-  assert.equal(out.decision, "allow");
-  console.log("✓ manage_task initial status check in session allowed");
-}
-
-// 20. manage_task status: second check on same task is DENIED (proportional backoff)
-{
-  const out = runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-A" } } });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Proportional Backoff Active/);
-  assert.match(out.reason, /1 denial/);
-  console.log("✓ manage_task second check on same task denied under Proportional Backoff (1 denial)");
-}
-
-// 21. LH-06: Changing task ID does NOT reset session denial counter!
-{
-  const out = runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-B" } } });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /2 denials/);
-  console.log("✓ changing TaskId does NOT reset session ledger (LH-06 closed)");
-}
-
-// 22. LH-04: Adding debug/stuck/timeout keywords does NOT grant immunity!
-{
-  const out = runHook({
-    conversationId: convId,
-    toolCall: {
-      name: "manage_task",
-      args: { Action: "status", TaskId: "task-C", Reason: "debug hung and stuck process timeout investigation" }
-    }
+  // D.3: Search pattern containing `.system_generated` against non-internal `scripts/` is ALLOWED (ACS-SWARM-08)
+  const outGrepPattern = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: 'grep -rn ".system_generated" scripts/', WaitMsBeforeAsync: 5000 } }
   });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /3 denials/);
-  console.log("✓ debug/stuck/timeout keywords do NOT bypass governance (LH-04 closed)");
-}
+  assert.equal(outGrepPattern.decision, "allow", "grep searching for literal '.system_generated' in workspace scripts/ must be allowed");
 
-// 23. LH-03: Task watchdog timer shorter than required backoff (< 30s) is DENIED!
-{
-  const out = runHook({
-    conversationId: convId,
-    toolCall: {
-      name: "schedule",
-      args: { DurationSeconds: 15, Prompt: "Check on background task-1542", TimerCondition: "task-1542" }
-    }
+  // D.4: Direct shell access to .system_generated gives `agy-context transcript` CLI hint (ACS-HOOK-16)
+  const outCatTranscript = runHook({
+    toolCall: { name: "run_command", args: { CommandLine: `cat "${validBrainTranscript}"`, WaitMsBeforeAsync: 5000 } }
   });
-  assert.equal(out.decision, "deny");
-  assert.match(out.reason, /Task watchdog timer duration too short/);
-  assert.match(out.reason, /4 denials/);
-  console.log("✓ task watchdog timer < 30s is strictly denied (LH-03 closed)");
-}
+  assert.equal(outCatTranscript.decision, "deny");
+  assert.match(outCatTranscript.reason, /agy-context transcript/);
 
-// 24. Circuit Breaker Tier 3: 5th cumulative denial triggers force_ask!
-{
-  const out = runHook({
-    conversationId: convId,
-    toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-D" } }
-  });
-  assert.equal(out.decision, "force_ask");
-  assert.match(out.reason, /\[CIRCUIT BREAKER ACTIVATED\] Autonomous loop suspended/);
-  console.log("✓ 5th cumulative polling denial triggers force_ask autonomous loop suspension");
-}
-
-// 25. Standard non-polling user reminder is ALLOWED
-{
-  const out = runHook({
-    conversationId: "conv-user-reminder",
-    toolCall: {
-      name: "schedule",
-      args: { DurationSeconds: 600, Prompt: "Remind the user to stretch", TimerCondition: "never" }
-    }
-  });
-  assert.equal(out.decision, "allow");
-  console.log("✓ standard non-polling user reminder is allowed");
-}
-
-// 25b. Task watchdog timer meeting backoff requirement (>= 30s) is ALLOWED
-{
-  const out = runHook({
-    conversationId: "conv-watchdog-allowed",
-    toolCall: {
-      name: "schedule",
-      args: { DurationSeconds: 60, Prompt: "Check on background task-1542", TimerCondition: "task-1542" }
-    }
-  });
-  assert.equal(out.decision, "allow");
-  console.log("✓ task watchdog timer meeting backoff requirement (>= 30s) is allowed");
-}
-
-// ============================================================================
-// GROUP E: Benchmark Mutation Protection (LH-09)
-// ============================================================================
-console.log("\n--- Group E: Benchmark Mutation Protection ---");
-
-// 26. replace_file_content on evaluator requires explicit user approval
-{
-  const out = runHook({
-    toolCall: {
-      name: "replace_file_content",
-      args: { TargetFile: "c:/project/evaluators/eval_accuracy.py", TargetContent: "foo", ReplacementContent: "bar" }
-    }
-  });
-  assert.equal(out.decision, "force_ask");
-  assert.match(out.reason, /\[BENCHMARK MUTATION DETECTED\].*requires explicit user confirmation/);
-  console.log("✓ mutation of evaluator artifact triggers force_ask (LH-09 closed)");
-}
-
-// 27. write_to_file on prompt templates requires explicit user approval
-{
-  const out = runHook({
-    toolCall: {
-      name: "write_to_file",
-      args: { TargetFile: "c:/project/benchmarks/prompt_templates/eval_14_02.json", CodeContent: "{}" }
-    }
-  });
-  assert.equal(out.decision, "force_ask");
-  assert.match(out.reason, /BENCHMARK MUTATION DETECTED/);
-  console.log("✓ mutation of prompt template artifact triggers force_ask");
-}
-
-// 27b. run_command mutation of evaluator triggers force_ask (LH-09-B)
-{
-  const out = runHook({
+  // D.5: Strictly single unchained `agy-context transcript ...` is ALLOWED
+  const outCliQuery = runHook({
     toolCall: {
       name: "run_command",
-      args: { CommandLine: 'echo "score=1.0" > c:/project/evaluators/eval_accuracy.py' }
+      args: { CommandLine: `agy-context transcript query --id fcda194f-62d6-46aa-b545-b2de8fa5774e --query ".system_generated" --summary`, WaitMsBeforeAsync: 5000 }
     }
   });
-  assert.equal(out.decision, "force_ask");
-  assert.match(out.reason, /BENCHMARK MUTATION DETECTED/);
-  console.log("✓ shell command mutation of evaluator triggers force_ask (LH-09-B closed)");
-}
+  assert.equal(outCliQuery.decision, "allow");
 
-// 28. Normal workspace code edit is ALLOWED
-{
-  const out = runHook({
+  const outCliFileOk = runHook({
     toolCall: {
-      name: "replace_file_content",
-      args: { TargetFile: "c:/project/src/models/user.py", TargetContent: "foo", ReplacementContent: "bar" }
+      name: "run_command",
+      args: { CommandLine: `agy-context transcript read --file "${validBrainTranscript}"`, WaitMsBeforeAsync: 5000 }
     }
   });
-  assert.equal(out.decision, "allow");
-  console.log("✓ normal workspace source edit is allowed without interference");
+  assert.equal(outCliFileOk.decision, "allow");
+
+  // D.6: Chained/redirected/subshell `agy-context transcript` & unspaced redirects MUST be DENIED (HOOK-REV-01)
+  for (const dangerous of [
+    `agy-context transcript health --id abc && cat "${validBrainTranscript}"`,
+    `agy-context transcript read --id abc | head -n 5`,
+    `agy-context transcript read --file /etc/passwd`,
+    `agy-context transcript read --file "${brainDir}/../config/hooks.json"`,
+    `rtk read .system_generated/steps/1/output.txt && cat /etc/passwd`,
+    `echo "hi">.system_generated/logs/transcript.jsonl`,
+    `echo hi>>.system_generated/logs/transcript.jsonl`
+  ]) {
+    const outBypass = runHook({
+      toolCall: { name: "run_command", args: { CommandLine: dangerous, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(outBypass.decision, "deny", `Dangerous chained/escape command must be DENIED: ${dangerous}`);
+  }
+  console.log("✓ Heredoc/echo/pattern immunity and strict unchained agy-context CLI exemption verified");
 }
 
 // ============================================================================
-// GROUP F: Historical Escape Replay (Incident 609d4489-2e7f-44b0-8170-390ee67cad97)
+// GROUP E: Task Polling Backoff, Watchdog & Benchmark Protection (LH-03..09, ACS-HOOK-13)
 // ============================================================================
-console.log("\n--- Group F: Historical Escape Sequence Replay ---");
-resetState();
-const incidentConv = "conv-incident-609d4489";
-
-// Step 1: Model ran native run_command -> NOW transparently rewritten to RTK
-const s1 = runHook({
-  conversationId: incidentConv,
-  toolCall: { name: "run_command", args: { CommandLine: "pytest tests/test_bench.py" } }
-});
-assert.equal(s1.decision, "allow");
-assert.equal(s1.overwrite?.CommandLine, "rtk pytest tests/test_bench.py");
-console.log("  Replay Step 1: run_command('pytest') -> rewritten to 'rtk pytest'");
-
-// Step 2: Model polled status on task-1521 -> Allowed once, then locked
-const s2a = runHook({
-  conversationId: incidentConv,
-  toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-1521" } }
-});
-assert.equal(s2a.decision, "allow");
-const s2b = runHook({
-  conversationId: incidentConv,
-  toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-1521" } }
-});
-assert.equal(s2b.decision, "deny");
-console.log("  Replay Step 2: manage_task('task-1521') subsequent poll -> denied");
-
-// Step 3: Model tried to route-around by reading task-1521.log via view_file -> BLOCKED
-const s3 = runHook({
-  conversationId: incidentConv,
-  toolCall: {
-    name: "view_file",
-    args: { AbsolutePath: "C:/Users/USER/.gemini/antigravity/brain/conv-incident-609d4489/.system_generated/tasks/task-1521.log" }
+console.log("\n--- Group E: Task Polling Backoff, Watchdog & Benchmark Mutation Guard ---");
+{
+  resetState();
+  const convId = "conv-backoff-test";
+  // First status check allowed
+  assert.equal(runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "status", TaskId: "t1" } } }).decision, "allow");
+  // Immediate checks 1..4 denied, 5th hits force_ask circuit breaker
+  for (let i = 1; i <= 4; i++) {
+    const d = runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "status", TaskId: "t1" } } });
+    assert.equal(d.decision, "deny", `Premature poll #${i} must be deny`);
   }
-});
-assert.equal(s3.decision, "deny");
-console.log("  Replay Step 3: view_file on task-1521.log -> blocked by root guard");
+  const breaker = runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "status", TaskId: "t1" } } });
+  assert.equal(breaker.decision, "force_ask", "5th premature poll must trip force_ask circuit breaker");
 
-// Step 4: Model tried short watchdog timer (15s) to wait in foreground -> BLOCKED
-const s4 = runHook({
-  conversationId: incidentConv,
-  toolCall: {
-    name: "schedule",
-    args: { DurationSeconds: 15, Prompt: "Check on task-1542", TimerCondition: "task-1542" }
+  // kill and send_input always allowed immediately
+  assert.equal(runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "kill", TaskId: "t1" } } }).decision, "allow");
+
+  // Short schedule polling timer denied; non-polling reminder allowed
+  resetState();
+  assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 5, Prompt: "Check status of task-1", TimerCondition: "task-1" } } }).decision, "deny");
+  assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 10, Prompt: "Remind me about coffee" } } }).decision, "allow");
+
+  // LH-09 Benchmark protection on edit_file, write_file, relative paths, and shell redirection/rm
+  for (const mut of [
+    { name: "edit_file", args: { Path: "/repo/benchmarks/suite.json", Target: "a", Replacement: "b" } },
+    { name: "write_file", args: { Path: "evaluators/eval_score.py", Content: "print(1)" } },
+    { name: "replace_file_content", args: { TargetFile: "/repo/scoring/rubric.json" } },
+    { name: "run_command", args: { CommandLine: "echo '{}' > benchmarks/ground_truth.json", WaitMsBeforeAsync: 5000 } },
+    { name: "run_command", args: { CommandLine: "echo {}>benchmarks/ground_truth.json", WaitMsBeforeAsync: 5000 } }
+  ]) {
+    const res = runHook({ toolCall: mut });
+    assert.equal(res.decision, "force_ask", `LH-09 must guard ${mut.name} on benchmark artifact`);
   }
-});
-assert.equal(s4.decision, "deny");
-assert.match(s4.reason, /Task watchdog timer duration too short/);
-console.log("  Replay Step 4: short schedule timer on task (< 30s) -> blocked by backoff coordination");
+  const safeEdit = runHook({ toolCall: { name: "edit_file", args: { Path: "/repo/src/utils.js", Target: "a", Replacement: "b" } } });
+  assert.equal(safeEdit.decision, "allow");
+  console.log("✓ Backoff circuit breaker, schedule watchdog, and 2.0 edit_file/write_file LH-09 protection verified");
+}
 
-// Step 5: Model tried switching task IDs to task-1581 -> BLOCKED (session ledger)
-const s5 = runHook({
-  conversationId: incidentConv,
-  toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-1581" } }
-});
-assert.equal(s5.decision, "deny");
-console.log("  Replay Step 5: status poll on new task-1581 -> blocked by session ledger");
-
-// Step 6: Model added 'diagnose timeout' debug keywords -> BLOCKED
-const s6 = runHook({
-  conversationId: incidentConv,
-  toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-1587", Reason: "diagnose timeout" } }
-});
-assert.equal(s6.decision, "deny");
-console.log("  Replay Step 6: status poll with 'diagnose timeout' -> blocked");
-
-// Step 7: Model tried reading repository files 36x via unbounded view_file -> ROUTED TO WAYMARK + BOUNDED SLICE
-const s7 = runHook({
-  conversationId: incidentConv,
-  toolCall: { name: "view_file", args: { AbsolutePath: "C:/project/session_engine.py" } }
-});
-assert.equal(s7.decision, "deny");
-assert.match(s7.reason, /waymark_ask\(\.\.\., plain: true\)/);
-console.log("  Replay Step 7: unbounded view_file('session_engine.py') -> routed to 'waymark_ask' + bounded slice");
-
-// Step 8: Model tried mutating evaluator to overfit benchmark -> FORCE_ASK
-const s8 = runHook({
-  conversationId: incidentConv,
-  toolCall: {
-    name: "replace_file_content",
-    args: { TargetFile: "C:/project/evaluators/scoring.py", TargetContent: "x", ReplacementContent: "y" }
-  }
-});
-assert.equal(s8.decision, "force_ask");
-console.log("  Replay Step 8: benchmark mutation -> gated with force_ask");
-
-// Step 9: Normal code fix is ALLOWED
-const s9 = runHook({
-  conversationId: incidentConv,
-  toolCall: {
-    name: "replace_file_content",
-    args: { TargetFile: "C:/project/src/logic.py", TargetContent: "x", ReplacementContent: "y" }
-  }
-});
-assert.equal(s9.decision, "allow");
-console.log("  Replay Step 9: normal application code change -> allowed");
-
-resetState();
-console.log("\nAll 27 comprehensive closed-topology governance tests passed successfully!");
-process.exit(0);
+hermetic.cleanup();
+console.log("\n=================================================");
+console.log("ALL 2.0 PRETOOLUSE HOOK GOVERNANCE TESTS PASSED!");
+console.log("=================================================");

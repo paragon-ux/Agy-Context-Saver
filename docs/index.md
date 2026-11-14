@@ -1,6 +1,6 @@
 # Overview & Motivation
 
-**Agy-Context-Saver** is an open-source Model Context Protocol (MCP) server and lifecycle governor engineered specifically for **Google Antigravity** (`agy`), paired with **RTK (Rust Token Killer)** for transparent CLI output reduction.
+**Agy-Context-Saver** is a CLI-first transcript forensic engine and lifecycle governor engineered specifically for **Google Antigravity** (`agy`), paired with **RTK (Rust Token Killer >= 1.1.0)** for transparent command output reduction.
 
 It eliminates session degradation, memory leaks, and context window exhaustion caused by **background task busy-wait polling**, **terminal output bloat**, **native inspection bypasses**, and **raw transcript reading**.
 
@@ -12,7 +12,7 @@ Install and activate the governor across your Antigravity environment in seconds
 
 === "NPX (Recommended)"
     ```bash
-    npx agy-context-saver install
+    npx --package=agy-context-saver agy-context setup
     ```
 
 === "Local Setup"
@@ -22,15 +22,15 @@ Install and activate the governor across your Antigravity environment in seconds
 
 === "Audit Status"
     ```bash
-    npm run status
+    agy-context status
     ```
 
 !!! success "Enterprise Non-Destructive Guarantee"
     Installing `Agy-Context-Saver` is 100% non-destructive and zero-churn:
     - **Zero Runtime Dependencies**: Built entirely with native Node.js standard library; 0 external npm dependencies.
-    - **Foreign Hook & MCP Preservation**: Existing third-party hooks (e.g. `waymark-continuity`) and MCP servers (e.g. `waymark-engine`) are strictly preserved.
+    - **Foreign Hook & MCP Preservation**: Existing third-party hooks (e.g. `waymark-continuity`) and external MCP servers are strictly preserved, while legacy `agy-context-saver*` MCP schemas are cleanly swept.
     - **Automatic Atomic Backups**: Creates timestamped `.bak` configuration backups before any edit.
-    - **One-Command Rollback**: Clean uninstallation via `npx agy-context-saver uninstall` or `uninstall --restore-backups`.
+    - **One-Command Rollback**: Clean uninstallation via `agy-context uninstall` or `agy-context uninstall --restore-backups`.
 
 ---
 
@@ -74,15 +74,15 @@ When an agent initiates a shell command exceeding `WaitMsBeforeAsync` (~5 second
 - **The Solution**: RTK transparently intercepts and optimizes commands via PreToolUse hooks, collapsing passes and preserving failures.
 
 ### 3. The Native Inspection Bypass Trap
-- **The Problem**: Unbounded native file and search tools (`view_file` without slices, `grep_search`, `find_by_name`, `list_dir`) bypass RTK command optimization.
-- **The Solution**: Agy enforces bounded `view_file` slices (`StartLine` / `EndLine <= 150`, paired with `waymark_ask(..., plain: true)` across 23 languages) and routes directory/prose search and spillover reads to canonical RTK CLI interfaces (`rtk find`, `rtk rg`, `rtk grep`, `rtk read`).
+- **The Problem**: Unbounded native file and search tools (`read_file` without bounds, `grep_search`, `find_by_name`, `list_dir`) bypass RTK command optimization.
+- **The Solution**: Agy enforces bounded `read_file` slices (`StartLine` / `EndLine <= 150`, or explicit full-file audits $\le 800\text{L} / 45\text{ KiB}$) and routes directory/prose search and spillover reads to canonical RTK CLI interfaces (`rtk grep`, `rtk find`, `rtk ls`, `rtk read`).
 
 ### 4. The Raw Transcript Reading Trap
-- **The Problem**: Direct `view_file` on `.system_generated/logs/transcript.jsonl` floods working memory with raw JSON syntax.
-- **The Solution**: Agy blocks direct reads of `.system_generated` by root and provides streaming Markdown tools (`read_transcript`, `query_transcript`).
+- **The Problem**: Direct `read_file` on `.system_generated/logs/transcript.jsonl` floods working memory with raw JSON syntax.
+- **The Solution**: Agy blocks direct reads of `.system_generated` by root and provides streaming Markdown CLI subcommands (`agy-context transcript read|query|step|health`).
 
 !!! note "Subagent tools moved to Agy-Squad"
-    `subagent_brief` and squad dispatch moved to the separate [Agy-Squad](https://paragon-ux.github.io/agy-squad/) package on 2026-10-15. Agy-Context-Saver is complete without them; Agy-Squad is under construction and will install alongside it.
+    `subagent_brief` and squad dispatch moved to the separate [Agy-Squad](https://paragon-ux.github.io/agy-squad/) package. Agy-Context-Saver 2.0.0 runs CLI-first with zero MCP tool schema overhead and pairs cleanly with Agy-Squad.
 
 ---
 
@@ -90,27 +90,26 @@ When an agent initiates a shell command exceeding `WaitMsBeforeAsync` (~5 second
 
 | Metric / Feature | Without Governor | With Agy-Context-Saver + RTK |
 | :--- | :--- | :--- |
-| **Command Output Bloat** | Unlimited raw test dots, ANSI dumps | RTK transparent reduction (60–90% token savings) |
-| **Workspace File Inspection** | Massive uncompressed `view_file` dumps | `waymark_ask(..., plain: true)` $\to$ bounded `view_file` slices ($\le 150$ lines) + `rtk find` / `rtk rg` |
-| **Long Command Execution** | Detached after 5s $\to$ busy-wait loop | Synchronous window expanded to 10s $\to$ finishes in-turn |
+| **Command Output Bloat** | Unlimited raw test dots, ANSI dumps | RTK `>= 1.1.0` transparent reduction via `rtk hook antigravity` |
+| **Workspace File Inspection** | Massive uncompressed file dumps | `rtk grep` / `rtk find` $\to$ bounded `read_file` slices ($\le 150$ lines) |
+| **Long Command Execution** | Detached after 5s $\to$ busy-wait loop | Synchronous window expanded to 10s when unset $\to$ finishes in-turn |
 | **Background Task Monitoring** | Repetitive busy-polling loops | Enforced Reactive Wakeup with 5-strike circuit breaker |
 | **Configuration Safety** | Risk of third-party config clobber | Non-destructive preservation of foreign hooks/MCP with `.bak` backups |
-| **Transcript Review** | Raw JSONL dumped into context | Clean human-readable Markdown via `read_transcript` |
-| **Runtime Dependencies** | N/A | **Zero** external npm dependencies (100% Node.js stdlib) + native RTK binary |
+| **Transcript Review** | Raw JSONL dumped into context | Clean Markdown via `agy-context transcript read\|query\|step\|health` |
+| **Runtime Dependencies** | N/A | **Zero** external npm dependencies (100% Node.js stdlib) + RTK binary |
 
 ---
 
-## MCP Capabilities at a Glance
+## CLI Capabilities at a Glance
 
-`Agy-Context-Saver` exposes two distinct interfaces in Antigravity:
+`Agy-Context-Saver` v2.0.0 exposes a zero-overhead CLI installed into `~/.gemini/antigravity/bin/agy-context`:
 
-* **User Slash Commands (MCP Prompts)**:
-  - [`/mcp:agy-context-saver:context_shield`](tools.md#mcp-prompts-mcp-user-slash-commands): One-click prompt template in your chat input that injects the complete 3-layer governance rules and RTK standards into any session.
-* **Agent MCP Tools**:
-  - [`check_context_health`](tools.md#1-check_context_health): Diagnoses transcript turn counts, payload size, and polling loops.
-  - [`read_transcript`](tools.md#2-read_transcript): Streams recent conversation history in clean Markdown format.
-  - [`query_transcript`](tools.md#3-query_transcript): Forensic filtering and regex search engine for transcripts.
-  - [`get_installation_status`](tools.md#4-get_installation_status): Audits live plugin link, hook, MCP server, schemas, and RTK.
-  - [`sync_installation`](tools.md#5-sync_installation): Re-verifies and repairs all 4 integration layers in ~25ms.
+* **Transcript Forensics & Health**:
+  - [`agy-context transcript health`](tools.md#1-agy-context-transcript-health): Diagnoses transcript turn counts, payload size, RTK status, and polling loops.
+  - [`agy-context transcript read`](tools.md#2-agy-context-transcript-read): Streams recent conversation history in clean Markdown format.
+  - [`agy-context transcript query`](tools.md#3-agy-context-transcript-query): Forensic filtering and regex search engine with truncated-tail dereferencing.
+  - [`agy-context transcript step`](tools.md#mode-c-surgical-step-dereferencing-agy-context-transcript-step): Surgically extracts untruncated `content`, `thinking`, or `tool_args` for a single step.
+* **Installation & Status**:
+  - [`agy-context status`](tools.md#4-agy-context-status) & [`setup`](tools.md#5-agy-context-setup-uninstall): Audits or repairs the plugin link, hook, CLI shim, RTK `>= 1.1.0`, and legacy MCP cleanup.
 
 See the complete [Tool & Prompt Reference](tools.md) for parameter details and usage examples.

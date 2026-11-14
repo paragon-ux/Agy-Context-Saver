@@ -25,7 +25,7 @@ function copyFilter(source) {
   if (!relative) return true;
   const parts = relative.split(path.sep);
   if (parts.some((part) => part === '.git' || part === 'node_modules' || part === '.venv')) return false;
-  if (parts[0] === 'bin') return false;
+  if (parts[0] === 'bin' && parts[1] && /^rtk/i.test(parts[1])) return false;
   return true;
 }
 
@@ -43,14 +43,14 @@ try {
   await fs.promises.cp(repoRoot, isolatedRepo, { recursive: true, filter: copyFilter });
 
   if (process.platform === 'win32') {
-    fs.writeFileSync(path.join(fakeBin, 'rtk.cmd'), '@echo off\r\necho RTK v0.51.0\r\n');
+    fs.writeFileSync(path.join(fakeBin, 'rtk.cmd'), '@echo off\r\necho rtk 1.1.0\r\n');
   } else {
     const fakeRtk = path.join(fakeBin, 'rtk');
-    fs.writeFileSync(fakeRtk, '#!/bin/sh\necho "RTK v0.51.0"\n');
+    fs.writeFileSync(fakeRtk, '#!/bin/sh\necho "rtk 1.1.0"\n');
     fs.chmodSync(fakeRtk, 0o755);
   }
 
-  const env = { ...process.env, HOME: isolatedHome, USERPROFILE: isolatedHome };
+  const env = { ...process.env, HOME: isolatedHome, USERPROFILE: isolatedHome, AGY_TEST_PROFILE_DIR: isolatedHome };
   prependPath(env, fakeBin);
   const result = spawnSync(process.execPath, ['scripts/install-register.mjs'], {
     cwd: isolatedRepo,

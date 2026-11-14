@@ -1,0 +1,335 @@
+import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import readline from "node:readline";
+import { fileURLToPath } from "node:url";
+import {
+  CircularRingBuffer,
+  cleanMessageContent,
+  readTranscript,
+  queryTranscript,
+  getStepDetail,
+  checkContextHealth,
+  getRequiredBackoffSeconds
+} from "../lib/transcript-core.mjs";
+import { createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const cliScript = path.resolve(__dirname, "../bin/agy-context.mjs");
+const mcpScript = path.resolve(__dirname, "../mcp/index.js");
+
+const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "agy-transcript-test-"));
+const brainDir = path.join(tempHome, ".gemini", "antigravity", "brain");
+const shimDir = path.join(tempHome, "rtk-bin");
+createRtkShim(shimDir, "1.1.0");
+const testEnv = { ...process.env, AGY_TEST_PROFILE_DIR: tempHome, AGY_BRAIN_DIR: brainDir };
+prependToPath(shimDir, testEnv);
+process.env.AGY_TEST_PROFILE_DIR = tempHome;
+process.env.AGY_BRAIN_DIR = brainDir;
+prependToPath(shimDir);
+
+function runCli(args, env = testEnv) {
+  return spawnSync(process.execPath, [cliScript, ...args], {
+    encoding: "utf-8",
+    env
+  });
+}
+
+console.log("Running Agy-Context-Saver v2.0.0 Transcript Engine & CLI Tests...\n");
+
+try {
+  // ==========================================================================
+  // 1. ACS-ARCH-01: O(1) CircularRingBuffer & bounded lastTurns: 0 reading
+  // ==========================================================================
+  console.log("--- 1. CircularRingBuffer & Bounded Streaming readTranscript (ACS-ARCH-01) ---");
+  {
+    const ring = new CircularRingBuffer(3);
+    for (let i = 1; i <= 7; i++) ring.push(i);
+    assert.deepEqual(ring.toArray(), [5, 6, 7], "Ring buffer must evict oldest entries in O(1)");
+
+    const bigConv = "conv-large-ring";
+    const bigLogs = path.join(brainDir, bigConv, ".system_generated", "logs");
+    fs.mkdirSync(bigLogs, { recursive: true });
+    const lines = [];
+    for (let i = 1; i <= 500; i++) {
+      lines.push(JSON.stringify({
+        step_index: i,
+        type: i % 2 === 1 ? "USER_INPUT" : "PLANNER_RESPONSE",
+        content: `Turn step ${i}`,
+        created_at: new Date(1700000000000 + i * 1000).toISOString()
+      }));
+    }
+    fs.writeFileSync(path.join(bigLogs, "transcript.jsonl"), lines.join("\n") + "\n", "utf-8");
+
+    const resZero = await readTranscript({ conversationId: bigConv, lastTurns: 0, mode: "full" });
+    assert.equal(resZero.totalSteps, 500);
+    assert.ok(resZero.selectedSteps <= 200, `lastTurns: 0 must stay bounded (got ${resZero.selectedSteps})`);
+    assert.ok(resZero.steps[resZero.steps.length - 1].step_index === 500, "Must keep trailing steps");
+    console.log(`✓ CircularRingBuffer bounded 500-step log with lastTurns=0 to ${resZero.selectedSteps} steps`);
+  }
+
+  // ==========================================================================
+  // 2. ACS-MCP-04: Media/CRLF Stripping Before Slicing, Safe Base64, Line Clamp
+  // ==========================================================================
+  console.log("\n--- 2. Message Sanitization & Base64 Safety (ACS-MCP-04) ---");
+  {
+    const longB64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(5) + "==";
+    const sha256 = "a3f5c8e1902b4d7c1234567890abcdef1234567890abcdef1234567890abcdef";
+    const longUrlToken = "https://example.com/" + "A1b2C3d4".repeat(40);
+    const longSnake = "my_very_long_snake_case_identifier_".repeat(10);
+    const input = [
+      "warning: in the working copy of 'src/a.js', LF will be replaced by CRLF the next time Git touches it",
+      `Image: data:image/png;base64,${longB64}`,
+      `RawBlob: ${longB64}`,
+      `CommitSHA: ${sha256}`,
+      `Docs: ${longUrlToken}`,
+      `Symbol: ${longSnake}`,
+      "Actual useful message survives!"
+    ].join("\n");
+
+    const cleaned = cleanMessageContent(input, 1500);
+    assert.equal(cleaned.includes("will be replaced by"), false, "CRLF warning must be stripped BEFORE slicing");
+    assert.ok(cleaned.includes("[Embedded Media/Binary Omitted]"), "data:image must be stripped");
+    assert.ok(cleaned.includes("[Binary/Base64 Payload Omitted]"), "raw >=256 base64 must be stripped");
+    assert.ok(cleaned.includes(sha256), "Hex SHA-256 must NOT be corrupted");
+    assert.ok(cleaned.includes("https://example.com/"), "URL tokens must NOT be treated as base64");
+    assert.ok(cleaned.includes("my_very_long_snake_case_identifier_"), "Long snake_case identifiers must NOT be stripped");
+    assert.ok(cleaned.includes("Actual useful message survives!"));
+
+    // Single-line 2500-char payload without newlines must still clamp
+    const singleLine = "Z".repeat(2500);
+    const clampedSingle = cleanMessageContent(singleLine, 5000);
+    assert.ok(clampedSingle.includes("[line clamped]"), "Single-line log > 1000 chars must be clamped");
+
+    // Ellipsis mode honors maxChars and appends `...` cleanly without verbose banner
+    const ellipsis = cleanMessageContent("Hello ".repeat(50), 60, { truncationStyle: "ellipsis" });
+    assert.ok(ellipsis.length <= 60 && ellipsis.endsWith("..."), "Ellipsis mode must stay within limit");
+    assert.equal(ellipsis.includes("[Content Truncated"), false);
+    console.log("✓ Sanitization strips media/CRLF first, preserves hashes/URLs/identifiers, and clamps single-line blobs");
+  }
+
+  // ==========================================================================
+  // 3. ACS-MCP-02, 03, 05, 09, 10: Query Auto-Hydration, Multi-Tool, Errors, Summary
+  // ==========================================================================
+  console.log("\n--- 3. Forensic Query Auto-Hydration, Multi-Tool, Error Role & Summary ---");
+  {
+    const richConv = "conv-rich-forensic";
+    const logsDir = path.join(brainDir, richConv, ".system_generated", "logs");
+    fs.mkdirSync(logsDir, { recursive: true });
+
+    const fullSteps = [
+      {
+        step_index: 1,
+        type: "USER_INPUT",
+        status: "DONE",
+        content: "Notice: handle potential error strings cleanly without false alarms.",
+        created_at: "2026-11-10T10:00:00Z"
+      },
+      {
+        step_index: 2,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        content: "Prefix summary only... [hidden needle: NEEDLE_IN_FULL_TAIL]",
+        thinking: "Secret thinking reasoning here",
+        tool_calls: [
+          { name: "run_command", args: { CommandLine: "npm test" } },
+          { name: "read_file", args: { Path: "lib/transcript-core.mjs", StartLine: 1, EndLine: 50 } }
+        ],
+        created_at: "2026-11-10T10:00:10Z"
+      },
+      {
+        step_index: 3,
+        type: "PLANNER_RESPONSE",
+        status: "ERROR",
+        content: "Command failed with exit code 2",
+        tool_calls: [{ name: "run_command", status: "ERROR", args: { CommandLine: "broken-cmd" } }],
+        created_at: "2026-11-10T10:00:20Z"
+      }
+    ];
+
+    const compactSteps = fullSteps.map((s) => {
+      if (s.step_index === 2) {
+        return {
+          ...s,
+          content: "Prefix summary only...",
+          truncated_fields: ["content"]
+        };
+      }
+      return s;
+    });
+
+    fs.writeFileSync(path.join(logsDir, "transcript.jsonl"), compactSteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+    fs.writeFileSync(path.join(logsDir, "transcript_full.jsonl"), fullSteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+
+    // ACS-MCP-02: mode="auto" finds needle inside truncated tail!
+    const needleRes = await queryTranscript({
+      conversationId: richConv,
+      query: "NEEDLE_IN_FULL_TAIL",
+      mode: "auto"
+    });
+    assert.equal(needleRes.matchedCount, 1, "mode='auto' must search full tail when truncated_fields present");
+    assert.match(needleRes.text, /NEEDLE_IN_FULL_TAIL/);
+
+    // ACS-MCP-09: roles=["error"] matches ONLY structured status/error fields, NOT "error" prose in step 1!
+    const errRes = await queryTranscript({
+      conversationId: richConv,
+      roles: ["error"]
+    });
+    assert.equal(errRes.matchedCount, 1, "roles=['error'] must match only structured error step 3, not prose step 1");
+    assert.ok(errRes.text.includes("Step 3") && !errRes.text.includes("Step 1"));
+    assert.match(errRes.text, /\[ERROR\]/);
+
+    // ACS-MCP-03 & 10: summaryOnly respects ellipsis, tool calls, and [ERROR] badge
+    const sumRes = await queryTranscript({
+      conversationId: richConv,
+      roles: ["all"],
+      summaryOnly: true,
+      includeToolCalls: true
+    });
+    assert.match(sumRes.text, /\[Step 2 \| ASSISTANT\]\*\*.*\[tools: run_command\(CommandLine="npm test"\), read_file\(Path="lib\/transcript-core\.mjs"\)\]/);
+    assert.match(sumRes.text, /\[Step 3 \| ASSISTANT\]\*\* \[ERROR\]/);
+
+    // ACS-MCP-05: step tool_args across ALL tool_calls[0..N]
+    const allToolArgs = await getStepDetail({
+      conversationId: richConv,
+      stepIndex: 2,
+      field: "tool_args"
+    });
+    assert.match(allToolArgs.text, /run_command/);
+    assert.match(allToolArgs.text, /read_file/);
+
+    const pathKeyOnly = await getStepDetail({
+      conversationId: richConv,
+      stepIndex: 2,
+      field: "tool_args:Path"
+    });
+    assert.match(pathKeyOnly.text, /lib\/transcript-core\.mjs/);
+    console.log("✓ Truncated tail auto-search, structured error role, summary tool/error formatting, and multi-tool args verified");
+  }
+
+  // ==========================================================================
+  // 4. ACS-MCP-01 & ACS-HOOK-12: Unified Context Health & Polling Violation Parity
+  // ==========================================================================
+  console.log("\n--- 4. Unified Context Health & Proportional Backoff Evaluator ---");
+  {
+    assert.equal(getRequiredBackoffSeconds(0), 0);
+    assert.equal(getRequiredBackoffSeconds(1), 30);
+    assert.equal(getRequiredBackoffSeconds(2), 75);
+    assert.equal(getRequiredBackoffSeconds(3), 188);
+
+    const pollConv = "conv-polling-health";
+    const pollLogs = path.join(brainDir, pollConv, ".system_generated", "logs");
+    fs.mkdirSync(pollLogs, { recursive: true });
+    const baseMs = Date.parse("2026-11-10T12:00:00Z");
+    const pollSteps = [
+      { step_index: 1, type: "USER_INPUT", content: "Start", created_at: new Date(baseMs).toISOString() },
+      // Legal poll #1 at t=0s
+      { step_index: 2, type: "PLANNER_RESPONSE", tool_calls: [{ name: "manage_task", args: { Action: "status", TaskId: "t1" } }], created_at: new Date(baseMs + 1000).toISOString() },
+      // Premature poll #2 at t+5s (requires >= 30s!) -> violation
+      { step_index: 3, type: "PLANNER_RESPONSE", tool_calls: [{ name: "manage_task", args: { Action: "status", TaskId: "t1" } }], created_at: new Date(baseMs + 6000).toISOString() },
+      // Short schedule poll -> violation
+      { step_index: 4, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 5, Prompt: "Check status of task-1", TimerCondition: "task-1" } }], created_at: new Date(baseMs + 10000).toISOString() },
+      // Valid kill (must NOT count as violation!)
+      { step_index: 5, type: "PLANNER_RESPONSE", tool_calls: [{ name: "manage_task", args: { Action: "kill", TaskId: "t1" } }], created_at: new Date(baseMs + 11000).toISOString() }
+    ];
+    fs.writeFileSync(path.join(pollLogs, "transcript.jsonl"), pollSteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+
+    const health = await checkContextHealth({ conversationId: pollConv });
+    assert.equal(health.metrics.legalChecks, 1);
+    assert.equal(health.metrics.pollingViolations, 2);
+    assert.match(health.status, /WARNING/);
+    console.log("✓ Unified health evaluator enforces timestamped backoff parity without false-flagging kill/list");
+  }
+
+  // ==========================================================================
+  // 5. ACS-MCP-05: Active Swarm Ambiguity Disambiguation & Realpath Containment
+  // ==========================================================================
+  console.log("\n--- 5. Active Swarm Disambiguation, Containment & CLI Subcommands ---");
+  {
+    const swarmHome = fs.mkdtempSync(path.join(os.tmpdir(), "agy-swarm-disambig-"));
+    const swarmBrain = path.join(swarmHome, ".gemini", "antigravity", "brain");
+    for (const id of ["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"]) {
+      const d = path.join(swarmBrain, id, ".system_generated", "logs");
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, "transcript.jsonl"), JSON.stringify({ step_index: 1, type: "USER_INPUT", content: `hi ${id}` }) + "\n");
+    }
+    const swarmEnv = { ...testEnv, AGY_TEST_PROFILE_DIR: swarmHome, AGY_BRAIN_DIR: swarmBrain };
+    delete swarmEnv.GEMINI_CONVERSATION_ID;
+    const ambigCli = runCli(["transcript", "health", "--json"], swarmEnv);
+    assert.notEqual(ambigCli.status, 0, "Omitting --id with 2 active transcripts must fail cleanly");
+    assert.match(ambigCli.stderr, /Ambiguous active conversation/);
+    assert.match(ambigCli.stderr, /11111111-1111-1111-1111-111111111111/);
+
+    // Explicit --id succeeds via CLI
+    const okCli = runCli(["transcript", "read", "--id", "11111111-1111-1111-1111-111111111111", "--json"], swarmEnv);
+    assert.equal(okCli.status, 0, `CLI failed: ${okCli.stderr}`);
+    assert.equal(JSON.parse(okCli.stdout).convId, "11111111-1111-1111-1111-111111111111");
+
+    // Path traversal --id is rejected
+    const badId = runCli(["transcript", "read", "--id", "../../etc/passwd"], swarmEnv);
+    assert.notEqual(badId.status, 0);
+
+    // Symlink escaping brainDir is rejected by realpath containment
+    const outsideFile = path.join(swarmHome, "outside.jsonl");
+    fs.writeFileSync(outsideFile, JSON.stringify({ step_index: 1, type: "USER_INPUT", content: "secret" }) + "\n");
+    const symConvLogs = path.join(swarmBrain, "33333333-3333-3333-3333-333333333333", ".system_generated", "logs");
+    fs.mkdirSync(symConvLogs, { recursive: true });
+    try {
+      fs.symlinkSync(outsideFile, path.join(symConvLogs, "transcript.jsonl"));
+      const symRes = runCli(["transcript", "read", "--id", "33333333-3333-3333-3333-333333333333"], swarmEnv);
+      assert.notEqual(symRes.status, 0, "Symlink escaping brainDir must be denied by realpath check");
+    } catch {
+      // Windows unprivileged symlink skipped gracefully
+    }
+
+    fs.rmSync(swarmHome, { recursive: true, force: true });
+    console.log("✓ Active swarm disambiguation, realpath containment, and bin/agy-context.mjs CLI verified");
+  }
+
+  // ==========================================================================
+  // 6. Deprecated MCP Compatibility Wrapper Smoke Test (`mcp/index.js`)
+  // ==========================================================================
+  console.log("\n--- 6. Deprecated MCP Compatibility Wrapper (`mcp/index.js`) ---");
+  {
+    const proc = spawn(process.execPath, [mcpScript], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: testEnv
+    });
+    const rl = readline.createInterface({ input: proc.stdout });
+    const pending = new Map();
+    let idCounter = 1;
+    rl.on("line", (line) => {
+      if (!line.trim()) return;
+      const msg = JSON.parse(line);
+      if (msg.id && pending.has(msg.id)) {
+        pending.get(msg.id)(msg);
+        pending.delete(msg.id);
+      }
+    });
+    const send = (method, params = {}) => new Promise((resolve) => {
+      const id = idCounter++;
+      pending.set(id, resolve);
+      proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    });
+
+    const init = await send("initialize", { protocolVersion: "2024-11-05" });
+    assert.equal(init.result.serverInfo.version, "2.0.0");
+    const tools = await send("tools/list");
+    assert.equal(tools.result.tools.length, 5);
+    const call = await send("tools/call", {
+      name: "query_transcript",
+      arguments: { conversationId: "conv-rich-forensic", query: "NEEDLE_IN_FULL_TAIL", mode: "auto" }
+    });
+    assert.match(call.result.content[0].text, /NEEDLE_IN_FULL_TAIL/);
+    proc.kill();
+    console.log("✓ Deprecated MCP compatibility wrapper cleanly delegates to v2.0.0 lib/transcript-core.mjs");
+  }
+} finally {
+  fs.rmSync(tempHome, { recursive: true, force: true });
+}
+
+console.log("\n=================================================");
+console.log("ALL 2.0 TRANSCRIPT CORE, CLI & COMPAT TESTS PASSED!");
+console.log("=================================================");

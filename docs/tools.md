@@ -1,6 +1,6 @@
-# MCP Tool, Prompt & CLI Reference
+# CLI & Hook Reference (`v2.0.0`)
 
-`Agy-Context-Saver` provides a unified, zero-dependency Model Context Protocol (MCP) server engineered specifically for **Google Antigravity** (`agy`). It pairs transparent command governance with **RTK (Rust Token Killer)** to eliminate conversational context bloat and ensure reliable multi-agent execution across general developer, research, and operations workloads.
+`Agy-Context-Saver` v2.0.0 provides a zero-dependency **CLI (`agy-context`)** and single-source **PreToolUse lifecycle hook (`agy-context-saver`)** engineered for **Google Antigravity 2.0**, paired with **RTK (Rust Token Killer >= 1.1.0)**. Default MCP server registration was retired in `v2.0.0` so tool schemas consume 0 tokens per conversation.
 
 ---
 
@@ -12,80 +12,67 @@ flowchart TD
         Agent["Antigravity Agent (LLM)"]
     end
 
-    subgraph Governance["PreToolUse Lifecycle Hook"]
+    subgraph Governance["PreToolUse Lifecycle Hook (hooks.json)"]
         Hook{"Execution Governor"}
-        Hook -- "run_command" --> Rewrite["RTK Rewrite Proxy\n(10s synchronous window)"]
-        Hook -- "view_file (partial >150L or >800L/45KiB)" --> Redirect["Route to waymark_ask + bounded slice\n(or rtk read fallback)"]
-        Hook -- "view_file (<=150L slice or full <=800L/45KiB)" --> SliceSafe["Permit Bounded / Full-File Audit"]
+        Hook -- "run_command" --> Rewrite["RTK >= 1.1.0 Delegation\n(WaitMsBeforeAsync=10s if unset)"]
+        Hook -- "read_file (partial >150L or >800L/45KiB)" --> Redirect["Route to rtk grep/find + bounded slice"]
+        Hook -- "read_file (<=150L slice or full <=800L/45KiB)" --> SliceSafe["Permit Bounded / Full-File Audit"]
         Hook -- "manage_task (status <30s)" --> Backoff["Deny via Proportional Backoff\n(Yield to Reactive Wakeup)"]
-        Hook -- "Direct .system_generated" --> RootDeny["Deny via Root Guard"]
+        Hook -- "Chained / raw .system_generated" --> RootDeny["Deny via Segment Guard"]
     end
 
-    subgraph MCP["Agy-Context-Saver MCP Server (Stdio)"]
-        T1["check_context_health"]
-        T2["read_transcript"]
-        T3["query_transcript"]
-        T4["get_installation_status"]
-        T5["sync_installation"]
+    subgraph CLI["agy-context CLI (Zero Schema Overhead)"]
+        T1["agy-context transcript health"]
+        T2["agy-context transcript read"]
+        T3["agy-context transcript query"]
+        T4["agy-context transcript step"]
+        T5["agy-context status / setup / uninstall"]
     end
 
     Agent --> Hook
-    Agent --> MCP
+    Agent --> CLI
 ```
 
-The system strictly divides operational responsibilities into two complementary layers:
-- **RTK (Rust Token Killer)**: Compresses terminal outputs (`rtk git`, `rtk pytest`, `rtk cargo`), executes canonical workspace searches (`rtk read`, `rtk grep`, `rtk find`), and summarizes stdout.
-- **Agy-Context-Saver**: Governs lifecycle turns, prevents runaway polling loops, provides high-density zero-JSON transcript streaming, and audits environmental context health. (Subagent briefs moved to the separate [Agy-Squad](https://paragon-ux.github.io/agy-squad/) package.)
+The system divides operational responsibilities cleanly:
+- **RTK (`>= 1.1.0`)**: Compresses terminal outputs via `rtk hook antigravity` (`rtk git`, `rtk pytest`, `rtk cargo`) and executes workspace inspection (`rtk grep`, `rtk find`, `rtk ls`, `rtk read`).
+- **Agy-Context-Saver (`v2.0.0`)**: Governs lifecycle turns, prevents runaway polling loops, provides streaming zero-JSON transcript forensics via `agy-context`, and verifies environmental health. (Subagent orchestration lives in the separate [Agy-Squad](https://paragon-ux.github.io/agy-squad/) package.)
 
 ---
 
 ## Unified 3-Tier Codebase & File Inspection
 
-Unbounded native inspection tools (`view_file` without slices, `grep_search`, `find_by_name`, `list_dir`) bypass token filtering and dump raw text into model context. The `Agy-Context-Saver` PreToolUse hook enforces a 3-tier inspection hierarchy with a hybrid `view_file` slice policy:
+Unbounded native inspection tools (`read_file` without slices, `view_file`, `grep_search`, `find_by_name`, `list_dir`) bypass token filtering and dump raw text into model context. The `Agy-Context-Saver` PreToolUse hook enforces a 3-tier inspection hierarchy:
 
 | Tier / Native Tool | Target / Arguments | Canonical Governed Workflow | Token Savings |
 | :--- | :--- | :--- | :---: |
-| **Tier 1: Structure** | Any of 23 supported formats (Code, Markdown, YAML, JSON, TOML, Bash) | `waymark_ask(..., plain: true)` $\to$ exact `[StartLine, EndLine]` (~19–466 tok) | **90–98%** |
-| **Tier 2: `view_file` (Default Slice)** | Bounded slice (`1–150` lines) | Permitted directly with 1-indexed line numbers for `replace_file_content` | **80–93%** |
-| **Tier 2: `view_file` (Full-File Audit)** | Explicit `StartLine: 1, EndLine: <TotalLines>` on files $\le 800$ lines and $\le 45\text{ KiB}$ | Permitted for justified single-pass medium-file audits; partial slices of `151–800` lines are denied | **3$\times$ vs multi-turn slices** |
-| **Tier 3: `rtk read`** | `.system_generated/steps/<step>/output.txt` & completed `tasks/<taskId>.log` | `rtk read <path>` (`--head-lines` / `--tail-lines`) | **60–85%** |
-| **Tier 3: `grep_search`** | Free-text / regex search in body prose (when symbol/heading/key is unknown) | `rtk rg "<pattern>" .` *(Win)* / `rtk grep "<pattern>"` *(POSIX)* | **70–90%** |
-| **Tier 3: `find_by_name` / `list_dir`** | Filename pattern or directory path | `rtk find <path>` *(Win & POSIX)* / `rtk ls <path>` *(POSIX)* | **75–92%** |
+| **Tier 1: Search & Discovery** | Pattern or directory discovery | `rtk grep "<pattern>" <path>` / `rtk find <path>` / `rtk ls <path>` | **75–95%** |
+| **Tier 2: `read_file` (Default Slice)** | Bounded slice (`1–150` lines) | Permitted directly with 1-indexed line numbers for `edit_file` / `write_file` | **80–93%** |
+| **Tier 2: `read_file` (Full-File Audit)** | Explicit `StartLine: 1, EndLine: <TotalLines>` on files $\le 800$ lines and $\le 45\text{ KiB}$ | Permitted for justified single-pass medium-file audits; partial slices of `151–800` lines are denied | **3$\times$ vs multi-turn slices** |
+| **Tier 3: Spillovers & Logs** | `.system_generated/steps/<step>/output.txt` & completed `tasks/<taskId>.log` | Bounded `read_file` ($\le 150\text{L}$) on step spillovers or single unchained `rtk read <path>` | **60–85%** |
 
-!!! tip "Waymark + Hybrid Slice Safe Harbor"
-    Always locate exact `[StartLine, EndLine]` spans first using `waymark_ask(..., plain: true)` (which natively parses code ASTs, Markdown headings, and YAML/JSON/TOML keys), then pass those coordinates into `view_file` (`1–150` lines default, or explicit `1..TotalLines` when auditing an entire file $\le 800$ lines and $\le 45\text{ KiB}$).
+!!! tip "Hybrid Slice & Safe Harbor"
+    Locate exact `[StartLine, EndLine]` spans first via `rtk grep "<pattern>" <path>`, then pass bounded slices into `read_file` (`1–150` lines default, or explicit `1..TotalLines` when auditing an entire file $\le 800$ lines and $\le 45\text{ KiB}$). Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `.gemini/config/`) pass Safe Harbor directly.
 
 ---
 
-## 1. `check_context_health`
+## 1. `agy-context transcript health`
 
-Inspects the active conversation trajectory (`transcript.jsonl`) via streaming chunk readers to audit turn count, payload weight, busy-polling loops, and context degradation risk.
+Inspects a conversation trajectory (`transcript.jsonl`) via streaming chunk readers to audit turn count, payload weight, busy-polling loops, RTK `>= 1.1.0` status, and context degradation risk.
 
-### Parameter Reference
+### Flags Reference
 
-| Parameter | Type | Required | Description |
+| Flag | Value | Required | Description |
 | :--- | :---: | :---: | :--- |
-| `transcriptPath` | `string` | No | Absolute path to `transcript.jsonl`. If omitted, automatically resolves the active session. |
-| `conversationId` | `string` | No | Conversation UUID or brain folder name (alternative to `transcriptPath`). |
+| `--id` | `<uuid>` | No* | Target conversation UUID. (*Required when `>= 2` active `/swarm` sessions ran in the last 5 min.) |
+| `--file` | `<path>` | No | Explicit path to `transcript.jsonl`. |
+| `--json` | — | No | Emit structured JSON output instead of Markdown. |
 
 ### Example Invocations
 
-**Audit active session context health (zero parameters):**
-```json
-{
-  "name": "check_context_health",
-  "arguments": {}
-}
-```
-
-**Audit specific historical conversation by UUID:**
-```json
-{
-  "name": "check_context_health",
-  "arguments": {
-    "conversationId": "68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc"
-  }
-}
+```bash
+agy-context transcript health
+agy-context transcript health --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc
+agy-context transcript health --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --json
 ```
 
 ### Structured Output Format
@@ -96,15 +83,16 @@ The output is structured into two explicitly labeled sections to eliminate metri
 ### Context Health Report: HEALTHY
 
 #### [Active Session Metrics]
-- Total Steps: 1140
-- User Turns: 18
-- Assistant Responses: 563
-- Tool Calls: 519
+- Total Steps: 332
+- User Turns: 4
+- Assistant Responses: 82
+- Tool Calls: 242
 - Detected Busy-Polling Events: 0
-- Approximate Raw Transcript Size: 1748.8 KB
+- Legal Backoff-Compliant Checks/Watchdogs: 0
+- Approximate Raw Transcript Size: 870.9 KB
 
 #### [Local RTK Environment]
-- RTK Command Optimizer: Active (rtk 0.50.0)
+- RTK Command Optimizer: Active (rtk 1.1.0)
 - Note: Lifetime token gains from 'rtk gain' represent cumulative machine-wide host savings, not single-session metrics.
 
 ✓ Context footprint is well-managed.
@@ -120,31 +108,25 @@ The output is structured into two explicitly labeled sections to eliminate metri
 
 ---
 
-## 2. `read_transcript`
+## 2. `agy-context transcript read`
 
 Streams conversation turns from Antigravity trajectory logs directly into clean, formatted Markdown dialogue without exposing raw JSON syntax or bloated transport wrappers.
 
-### Parameter Reference
+### Flags Reference
 
-| Parameter | Type | Required | Default | Description |
-| :--- | :---: | :---: | :---: | :--- |
-| `conversationId` | `string` | **Yes** | — | Target conversation UUID or absolute path to transcript. |
-| `mode` | `string` | No | `"compact"` | Format mode: `"compact"` (reads compact `transcript.jsonl`) or `"full"` (reads un-truncated `transcript_full.jsonl`). |
-| `lastTurns` | `number` | No | `3` | Number of most recent turns to return (`0` for all retained turns). |
-| `includeThinking` | `boolean` | No | `false` | Whether to render the assistant's extended thinking / chain-of-thought blocks. |
+| Flag | Value | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `--id` | `<uuid>` | Active / auto | Target conversation UUID. |
+| `--mode` | `compact \| full` | `compact` | Format mode: `compact` (`transcript.jsonl`) or `full` (`transcript_full.jsonl`). |
+| `--last-turns` | `<N>` | `3` | Number of most recent turns (`0` returns trailing bounded window up to 200 steps). |
+| `--include-thinking` | — | `false` | Render extended thinking / chain-of-thought blocks. |
+| `--file` | `<path>` | — | Explicit `.jsonl` transcript file path. |
+| `--json` | — | `false` | Emit structured JSON output. |
 
 ### Example Invocation
 
-```json
-{
-  "name": "read_transcript",
-  "arguments": {
-    "conversationId": "68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc",
-    "mode": "compact",
-    "lastTurns": 2,
-    "includeThinking": false
-  }
-}
+```bash
+agy-context transcript read --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --last-turns 2 --mode compact
 ```
 
 ### Sample Output
@@ -160,219 +142,140 @@ Check context health first, before we continue.
 
 ---
 ### Turn 18: Assistant
-Audited context health: Active session is HEALTHY (0 busy-polling loops, 18 user turns). Proceeding with orchestration evaluation.
+Audited context health: Active session is HEALTHY (0 busy-polling loops, 18 user turns).
 ```
 
 ### Operating Guidance: `compact` vs. `full`
-- **Use `compact` (Default)**: Best for standard catch-up, peer agent review, and context summarization. Automatically handles truncated fields without pulling megabytes of uncompressed payloads into active context.
-- **Use `full`**: Use only when inspecting raw code diffs or large tool outputs that were truncated in the compact transcript. Always pair with a tight `lastTurns` limit ($\le 2$).
+- **Use `compact` (Default)**: Best for standard catch-up, peer agent review, and context summarization. Automatically skips unneeded payload dumps while keeping outputs fast and clean.
+- **Use `full`**: Use only when inspecting raw outputs truncated in `compact`, paired with a tight `--last-turns` limit ($\le 2$) or `agy-context transcript step`.
 
 ---
 
-## 3. `query_transcript`
+## 3. `agy-context transcript query`
 
-A multi-mode forensic search engine and surgical step dereferencer across conversation trajectories. Enables finding historical tool calls, searching user directives, and surgically dereferencing specific truncated payload fields.
+Multi-mode forensic search engine across conversation trajectories, supporting truncated-tail auto-dereferencing, role filtering, compact 1-line summaries, and step range bounds.
 
-### Parameter Reference
+### Flags Reference
 
-| Parameter | Type | Required | Default | Description |
-| :--- | :---: | :---: | :---: | :--- |
-| `conversationId` | `string` | **Yes** | — | Conversation UUID or transcript file path. |
-| `query` | `string` | No | `""` | Case-insensitive keyword or substring to filter steps. |
-| `roles` | `array` | No | `["user", "assistant"]` | Roles to filter: `"user"`, `"assistant"`, `"subagent"`, `"tool"`, `"error"`, or `["all"]`. |
-| `mode` | `string` | No | `"auto"` | Retrieval mode: `"auto"` (auto-dereferences truncated steps), `"compact"`, or `"full"`. |
-| `startStep` | `number` | No | — | Start `step_index` boundary (inclusive). |
-| `endStep` | `number` | No | — | End `step_index` boundary (inclusive). |
-| `lastTurns` | `number` | No | — | Limit matching steps to the last N conversation turns. |
-| `includeThinking` | `boolean` | No | `false` | Whether to include internal model thinking blocks in output. |
-| `includeToolCalls` | `boolean` | No | `false` | Whether to include tool call arguments and results in output. |
-| `maxResults` | `number` | No | `5` | Maximum matching entries to return. |
-| `summaryOnly` | `boolean` | No | `false` | When `true`, formats results as 1-line bullet summaries. |
-| `stepIndex` | `number` | No | — | Exact step index to dereference un-truncated from `transcript_full.jsonl`. |
-| `field` | `string` | No | — | Optional field projection when `stepIndex` is provided (`"content"`, `"thinking"`, `"tool_calls"`). |
+| Flag | Value | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `--id` | `<uuid>` | Active / auto | Conversation UUID. |
+| `--query` | `<regex>` | `""` | Case-insensitive regex or substring pattern to match. |
+| `--roles` | `<csv>` | `user,assistant` | Comma-separated filter: `user`, `assistant`, `subagent`, `tool`, `error`, or `all`. |
+| `--mode` | `auto \| compact \| full` | `auto` | `auto` checks `transcript.jsonl` and hydrates `truncated_fields` from `transcript_full.jsonl` when needed. |
+| `--start` / `--end` | `<N>` | — | Inclusive `step_index` bounds. |
+| `--last-turns` | `<N>` | — | Limit search window to the last N conversation turns. |
+| `--limit` | `<N>` | `5` (`30` w/ `--summary`) | Maximum matching entries to return. |
+| `--summary` | — | `false` | Render compact 1-line timeline bullets with `[ERROR]` and `[tools: ...]` tags. |
+| `--include-tools` / `--include-thinking` | — | `false` | Include tool call arguments / thinking blocks. |
+| `--json` / `--file` | — | — | JSON output or explicit transcript `.jsonl` file path. |
 
 ### Query Modes & Examples
 
 #### Mode A: Keyword & Role Filtering
-Search for specific error messages or tool calls across history without reading full transcripts:
+Search for structured errors or tool calls across history cleanly:
 
-```json
-{
-  "name": "query_transcript",
-  "arguments": {
-    "conversationId": "current",
-    "query": "verification failed",
-    "roles": ["tool", "assistant"],
-    "maxResults": 3
-  }
-}
+```bash
+agy-context transcript query --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --query "verification failed" --roles tool,assistant --limit 3
 ```
 
-#### Mode B: Compact 1-Line Summary (`summaryOnly: true`)
+#### Mode B: Compact 1-Line Summary (`--summary`)
 Provides ultra-dense timeline summaries for high-level orientation:
 
-```json
-{
-  "name": "query_transcript",
-  "arguments": {
-    "conversationId": "current",
-    "summaryOnly": true,
-    "maxResults": 5
-  }
-}
+```bash
+agy-context transcript query --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --summary --limit 5
 ```
 
 *Sample Output:*
 ```markdown
 ## Transcript Query Summary: `68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc`
-- [Step 1138] (assistant) Ran npm test across 10 test suites.
+- [Step 1138] (assistant) Ran npm test across 11 test suites.
 - [Step 1139] (tool) Full test suite passed 100%.
 - [Step 1140] (assistant) Formulated roadmap synthesis.
 ```
 
-#### Mode C: Surgical Step Dereferencing (`stepIndex` & `field`)
-When a compact transcript indicates `truncated_fields: ["content"]`, recover the exact content field without reading adjacent steps:
+#### Mode C: Surgical Step Dereferencing (`agy-context transcript step`)
+When a compact transcript indicates `truncated_fields: ["content"]`, recover the exact field without reading adjacent steps:
 
-```json
-{
-  "name": "query_transcript",
-  "arguments": {
-    "conversationId": "current",
-    "stepIndex": 1139,
-    "field": "content"
-  }
-}
+```bash
+agy-context transcript step --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --step 1139 --field content
 ```
 
 *Sample Output:*
 ```markdown
 ### Step 1139 Content:
-ALL 10 AUTOMATED TEST SUITES PASSED 100%!
-✓ test-hook.mjs (27/27 passed)
-✓ test-mcp.mjs (15/15 passed)
-✓ test-output-governance.mjs (12/12 passed)
+ALL 11 AUTOMATED TEST SUITES PASSED 100%!
+✓ test-hook.mjs
+✓ test-transcript.mjs
+✓ test-rtk-integration.mjs
 ```
 
 ---
 
-## 4. `get_installation_status`
+## 4. `agy-context status`
 
-Performs an instant live audit of the 4 integration layers and the RTK binary directly from inside an Antigravity agent or user session.
+Performs an instant live audit of all v2.0.0 integration layers, CLI shims, RTK `>= 1.1.0`, and legacy MCP cleanup:
 
-### Parameter Reference
-*(None — operates with empty arguments `{}`)*
-
-### Example Invocation
-
-```json
-{
-  "name": "get_installation_status",
-  "arguments": {}
-}
+```bash
+agy-context status
 ```
 
-### Structured Output Format
-
+*Sample Output:*
 ```markdown
-### Agy-Context-Saver Installation Status: HEALTHY & ACTIVE 🛡️
-- Native Plugin Link: ACTIVE (C:\Users\USER\.gemini\config\plugins\agy-context-saver)
-- Governor Lifecycle Hook: REGISTERED in hooks.json (Script: Present)
-- Universal MCP Server: CONFIGURED in mcp_config.json
-- Antigravity Tool Schemas: ALL 5 SCHEMAS PRESENT (C:\Users\USER\.gemini\antigravity\mcp\agy-context-saver)
-- RTK Binary: INSTALLED (rtk 0.50.0)
-- RTK Hook Optimization: ACTIVE (via PreToolUse)
-
-✓ All Antigravity integration layers and RTK optimizer are fully operational.
+Checking Agy-Context-Saver installation status...
+- Native Plugin Link: ACTIVE (~/.gemini/config/plugins/agy-context-saver)
+- Execution Governor Hook (agy-context-saver): ACTIVE (plugin hooks.json)
+- CLI Shim (agy-context): INSTALLED (~/.gemini/antigravity/bin)
+- RTK Command Optimizer (>= 1.1.0): INSTALLED (rtk 1.1.0)
+- MCP Cleanup: CLEAN (0 duplicate MCP configs/schemas)
+Overall Status: HEALTHY & ACTIVE
 ```
 
 ---
 
-## 5. `sync_installation`
+## 5. `agy-context setup` & `uninstall`
 
-Programmatically reconciles, repairs, and updates all installation layers (Plugin link, Lifecycle Hook, MCP config, and mirrored Antigravity tool schemas) in $<150\text{ ms}$.
+Programmatically reconciles, repairs, or cleanly uninstalls all integration layers (Plugin link, single-source hook activation, CLI shims, RTK configuration, and legacy MCP sweep):
 
-### Parameter Reference
-
-| Parameter | Type | Required | Default | Description |
-| :--- | :---: | :---: | :---: | :--- |
-| `checkOnly` | `boolean` | No | `false` | If `true`, runs pre-flight validation dry-run without writing changes to disk. |
-
-### Example Invocations
-
-**Dry-run pre-flight check:**
-```json
-{
-  "name": "sync_installation",
-  "arguments": { "checkOnly": true }
-}
-```
-
-**Live repair and synchronization:**
-```json
-{
-  "name": "sync_installation",
-  "arguments": {}
-}
-```
-
-### Structured Output Format
-
-```markdown
-### Agy-Context-Saver Installation Synchronization
-- Status: SYNCHRONIZED & HEALTHY 🛡️
-- Elapsed Time: 135.3 ms
-- Plugin Link: Verified
-- Lifecycle Hook: Registered in hooks.json
-- MCP Server: Registered in mcp_config.json
-- Tool Schemas: 5 Schemas mirrored to ~/.gemini/antigravity/mcp/agy-context-saver
-- RTK Binary: Verified (rtk 0.50.0)
-
-✓ Installation fully synchronized and up-to-date in Zero-Delay mode.
+```bash
+agy-context setup [--check] [--allow-degraded]
+agy-context uninstall [--restore-backups]
 ```
 
 ---
 
 ## Ephemeral Spillover & Task Log Safe Harbors (0 New Tools)
 
-Rather than introducing redundant MCP tools that inflate schema overhead and induce LLM tool confusion, `Agy-Context-Saver` leverages canonical tools coupled with PreToolUse governance safe-harbors:
+Rather than introducing redundant MCP tools that inflate schema overhead and induce LLM tool confusion, `Agy-Context-Saver` leverages canonical tools and CLI subcommands coupled with PreToolUse governance safe harbors:
 
 ### 1. Step Output Spillovers
 When tool outputs exceed inline thresholds ($>24\text{ KB}$), Antigravity spills them to `.system_generated/steps/<step>/output.txt`.
-- **Governance**: Native `view_file` or shell `cat` invocations on spillover paths are automatically routed to `rtk read <path>`.
-- **Optimization**: `rtk read` automatically applies line windowing, head/tail clamping, and token reduction with zero manual configuration.
+- **Governance**: Bounded `read_file` (`StartLine`/`EndLine` $\le 150$ lines) and single unchained `rtk read <path>` invocations are allowed.
+- **Optimization**: `rtk read` applies line windowing, head/tail clamping, and token reduction with zero manual configuration.
 
 ### 2. Completed Background Task Logs
 When detached tasks finish, full logs reside in `.system_generated/tasks/<taskId>.log`.
 - **While RUNNING**: Reading task logs is strictly **DENIED** under the Proportional Backoff curve, eliminating busy-polling loops.
 - **When COMPLETED**: Inspecting completed task logs is safe-harbored via `rtk read tasks/<taskId>.log` via `run_command`, enabling post-mortem stack trace inspection.
 
-### 3. Permanently Retired Tools (Superseded by PreToolUse Proxies)
-To eliminate tool registry bloat and agent hesitation, legacy tools from earlier versions are permanently retired and cleanly purged:
-- **`safe_command`** *(Retired in v1.2.0)*: Replaced by transparent PreToolUse hook rewriting of native `run_command` via RTK (`rtk git`, `rtk pytest`, etc.) and synchronous window expansion to 10s. Invocations return JSON-RPC error `-32601` (*Tool not found*).
-- **`get_spillover_content` & `read_task_output`** *(Retired in v1.5.0)*: Replaced by the zero-new-tools safe-harbor pattern routing `view_file` to `rtk read`.
-- **`get_step_detail`** *(Retired in v1.5.0)*: Consolidated surgically into `query_transcript(stepIndex, field)`.
+### 3. Permanently Retired Legacy Tools
+To eliminate tool schema overhead and agent confusion, legacy MCP tools and default MCP server registration are retired:
+- **`safe_command`** *(Retired in v1.2.0)*: Replaced by transparent PreToolUse hook rewriting via `rtk hook antigravity` and synchronous window expansion to 10s when unset.
+- **`get_spillover_content` & `read_task_output`** *(Retired in v1.5.0)*: Replaced by bounded `read_file` ($\le 150\text{L}$) on step spillovers and single unchained `rtk read` calls.
+- **`get_step_detail`** *(Retired in v1.5.0)*: Replaced by `agy-context transcript step --id <conv> --step <N> --field <field>`.
+- **Default MCP Registration** *(Retired in v2.0.0)*: Replaced by the zero-overhead `agy-context` CLI shim over `lib/transcript-core.mjs`. (`mcp/index.js` remains only as a thin deprecated wrapper for manual legacy JSON-RPC callers.)
 
 ---
 
-## MCP Prompts (`/mcp:...`): User Slash Commands
-
-MCP Prompts appear directly in Antigravity chat autocomplete menus as user-triggerable slash commands.
-
-### `/mcp:agy-context-saver:context_shield`
-
-* **Prompt Name**: `context_shield`
-* **Trigger**: Type `/mcp:agy-context-saver:context_shield` in chat or select from autocomplete.
-* **Purpose**: Instantly injects the complete 3-layer context governance rules into any active session.
-
-#### Governance Rules Injected by `context_shield`
+## Built-In Governance Architecture Summary
 
 ```mermaid
 flowchart TD
-    CS["/mcp:agy-context-saver:context_shield"]
+    CS["PreToolUse + AGY CLI Governance"]
     
     L1["Layer 1: Background Tasks & Reactive Wakeup\n- Forbid manage_task(status) loops\n- Eliminate busy-polling timers\n- 5-strike circuit breaker"]
-    L2["Layer 2: Transparent RTK Inspection\n- Hard-route view_file/grep to rtk\n- Protect .system_generated internal state\n- Bounded slice safe harbor (<=150 lines)"]
-    L3["Layer 3: Synchronous Execution\n- Expand WaitMsBeforeAsync to 10s\n- Targeted test runs, opt-in fail-fast"]
+    L2["Layer 2: Transparent RTK >= 1.1.0 & CLI\n- Bounded read_file + rtk grep/find\n- Protect .system_generated via segment guard\n- agy-context transcript read/query/step/health"]
+    L3["Layer 3: Synchronous Execution\n- Set WaitMsBeforeAsync=10s when unset\n- Protect benchmark files (edit_file/write_file/shell)"]
     
     CS --> L1
     CS --> L2
@@ -380,5 +283,5 @@ flowchart TD
 ```
 
 1. **Layer 1 (Background Tasks & Reactive Wakeup)**: Enforces native notification resumption (`<SYSTEM_MESSAGE>`). Repeated polling attempts trip a `force_ask` circuit breaker at 5 denials.
-2. **Layer 2 (Transparent Shell & RTK Inspection)**: Hard-routes full file reads to `rtk read`, directory scans to `rtk find`, and searches to `rtk rg "<pattern>" .`.
-3. **Layer 3 (Synchronous Execution)**: Extends default command execution wait windows to 10,000ms.
+2. **Layer 2 (Transparent Shell & RTK Inspection)**: Routes searches to `rtk grep` / `rtk find` / `rtk ls`, file reads to bounded `read_file(StartLine, EndLine <= 150)`, and transcript queries to unchained `agy-context transcript ...`.
+3. **Layer 3 (Synchronous Execution)**: Extends unset `WaitMsBeforeAsync` on non-daemon commands to 10,000ms while preserving explicit caller timeouts.

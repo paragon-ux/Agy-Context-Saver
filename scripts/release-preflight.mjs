@@ -57,16 +57,38 @@ if (pkg) {
   }
 
   const requiredPackageFiles = [
-    'mcp/index.js',
+    'lib/transcript-core.mjs',
+    'bin/agy-context.mjs',
     'scripts/install-register.mjs',
     'scripts/provision-rtk.mjs',
     'plugin.json',
     'hooks.json',
-    'mcp_config.json',
     'README.md',
     'CHANGELOG.md',
     'LICENSE',
   ];
+
+  if (exists('mcp_config.json')) {
+    errors.push('Legacy mcp_config.json is still present at repository root; remove it for 2.0 CLI-first release.');
+  }
+
+  try {
+    const pluginHooks = JSON.parse(readText('hooks.json'));
+    const hookCmd = pluginHooks?.['agy-context-saver']?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
+    const hookMatcher = pluginHooks?.['agy-context-saver']?.PreToolUse?.[0]?.matcher ?? '';
+    if (!hookCmd) {
+      errors.push('hooks.json must define "agy-context-saver".PreToolUse[0].hooks[0].command.');
+    } else if (hookCmd.includes('ANTIGRAVITY_PLUGIN_ROOT')) {
+      errors.push('hooks.json command must not use unexpanded ${ANTIGRAVITY_PLUGIN_ROOT}; use ./scripts/execution-guard-hook.mjs (cwd is plugin root).');
+    }
+    for (const tool of ['read_file', 'edit_file', 'write_file', 'run_command']) {
+      if (!hookMatcher.includes(tool)) {
+        errors.push(`hooks.json PreToolUse matcher must include ${tool}.`);
+      }
+    }
+  } catch (error) {
+    errors.push(`hooks.json is not valid JSON: ${error.message}`);
+  }
 
   for (const relativePath of requiredPackageFiles) {
     if (!exists(relativePath)) errors.push(`Required runtime/release file is missing: ${relativePath}`);
@@ -121,11 +143,24 @@ if (pkg) {
   }
 
   const rtkProvisioner = readText('scripts/provision-rtk.mjs');
-  const rtkVersionMatch = rtkProvisioner.match(/RTK_VERSION\s*=\s*['"]([^'"]+)['"]/);
-  if (!rtkVersionMatch) {
-    errors.push('Could not locate a pinned RTK_VERSION in scripts/provision-rtk.mjs.');
+  const minRtkMatch = rtkProvisioner.match(/MIN_(?:COMPATIBLE_)?RTK_VERSION\s*=\s*['"]v?([^'"]+)['"]/);
+  const rtkVersionMatch = rtkProvisioner.match(/RTK_VERSION\s*=\s*['"]v?([^'"]+)['"]/);
+  const detectedRtkVersion = minRtkMatch?.[1] || rtkVersionMatch?.[1];
+  if (!detectedRtkVersion) {
+    errors.push('Could not locate MIN_RTK_VERSION or RTK_VERSION in scripts/provision-rtk.mjs.');
   } else {
-    console.log(`RTK provisioner pin found: ${rtkVersionMatch[1]}`);
+    const semverMatch = detectedRtkVersion.match(/^(\d+)\.(\d+)\.(\d+)/);
+    if (!semverMatch) {
+      errors.push(`Invalid RTK version format in scripts/provision-rtk.mjs: ${detectedRtkVersion}`);
+    } else {
+      const major = Number(semverMatch[1]);
+      const minor = Number(semverMatch[2]);
+      if (major < 1 || (major === 1 && minor < 1)) {
+        errors.push(`RTK version requirement must be >= 1.1.0; found ${detectedRtkVersion} in scripts/provision-rtk.mjs.`);
+      } else {
+        console.log(`RTK provisioner requirement found: ${detectedRtkVersion} (>= 1.1.0)`);
+      }
+    }
   }
 
   if (!pkg.scripts?.setup || !pkg.scripts?.status || !pkg.scripts?.test) {

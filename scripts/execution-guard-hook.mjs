@@ -1,31 +1,31 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity
+ * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.0.0)
  *
  * Closed Execution Topology & Governance Invariants:
  * 1. RTK Transparent Command Optimization:
- *    - Offloads 100% of command output reduction to RTK (Rust Token Killer).
- *    - Intercepts native run_command and calls `rtk rewrite <cmd>`.
- *    - Non-daemon commands maintain WaitMsBeforeAsync=10000 for synchronous completion.
+ *    - Delegates command rewriting to `rtk hook antigravity` (>= 1.1.0) via stdin JSON.
+ *    - Reverts lossy `rtk wc` / `rtk ls` / `rtk diff` rewrites unless explicitly requested.
+ *    - Never emits `rtk rg` when `rg` is absent on PATH (maps safe invocations to `rtk grep`
+ *      with explicit path, or strips `rtk ` when rg-only flags are used).
+ *    - Sets WaitMsBeforeAsync=10000 only when `!isDaemon && waitMs === undefined`.
  * 2. Hard-Routed Native File/Search Inspection (LH-07):
- *    - view_file -> Allow bounded slices (<= 150 lines, paired with waymark_ask); deny unbounded dumps.
- *    - read_file, read_many_files -> Deny and route to bounded view_file or `rtk read <file>`.
- *    - grep_search -> Deny and route to `rtk rg "<pattern>" .` / `rtk grep <pattern>`.
- *    - find_by_name -> Deny and route to `rtk find <path>`.
- *    - list_dir -> Deny and route to `rtk find` (Win) or `rtk ls` / `rtk tree` (POSIX).
- *    - Safe Harbor: Documented Antigravity special files (SKILL.md, brain artifacts, configs) are allowed.
+ *    - read_file & view_file -> Symmetrical Safe Harbor + Hybrid Slice (<= 150 lines, or
+ *      explicit full-file StartLine=1..EndLine=TotalLines when <= 800 lines & <= 45 KiB);
+ *      bounded read_file (<= 150 lines) allowed on `.system_generated/steps/<n>/output.txt`.
+ *    - read_many_files, grep_search, find_by_name, list_dir -> Hard-routed to RTK CLI.
  * 3. Root-Based Antigravity Internal State Protection (LH-02):
- *    - Hard denial for any inspection of `.system_generated/` (transcripts, task logs, progress).
- *    - Directed to Agy MCP tools `read_transcript` / `query_transcript`.
+ *    - Quote/heredoc-aware shell parser (`splitShellSegments`) protects `.system_generated/`
+ *      without false-blocking heredoc prose, `echo`/`printf`, or literal search patterns.
+ *    - Allows strictly single unchained `rtk read <spillover|completed task log>` and
+ *      `agy-context transcript (read|query|step|health) ...` within `<brainDir>`.
  * 4. Closed Lifecycle Governance (LH-03, LH-04, LH-05, LH-06):
- *    - Session-wide ledger without cooldown resets, task-ID resets, or duration exemptions.
- *    - Enforces native Reactive Wakeup (<SYSTEM_MESSAGE>) for background tasks.
- *    - Circuit Breaker: 5 cumulative denials trigger `force_ask` to halt runaway autonomous loops.
+ *    - Session-wide ledger with proportional backoff and 5-denial `force_ask` circuit breaker.
  * 5. Benchmark & Evaluator Mutation Protection (LH-09):
- *    - Requires user approval before mutating benchmark definitions, evaluators, or scoring files.
- * 6. Fail-Closed on Governed Operations (LH-10):
- *    - Governed tool failures deny instead of silently allowing.
+ *    - Requires user approval (`force_ask`) for `edit_file`, `write_file`,
+ *      `replace_file_content`, `write_to_file`, and destructive shell commands.
+ * 6. Fail-Closed on Governed Operations (LH-10).
  */
 
 import fs from "node:fs";
@@ -51,7 +51,9 @@ const GOVERNED_TOOLS = new Set([
   "find_by_name",
   "list_dir",
   "replace_file_content",
-  "write_to_file"
+  "write_to_file",
+  "write_file",
+  "edit_file"
 ]);
 
 const STATE_TTL_MS = 3600000; // 1 hour TTL
@@ -193,35 +195,41 @@ function isProtectedBenchmarkPath(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
   const normalized = targetPath.replace(/\\/g, "/");
   return (
-    /\/(?:benchmarks?|evaluators?|evaluation|scoring|ground_truth|prompt_templates)\//i.test(normalized) ||
-    /\/(?:eval_[^\/]+\.(?:py|json|toml)|bench_[^\/]+\.(?:py|json|toml))$/i.test(normalized)
+    /(?:^|\/)(?:benchmarks?|evaluators?|evaluation|scoring|ground_truth|prompt_templates)\//i.test(normalized) ||
+    /(?:^|\/)(?:eval_[^\/]+\.(?:py|json|toml)|bench_[^\/]+\.(?:py|json|toml))$/i.test(normalized)
   );
 }
 
-
 /**
- * Checks if target path references runtime step output spillover file.
+ * Checks if target path strictly matches runtime step output spillover:
+ * `<prefix>/.system_generated/steps/<digits>/output.txt` (or relative `.system_generated/steps/<digits>/output.txt`).
  */
 function isStepSpilloverPath(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
-  if (!isProtectedInternalState(targetPath)) return false; // cheap precheck
-  const normalized = targetPath.replace(/\\/g, "/");
-  return (
-    /\.system_generated[/\\]steps[/\\]\d+[/\\]output\.txt/i.test(normalized) ||
-    (normalized.includes("/.system_generated/steps/") && normalized.endsWith("output.txt"))
-  );
+  const normalized = targetPath.trim().replace(/\\/g, "/");
+  return /(?:^|\/)\.system_generated\/steps\/\d+\/output\.txt$/i.test(normalized);
+}
+
+/**
+ * Checks whether any path token in a command string strictly contains a step spillover path.
+ */
+function findStepSpilloverToken(tokens) {
+  for (const tok of tokens) {
+    const clean = tok.replace(/^file:\/\//i, "");
+    if (isStepSpilloverPath(clean)) return clean;
+  }
+  return null;
 }
 
 /**
  * Extracts the task-log reference from a target path or command, or null.
- * Returns { id, token }: `id` is the bare task id; `token` is the matched path text
- * (relative "tasks/task-1.log" or absolute ".../.system_generated/tasks/task-1.log").
+ * Returns { id, token }: `id` is the bare task id; `token` is the matched path text.
  */
 function getTaskLogMatch(text) {
   if (!text || typeof text !== "string" || !text.includes(".log")) return null;
   const normalized = text.replace(/\\/g, "/");
   if (!normalized.includes("tasks/")) return null;
-  const m = normalized.match(/(?:^|[\s"'])((?:[^\s"']*\/)?tasks\/(?:task-)?([a-zA-Z0-9_-]+)\.log)/i);
+  const m = normalized.match(/(?:^|[\s"'])((?:[^\s"']*\/)?tasks\/(?:task-)?([a-zA-Z0-9_-]+)\.log)(?=$|[\s"'])/i);
   if (!m) return null;
   let token = m[1].replace(/^file:\/\//i, "");
   if (/^\/[A-Za-z]:/.test(token)) token = token.slice(1);
@@ -239,7 +247,6 @@ function getBrainDir() {
   return process.env.AGY_BRAIN_DIR || path.join(getProfileHomeDir(), ".gemini", "antigravity", "brain");
 }
 
-/** Reads the last `bytes` of a file. Returns { text, whole } or null. */
 function readTail(file, bytes) {
   let fd;
   try {
@@ -256,22 +263,12 @@ function readTail(file, bytes) {
   }
 }
 
-/**
- * Looks for the finish / start notices of `taskName` in transcript text using literal needles
- * (JSON-escaped and raw variants). Finish: `<conv>/task-N" finished with result`.
- * Start: `<conv>/task-N` followed by a newline and "Task Description" or "Task logs".
- * Returns "COMPLETED", "RUNNING" or null.
- */
 function scanTaskMarkers(text, taskName) {
   if (text.includes(`/${taskName}\\" finished`) || text.includes(`/${taskName}" finished`)) return "COMPLETED";
   if (text.includes(`/${taskName}\\nTask `) || text.includes(`/${taskName}\nTask `)) return "RUNNING";
   return null;
 }
 
-/**
- * Resolves a background task's lifecycle state: "RUNNING", "COMPLETED" or "UNKNOWN".
- * Authority order: transcript notices (tail first, full file only if needed), then log mtime.
- */
 function getTaskState(match, convId) {
   const taskName = `task-${match.id}`;
   const token = match.token;
@@ -308,13 +305,38 @@ function getTaskState(match, convId) {
   return "UNKNOWN";
 }
 
+// ============================================================================
+// RTK Resolution & `rtk hook antigravity` Delegation
+// ============================================================================
+
 function isCompatibleRtkVersion(versionStr) {
   if (!versionStr || typeof versionStr !== "string") return false;
   const match = versionStr.match(/(\d+)\.(\d+)\.(\d+)/);
   if (!match) return false;
   const major = parseInt(match[1], 10);
   const minor = parseInt(match[2], 10);
-  return major === 0 && (minor === 50 || minor === 51);
+  return major > 1 || (major === 1 && minor >= 1);
+}
+
+function findExecutableOnPath(baseName) {
+  const pathEnv = process.env.PATH || process.env.Path || "";
+  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
+  const isWin = os.platform() === "win32";
+  const exts = isWin ? [".exe", ".cmd", ".bat"] : [""];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const candidate = path.join(dir, `${baseName}${ext}`);
+      try {
+        const stat = fs.statSync(candidate);
+        if (!stat.isFile()) continue;
+        if (!isWin) {
+          fs.accessSync(candidate, fs.constants.X_OK);
+        }
+        return candidate;
+      } catch {}
+    }
+  }
+  return "";
 }
 
 function getLocalRtkCandidate() {
@@ -331,23 +353,6 @@ function getLocalRtkCandidate() {
   return "";
 }
 
-function findFirstRtkOnPath() {
-  const pathEnv = process.env.PATH || process.env.Path || "";
-  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
-  const exts = os.platform() === "win32" ? [".exe", ".cmd", ".bat"] : [""];
-  for (const dir of dirs) {
-    for (const ext of exts) {
-      const candidate = path.join(dir, `rtk${ext}`);
-      try {
-        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-          return candidate;
-        }
-      } catch {}
-    }
-  }
-  return "";
-}
-
 function spawnRtk(bin, args, opts) {
   if (!bin) return { error: Object.assign(new Error("ENOENT"), { code: "ENOENT" }), status: null, stdout: "", stderr: "" };
   if (os.platform() === "win32" && /\.(cmd|bat)$/i.test(bin)) {
@@ -358,212 +363,1123 @@ function spawnRtk(bin, args, opts) {
   return spawnSync(bin, args, opts);
 }
 
-const NON_REWRITABLE_BINARIES = new Set([
-  "node", "node.exe",
-  "powershell", "powershell.exe",
-  "pwsh", "pwsh.exe",
-  "cmd", "cmd.exe",
-  "dir",
-  "echo",
-  "cd",
-  "del",
-  "mkdir",
-  "rmdir",
-  "copy",
-  "move",
-  "type",
-  "cls",
-  "clear",
-  "set",
-  "export"
-]);
-
-const REWRITE_CACHE_FILE = path.join(getStateDir(), "agy-rtk-rewrite-cache.json");
-const REWRITE_CACHE_MAX = 100;
-let inMemoryRewriteCache = null;
-
-function readRewriteCacheFile() {
-  try {
-    const data = JSON.parse(fs.readFileSync(REWRITE_CACHE_FILE, "utf-8"));
-    if (data && typeof data === "object" && !Array.isArray(data)) return data;
-  } catch {}
-  return {};
-}
-
-function loadRewriteCache() {
-  if (!inMemoryRewriteCache) inMemoryRewriteCache = readRewriteCacheFile();
-  return inMemoryRewriteCache;
-}
+let cachedRtkKey = null;
+let cachedRtkValue = undefined;
 
 function resolveCompatibleRtk() {
   const localCandidate = getLocalRtkCandidate();
-  const pathCandidate = findFirstRtkOnPath();
-  const envSig = `${pathCandidate}::${localCandidate}`;
-  const cache = loadRewriteCache();
-  if (cache.__envSig === envSig && cache.__rtkResolved !== undefined) {
-    return cache.__rtkResolved;
+  const pathCandidate = findExecutableOnPath("rtk");
+  const key = `${pathCandidate}::${localCandidate}`;
+  if (cachedRtkKey === key && cachedRtkValue !== undefined) {
+    return cachedRtkValue;
   }
-
-  for (const k of Object.keys(cache)) delete cache[k];
 
   const opts = { encoding: "utf-8", timeout: 2000, windowsHide: true };
   let resolved = null;
 
-  const pathRes = pathCandidate ? spawnRtk(pathCandidate, ["--version"], opts) : { status: 1, stdout: "" };
-  const pathCompatible = !pathRes.error && pathRes.status === 0 && isCompatibleRtkVersion(pathRes.stdout);
+  // Prefer PATH rtk (>= 1.1.0) before local binaries
+  if (pathCandidate) {
+    const pathRes = spawnRtk(pathCandidate, ["--version"], opts);
+    if (!pathRes.error && pathRes.status === 0 && isCompatibleRtkVersion(pathRes.stdout)) {
+      resolved = { exe: pathCandidate, prefix: "rtk" };
+    }
+  }
 
-  if (pathCompatible) {
-    resolved = { exe: pathCandidate, prefix: "rtk" };
-  } else if (localCandidate) {
+  if (!resolved && localCandidate) {
     const localRes = spawnRtk(localCandidate, ["--version"], opts);
-    const localCompatible = !localRes.error && localRes.status === 0 && isCompatibleRtkVersion(localRes.stdout);
-    if (localCompatible) {
+    if (!localRes.error && localRes.status === 0 && isCompatibleRtkVersion(localRes.stdout)) {
       const normalizedLocal = localCandidate.replace(/\\/g, "/");
       const prefix = /\s/.test(normalizedLocal) ? `"${normalizedLocal}"` : normalizedLocal;
       resolved = { exe: localCandidate, prefix };
     }
   }
 
-  cache.__envSig = envSig;
-  cache.__rtkResolved = resolved;
-  ensureStateDir();
-  try {
-    const tmp = `${REWRITE_CACHE_FILE}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(cache), "utf-8");
-    try {
-      fs.renameSync(tmp, REWRITE_CACHE_FILE);
-    } catch {
-      fs.writeFileSync(REWRITE_CACHE_FILE, JSON.stringify(cache), "utf-8");
-      try { fs.unlinkSync(tmp); } catch {}
-    }
-  } catch {}
-
+  cachedRtkKey = key;
+  cachedRtkValue = resolved;
   return resolved;
 }
 
-function runRtkRewrite(cmd, resolvedRtk) {
-  const rtk = resolvedRtk || resolveCompatibleRtk();
-  if (!rtk) return { status: 1, stdout: "", stderr: "No compatible RTK binary available" };
-  const opts = { encoding: "utf-8", timeout: 2000, windowsHide: true };
-  return spawnRtk(rtk.exe, ["rewrite", cmd], opts);
+// ============================================================================
+// Quote- & Heredoc-Aware Shell Segment Parser & Tokenizer
+// ============================================================================
+
+const SHELL_ESCAPE_CHARS = new Set([" ", "\t", "\n", "\r", ";", "|", "&", "<", ">", "(", ")", '"', "'", "\\", "$", "`"]);
+
+function parseHeredocTag(cmd, pos) {
+  // Assumes cmd[pos] === '<' && cmd[pos + 1] === '<' && cmd[pos + 2] !== '<'
+  let i = pos + 2;
+  let stripTabs = false;
+  if (cmd[i] === "-") {
+    stripTabs = true;
+    i++;
+  }
+  while (i < cmd.length && (cmd[i] === " " || cmd[i] === "\t")) i++;
+  if (i >= cmd.length) return null;
+
+  let delim = "";
+  let quoted = false;
+  const ch = cmd[i];
+  if (ch === "'" || ch === '"') {
+    quoted = true;
+    const q = ch;
+    i++;
+    while (i < cmd.length && cmd[i] !== q && cmd[i] !== "\n" && cmd[i] !== "\r") {
+      if (q === '"' && cmd[i] === "\\" && i + 1 < cmd.length) {
+        i++;
+      }
+      delim += cmd[i++];
+    }
+    if (i < cmd.length && cmd[i] === q) i++;
+  } else {
+    while (i < cmd.length && !/[\s;|&<>()"']/.test(cmd[i])) {
+      if (cmd[i] === "\\" && i + 1 < cmd.length) {
+        quoted = true;
+        i++;
+      }
+      delim += cmd[i++];
+    }
+  }
+
+  if (!delim) return null;
+  return { delim, stripTabs, quoted, endIndex: i };
+}
+
+function readBalancedSubshell(cmd, startPos) {
+  // startPos points right after "$("
+  let i = startPos;
+  let depth = 1;
+  let inSingle = false;
+  let inDouble = false;
+
+  while (i < cmd.length && depth > 0) {
+    const c = cmd[i];
+    if (inSingle) {
+      if (c === "'") inSingle = false;
+      i++;
+      continue;
+    }
+    if (inDouble) {
+      if (c === "\\" && i + 1 < cmd.length) {
+        i += 2;
+        continue;
+      }
+      if (c === '"') inDouble = false;
+      else if (c === "$" && cmd[i + 1] === "(") {
+        depth++;
+        i += 2;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    if (c === "\\" && i + 1 < cmd.length && SHELL_ESCAPE_CHARS.has(cmd[i + 1])) {
+      i += 2;
+      continue;
+    }
+    if (c === "'") {
+      inSingle = true;
+      i++;
+    } else if (c === '"') {
+      inDouble = true;
+      i++;
+    } else if (c === "(") {
+      depth++;
+      i++;
+    } else if (c === ")") {
+      depth--;
+      i++;
+    } else {
+      i++;
+    }
+  }
+
+  const endInner = depth === 0 ? i - 1 : i;
+  return { inner: cmd.slice(startPos, endInner), nextIndex: i };
+}
+
+function readBacktickSubshell(cmd, startPos) {
+  // startPos points right after opening "`"
+  let i = startPos;
+  let inner = "";
+  while (i < cmd.length) {
+    const c = cmd[i];
+    if (c === "\\" && i + 1 < cmd.length) {
+      inner += cmd[i + 1];
+      i += 2;
+      continue;
+    }
+    if (c === "`") {
+      return { inner, nextIndex: i + 1 };
+    }
+    inner += c;
+    i++;
+  }
+  return { inner, nextIndex: i };
 }
 
 /**
- * Persists one rewrite result. Re-reads the file first so concurrent hook processes merge instead
- * of overwriting each other, trims to the newest entries, and writes atomically (temp + rename).
+ * Splits a shell command string into segments while respecting single/double quotes,
+ * backslash escapes, `$()` / backtick subshells, process substitutions, and `<<DELIM ... DELIM`
+ * heredoc bodies.
  */
-function rememberRewrite(cmd, rewritten) {
-  const cache = loadRewriteCache();
-  cache[cmd] = rewritten;
-  try {
-    const disk = readRewriteCacheFile();
-    const envSig = cache.__envSig ?? disk.__envSig;
-    const rtkResolved = cache.__rtkResolved ?? disk.__rtkResolved;
-    delete disk.__envSig;
-    delete disk.__rtkResolved;
-    delete disk[cmd];
-    disk[cmd] = rewritten;
-    const keys = Object.keys(disk);
-    for (const k of keys.slice(0, Math.max(0, keys.length - REWRITE_CACHE_MAX))) delete disk[k];
-    if (envSig !== undefined) disk.__envSig = envSig;
-    if (rtkResolved !== undefined) disk.__rtkResolved = rtkResolved;
-    ensureStateDir();
-    const tmp = `${REWRITE_CACHE_FILE}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(disk), "utf-8");
-    try {
-      fs.renameSync(tmp, REWRITE_CACHE_FILE);
-    } catch {
-      fs.writeFileSync(REWRITE_CACHE_FILE, JSON.stringify(disk), "utf-8");
-      try { fs.unlinkSync(tmp); } catch {}
-    }
-  } catch {}
-}
+function splitShellSegments(command) {
+  if (!command || typeof command !== "string") return [];
 
-/**
- * Rewrite raw shell command using RTK (Rust Token Killer).
- */
-function rewriteCommandWithRtk(rawCmd) {
-  if (!rawCmd || typeof rawCmd !== "string") return rawCmd;
-  const trimmed = rawCmd.trim();
-  if (!trimmed) return rawCmd;
+  const segments = [];
+  const pendingHeredocs = [];
+  let inSingle = false;
+  let inDouble = false;
 
-  // Already prefixed with rtk
-  if (/^rtk(?:\.exe)?(?=\s|$)/i.test(trimmed)) {
-    const rtk = resolveCompatibleRtk();
-    if (rtk && rtk.prefix !== "rtk") {
-      return trimmed.replace(/^rtk(?:\.exe)?(?=\s|$)/i, rtk.prefix);
-    }
-    return trimmed;
-  }
+  let segStart = 0;
+  let leadingSep = "";
+  let hasRedirect = false;
+  let hasWriteRedirect = false;
+  let hasHeredoc = false;
+  let hasSubshell = false;
+  let subshells = [];
+  let heredocBodies = [];
+  let firstHeredocSegIdx = -1;
 
-  // Unwrap shell wrappers (e.g. cmd /c "...", powershell -Command "...", bash -c "...") (LH-01-B)
-  const shellWrapperMatch = trimmed.match(
-    /^(cmd(?:\.exe)?\s+\/[cC]|(?:powershell|pwsh)(?:\.exe)?\s+(?:-Command|-c)|(?:bash|sh)\s+-c)\s+["']?(.+?)["']?$/i
-  );
-  if (shellWrapperMatch) {
-    const wrapperPrefix = shellWrapperMatch[1];
-    const innerCmd = shellWrapperMatch[2].trim();
-    const rewrittenInner = rewriteCommandWithRtk(innerCmd);
-    if (rewrittenInner !== innerCmd) {
-      return `${wrapperPrefix} "${rewrittenInner}"`;
-    }
-    return trimmed;
-  }
-
-  // Fast-path bypass for shell builtins, non-rewritable binaries, and powershell cmdlets
-  const firstWord = (trimmed.match(/^[^\s"']+/)?.[0] || "").toLowerCase();
-  if (
-    NON_REWRITABLE_BINARIES.has(firstWord) ||
-    firstWord.startsWith("get-") ||
-    firstWord.startsWith("set-") ||
-    firstWord.startsWith("start-") ||
-    firstWord.startsWith("stop-") ||
-    firstWord.startsWith("new-") ||
-    firstWord.startsWith("remove-") ||
-    firstWord.startsWith("test-")
-  ) {
-    return trimmed;
-  }
-
-  const rtk = resolveCompatibleRtk();
-  if (!rtk) return trimmed;
-
-  // Check persistent cache
-  const cache = loadRewriteCache();
-  if (cache[trimmed] !== undefined) {
-    return cache[trimmed];
-  }
-
-  let rewritten = trimmed;
-  let cacheable = false;
-  try {
-    const res = runRtkRewrite(trimmed, rtk);
-    // Never cache timeouts, spawn errors or signals: a transient failure must not pin a command
-    // to "no rewrite" for the lifetime of the cache.
-    cacheable = !res.error && !res.signal && typeof res.status === "number" && res.status >= 0 && res.status <= 3;
-
-    // RTK exits 0 or 3 when rewritten, with new command on stdout
-    if ((res.status === 0 || res.status === 3) && res.stdout && res.stdout.trim()) {
-      rewritten = res.stdout.trim();
-      if (rtk.prefix !== "rtk") {
-        rewritten = rewritten.replace(/^rtk(?:\.exe)?(?=\s|$)/i, rtk.prefix);
+  const pushSegment = (endOffset) => {
+    const raw = command.slice(segStart, endOffset);
+    const trimmed = raw.trim();
+    if (trimmed || hasHeredoc) {
+      const leadWS = raw.length - raw.trimStart().length;
+      const trailWS = raw.length - raw.trimEnd().length;
+      segments.push({
+        text: trimmed,
+        raw,
+        start: segStart + leadWS,
+        end: Math.max(segStart + leadWS, endOffset - trailWS),
+        leadingSep,
+        hasRedirect,
+        hasWriteRedirect,
+        hasHeredoc,
+        heredocBodies,
+        hasSubshell,
+        subshells
+      });
+      if (hasHeredoc && firstHeredocSegIdx === -1) {
+        firstHeredocSegIdx = segments.length - 1;
       }
     }
-  } catch {}
+    leadingSep = "";
+    hasRedirect = false;
+    hasWriteRedirect = false;
+    hasHeredoc = false;
+    hasSubshell = false;
+    subshells = [];
+    heredocBodies = [];
+  };
 
-  if (cacheable) rememberRewrite(trimmed, rewritten);
-  return rewritten;
+  let i = 0;
+  while (i < command.length) {
+    const c = command[i];
+    const next = command[i + 1];
+
+    if (inSingle) {
+      if (c === "'") inSingle = false;
+      i++;
+      continue;
+    }
+
+    if (inDouble) {
+      if (c === "\\" && i + 1 < command.length) {
+        i += 2;
+        continue;
+      }
+      if (c === '"') {
+        inDouble = false;
+        i++;
+      } else if (c === "$" && next === "(") {
+        hasSubshell = true;
+        const sub = readBalancedSubshell(command, i + 2);
+        subshells.push(sub.inner);
+        i = sub.nextIndex;
+      } else if (c === "`") {
+        hasSubshell = true;
+        const sub = readBacktickSubshell(command, i + 1);
+        subshells.push(sub.inner);
+        i = sub.nextIndex;
+      } else {
+        i++;
+      }
+      continue;
+    }
+
+    // Backslash escape outside quotes (preserve Windows paths like C:\Users\...)
+    if (c === "\\") {
+      if (next === "\r" && command[i + 2] === "\n") {
+        i += 3;
+        continue;
+      }
+      if (next !== undefined && SHELL_ESCAPE_CHARS.has(next)) {
+        i += 2;
+        continue;
+      }
+      i++;
+      continue;
+    }
+
+    if (c === "'") {
+      inSingle = true;
+      i++;
+      continue;
+    }
+
+    if (c === '"') {
+      inDouble = true;
+      i++;
+      continue;
+    }
+
+    // Comments (# at start of segment or after whitespace)
+    if (c === "#" && (i === 0 || /\s/.test(command[i - 1]))) {
+      while (i < command.length && command[i] !== "\n") i++;
+      continue;
+    }
+
+    // Subshells & process substitutions
+    if ((c === "$" || c === "<" || c === ">") && next === "(") {
+      hasSubshell = true;
+      if (c === "<" || c === ">") hasRedirect = true;
+      const sub = readBalancedSubshell(command, i + 2);
+      subshells.push(sub.inner);
+      i = sub.nextIndex;
+      continue;
+    }
+
+    if (c === "(") {
+      hasSubshell = true;
+      const sub = readBalancedSubshell(command, i + 1);
+      subshells.push(sub.inner);
+      i = sub.nextIndex;
+      continue;
+    }
+
+    if (c === "`") {
+      hasSubshell = true;
+      const sub = readBacktickSubshell(command, i + 1);
+      subshells.push(sub.inner);
+      i = sub.nextIndex;
+      continue;
+    }
+
+    // Heredocs << / <<- vs here-string <<< vs input redirect <
+    if (c === "<") {
+      if (next === "<" && command[i + 2] !== "<") {
+        const tag = parseHeredocTag(command, i);
+        if (tag) {
+          hasHeredoc = true;
+          pendingHeredocs.push(tag);
+          i = tag.endIndex;
+          continue;
+        }
+      }
+      hasRedirect = true;
+      i += next === "<" ? (command[i + 2] === "<" ? 3 : 2) : 1;
+      continue;
+    }
+
+    if (c === ">") {
+      hasRedirect = true;
+      hasWriteRedirect = true;
+      i += next === ">" ? 2 : 1;
+      continue;
+    }
+
+    // Newline: flush current segment, then consume any pending heredoc bodies
+    if (c === "\n" || (c === "\r" && next === "\n")) {
+      const nlLen = c === "\r" ? 2 : 1;
+      pushSegment(i);
+      i += nlLen;
+
+      if (pendingHeredocs.length > 0) {
+        const targetIdx = firstHeredocSegIdx !== -1 ? firstHeredocSegIdx : segments.length - 1;
+        while (pendingHeredocs.length > 0) {
+          const hd = pendingHeredocs.shift();
+          const bodyLines = [];
+          while (i < command.length) {
+            const nlPos = command.indexOf("\n", i);
+            const lineEnd = nlPos === -1 ? command.length : nlPos;
+            const rawLine = command.slice(i, lineEnd).replace(/\r$/, "");
+            const checkLine = hd.stripTabs ? rawLine.replace(/^\t+/, "") : rawLine;
+            i = nlPos === -1 ? command.length : nlPos + 1;
+            if (checkLine === hd.delim) {
+              break;
+            }
+            bodyLines.push(rawLine);
+          }
+          if (targetIdx >= 0 && segments[targetIdx]) {
+            segments[targetIdx].heredocBodies.push(bodyLines.join("\n"));
+          }
+        }
+        firstHeredocSegIdx = -1;
+      }
+
+      segStart = i;
+      leadingSep = "\n";
+      continue;
+    }
+
+    // Operators: &&, ||, |&, |, ;, &
+    if (c === "&" && next === "&") {
+      pushSegment(i);
+      i += 2;
+      segStart = i;
+      leadingSep = "&&";
+      continue;
+    }
+    if (c === "|" && next === "|") {
+      pushSegment(i);
+      i += 2;
+      segStart = i;
+      leadingSep = "||";
+      continue;
+    }
+    if (c === "|" && next === "&") {
+      pushSegment(i);
+      i += 2;
+      segStart = i;
+      leadingSep = "|&";
+      continue;
+    }
+    if (c === "|") {
+      pushSegment(i);
+      i += 1;
+      segStart = i;
+      leadingSep = "|";
+      continue;
+    }
+    if (c === ";") {
+      pushSegment(i);
+      i += 1;
+      segStart = i;
+      leadingSep = ";";
+      continue;
+    }
+    if (c === "&") {
+      // Exclude fd redirects like >&2, 2>&1, <&0, &>file
+      const prevChar = i > 0 ? command[i - 1] : "";
+      if (prevChar === ">" || prevChar === "<") {
+        hasRedirect = true;
+        i++;
+        continue;
+      }
+      if (next === ">") {
+        hasRedirect = true;
+        hasWriteRedirect = true;
+        i += 2;
+        continue;
+      }
+      pushSegment(i);
+      i += 1;
+      segStart = i;
+      leadingSep = "&";
+      continue;
+    }
+
+    i++;
+  }
+
+  pushSegment(command.length);
+  return segments;
 }
+
+/**
+ * Tokenizes a single shell segment into words (preserving raw token text & unquoted value).
+ */
+const REDIRECT_OP_REGEX = /^(?:&>>?|(?:\d+)?(?:>>?|<<<?|<<-|<&|>&|>\||<>))$/;
+const REDIRECT_ATTACHED_REGEX = /^(?:\d+)?(?:>>?|<<?)(.+)$/;
+
+function tokenizeShellWordsDetailed(text) {
+  const tokens = [];
+  let i = 0;
+
+  while (i < text.length) {
+    while (i < text.length && /\s/.test(text[i])) i++;
+    if (i >= text.length) break;
+
+    const start = i;
+    let value = "";
+    let quoted = false;
+
+    while (i < text.length && !/\s/.test(text[i])) {
+      const c = text[i];
+      if (c === ">" || c === "<") {
+        if (i > start) {
+          const prefixRaw = text.slice(start, i);
+          const isFdOrAmpPrefix = !quoted && (/^\d+$/.test(prefixRaw) || (c === ">" && prefixRaw === "&"));
+          if (!isFdOrAmpPrefix) {
+            break;
+          }
+        }
+        i++;
+        if (i < text.length && (text[i] === c || text[i] === "&" || (c === ">" && text[i] === "|") || (c === "<" && text[i] === ">"))) {
+          i++;
+          if (i < text.length && (text[i] === "<" || text[i] === ">" || text[i] === "-")) {
+            i++;
+          }
+        }
+        value = text.slice(start, i);
+        break;
+      } else if (c === "&" && i + 1 < text.length && text[i + 1] === ">" && i === start) {
+        i += 2;
+        if (i < text.length && text[i] === ">") i++;
+        value = text.slice(start, i);
+        break;
+      } else if (c === "'") {
+        quoted = true;
+        i++;
+        while (i < text.length && text[i] !== "'") {
+          value += text[i++];
+        }
+        if (i < text.length && text[i] === "'") i++;
+      } else if (c === '"') {
+        quoted = true;
+        i++;
+        while (i < text.length && text[i] !== '"') {
+          if (text[i] === "\\" && i + 1 < text.length && (text[i + 1] === '"' || text[i + 1] === "\\" || text[i + 1] === "$" || text[i + 1] === "`")) {
+            value += text[i + 1];
+            i += 2;
+          } else {
+            value += text[i++];
+          }
+        }
+        if (i < text.length && text[i] === '"') i++;
+      } else if (c === "\\" && i + 1 < text.length && SHELL_ESCAPE_CHARS.has(text[i + 1])) {
+        value += text[i + 1];
+        i += 2;
+      } else {
+        value += c;
+        i++;
+      }
+    }
+
+    tokens.push({ raw: text.slice(start, i), value, quoted, start, end: i });
+  }
+
+  return tokens;
+}
+
+const ENV_VALUE_FLAGS = new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]);
+
+function splitEnvPrefix(text) {
+  const tokens = tokenizeShellWordsDetailed(text);
+  let idx = 0;
+
+  while (idx < tokens.length) {
+    const tok = tokens[idx];
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tok.raw)) {
+      idx++;
+      continue;
+    }
+    if (normalizeCmdName(tok.value) === "env") {
+      idx++;
+      while (idx < tokens.length) {
+        const sub = tokens[idx];
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(sub.raw)) {
+          idx++;
+          continue;
+        }
+        if (sub.value.startsWith("-") && sub.value !== "-") {
+          idx++;
+          if (ENV_VALUE_FLAGS.has(sub.value) && idx < tokens.length) {
+            idx++;
+          }
+          continue;
+        }
+        break;
+      }
+      continue;
+    }
+    break;
+  }
+
+  if (idx === 0) return { prefix: "", body: text };
+  if (idx >= tokens.length) return { prefix: text, body: "" };
+  return {
+    prefix: text.slice(0, tokens[idx].start),
+    body: text.slice(tokens[idx].start)
+  };
+}
+
+function tokenizeShellWords(text) {
+  return tokenizeShellWordsDetailed(text).map((t) => t.value);
+}
+
+function hasDotDotTraversal(str) {
+  if (!str || typeof str !== "string") return false;
+  return /(?:^|[\/\\])\.\.(?:$|[\/\\])/.test(str);
+}
+
+function tryRealpath(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    try {
+      const parent = path.dirname(p);
+      const base = path.basename(p);
+      return path.join(fs.realpathSync(parent), base);
+    } catch {
+      return path.resolve(p);
+    }
+  }
+}
+
+function isPathInsideDir(candidatePath, baseDir) {
+  const norm = (p) => (os.platform() === "win32" ? p.toLowerCase() : p);
+  const resolvedCandidate = norm(tryRealpath(path.resolve(candidatePath)));
+  const resolvedBase = norm(tryRealpath(path.resolve(baseDir)));
+  const prefix = resolvedBase.endsWith(path.sep) ? resolvedBase : resolvedBase + path.sep;
+  return resolvedCandidate.startsWith(prefix);
+}
+
+function normalizeCmdName(token) {
+  const base = path.basename(token.replace(/\\/g, "/")).toLowerCase();
+  return base.replace(/\.(exe|cmd|bat)$/i, "");
+}
+
+// ============================================================================
+// Internal State & `agy-context transcript` Governance
+// ============================================================================
+
+function isAllowedAgyContextScriptPath(scriptToken) {
+  if (!scriptToken || hasDotDotTraversal(scriptToken)) return false;
+  const normalized = scriptToken.replace(/\\/g, "/");
+  if (!normalized.endsWith("/bin/agy-context.mjs") && normalized !== "bin/agy-context.mjs") {
+    return false;
+  }
+
+  const hookDir = path.dirname(fileURLToPath(import.meta.url));
+  const repoOrPluginRoot = path.resolve(hookDir, "..");
+  const installedPluginRoot = path.join(getProfileHomeDir(), ".gemini", "config", "plugins", "agy-context-saver");
+  const allowedTargets = new Set([
+    tryRealpath(path.join(repoOrPluginRoot, "bin", "agy-context.mjs")),
+    tryRealpath(path.join(installedPluginRoot, "bin", "agy-context.mjs"))
+  ]);
+  const resolvedArg = tryRealpath(path.resolve(scriptToken));
+  if (allowedTargets.has(resolvedArg)) return true;
+
+  // Also allow relative "bin/agy-context.mjs" when invoked from repo/plugin root
+  if (normalized === "bin/agy-context.mjs") return true;
+  return false;
+}
+
+/**
+ * Checks if a command is a valid, strictly single, unchained `agy-context transcript ...` invocation.
+ * Returns { matched: boolean, allowed: boolean, reason?: string }.
+ */
+function checkAgyContextTranscriptCommand(segments) {
+  if (segments.length === 0) return { matched: false, allowed: false };
+  const firstTokens = tokenizeShellWords(segments[0].text);
+  if (firstTokens.length === 0) return { matched: false, allowed: false };
+
+  const cmd0 = normalizeCmdName(firstTokens[0]);
+  let subOffset = -1;
+
+  if ((cmd0 === "agy-context" || cmd0 === "agy-context-saver") && firstTokens[1] === "transcript") {
+    subOffset = 2;
+  } else if (cmd0 === "node" && firstTokens.length >= 3 && isAllowedAgyContextScriptPath(firstTokens[1]) && firstTokens[2] === "transcript") {
+    subOffset = 3;
+  }
+
+  if (subOffset === -1) {
+    return { matched: false, allowed: false };
+  }
+
+  const subcommand = firstTokens[subOffset];
+  const validSubcommands = new Set(["read", "query", "step", "health"]);
+  if (!validSubcommands.has(subcommand)) {
+    return { matched: false, allowed: false };
+  }
+
+  // Must be strictly single, unchained, no redirects, no heredocs, no subshells
+  const seg = segments[0];
+  if (segments.length !== 1 || seg.hasRedirect || seg.hasHeredoc || seg.hasSubshell) {
+    return {
+      matched: true,
+      allowed: false,
+      reason: "Antigravity Execution Governance: 'agy-context transcript' access to .system_generated must be strictly single and unchained (no chaining, redirects, heredocs, or subshells)."
+    };
+  }
+
+  // Validate flags: disallow `..` traversal and `--file` outside <brainDir>
+  for (let i = subOffset + 1; i < firstTokens.length; i++) {
+    const tok = firstTokens[i];
+    if (tok === "--file") {
+      const val = firstTokens[i + 1];
+      if (!val || hasDotDotTraversal(val) || !isPathInsideDir(val, getBrainDir())) {
+        return {
+          matched: true,
+          allowed: false,
+          reason: `Antigravity Execution Governance: '--file' in 'agy-context transcript' must stay inside '${getBrainDir()}' without '..' path traversal.`
+        };
+      }
+      i++;
+      continue;
+    }
+    if (tok.startsWith("--file=")) {
+      const val = tok.slice("--file=".length);
+      if (!val || hasDotDotTraversal(val) || !isPathInsideDir(val, getBrainDir())) {
+        return {
+          matched: true,
+          allowed: false,
+          reason: `Antigravity Execution Governance: '--file' in 'agy-context transcript' must stay inside '${getBrainDir()}' without '..' path traversal.`
+        };
+      }
+      continue;
+    }
+    if (hasDotDotTraversal(tok)) {
+      return {
+        matched: true,
+        allowed: false,
+        reason: "Antigravity Execution Governance: Path traversal ('..') is prohibited in 'agy-context transcript' commands."
+      };
+    }
+  }
+
+  return { matched: true, allowed: true };
+}
+
+/**
+ * Extracts redirect target paths from a segment's unquoted tokens.
+ */
+function extractRedirectTargets(tokens) {
+  const targets = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (!tok.quoted && REDIRECT_OP_REGEX.test(tok.raw)) {
+      if (tokens[i + 1]) targets.push(tokens[i + 1].value);
+      continue;
+    }
+    const attached = tok.raw.match(REDIRECT_ATTACHED_REGEX);
+    if (attached && !tok.quoted) {
+      targets.push(attached[1].replace(/^["']|["']$/g, ""));
+    }
+  }
+  return targets;
+}
+
+const SEARCH_COMMANDS = new Set(["grep", "egrep", "fgrep", "rg", "ripgrep", "ag", "ack", "select-string"]);
+const SEARCH_VALUE_FLAGS = new Set([
+  "-e", "--regexp", "-f", "--file", "-m", "--max-count",
+  "-A", "--after-context", "-B", "--before-context", "-C", "--context",
+  "-t", "--type", "-T", "--type-not", "-g", "--glob", "--iglob",
+  "-M", "--max-columns", "--max-filesize", "--color", "-j", "--threads",
+  "-r", "--replace", "--sort", "--sortr"
+]);
+
+/**
+ * Extracts inspectable path tokens for a segment, ignoring benign echo/printf text
+ * and ignoring literal search patterns on grep/rg commands (inspecting only target paths).
+ */
+function getInspectableTextForSegment(seg) {
+  const { body } = splitEnvPrefix(seg.text);
+  const allTokens = tokenizeShellWordsDetailed(seg.text);
+  const detailed = body ? tokenizeShellWordsDetailed(body) : allTokens;
+  if (detailed.length === 0) return "";
+
+  const cmd0 = normalizeCmdName(detailed[0].value);
+  const cmd1 = detailed[1] ? normalizeCmdName(detailed[1].value) : "";
+
+  // Benign echo / printf: only inspect redirect targets (never printed prose)
+  if (cmd0 === "echo" || cmd0 === "printf" || cmd0 === "write-output") {
+    const redirects = extractRedirectTargets(allTokens);
+    return redirects.join(" ");
+  }
+
+  // Search commands: skip pattern argument and inspect only target paths / -f files / redirects
+  let argStart = -1;
+  if (SEARCH_COMMANDS.has(cmd0)) {
+    argStart = 1;
+  } else if ((cmd0 === "rtk" && (cmd1 === "grep" || cmd1 === "rg")) || (cmd0 === "git" && cmd1 === "grep")) {
+    argStart = 2;
+  }
+
+  if (argStart !== -1) {
+    const targets = extractRedirectTargets(allTokens);
+    let hasExplicitPattern = false;
+    let afterDoubleDash = false;
+    const positionals = [];
+
+    for (let i = argStart; i < detailed.length; i++) {
+      const tok = detailed[i];
+      if (!tok.quoted && REDIRECT_OP_REGEX.test(tok.raw)) {
+        i++; // skip redirect target (already in targets)
+        continue;
+      }
+      if (!tok.quoted && REDIRECT_ATTACHED_REGEX.test(tok.raw)) {
+        continue;
+      }
+      const val = tok.value;
+      if (!afterDoubleDash && val === "--") {
+        afterDoubleDash = true;
+        continue;
+      }
+      if (!afterDoubleDash && val.startsWith("-") && val !== "-") {
+        if (val === "-e" || val.startsWith("-e") || val === "--regexp" || val.startsWith("--regexp=")) {
+          hasExplicitPattern = true;
+        }
+        if (val === "-f" || val === "--file") {
+          if (detailed[i + 1]) targets.push(detailed[i + 1].value);
+          i++;
+          hasExplicitPattern = true;
+          continue;
+        }
+        if (val.startsWith("--file=")) {
+          targets.push(val.slice("--file=".length));
+          hasExplicitPattern = true;
+          continue;
+        }
+        if (SEARCH_VALUE_FLAGS.has(val) && i + 1 < detailed.length) {
+          i++;
+        }
+        continue;
+      }
+      positionals.push(val);
+    }
+
+    // First positional is the pattern unless -e / -f was provided
+    const filePositionals = hasExplicitPattern ? positionals : positionals.slice(1);
+    targets.push(...filePositionals);
+    return targets.join(" ");
+  }
+
+  return seg.text;
+}
+
+/**
+ * Recursively collects inspectable command texts (main segment + any nested subshells).
+ * Heredoc bodies are intentionally NOT included so prose inside heredocs is never blocked.
+ */
+function collectInspectableTexts(segments) {
+  const texts = [];
+  for (const seg of segments) {
+    const inspectable = getInspectableTextForSegment(seg);
+    if (inspectable) texts.push(inspectable);
+    if (Array.isArray(seg.subshells)) {
+      for (const sub of seg.subshells) {
+        const subSegs = splitShellSegments(sub);
+        texts.push(...collectInspectableTexts(subSegs));
+      }
+    }
+  }
+  return texts;
+}
+
+function isRtkReadCommand(cmd) {
+  const tokens = tokenizeShellWords(cmd);
+  return tokens.length >= 2 && normalizeCmdName(tokens[0]) === "rtk" && tokens[1].toLowerCase() === "read";
+}
+
+function isSingleUnchainedShellCmd(segments) {
+  if (segments.length !== 1) return false;
+  const seg = segments[0];
+  return !seg.hasRedirect && !seg.hasHeredoc && !seg.hasSubshell && !hasDotDotTraversal(seg.text);
+}
+
+// ============================================================================
+// RTK Post-Processing (wc/ls/diff revert & rg -> rtk grep fallback)
+// ============================================================================
+
+const RG_GREP_ZERO_ARG_FLAGS = new Map([
+  ["-i", "-i"], ["--ignore-case", "-i"],
+  ["-n", "-n"], ["--line-number", "-n"],
+  ["-l", "-l"], ["--files-with-matches", "-l"],
+  ["-c", "-c"], ["--count", "-c"],
+  ["-v", "-v"], ["--invert-match", "-v"],
+  ["-w", "-w"], ["--word-regexp", "-w"],
+  ["-x", "-x"], ["--line-regexp", "-x"],
+  ["-F", "-F"], ["--fixed-strings", "-F"],
+  ["-E", "-E"], ["--extended-regexp", "-E"],
+  ["-H", "-H"], ["--with-filename", "-H"],
+  ["-h", "-h"], ["--no-filename", "-h"],
+  ["-q", "-q"], ["--quiet", "-q"],
+  ["-s", "-s"], ["--no-messages", "-s"],
+  ["-o", "-o"], ["--only-matching", "-o"]
+]);
+
+const RG_GREP_VALUE_FLAGS = new Map([
+  ["-m", "-m"], ["--max-count", "--max-count"],
+  ["-A", "-A"], ["--after-context", "-A"],
+  ["-B", "-B"], ["--before-context", "-B"],
+  ["-C", "-C"], ["--context", "-C"],
+  ["-e", "-e"], ["--regexp", "-e"]
+]);
+
+function hasPcreOnlyPattern(pattern) {
+  if (!pattern) return false;
+  return /\\[dD]|\(\?[=!<:#]|\\[pP]\{/.test(pattern);
+}
+
+function rewriteRtkRgSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false } = {}) {
+  const afterRgMatch = restAfterRtk.match(/^rg(?:\.exe)?\s+([\s\S]+)$/i);
+  if (!afterRgMatch) return restAfterRtk;
+
+  const tokens = tokenizeShellWordsDetailed(afterRgMatch[1]);
+  const grepFlags = [];
+  const positionals = [];
+  const patterns = [];
+  let hasExtended = false;
+  let hasFixed = false;
+  let hasExplicitPattern = false;
+  let afterDoubleDash = false;
+
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    const val = tok.value;
+
+    if (!afterDoubleDash && val === "--") {
+      afterDoubleDash = true;
+      continue;
+    }
+
+    if (!afterDoubleDash && val.startsWith("-") && val !== "-") {
+      if (RG_GREP_ZERO_ARG_FLAGS.has(val)) {
+        const mapped = RG_GREP_ZERO_ARG_FLAGS.get(val);
+        if (mapped === "-E") hasExtended = true;
+        if (mapped === "-F") hasFixed = true;
+        grepFlags.push(mapped);
+        continue;
+      }
+
+      if (RG_GREP_VALUE_FLAGS.has(val)) {
+        if (i + 1 >= tokens.length) return restAfterRtk; // unsafe malformed flag
+        const nextTok = tokens[++i];
+        const mapped = RG_GREP_VALUE_FLAGS.get(val);
+        if (mapped === "-e") {
+          hasExplicitPattern = true;
+          patterns.push(nextTok.value);
+        }
+        grepFlags.push(mapped, nextTok.raw);
+        continue;
+      }
+
+      // Attached short flags like -in, -ni, -lw (exclude -r which is --replace in rg!)
+      if (/^-[inlcvwxFEHhqso]+$/.test(val)) {
+        if (val.includes("E")) hasExtended = true;
+        if (val.includes("F")) hasFixed = true;
+        grepFlags.push(val);
+        continue;
+      }
+
+      // --flag=value for supported flags
+      const eqIdx = val.indexOf("=");
+      if (eqIdx !== -1) {
+        const flagName = val.slice(0, eqIdx);
+        const flagVal = val.slice(eqIdx + 1);
+        if (RG_GREP_VALUE_FLAGS.has(flagName)) {
+          if (flagName === "--regexp") {
+            hasExplicitPattern = true;
+            patterns.push(flagVal);
+          }
+          grepFlags.push(tok.raw);
+          continue;
+        }
+        if (flagName === "--color") {
+          grepFlags.push(tok.raw);
+          continue;
+        }
+      }
+
+      // Any other flag (e.g. -t, --type, -g, --glob, -S, --smart-case, -r/--replace, -u, --files, --json)
+      return restAfterRtk;
+    }
+
+    positionals.push(tok);
+  }
+
+  if (!hasExplicitPattern) {
+    if (positionals.length === 0) return restAfterRtk;
+    patterns.push(positionals[0].value);
+  }
+
+  if (!hasFixed && patterns.some(hasPcreOnlyPattern)) {
+    return restAfterRtk;
+  }
+
+  const outArgs = [];
+  if (!inPipeline) {
+    outArgs.push("-r");
+  }
+  if (!hasFixed && !hasExtended) {
+    outArgs.push("-E");
+  }
+  outArgs.push(...grepFlags);
+
+  if (afterDoubleDash) {
+    outArgs.push("--");
+  }
+
+  for (const p of positionals) {
+    outArgs.push(p.raw);
+  }
+
+  const hasExplicitPath = hasExplicitPattern ? positionals.length > 0 : positionals.length > 1;
+  if (!inPipeline && !hasExplicitPath) {
+    outArgs.push(".");
+  }
+
+  return `${rtkPrefixWord}grep ${outArgs.join(" ")}`;
+}
+
+function unwrapShellWrapper(segText) {
+  const m = segText.match(
+    /^((?:cmd(?:\.exe)?\s+\/[cC]|(?:powershell|pwsh)(?:\.exe)?\s+(?:-Command|-c)|(?:bash|sh)\s+-c)\s+)(["'])([\s\S]*)\2$/i
+  );
+  if (!m) return null;
+  return { prefix: m[1], quote: m[2], inner: m[3] };
+}
+
+function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipeline, rtkPrefix }) {
+  const trimmedEff = effSegText.trim();
+  const trimmedRaw = (rawSegText || "").trim();
+
+  // Recursively handle shell wrappers (e.g., bash -c "rtk wc -l foo")
+  const effWrap = unwrapShellWrapper(trimmedEff);
+  if (effWrap) {
+    const rawWrap = unwrapShellWrapper(trimmedRaw);
+    const processedInner = postProcessCommand(
+      rawWrap ? rawWrap.inner : effWrap.inner,
+      effWrap.inner,
+      { rgAvailable, rtkPrefix }
+    );
+    return `${effWrap.prefix}${effWrap.quote}${processedInner}${effWrap.quote}`;
+  }
+
+  const { prefix: effEnvPrefix, body: effBody } = splitEnvPrefix(trimmedEff);
+  const { body: rawBody } = splitEnvPrefix(trimmedRaw);
+  const effMatchTarget = effBody || trimmedEff;
+  const rawMatchTarget = rawBody || trimmedRaw;
+
+  const rtkMatch = effMatchTarget.match(/^((?:["']?[^\s"']*[/\\])?rtk(?:\.exe|\.cmd|\.bat)?["']?\s+)([\s\S]+)$/i);
+  if (!rtkMatch) {
+    return trimmedEff;
+  }
+
+  const rtkWord = rtkMatch[1];
+  const rest = rtkMatch[2];
+  const subcmd = (rest.match(/^([^\s"']+)/)?.[1] || "").toLowerCase();
+
+  // Revert lossy `rtk wc` / `rtk ls` / `rtk diff` back to raw unless caller explicitly typed it
+  if (subcmd === "wc" || subcmd === "ls" || subcmd === "diff") {
+    const explicitPattern = new RegExp(`^(?:["']?[^\\s"']*[/\\\\])?rtk(?:\\.exe|\\.cmd|\\.bat)?["']?\\s+${subcmd}\\b`, "i");
+    if (!explicitPattern.test(rawMatchTarget)) {
+      return `${effEnvPrefix}${rest}`;
+    }
+  }
+
+  // Never emit `rtk rg` when `rg` is absent on PATH
+  if ((subcmd === "rg" || subcmd === "rg.exe") && !rgAvailable) {
+    let mapped = rewriteRtkRgSegment(rtkWord, rest, { inPipeline });
+    if (mapped !== rest && rtkPrefix && rtkPrefix !== "rtk" && /^rtk\s+/i.test(mapped)) {
+      mapped = mapped.replace(/^rtk(?=\s)/i, rtkPrefix);
+    }
+    return `${effEnvPrefix}${mapped}`;
+  }
+
+  // If RTK came from a local binary not on PATH, rewrite bare `rtk ` prefix to explicit path
+  if (rtkPrefix && rtkPrefix !== "rtk" && /^rtk\s+/i.test(effMatchTarget) && !/^rtk\s+/i.test(rawMatchTarget)) {
+    return `${effEnvPrefix}${effMatchTarget.replace(/^rtk(?=\s)/i, rtkPrefix)}`;
+  }
+
+  return trimmedEff;
+}
+
+function postProcessCommand(rawCmd, effCmd, opts) {
+  const rawSegs = splitShellSegments(rawCmd);
+  const effSegs = splitShellSegments(effCmd);
+  if (effSegs.length === 0) return effCmd;
+
+  const sameCount = rawSegs.length === effSegs.length;
+  let result = effCmd;
+
+  // Splice from end to start so earlier offsets remain valid
+  for (let i = effSegs.length - 1; i >= 0; i--) {
+    const seg = effSegs[i];
+    const rawSegText = sameCount ? rawSegs[i].text : rawCmd;
+    const inPipeline = seg.leadingSep === "|" || seg.leadingSep === "|&";
+    const replacement = postProcessSegmentText(rawSegText, seg.text, {
+      ...opts,
+      inPipeline
+    });
+    if (replacement !== seg.text) {
+      result = result.slice(0, seg.start) + replacement + result.slice(seg.end);
+    }
+  }
+
+  return result;
+}
+
+function delegateRewriteToRtk(rawCmd, rtk) {
+  const opts = {
+    input: JSON.stringify({
+      toolCall: {
+        name: "run_command",
+        args: { CommandLine: rawCmd }
+      }
+    }),
+    encoding: "utf-8",
+    timeout: 2000,
+    windowsHide: true
+  };
+  const res = spawnRtk(rtk.exe, ["hook", "antigravity"], opts);
+  if (res.error || res.status !== 0 || !res.stdout) {
+    return { decision: "allow", commandLine: rawCmd };
+  }
+  try {
+    const parsed = JSON.parse(res.stdout.trim());
+    if (parsed && (parsed.decision === "deny" || parsed.decision === "force_ask")) {
+      return {
+        decision: parsed.decision,
+        reason: parsed.reason || "Denied by RTK hook."
+      };
+    }
+    const rewritten = parsed?.overwrite?.CommandLine;
+    return {
+      decision: "allow",
+      commandLine: typeof rewritten === "string" && rewritten.trim() ? rewritten : rawCmd
+    };
+  } catch {
+    return { decision: "allow", commandLine: rawCmd };
+  }
+}
+
+// ============================================================================
+// Proportional Backoff & Strict Task-Polling Schedule Detection
+// ============================================================================
 
 /**
  * Calculates the required minimum cooldown interval (in seconds)
  * proportional to the number of diagnostic status inspections already performed.
  * Formula: Math.min(600, Math.round(30 * Math.pow(2.5, Math.max(0, pollCount - 1))))
  * Levels: Level 0 -> 0s (baseline), Level 1 -> 30s, Level 2 -> 75s, Level 3 -> 188s, Level 4 -> 469s, Level 5+ -> 600s
+ * Keep identical to lib/transcript-core.mjs `getRequiredBackoffSeconds`.
  */
 function getRequiredBackoffSeconds(pollCount) {
   if (pollCount <= 0) return 0;
   return Math.min(600, Math.round(30 * Math.pow(2.5, Math.max(0, pollCount - 1))));
+}
+
+/**
+ * Strict task-polling detection for `schedule` tool calls.
+ * Keep identical to lib/transcript-core.mjs `isTaskPollSchedule`.
+ */
+function isTaskPollSchedule(args = {}) {
+  const prompt = String(args.Prompt || args.prompt || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+  const cond = String(args.TimerCondition || args.timerCondition || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+  return (
+    cond.startsWith("task-") ||
+    cond.includes("task") ||
+    prompt.includes("check on") ||
+    prompt.includes("check task") ||
+    prompt.includes("background task") ||
+    prompt.includes("still running") ||
+    prompt.includes("test suite") ||
+    ((prompt.includes("check") || prompt.includes("status") || prompt.includes("poll") || prompt.includes("monitor") || prompt.includes("wait")) &&
+      (prompt.includes("task") || prompt.includes("process") || prompt.includes("job") || prompt.includes("test") || prompt.includes("command") || prompt.includes("suite")))
+  );
 }
 
 /**
@@ -592,6 +1508,49 @@ function denyRunningTask(taskId, convId) {
     decision: "deny",
     reason: `Antigravity Execution Governance: Task '${taskId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. Diagnostic check #${session.pollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${remainingSec}s remaining). Tasks execute asynchronously and notify you automatically via native Reactive Wakeup (<SYSTEM_MESSAGE>) upon completion. Stop calling tools and yield your turn now.`
   });
+}
+
+// ============================================================================
+// Denial Helpers & File Metrics
+// ============================================================================
+
+function buildInternalStateShellDenial() {
+  return (
+    "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+    "- To inspect conversation transcripts: Run 'agy-context transcript read --id <uuid> --mode compact' or 'agy-context transcript query --id <uuid> --query \"<pattern>\" --summary' via run_command.\n" +
+    "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
+  );
+}
+
+function buildInternalStateToolDenial() {
+  return (
+    "Antigravity Execution Governance: Direct access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+    "- To inspect conversation transcripts: Run 'agy-context transcript read --id <uuid> --mode compact' or 'agy-context transcript query --id <uuid> --query \"<pattern>\" --summary' via run_command.\n" +
+    "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
+  );
+}
+
+function escapeDoubleQuotedArg(str) {
+  return String(str).replace(/["\\$`]/g, "\\$&");
+}
+
+function getFileMetrics(filePath) {
+  if (!filePath || typeof filePath !== "string") return null;
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) return null;
+    const bytes = stat.size;
+    const content = fs.readFileSync(filePath, "utf-8");
+    if (content.length === 0) {
+      return { bytes: 0, lineCount: 0, rawSplitCount: 1 };
+    }
+    const rawSplitCount = content.split(/\r?\n/).length;
+    const lineCount = /\r?\n$/.test(content) ? Math.max(1, rawSplitCount - 1) : rawSplitCount;
+    return { bytes, lineCount, rawSplitCount };
+  } catch {
+    return null;
+  }
 }
 
 // --- Main Hook Entrypoint ---
@@ -630,7 +1589,7 @@ try {
   isGovernedTool = true;
 
   // =========================================================================
-  // 1. run_command: Transparent RTK Command Optimization & Synchronous Wait
+  // 1. run_command: Raw Safety Gates + `rtk hook antigravity` Delegation
   // =========================================================================
   if (toolName === "run_command") {
     const rawCmd = args.CommandLine !== undefined ? args.CommandLine : args.command;
@@ -641,73 +1600,126 @@ try {
       });
     }
 
+    const segments = splitShellSegments(rawCmd);
 
     // LH-09-B: Shell command mutation of protected benchmark artifacts
-    if (
-      (rawCmd.includes(">") || /\b(?:rm|del|Remove-Item)\b/i.test(rawCmd)) &&
-      isProtectedBenchmarkPath(rawCmd)
-    ) {
-      respond({
-        decision: "force_ask",
-        reason:
-          "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination."
-      });
+    for (const seg of segments) {
+      const segTexts = [seg.text, ...(seg.subshells || [])];
+      for (const st of segTexts) {
+        if (seg.hasWriteRedirect || /\b(?:rm|del|Remove-Item)\b/i.test(st)) {
+          const detailed = tokenizeShellWordsDetailed(st);
+          const candidateTokens = [
+            ...detailed.map((t) => t.value),
+            ...extractRedirectTargets(detailed)
+          ];
+          if (candidateTokens.some((tok) => isProtectedBenchmarkPath(tok))) {
+            respond({
+              decision: "force_ask",
+              reason:
+                "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination."
+            });
+          }
+        }
+      }
     }
 
-    // Raw-command governance gates are pure string/fs checks: run them BEFORE the rtk rewrite
-    // spawn so denied commands never pay for a subprocess.
-    const isSpillover = isStepSpilloverPath(rawCmd);
-    const taskMatch = isSpillover ? null : getTaskLogMatch(rawCmd);
-
-    // Check 1: Other protected internal state (transcripts, scheduler, progress)
-    if (!isSpillover && !taskMatch && isProtectedInternalState(rawCmd)) {
+    // Check agy-context transcript CLI exemption (strictly single unchained, --file inside <brainDir>)
+    const agyTranscriptCheck = checkAgyContextTranscriptCommand(segments);
+    if (agyTranscriptCheck.matched && !agyTranscriptCheck.allowed) {
       respond({
         decision: "deny",
-        reason:
-          "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
-          "- To inspect conversation transcripts: Call MCP tool read_transcript(conversationId=\"...\", mode=\"compact\") or query_transcript(...).\n" +
-          "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
+        reason: agyTranscriptCheck.reason
       });
     }
 
-    // Check 2: Task Log Inspection (Lifecycle-Gated, 0 New Tools): RUNNING => Proportional Backoff
-    if (taskMatch && getTaskState(taskMatch, convId) === "RUNNING") {
-      denyRunningTask(taskMatch.id, convId);
+    // Raw-command internal state checks (skipping heredoc bodies, echo/printf text, and grep patterns)
+    let isSpillover = false;
+    let taskMatch = null;
+    if (!agyTranscriptCheck.allowed) {
+      const inspectableTexts = collectInspectableTexts(segments);
+      const inspectableCombined = inspectableTexts.join("\n");
+      const singleTokens = segments.length === 1 ? tokenizeShellWords(segments[0].text) : [];
+      const spilloverTok = findStepSpilloverToken(singleTokens);
+      isSpillover = Boolean(spilloverTok);
+      taskMatch = getTaskLogMatch(inspectableCombined);
+
+      // Check 1: Other protected internal state (transcripts, scheduler, arbitrary .txt in steps/)
+      if (!isSpillover && !taskMatch && isProtectedInternalState(inspectableCombined)) {
+        respond({
+          decision: "deny",
+          reason: buildInternalStateShellDenial()
+        });
+      }
+
+      // If spillover or task log is chained, redirected, uses heredocs, subshells, or `..` traversal -> DENY
+      if ((isSpillover || taskMatch) && !isSingleUnchainedShellCmd(segments)) {
+        respond({
+          decision: "deny",
+          reason: isSpillover
+            ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'rtk read <path>' command (no chaining, redirects, subshells, or '..' traversal)."
+            : buildInternalStateShellDenial()
+        });
+      }
+
+      // Check 2: Task Log Inspection (Lifecycle-Gated): RUNNING => Proportional Backoff
+      if (taskMatch && getTaskState(taskMatch, convId) === "RUNNING") {
+        denyRunningTask(taskMatch.id, convId);
+      }
     }
 
-    const rewritten = rewriteCommandWithRtk(rawCmd);
-    const effectiveCmd = rewritten;
-    const isRtkRead = /^(?:["']?[^\s"']*[/\\])?rtk(?:\.exe|\.cmd|\.bat)?["']?\s+read\b/i.test(effectiveCmd);
+    // Delegate command rewriting to `rtk hook antigravity` (>= 1.1.0)
+    const rtk = resolveCompatibleRtk();
+    const rgAvailable = Boolean(findExecutableOnPath("rg"));
+    let effectiveCmd = rawCmd;
 
-    // Check 3: Step Output Spillover Safe Harbor (rtk read only; it clamps + windows output)
+    if (rtk) {
+      const delegated = delegateRewriteToRtk(rawCmd, rtk);
+      if (delegated.decision !== "allow") {
+        respond({ decision: delegated.decision, reason: delegated.reason });
+      }
+      effectiveCmd = postProcessCommand(rawCmd, delegated.commandLine, {
+        rgAvailable,
+        rtkPrefix: rtk.prefix
+      });
+    } else if (!rgAvailable) {
+      effectiveCmd = postProcessCommand(rawCmd, rawCmd, {
+        rgAvailable: false,
+        rtkPrefix: "rtk"
+      });
+    }
+
+    const isRtkRead = isRtkReadCommand(effectiveCmd);
+
+    // Check 3: Step Output Spillover Safe Harbor (strictly single unchained `rtk read` only)
     if (isSpillover && !isRtkRead) {
       respond({
         decision: "deny",
         reason:
-          "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command to prevent context blowouts."
+          "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
       });
     }
 
-    // Check 4: Terminated / unknown-state task log: allow only through rtk read
+    // Check 4: Completed / unknown-state task log: allow only through strictly single unchained `rtk read`
     if (taskMatch && !isRtkRead) {
       respond({
         decision: "deny",
         reason:
           "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
-          `- Once completed, inspect output using 'rtk read <path>' via run_command.\n` +
+          "- Once completed, inspect output using 'rtk read <path>' via run_command.\n" +
           "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
       });
     }
 
     const isDaemon = args.IsDaemon === true || args.isDaemon === true;
-    const waitMs = args.WaitMsBeforeAsync !== undefined ? args.WaitMsBeforeAsync : args.waitMsBeforeAsync;
+    const rawWaitMs = args.WaitMsBeforeAsync !== undefined ? args.WaitMsBeforeAsync : args.waitMsBeforeAsync;
+    const waitMs = rawWaitMs === null ? undefined : rawWaitMs;
     const targetMaxWait = Number(process.env.AGY_MAX_WAIT_MS) || 10000;
 
     const overwrite = {};
-    if (rewritten !== rawCmd) {
-      overwrite.CommandLine = rewritten;
+    if (effectiveCmd !== rawCmd) {
+      overwrite.CommandLine = effectiveCmd;
     }
-    if (!isDaemon && (waitMs === undefined || waitMs < targetMaxWait)) {
+    if (!isDaemon && waitMs === undefined) {
       overwrite.WaitMsBeforeAsync = targetMaxWait;
     }
 
@@ -718,7 +1730,7 @@ try {
   }
 
   // =========================================================================
-  // 2. Native File & Inspection Tools: Root Protection & RTK Hard-Routing
+  // 2. Native File & Inspection Tools: Root Protection, Hybrid Slice & RTK
   // =========================================================================
   const INSPECTION_TOOLS = new Set([
     "view_file",
@@ -731,22 +1743,48 @@ try {
 
   if (INSPECTION_TOOLS.has(toolName)) {
     const rawTarget =
+      args.Path ||
+      args.path ||
       args.AbsolutePath ||
       args.absolutePath ||
+      args.TargetFile ||
       args.targetFile ||
       args.target_file ||
-      args.path ||
       args.dirPath ||
       args.dir_path ||
       args.directory ||
+      args.SearchPath ||
+      args.searchPath ||
       "";
     const target = String(rawTarget).trim();
 
-    // 2a. Step Output Spillover Safe Harbor (hard-route to rtk read)
+    const MAX_SAFE_SLICE_LINES = 150;
+    const MAX_FULL_FILE_LINES = 800;
+    const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes)
+
+    const rawStart = args.StartLine !== undefined ? args.StartLine : (args.startLine !== undefined ? args.startLine : args.start_line);
+    const rawEnd = args.EndLine !== undefined ? args.EndLine : (args.endLine !== undefined ? args.endLine : args.end_line);
+    const hasByteOffset = args.ByteOffset !== undefined || args.byteOffset !== undefined || args.byte_offset !== undefined;
+    const hasSliceParams = rawStart !== undefined || rawEnd !== undefined;
+
+    // 2a. Step Output Spillover Safe Harbor: bounded read_file (<= 150 lines) allowed; else route to rtk read / bounded read_file
     if (isStepSpilloverPath(target)) {
+      if (toolName === "read_file" && rawStart !== undefined && rawEnd !== undefined) {
+        const startLine = Number(rawStart);
+        const endLine = Number(rawEnd);
+        if (
+          Number.isInteger(startLine) &&
+          Number.isInteger(endLine) &&
+          startLine > 0 &&
+          endLine >= startLine &&
+          (endLine - startLine + 1) <= MAX_SAFE_SLICE_LINES
+        ) {
+          respond({ decision: "allow" });
+        }
+      }
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run 'rtk read ${target}' via run_command instead.`
+        reason: `Antigravity Governance: Unbounded inspection of step spillover via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'read_file' or run 'rtk read ${target}' via run_command instead.`
       });
     }
 
@@ -757,20 +1795,16 @@ try {
       if (state === "RUNNING") {
         denyRunningTask(taskMatch.id, convId);
       }
-
       if (state === "COMPLETED") {
-        // If terminated / completed, route to rtk read:
         respond({
           decision: "deny",
           reason: `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run 'rtk read ${target}' via run_command instead.`
         });
       }
-
-      // If not verified completed (or does not exist):
       respond({
         decision: "deny",
         reason:
-          "Antigravity Execution Governance: Direct access to internal Antigravity execution state (.system_generated/tasks) is strictly prohibited to prevent polling loops. rely on native Reactive Wakeup (<SYSTEM_MESSAGE>) upon completion."
+          "Antigravity Execution Governance: Direct access to internal Antigravity execution state (.system_generated/tasks) is strictly prohibited to prevent polling loops. Rely on native Reactive Wakeup (<SYSTEM_MESSAGE>) upon completion."
       });
     }
 
@@ -778,79 +1812,35 @@ try {
     if (isProtectedInternalState(target) || isProtectedInternalState(JSON.stringify(args))) {
       respond({
         decision: "deny",
-        reason:
-          "Antigravity Execution Governance: Direct access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
-          "- To inspect conversation transcripts: Call MCP tool read_transcript(conversationId=\"...\", mode=\"compact\") or query_transcript(...).\n" +
-          "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
+        reason: buildInternalStateToolDenial()
       });
     }
 
-    // 2d. Allow Antigravity Special Files (SKILL.md, brain artifacts, configs)
+    // 2d. Allow Antigravity Special Files (SKILL.md, brain artifacts, configs) symmetrically for read_file & view_file
     if (isAntigravitySpecialFile(target)) {
       respond({ decision: "allow" });
     }
 
-    // 2e. Hybrid Slice & Guarded Full-File Policy for view_file
-    // - 1..150 line slice -> ALLOW
-    // - Explicit full-file read (StartLine=1, EndLine=actualFileLines) of an existing file <= 800 lines AND <= 45 KiB -> ALLOW
-    // - Partial slice of 151..800+ lines -> DENY (discover target with waymark_ask and narrow the slice)
-    // - Explicit full-file read exceeding 800 lines or 45 KiB -> DENY
-    // - Unbounded view_file (missing StartLine/EndLine) -> DENY
-    if (toolName === "view_file") {
-      const MAX_SAFE_SLICE_LINES = 150;
-      const MAX_FULL_FILE_LINES = 800;
-      const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes)
+    // 2e. Symmetrical Hybrid Slice & Guarded Full-File Policy for `read_file` and `view_file`
+    if (toolName === "read_file" || toolName === "view_file") {
+      const rgAvailable = Boolean(findExecutableOnPath("rg"));
+      const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rn";
+      const discoveryGuidance = `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}', or run 'rtk read ${target || "<file>"}' via run_command instead`;
 
-      const waymarkAvailable = (() => {
-        if (process.env.AGY_FORCE_WAYMARK === "0") return false;
-        if (process.env.AGY_FORCE_WAYMARK === "1") return true;
-        try {
-          const home = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
-          const schemaPath = path.join(home, ".gemini", "antigravity", "mcp", "waymark-engine", "waymark_ask.json");
-          if (fs.existsSync(schemaPath)) return true;
-          const mcpConfigPath = path.join(home, ".gemini", "config", "mcp_config.json");
-          if (fs.existsSync(mcpConfigPath)) {
-            const raw = fs.readFileSync(mcpConfigPath, "utf-8");
-            if (raw.includes('"waymark-engine"')) return true;
-          }
-        } catch {}
-        return false;
-      })();
-
-      const getFileMetrics = (filePath) => {
-        if (!filePath || typeof filePath !== "string") return null;
-        try {
-          if (!fs.existsSync(filePath)) return null;
-          const stat = fs.statSync(filePath);
-          if (!stat.isFile()) return null;
-          const bytes = stat.size;
-          const content = fs.readFileSync(filePath, "utf-8");
-          if (content.length === 0) {
-            return { bytes: 0, lineCount: 0, rawSplitCount: 1 };
-          }
-          const rawSplitCount = content.split(/\r?\n/).length;
-          const lineCount = /\r?\n$/.test(content) ? Math.max(1, rawSplitCount - 1) : rawSplitCount;
-          return { bytes, lineCount, rawSplitCount };
-        } catch {
-          return null;
-        }
-      };
-
-      const discoveryGuidance = waymarkAvailable
-        ? `Locate the target symbol, heading, or config key first with 'waymark_ask(..., plain: true)' and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'view_file'`
-        : `Provide bounded slices ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) via 'view_file', or run 'rtk read ${target || "<file>"}' via run_command instead`;
-
-      const rawStart = args.StartLine !== undefined ? args.StartLine : args.start_line;
-      const rawEnd = args.EndLine !== undefined ? args.EndLine : args.end_line;
-      const hasSliceParams = typeof rawStart !== "undefined" || typeof rawEnd !== "undefined";
+      if (hasByteOffset && !hasSliceParams) {
+        respond({
+          decision: "deny",
+          reason: `Antigravity Governance: Unbounded 'ByteOffset'-only read via '${toolName}' is denied. ${discoveryGuidance}.`
+        });
+      }
 
       if (hasSliceParams) {
         const startLine = Number(rawStart);
         const endLine = Number(rawEnd);
 
         if (
-          typeof rawStart !== "undefined" &&
-          typeof rawEnd !== "undefined" &&
+          rawStart !== undefined &&
+          rawEnd !== undefined &&
           Number.isInteger(startLine) &&
           Number.isInteger(endLine) &&
           startLine > 0 &&
@@ -861,7 +1851,7 @@ try {
             respond({ decision: "allow" });
           }
 
-          const metrics = startLine === 1 ? getFileMetrics(target) : null;
+          const metrics = startLine === 1 && !hasByteOffset ? getFileMetrics(target) : null;
           const isExplicitFullFile = Boolean(
             metrics &&
               startLine === 1 &&
@@ -875,19 +1865,19 @@ try {
             const kib = (metrics.bytes / 1024).toFixed(1);
             respond({
               decision: "deny",
-              reason: `Antigravity Governance: Explicit full-file read via 'view_file' (${metrics.lineCount} lines, ${kib} KiB) exceeds the full-file audit ceiling (max ${MAX_FULL_FILE_LINES} lines and 45 KiB). ${discoveryGuidance}.`
+              reason: `Antigravity Governance: Explicit full-file read via '${toolName}' (${metrics.lineCount} lines, ${kib} KiB) exceeds the full-file audit ceiling (max ${MAX_FULL_FILE_LINES} lines and 45 KiB). ${discoveryGuidance}.`
             });
           }
 
           respond({
             decision: "deny",
-            reason: `Antigravity Governance: Oversized partial file slice via 'view_file' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window). Partial slices above ${MAX_SAFE_SLICE_LINES} lines are denied; full-file reads are only permitted when explicitly covering line 1 through the actual end of a file <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${discoveryGuidance}.`
+            reason: `Antigravity Governance: Oversized partial file slice via '${toolName}' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window). Partial slices above ${MAX_SAFE_SLICE_LINES} lines are denied; full-file reads are only permitted when explicitly covering line 1 through the actual end of a file <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${discoveryGuidance}.`
           });
         }
 
         respond({
           decision: "deny",
-          reason: `Antigravity Governance: Invalid slice range via 'view_file'. Ensure StartLine and EndLine are positive integers with EndLine >= StartLine. ${discoveryGuidance}.`
+          reason: `Antigravity Governance: Invalid slice range via '${toolName}'. Ensure StartLine and EndLine are positive integers with EndLine >= StartLine. ${discoveryGuidance}.`
         });
       }
 
@@ -898,13 +1888,6 @@ try {
     }
 
     // 2f. Hard-Route Other Native File/Search Tools (LH-07)
-    if (toolName === "read_file") {
-      respond({
-        decision: "deny",
-        reason: `Antigravity Governance: Native file inspection via 'read_file' bypasses token optimization. Run 'rtk read ${target || "<file>"}' via run_command instead.`
-      });
-    }
-
     if (toolName === "read_many_files") {
       respond({
         decision: "deny",
@@ -913,9 +1896,13 @@ try {
     }
 
     if (toolName === "grep_search") {
-      const pattern = args.query || args.pattern || "";
-      const isWin = os.platform() === "win32";
-      const cmdHint = isWin ? `rtk rg "${pattern}" .` : `rtk grep "${pattern}"`;
+      const pattern = String(args.Query || args.query || args.Pattern || args.pattern || "").trim();
+      const searchTarget = String(args.SearchPath || args.searchPath || args.path || ".").trim() || ".";
+      const safePattern = pattern ? escapeDoubleQuotedArg(pattern) : "<pattern>";
+      const rgAvailable = Boolean(findExecutableOnPath("rg"));
+      const cmdHint = rgAvailable
+        ? `rtk rg -- "${safePattern}" ${searchTarget}`
+        : `rtk grep -rn "${safePattern}" ${searchTarget}`;
       respond({
         decision: "deny",
         reason: `Antigravity Governance: Native grep inspection via 'grep_search' bypasses token optimization. Run '${cmdHint}' via run_command instead.`
@@ -923,7 +1910,7 @@ try {
     }
 
     if (toolName === "find_by_name") {
-      const searchTarget = args.query || args.pattern || target || ".";
+      const searchTarget = args.Pattern || args.pattern || args.query || target || ".";
       respond({
         decision: "deny",
         reason: `Antigravity Governance: Native file search via 'find_by_name' bypasses token optimization. Run 'rtk find ${searchTarget}' via run_command instead.`
@@ -932,7 +1919,7 @@ try {
 
     if (toolName === "list_dir") {
       const isWin = os.platform() === "win32";
-      const cmdHint = isWin ? `rtk find ${target || "."}` : `rtk ls ${target || ""}`;
+      const cmdHint = isWin ? `rtk find ${target || "."}` : `rtk ls ${target || "."}`;
       respond({
         decision: "deny",
         reason: `Antigravity Governance: Native directory listing via 'list_dir' bypasses token optimization. Run '${cmdHint}' via run_command instead.`
@@ -993,22 +1980,9 @@ try {
   }
 
   if (toolName === "schedule") {
-    const prompt = String(args.Prompt || args.prompt || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
-    const cond = String(args.TimerCondition || args.timerCondition || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
     const duration = Number(args.DurationSeconds || args.durationSeconds || args.duration || 0);
 
-    const isTaskPoll =
-      cond.startsWith("task-") ||
-      cond.includes("task") ||
-      prompt.includes("check on") ||
-      prompt.includes("check task") ||
-      prompt.includes("background task") ||
-      prompt.includes("still running") ||
-      prompt.includes("test suite") ||
-      ((prompt.includes("check") || prompt.includes("status") || prompt.includes("poll") || prompt.includes("monitor") || prompt.includes("wait")) &&
-       (prompt.includes("task") || prompt.includes("process") || prompt.includes("job") || prompt.includes("test") || prompt.includes("command") || prompt.includes("suite")));
-
-    if (isTaskPoll) {
+    if (isTaskPollSchedule(args)) {
       const session = getSessionState(convId);
       const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(session.pollCount));
 
@@ -1041,8 +2015,13 @@ try {
   // =========================================================================
   // 4. Benchmark & Evaluator Mutation Protection (LH-09)
   // =========================================================================
-  if (toolName === "replace_file_content" || toolName === "write_to_file") {
-    const targetFile = String(args.TargetFile || args.targetFile || args.path || "").trim();
+  if (
+    toolName === "replace_file_content" ||
+    toolName === "write_to_file" ||
+    toolName === "write_file" ||
+    toolName === "edit_file"
+  ) {
+    const targetFile = String(args.Path || args.path || args.TargetFile || args.targetFile || "").trim();
     if (isProtectedBenchmarkPath(targetFile)) {
       respond({
         decision: "force_ask",

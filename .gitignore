@@ -5,3 +5,5 @@ scratch/
 site/
 *.tgz
 .waymark/
+/bin/rtk
+/bin/rtk.exe

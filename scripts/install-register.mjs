@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver Registration & Installation Engine
- * Zero-delay cross-platform installer with intelligent existing-installation detection.
+ * Agy-Context-Saver Registration & Installation Engine (v2.0.0)
+ * Zero-delay cross-platform installer with CLI-first shim provisioning,
+ * unified hook registration, and legacy MCP retirement/sweep.
  *
  * Capabilities:
- * - Detects existing native plugin link, hook registration, MCP server, and tool schemas
- * - Re-verifies and updates in ~10-15ms without redundant configuration churn
- * - Uses asynchronous file operations (fs.promises) with parallel schema writes
- * - Supports silent mode for stdio MCP JSON-RPC compatibility
- * - Supports CLI flags: install, install --check, uninstall, status
+ * - Detects native plugin link, hook registration (agy-context-saver), CLI shims, RTK (>= 1.1.0), and MCP cleanup
+ * - Re-verifies and updates without redundant disk churn
+ * - Retires legacy MCP registration in mcp_config.json and sweeps agy-context-saver* schema dirs (ACS-HOOK-11)
+ * - Supports silent mode and CLI flags: install, install --check, uninstall, status, --restore-backups
  */
 
 import fs from "node:fs";
@@ -32,12 +32,80 @@ const hooksJsonPath = path.join(geminiConfigDir, "hooks.json");
 const hooksBakPath = path.join(geminiConfigDir, "hooks.json.bak");
 const mcpJsonPath = path.join(geminiConfigDir, "mcp_config.json");
 const mcpBakPath = path.join(geminiConfigDir, "mcp_config.json.bak");
-const antigravityMcpDir = path.join(homeDir, ".gemini", "antigravity", "mcp", "agy-context-saver");
+const antigravityMcpRootDir = path.join(homeDir, ".gemini", "antigravity", "mcp");
+const antigravityMcpDir = path.join(antigravityMcpRootDir, "agy-context-saver");
+const antigravityBinDir = path.join(homeDir, ".gemini", "antigravity", "bin");
 
 const sourceHook = path.join(repoRoot, "scripts", "execution-guard-hook.mjs");
 const destHook = path.join(scriptsDir, "execution-guard-hook.mjs");
-const mcpIndexPath = path.join(pluginDest, "mcp", "index.js").replace(/\\/g, "/");
 const destHookNormalized = destHook.replace(/\\/g, "/");
+
+const HOOK_KEY = "agy-context-saver";
+const LEGACY_HOOK_KEY = "execution-guard";
+const CLI_SHIM_NAMES = ["agy-context", "agy-context-saver"];
+
+function isLegacyAgyMcpKey(key) {
+  return key === "agy-context-saver" || key.startsWith("agy-context-saver");
+}
+
+function isExecutableFile(filePath) {
+  if (!fs.existsSync(filePath)) return false;
+  if (os.platform() === "win32") return true;
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function detectCliShims() {
+  const isWin = os.platform() === "win32";
+  const expectedFiles = isWin
+    ? CLI_SHIM_NAMES.map((name) => `${name}.cmd`)
+    : CLI_SHIM_NAMES;
+  const present = expectedFiles.filter((name) => isExecutableFile(path.join(antigravityBinDir, name)));
+  return {
+    exists: present.length === expectedFiles.length,
+    dir: antigravityBinDir,
+    shims: present
+  };
+}
+
+function findLegacyMcpArtifacts() {
+  const legacyMcpKeys = [];
+  if (fs.existsSync(mcpJsonPath)) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
+      if (cfg && typeof cfg.mcpServers === "object" && cfg.mcpServers !== null) {
+        for (const key of Object.keys(cfg.mcpServers)) {
+          if (isLegacyAgyMcpKey(key)) {
+            legacyMcpKeys.push(key);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const legacySchemaDirs = [];
+  if (fs.existsSync(antigravityMcpRootDir)) {
+    try {
+      for (const entry of fs.readdirSync(antigravityMcpRootDir, { withFileTypes: true })) {
+        if (entry.name.startsWith("agy-context-saver")) {
+          legacySchemaDirs.push(path.join(antigravityMcpRootDir, entry.name));
+        }
+      }
+    } catch {}
+  }
+
+  const duplicateCount = legacyMcpKeys.length + legacySchemaDirs.length;
+  return {
+    clean: duplicateCount === 0,
+    duplicateCount,
+    legacyMcpKeys,
+    legacySchemaDirs
+  };
+}
 
 /**
  * Write file only if content has changed, eliminating disk churn.
@@ -75,7 +143,7 @@ export async function safeCopyFileIfChanged(sourcePath, targetPath) {
 }
 
 /**
- * Detects whether Agy-Context-Saver is already installed across all Antigravity integration points.
+ * Detects whether Agy-Context-Saver is already installed across all Antigravity 2.0 integration points.
  */
 export function detectExistingInstallation() {
   const pluginExists = fs.existsSync(pluginDest);
@@ -90,49 +158,70 @@ export function detectExistingInstallation() {
 
   let hookRegistered = false;
   let hookCommand = null;
+  const pluginHooksPath = path.join(pluginDest, "hooks.json");
+  if (fs.existsSync(pluginHooksPath)) {
+    try {
+      const pCfg = JSON.parse(fs.readFileSync(pluginHooksPath, "utf-8"));
+      const h = pCfg?.[HOOK_KEY];
+      if (h) {
+        hookCommand = h.PreToolUse?.[0]?.hooks?.[0]?.command ?? null;
+        hookRegistered = Boolean(hookCommand) && !String(hookCommand).includes("ANTIGRAVITY_PLUGIN_ROOT");
+      }
+    } catch {}
+  }
+
+  let legacyHookPresent = false;
+  let duplicateGlobalHookPresent = false;
   if (fs.existsSync(hooksJsonPath)) {
     try {
       const cfg = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
-      const h = cfg["execution-guard"] || cfg["agy-context-saver"];
-      if (h) {
-        hookRegistered = true;
-        hookCommand = h.PreToolUse?.[0]?.hooks?.[0]?.command;
-      }
+      legacyHookPresent = Boolean(cfg?.[LEGACY_HOOK_KEY]);
+      duplicateGlobalHookPresent = Boolean(cfg?.[HOOK_KEY]);
     } catch {}
   }
 
-  let mcpRegistered = false;
-  let mcpArgs = null;
-  if (fs.existsSync(mcpJsonPath)) {
-    try {
-      const cfg = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
-      if (cfg.mcpServers?.["agy-context-saver"]) {
-        mcpRegistered = true;
-        mcpArgs = cfg.mcpServers["agy-context-saver"].args;
-      }
-    } catch {}
-  }
-
-  const scriptExists = fs.existsSync(destHook);
-  const schemasExist =
-    fs.existsSync(path.join(antigravityMcpDir, "check_context_health.json")) &&
-    fs.existsSync(path.join(antigravityMcpDir, "get_installation_status.json")) &&
-    fs.existsSync(path.join(antigravityMcpDir, "sync_installation.json")) &&
-    fs.existsSync(path.join(antigravityMcpDir, "read_transcript.json")) &&
-    fs.existsSync(path.join(antigravityMcpDir, "query_transcript.json"));
-
+  const pluginHookScript = path.join(pluginDest, "scripts", "execution-guard-hook.mjs");
+  const scriptExists = fs.existsSync(pluginHookScript);
+  const legacyMirroredHookExists = fs.existsSync(destHook);
+  const cliShim = detectCliShims();
+  const mcp = findLegacyMcpArtifacts();
   const rtkInfo = findExistingRtk();
-  const isInstalled = pluginExists || (hookRegistered && mcpRegistered);
-  const isComplete = (pluginExists || (hookRegistered && mcpRegistered && scriptExists)) && schemasExist && Boolean(rtkInfo);
+
+  const isInstalled =
+    pluginExists ||
+    hookRegistered ||
+    legacyHookPresent ||
+    duplicateGlobalHookPresent ||
+    legacyMirroredHookExists ||
+    cliShim.exists ||
+    mcp.legacyMcpKeys.length > 0 ||
+    mcp.legacySchemaDirs.length > 0;
+
+  const isComplete =
+    pluginExists &&
+    hookRegistered &&
+    scriptExists &&
+    !legacyHookPresent &&
+    !duplicateGlobalHookPresent &&
+    cliShim.exists &&
+    Boolean(rtkInfo) &&
+    mcp.clean;
 
   return {
     isInstalled,
     isComplete,
     details: {
       plugin: { exists: pluginExists, target: pluginTarget },
-      hook: { registered: hookRegistered, command: hookCommand, scriptExists },
-      mcp: { registered: mcpRegistered, args: mcpArgs },
-      schemas: { exists: schemasExist, dir: antigravityMcpDir },
+      hook: {
+        key: HOOK_KEY,
+        registered: hookRegistered,
+        legacyHookPresent,
+        duplicateGlobalHookPresent,
+        command: hookCommand,
+        scriptExists
+      },
+      cliShim,
+      mcp,
       rtk: rtkInfo
     }
   };
@@ -145,17 +234,140 @@ export function parseAndValidateJsonConfig(filePath, configName) {
   try {
     parsed = JSON.parse(content);
   } catch (err) {
-    throw new Error(`Configuration error: ${filePath} contains invalid JSON (${err.message}). Installation aborted to prevent data loss. Original file is unchanged.`);
+    throw new Error(
+      `Configuration error: ${filePath} contains invalid JSON (${err.message}). Installation aborted to prevent data loss. Original file is unchanged.`
+    );
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error(`Configuration error: ${filePath} must contain a JSON object, but found ${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed}. Installation aborted to prevent data loss. Original file is unchanged.`);
+    throw new Error(
+      `Configuration error: ${filePath} must contain a JSON object, but found ${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed}. Installation aborted to prevent data loss. Original file is unchanged.`
+    );
   }
   if (configName === "mcp" && parsed.mcpServers !== undefined) {
     if (typeof parsed.mcpServers !== "object" || parsed.mcpServers === null || Array.isArray(parsed.mcpServers)) {
-      throw new Error(`Configuration error: ${filePath} property "mcpServers" must be a JSON object. Installation aborted to prevent data loss. Original file is unchanged.`);
+      throw new Error(
+        `Configuration error: ${filePath} property "mcpServers" must be a JSON object. Installation aborted to prevent data loss. Original file is unchanged.`
+      );
     }
   }
   return parsed;
+}
+
+async function stripLegacyMcpRegistrations(parsedMcp, { log, warn }) {
+  if (!fs.existsSync(mcpJsonPath) || !parsedMcp?.mcpServers || typeof parsedMcp.mcpServers !== "object") {
+    return;
+  }
+
+  const keysToStrip = Object.keys(parsedMcp.mcpServers).filter(isLegacyAgyMcpKey);
+  if (keysToStrip.length === 0) {
+    return;
+  }
+
+  if (!fs.existsSync(mcpBakPath)) {
+    try {
+      await fsPromises.copyFile(mcpJsonPath, mcpBakPath);
+      log(`[OK] Created configuration backup: ${mcpBakPath}`);
+    } catch (err) {
+      warn(`[WARN] Could not create backup of ${mcpJsonPath}: ${err.message}`);
+    }
+  }
+
+  const nextMcpConfig = {
+    ...parsedMcp,
+    mcpServers: { ...parsedMcp.mcpServers }
+  };
+  for (const key of keysToStrip) {
+    delete nextMcpConfig.mcpServers[key];
+  }
+
+  await safeWriteFileIfChanged(mcpJsonPath, JSON.stringify(nextMcpConfig, null, 2));
+  log(`[OK] Retired legacy MCP registration(s) (${keysToStrip.join(", ")}) from: ${mcpJsonPath}`);
+}
+
+async function sweepLegacyMcpSchemas({ log, warn }) {
+  if (!fs.existsSync(antigravityMcpRootDir)) {
+    return;
+  }
+  let entries = [];
+  try {
+    entries = await fsPromises.readdir(antigravityMcpRootDir, { withFileTypes: true });
+  } catch (err) {
+    warn(`[WARN] Could not inspect ${antigravityMcpRootDir}: ${err.message}`);
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.name.startsWith("agy-context-saver")) continue;
+    const targetPath = path.join(antigravityMcpRootDir, entry.name);
+    try {
+      await fsPromises.rm(targetPath, { recursive: true, force: true });
+      log(`[OK] Swept legacy MCP schema directory: ${targetPath}`);
+    } catch (err) {
+      warn(`[WARN] Could not remove legacy MCP schema directory ${targetPath}: ${err.message}`);
+    }
+  }
+}
+
+async function installCliShims({ log }) {
+  const sourceCli = path.join(repoRoot, "bin", "agy-context.mjs");
+  const pluginCli = path.join(pluginDest, "bin", "agy-context.mjs");
+
+  for (const cliPath of [sourceCli, pluginCli]) {
+    if (fs.existsSync(cliPath)) {
+      try {
+        fs.chmodSync(cliPath, 0o755);
+      } catch {}
+    }
+  }
+
+  const targetCli = fs.existsSync(pluginCli) ? pluginCli : sourceCli;
+  const targetCliNormalized = targetCli.replace(/\\/g, "/");
+  const execPathNormalized = process.execPath.replace(/\\/g, "/");
+
+  await fsPromises.mkdir(antigravityBinDir, { recursive: true });
+
+  const posixShimBody = [
+    "#!/bin/sh",
+    "set -eu",
+    "if command -v node >/dev/null 2>&1; then",
+    `  exec node "${targetCliNormalized}" "$@"`,
+    "fi",
+    `exec "${execPathNormalized}" "${targetCliNormalized}" "$@"`,
+    ""
+  ].join("\n");
+
+  const winShimBody = [
+    "@echo off",
+    "setlocal",
+    "where node >nul 2>nul",
+    "if %errorlevel% equ 0 (",
+    `  node "${targetCli}" %*`,
+    "  exit /b %errorlevel%",
+    ")",
+    `"${process.execPath}" "${targetCli}" %*`,
+    "exit /b %errorlevel%",
+    ""
+  ].join("\r\n");
+
+  let changed = false;
+  for (const name of CLI_SHIM_NAMES) {
+    const posixShimPath = path.join(antigravityBinDir, name);
+    if (await safeWriteFileIfChanged(posixShimPath, posixShimBody)) {
+      changed = true;
+    }
+    try {
+      fs.chmodSync(posixShimPath, 0o755);
+    } catch {}
+
+    if (os.platform() === "win32") {
+      const winShimPath = path.join(antigravityBinDir, `${name}.cmd`);
+      if (await safeWriteFileIfChanged(winShimPath, winShimBody)) {
+        changed = true;
+      }
+    }
+  }
+
+  log(`[OK] CLI shims installed in: ${antigravityBinDir}${changed ? "" : " (up-to-date)"}`);
 }
 
 export async function runInstall(options = {}) {
@@ -173,44 +385,49 @@ export async function runInstall(options = {}) {
   // If checkOnly is requested, execute strictly read-only inspection (zero disk writes, zero network calls)
   if (options.checkOnly) {
     if (existing.isInstalled) {
-      log("🔍 Existing installation detected:");
+      log("Existing installation detected:");
       if (existing.details.plugin.exists) {
-        log(`   ✓ Native Plugin Link: ${pluginDest}`);
+        log(`   [OK] Native Plugin Link: ${pluginDest}`);
       }
       if (existing.details.hook.registered) {
-        log(`   ✓ Governor Hook: Registered in ${hooksJsonPath}`);
+        log(`   [OK] Governor Hook (${HOOK_KEY}): Active via plugin hooks.json`);
       }
-      if (existing.details.mcp.registered) {
-        log(`   ✓ Universal MCP Server: Configured in ${mcpJsonPath}`);
+      if (existing.details.hook.legacyHookPresent || existing.details.hook.duplicateGlobalHookPresent) {
+        log(`   [WARN] Global hooks.json has legacy/duplicate hook entry (run setup to clean up)`);
       }
-      if (existing.details.schemas.exists) {
-        log(`   ✓ Antigravity Tool Schemas: Present in ${antigravityMcpDir}`);
+      if (existing.details.cliShim.exists) {
+        log(`   [OK] CLI Shims (agy-context): Installed in ${antigravityBinDir}`);
       }
-      log("\n[OK] Pre-flight check complete. Installation is active.");
+      if (existing.details.rtk) {
+        log(`   [OK] RTK Command Optimizer: ${existing.details.rtk.version} (${existing.details.rtk.path})`);
+      }
+      if (existing.details.mcp.clean) {
+        log("   [OK] MCP Cleanup: 0 duplicate MCP configs/schemas");
+      } else {
+        log(`   [WARN] MCP Cleanup: ${existing.details.mcp.duplicateCount} legacy MCP config/schema entries found`);
+      }
+      log("\n[OK] Pre-flight check complete. Zero changes written.");
     } else {
-      log("🔍 Pre-flight check: No active installation detected (clean profile).");
+      log("Pre-flight check: No active installation detected (clean profile).");
       log("\n[OK] Pre-flight check complete. Zero changes written.");
     }
     return existing;
   }
 
   if (existing.isInstalled) {
-    log("🔍 Existing installation detected:");
+    log("Existing installation detected:");
     if (existing.details.plugin.exists) {
-      log(`   ✓ Native Plugin Link: ${pluginDest}`);
+      log(`   [OK] Native Plugin Link: ${pluginDest}`);
     }
     if (existing.details.hook.registered) {
-      log(`   ✓ Governor Hook: Registered in ${hooksJsonPath}`);
+      log(`   [OK] Governor Hook (${HOOK_KEY}): Active via plugin hooks.json`);
     }
-    if (existing.details.mcp.registered) {
-      log(`   ✓ Universal MCP Server: Configured in ${mcpJsonPath}`);
+    if (existing.details.cliShim.exists) {
+      log(`   [OK] CLI Shims (agy-context): Installed in ${antigravityBinDir}`);
     }
-    if (existing.details.schemas.exists) {
-      log(`   ✓ Antigravity Tool Schemas: Present in ${antigravityMcpDir}`);
-    }
-    log("\n⚡ Re-verifying and synchronizing to latest version...");
+    log("\nRe-verifying and synchronizing to v2.0.0...");
   } else {
-    log("⚡ Fresh installation of Agy-Context-Saver (Zero-Delay Mode)...");
+    log("Fresh installation of Agy-Context-Saver v2.0.0...");
   }
 
   // 0. Pre-flight Validation: Verify configuration directory write access
@@ -220,10 +437,12 @@ export async function runInstall(options = {}) {
     await fsPromises.writeFile(probeFile, "ok", "utf-8");
     await fsPromises.unlink(probeFile);
   } catch (err) {
-    throw new Error(`Pre-flight check failed: cannot write to Antigravity configuration directory (${geminiConfigDir}): ${err.message}`);
+    throw new Error(
+      `Pre-flight check failed: cannot write to Antigravity configuration directory (${geminiConfigDir}): ${err.message}`
+    );
   }
 
-  // 0a. Ensure RTK is provisioned and available
+  // 0a. Ensure RTK (>= 1.1.0) is provisioned and available
   try {
     const rtkResult = await ensureRtkInstalled({ silent: options.silent, existingRtk: existing.details.rtk });
     log(`[OK] RTK Command Optimizer verified: ${rtkResult.version} (${rtkResult.path})`);
@@ -231,14 +450,17 @@ export async function runInstall(options = {}) {
     if (options.allowDegraded) {
       warn(`[WARN] RTK provisioning check encountered an issue: ${err.message}. Continuing in degraded mode.`);
     } else {
-      throw new Error(`RTK provisioning failed: ${err.message}. To install without RTK (degraded mode), re-run with --allow-degraded.`);
+      throw new Error(
+        `RTK provisioning failed: ${err.message}. To install without RTK (degraded mode), re-run with --allow-degraded.`
+      );
     }
   }
 
-  // 1. Instant Native Plugin Junction / Symlink or Permanent Copy (Takes ~5ms)
+  // 1. Native Plugin Junction / Symlink or Permanent Copy
   await fsPromises.mkdir(pluginsDir, { recursive: true });
   const isGitRepo = fs.existsSync(path.join(repoRoot, ".git"));
-  const isTempOrNpx = !isGitRepo || repoRoot.includes("_npx") || repoRoot.includes("npm-cache") || repoRoot.includes("node_modules");
+  const isTempOrNpx =
+    !isGitRepo || repoRoot.includes("_npx") || repoRoot.includes("npm-cache") || repoRoot.includes("node_modules");
   const copyFilter = (src) => {
     const rel = path.relative(repoRoot, src);
     if (!rel) return true;
@@ -255,7 +477,7 @@ export async function runInstall(options = {}) {
         const isWin = os.platform() === "win32";
         fs.symlinkSync(repoRoot, pluginDest, isWin ? "junction" : "dir");
         log(`[OK] Native Antigravity Plugin linked: ${pluginDest} -> ${repoRoot}`);
-      } catch (err) {
+      } catch {
         await fsPromises.cp(repoRoot, pluginDest, { recursive: true, filter: copyFilter });
         log(`[OK] Native Antigravity Plugin copied to: ${pluginDest}`);
       }
@@ -269,246 +491,47 @@ export async function runInstall(options = {}) {
     log(`[OK] Native Antigravity Plugin verified: ${pluginDest}`);
   }
 
-  // 2. Ensure scripts dir exists & copy hook script asynchronously
-  await fsPromises.mkdir(scriptsDir, { recursive: true });
-  const hookUpdated = await safeCopyFileIfChanged(sourceHook, destHook);
-  log(`[OK] Governor hook script mirrored to: ${destHook}${hookUpdated ? "" : " (up-to-date)"}`);
-
-  // 3. Register Hook in ~/.gemini/config/hooks.json (Preserves existing hooks + creates backup)
-  let hooksConfig = validatedHooks ? { ...validatedHooks } : {};
-  if (fs.existsSync(hooksJsonPath) && !fs.existsSync(hooksBakPath)) {
-    try {
-      await fsPromises.copyFile(hooksJsonPath, hooksBakPath);
-      log(`[OK] Created configuration backup: ${hooksBakPath}`);
-    } catch (err) {
-      warn(`[WARN] Could not create backup of ${hooksJsonPath}: ${err.message}`);
-    }
-  }
-
-  const alreadyHadHook = Boolean(hooksConfig["execution-guard"]);
-  if (hooksConfig["agy-context-saver"]) {
-    delete hooksConfig["agy-context-saver"];
-  }
-  hooksConfig["execution-guard"] = {
-    PreToolUse: [
-      {
-        matcher: "manage_task|schedule|run_command|view_file|read_file|read_many_files|grep_search|find_by_name|list_dir|replace_file_content|write_to_file",
-        hooks: [
-          {
-            type: "command",
-            command: `node "${destHookNormalized}"`,
-            timeout: 5
-          }
-        ]
-      }
-    ]
-  };
-  const hooksUpdated = await safeWriteFileIfChanged(hooksJsonPath, JSON.stringify(hooksConfig, null, 2));
-  log(`[OK] Lifecycle hook ${alreadyHadHook ? "re-verified" : "registered"} in: ${hooksJsonPath}${hooksUpdated ? "" : " (up-to-date)"}`);
-
-  // 4. Register MCP Server in ~/.gemini/config/mcp_config.json (Preserves existing servers + creates backup)
-  let mcpConfig = validatedMcp ? { ...validatedMcp } : { mcpServers: {} };
-  if (!mcpConfig.mcpServers || typeof mcpConfig.mcpServers !== "object") {
-    mcpConfig.mcpServers = {};
-  } else {
-    mcpConfig.mcpServers = { ...mcpConfig.mcpServers };
-  }
-  if (fs.existsSync(mcpJsonPath) && !fs.existsSync(mcpBakPath)) {
-    try {
-      await fsPromises.copyFile(mcpJsonPath, mcpBakPath);
-      log(`[OK] Created configuration backup: ${mcpBakPath}`);
-    } catch (err) {
-      warn(`[WARN] Could not create backup of ${mcpJsonPath}: ${err.message}`);
-    }
-  }
-
-  const alreadyHadMcp = Boolean(mcpConfig.mcpServers["agy-context-saver"]);
-  mcpConfig.mcpServers["agy-context-saver"] = {
-    command: "node",
-    args: [mcpIndexPath]
-  };
-  const mcpUpdated = await safeWriteFileIfChanged(mcpJsonPath, JSON.stringify(mcpConfig, null, 2));
-  log(`[OK] MCP Server ${alreadyHadMcp ? "re-verified" : "registered"} in: ${mcpJsonPath}${mcpUpdated ? "" : " (up-to-date)"}`);
-
-  // 5. Mirror Antigravity Tool Schemas in parallel
-  await fsPromises.mkdir(antigravityMcpDir, { recursive: true });
-
-  // Clean up retired schemas if present
-  const retiredSchemas = [
-    "safe_command.json",
-    "get_spillover_content.json",
-    "read_task_output.json",
-    "get_step_detail.json",
-    // Subagent tools moved to the separate Agy-Squad package (2026-10-15)
-    "subagent_brief.json",
-    "dispatch_squad.json"
-  ];
-  for (const s of retiredSchemas) {
-    const sPath = path.join(antigravityMcpDir, s);
-    if (fs.existsSync(sPath)) {
+  // 2. Single-source hook governance via plugin hooks.json (ACS-HOOK-14):
+  //    Prune legacy "execution-guard" and any duplicate "agy-context-saver" from ~/.gemini/config/hooks.json,
+  //    and remove any stale mirrored hook script in ~/.gemini/config/scripts/ so PreToolUse never fires twice.
+  if (fs.existsSync(hooksJsonPath) && validatedHooks && (validatedHooks[LEGACY_HOOK_KEY] || validatedHooks[HOOK_KEY])) {
+    if (!fs.existsSync(hooksBakPath)) {
       try {
-        await fsPromises.unlink(sPath);
-        log(`[OK] Cleaned up retired schema from: ${sPath}`);
-      } catch {}
+        await fsPromises.copyFile(hooksJsonPath, hooksBakPath);
+        log(`[OK] Created configuration backup: ${hooksBakPath}`);
+      } catch (err) {
+        warn(`[WARN] Could not create backup of ${hooksJsonPath}: ${err.message}`);
+      }
     }
+    const nextHooks = { ...validatedHooks };
+    delete nextHooks[LEGACY_HOOK_KEY];
+    delete nextHooks[HOOK_KEY];
+    await safeWriteFileIfChanged(hooksJsonPath, JSON.stringify(nextHooks, null, 2));
+    log(`[OK] Pruned legacy/duplicate global hook keys from: ${hooksJsonPath}`);
   }
+  if (fs.existsSync(destHook)) {
+    try {
+      await fsPromises.unlink(destHook);
+      log(`[OK] Removed stale mirrored hook script: ${destHook}`);
+    } catch {}
+  }
+  log(`[OK] Lifecycle hook (${HOOK_KEY}) active via plugin hooks.json (single registration)`);
 
-  // Versions up to 1.7.0 kept hook state in the shared temp folder; it now lives in getStateDir()
+  // 4. Retire default MCP registration & sweep all agy-context-saver* schema directories (ACS-HOOK-11)
+  await stripLegacyMcpRegistrations(validatedMcp, { log, warn });
+  await sweepLegacyMcpSchemas({ log, warn });
+
+  // 5. Install executable CLI shims (agy-context, agy-context-saver) into ~/.gemini/antigravity/bin/
+  await installCliShims({ log });
+
+  // 6. Clean up legacy temp-folder state from versions <= 1.7.0
   for (const legacy of removeLegacyTmpState()) {
     log(`[OK] Removed legacy temp-folder state: ${legacy}`);
   }
 
-  const instructionsSourcePath = path.join(repoRoot, "mcp", "instructions.md");
-  const instructionsContent = await fsPromises.readFile(instructionsSourcePath, "utf-8");
-
-  const checkHealthSchema = {
-    name: "check_context_health",
-    description: "Inspects a conversation transcript (transcript.jsonl) to diagnose turn count, payload size, tool polling loops, and context degradation risk. Accepts full file path, conversation UUID, or empty for active session.",
-    parameters: {
-      type: "object",
-      properties: {
-        transcriptPath: {
-          type: "string",
-          description: "Path to transcript.jsonl file, conversation UUID, or empty for active conversation."
-        },
-        conversationId: {
-          type: "string",
-          description: "Conversation UUID or folder name (alternative to transcriptPath)."
-        }
-      }
-    }
-  };
-
-  const getInstallationStatusSchema = {
-    name: "get_installation_status",
-    description: "Inspect the live installation status of Agy-Context-Saver across all Antigravity integration points (Native Plugin Link, Governor Hook, MCP Server, and Tool Schemas).",
-    parameters: {
-      type: "object",
-      properties: {},
-      required: []
-    }
-  };
-
-  const syncInstallationSchema = {
-    name: "sync_installation",
-    description: "Re-verify and synchronize Agy-Context-Saver installation, updating the governor hook, plugin link, and tool schemas in ~25ms without terminal shell commands.",
-    parameters: {
-      type: "object",
-      properties: {
-        checkOnly: {
-          type: "boolean",
-          description: "If true, performs a pre-flight audit without writing changes (default: false)."
-        }
-      },
-      required: []
-    }
-  };
-
-  const readTranscriptSchema = {
-    name: "read_transcript",
-    description: "Quickly read recent conversation history from an Antigravity transcript in clean Markdown format with zero JSON noise. Supports 'compact' (transcript.jsonl) and 'full' (transcript_full.jsonl) modes with minimal parameters.",
-    parameters: {
-      type: "object",
-      properties: {
-        conversationId: {
-          type: "string",
-          description: "Conversation ID (UUID), folder name, or full path to transcript.jsonl. If omitted, defaults to active conversation."
-        },
-        mode: {
-          type: "string",
-          enum: ["compact", "full"],
-          description: "Transcript mode: 'compact' reads transcript.jsonl; 'full' reads transcript_full.jsonl (default: 'compact')."
-        },
-        lastTurns: {
-          type: "number",
-          description: "Number of most recent conversation turns to display (default: 3). Set to 0 to read all."
-        },
-        includeThinking: {
-          type: "boolean",
-          description: "Whether to include model thinking / internal reasoning blocks (default: false)."
-        }
-      },
-      required: ["conversationId"]
-    }
-  };
-
-  const queryTranscriptSchema = {
-    name: "query_transcript",
-    description: "Granular query and forensic filtering engine for Antigravity conversation transcripts. Searches by keyword or regex, filters by role (user, assistant, subagent, tool, error), slices step ranges, and automatically dereferences full content when truncated.",
-    parameters: {
-      type: "object",
-      properties: {
-        conversationId: {
-          type: "string",
-          description: "Conversation ID (UUID), folder name, or full path to transcript.jsonl."
-        },
-        query: {
-          type: "string",
-          description: "Search keyword or regex pattern to match across message content, tool calls, and thinking."
-        },
-        roles: {
-          type: "array",
-          items: { type: "string" },
-          description: "Filter steps by role/source: 'user', 'assistant', 'subagent', 'tool', 'error', or 'all' (default: ['user', 'assistant'])."
-        },
-        mode: {
-          type: "string",
-          enum: ["auto", "compact", "full"],
-          description: "Mode: 'auto' streams transcript.jsonl and dereferences matched truncated lines from transcript_full.jsonl; 'compact' reads transcript.jsonl only; 'full' reads transcript_full.jsonl only (default: 'auto')."
-        },
-        startStep: {
-          type: "number",
-          description: "Start step_index (inclusive)."
-        },
-        endStep: {
-          type: "number",
-          description: "End step_index (inclusive)."
-        },
-        lastTurns: {
-          type: "number",
-          description: "Limit to last N matched turns."
-        },
-        includeThinking: {
-          type: "boolean",
-          description: "Include model thinking blocks in output (default: false)."
-        },
-        includeToolCalls: {
-          type: "boolean",
-          description: "Include tool call arguments and results in output (default: false)."
-        },
-        maxResults: {
-          type: "number",
-          description: "Maximum number of matched steps to return (default: 5)."
-        },
-        summaryOnly: {
-          type: "boolean",
-          description: "If true, returns high-density 1-line step summaries instead of full message blocks to minimize UI card height (default: false)."
-        },
-        stepIndex: {
-          type: "number",
-          description: "Optional step_index to surgically retrieve full un-truncated content for a single step from transcript_full.jsonl."
-        },
-        field: {
-          type: "string",
-          description: "Optional specific field to extract when stepIndex is provided (e.g. 'content', 'thinking', 'tool_calls', 'tool_args', or 'tool_args:Message'). Defaults to full step."
-        }
-      },
-      required: ["conversationId"]
-    }
-  };
-
-  await Promise.all([
-    safeWriteFileIfChanged(path.join(antigravityMcpDir, "instructions.md"), instructionsContent),
-    safeWriteFileIfChanged(path.join(antigravityMcpDir, "check_context_health.json"), JSON.stringify(checkHealthSchema, null, 2)),
-    safeWriteFileIfChanged(path.join(antigravityMcpDir, "get_installation_status.json"), JSON.stringify(getInstallationStatusSchema, null, 2)),
-    safeWriteFileIfChanged(path.join(antigravityMcpDir, "sync_installation.json"), JSON.stringify(syncInstallationSchema, null, 2)),
-    safeWriteFileIfChanged(path.join(antigravityMcpDir, "read_transcript.json"), JSON.stringify(readTranscriptSchema, null, 2)),
-    safeWriteFileIfChanged(path.join(antigravityMcpDir, "query_transcript.json"), JSON.stringify(queryTranscriptSchema, null, 2))
-  ]);
-
   const elapsed = (performance.now() - startTime).toFixed(1);
   const statusVerb = existing.isInstalled ? "synchronized & up-to-date" : "completed";
-  log(`\n✓ Installation ${statusVerb} in ${elapsed}ms (Zero Delay)!\n`);
+  log(`\nInstallation ${statusVerb} in ${elapsed}ms!\n`);
   const postInstall = detectExistingInstallation();
   return { ...postInstall, isInstalled: true, elapsedMs: elapsed };
 }
@@ -538,40 +561,46 @@ export async function runUninstall(options = {}) {
     }
   }
 
-  // 3. Remove from hooks.json
+  // 3. Remove both current and legacy hook keys from hooks.json
   if (fs.existsSync(hooksJsonPath)) {
     try {
       const hooksConfig = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
-      delete hooksConfig["execution-guard"];
-      delete hooksConfig["agy-context-saver"];
-      await fsPromises.writeFile(hooksJsonPath, JSON.stringify(hooksConfig, null, 2), "utf-8");
-      log(`[OK] Removed from: ${hooksJsonPath}`);
+      if (hooksConfig && typeof hooksConfig === "object") {
+        delete hooksConfig[LEGACY_HOOK_KEY];
+        delete hooksConfig[HOOK_KEY];
+        await safeWriteFileIfChanged(hooksJsonPath, JSON.stringify(hooksConfig, null, 2));
+        log(`[OK] Removed hook registration from: ${hooksJsonPath}`);
+      }
     } catch {}
   }
 
-  // 4. Remove from mcp_config.json
+  // 4. Strip any agy-context-saver* keys from mcp_config.json (preserving foreign servers, creating .bak if absent)
   if (fs.existsSync(mcpJsonPath)) {
     try {
-      const mcpConfig = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
-      if (mcpConfig.mcpServers) {
-        delete mcpConfig.mcpServers["agy-context-saver"];
-      }
-      await fsPromises.writeFile(mcpJsonPath, JSON.stringify(mcpConfig, null, 2), "utf-8");
-      log(`[OK] Removed from: ${mcpJsonPath}`);
+      const parsedMcp = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
+      await stripLegacyMcpRegistrations(parsedMcp, { log, warn });
     } catch {}
   }
 
-  // 5. Remove mirrored Antigravity MCP schemas directory
-  if (fs.existsSync(antigravityMcpDir)) {
-    try {
-      await fsPromises.rm(antigravityMcpDir, { recursive: true, force: true });
-      log(`[OK] Removed mirrored MCP schema directory: ${antigravityMcpDir}`);
-    } catch (err) {
-      warn(`[WARN] Could not remove schema directory: ${err.message}`);
+  // 5. Sweep ALL agy-context-saver* directories under ~/.gemini/antigravity/mcp/
+  await sweepLegacyMcpSchemas({ log, warn });
+
+  // 6. Remove CLI shims from ~/.gemini/antigravity/bin/
+  for (const name of CLI_SHIM_NAMES) {
+    for (const candidate of [name, `${name}.cmd`]) {
+      const shimPath = path.join(antigravityBinDir, candidate);
+      if (fs.existsSync(shimPath)) {
+        try {
+          await fsPromises.unlink(shimPath);
+          log(`[OK] Removed CLI shim: ${shimPath}`);
+        } catch (err) {
+          warn(`[WARN] Could not remove CLI shim ${shimPath}: ${err.message}`);
+        }
+      }
     }
   }
 
-  // 6. Remove hook state: the per-user state folder and anything older versions left in the temp folder
+  // 7. Remove hook state: the per-user state folder and anything older versions left in the temp folder
   const stateDir = getStateDir();
   if (fs.existsSync(stateDir)) {
     try {
@@ -585,12 +614,12 @@ export async function runUninstall(options = {}) {
     log(`[OK] Removed legacy temp-folder state: ${legacy}`);
   }
 
-  // 7. Optional: Restore configuration files from backups if requested
+  // 8. Optional: Restore configuration files from backups if requested
   if (options.restoreBackups) {
     await runRestoreBackups(options);
   }
 
-  log("\n✓ Uninstallation complete.\n");
+  log("\nUninstallation complete.\n");
 }
 
 export async function runRestoreBackups(options = {}) {
@@ -630,12 +659,22 @@ export function runStatus(options = {}) {
   const existing = detectExistingInstallation();
   log("Checking Agy-Context-Saver installation status...\n");
   log(`- Native Plugin Link: ${existing.details.plugin.exists ? "ACTIVE (" + pluginDest + ")" : "NOT LINKED"}`);
-  log(`- Execution Governor Hook: ${existing.details.hook.registered ? "REGISTERED in hooks.json" : "NOT REGISTERED"}`);
-  log(`- Universal MCP Server: ${existing.details.mcp.registered ? "CONFIGURED in mcp_config.json" : "NOT CONFIGURED"}`);
-  log(`- Antigravity Tool Schemas: ${existing.details.schemas.exists ? "PRESENT (5 Schemas)" : "MISSING"}`);
-  log(`- RTK Command Optimizer: ${existing.details.rtk ? "INSTALLED (" + existing.details.rtk.version + ")" : "MISSING"}`);
+  log(
+    `- Execution Governor Hook (${HOOK_KEY}): ${existing.details.hook.registered ? "ACTIVE (plugin hooks.json)" : "NOT REGISTERED"}${existing.details.hook.legacyHookPresent ? " (legacy 'execution-guard' in global hooks.json)" : ""}${existing.details.hook.duplicateGlobalHookPresent ? " (duplicate global entry in hooks.json)" : ""}`
+  );
+  log(
+    `- CLI Shim (agy-context): ${existing.details.cliShim.exists ? "INSTALLED (" + antigravityBinDir + ")" : "MISSING"}`
+  );
+  log(
+    `- RTK Command Optimizer (>= 1.1.0): ${existing.details.rtk ? "INSTALLED (" + existing.details.rtk.version + ")" : "MISSING"}`
+  );
+  log(
+    `- MCP Cleanup: ${existing.details.mcp.clean ? "CLEAN (0 duplicate MCP configs/schemas)" : existing.details.mcp.duplicateCount + " legacy MCP config/schema entries present"}`
+  );
 
-  log(`\nOverall Status: ${existing.isComplete ? "HEALTHY & ACTIVE 🛡️" : existing.isInstalled ? "PARTIAL INSTALLATION" : "NOT INSTALLED"}\n`);
+  log(
+    `\nOverall Status: ${existing.isComplete ? "HEALTHY & ACTIVE" : existing.isInstalled ? "PARTIAL INSTALLATION" : "NOT INSTALLED"}\n`
+  );
   return existing;
 }
 
@@ -646,24 +685,26 @@ export {
   hooksBakPath,
   mcpJsonPath,
   mcpBakPath,
-  antigravityMcpDir
+  antigravityMcpRootDir,
+  antigravityMcpDir,
+  antigravityBinDir
 };
 
 function printCliHelp() {
   console.log(`
-Agy-Context-Saver Registration & Lifecycle Engine
+Agy-Context-Saver Registration & Lifecycle Engine (v2.0.0)
 
 Usage:
   node scripts/install-register.mjs [command/option]
 
 Commands & Options:
-  --status, status             Check live integration status across all layers + RTK
-  --check, -c                  Run pre-flight validation check without writing changes
-  --uninstall, uninstall       Remove governor hook, plugin link, and MCP server
+  --status, status             Check live integration status (plugin, hook, CLI shim, RTK >= 1.1.0, MCP cleanup)
+  --check, -c                  Run read-only pre-flight validation check without writing changes
+  --uninstall, uninstall       Remove governor hook, plugin link, CLI shims, and legacy MCP configs/schemas
   --restore-backups            Restore original configuration backup files (*.bak) (standalone or during uninstall)
   --allow-degraded             Allow installation to proceed even if RTK optimizer provisioning fails
   --help, -h, help             Show this help message
-  (no arguments)               Synchronize and verify full 4-layer installation
+  (no arguments)               Synchronize and verify v2.0.0 CLI-first installation
 `);
 }
 
@@ -684,7 +725,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 
   // Reject conflicting read-only and mutating flags explicitly
   if ((isCheck || isStatus) && (isUninstall || isRestoreBackups)) {
-    console.error("Error: Read-only flags (--check, --status) cannot be combined with mutating flags (--uninstall, --restore-backups).");
+    console.error(
+      "Error: Read-only flags (--check, --status) cannot be combined with mutating flags (--uninstall, --restore-backups)."
+    );
     process.exit(1);
   }
   if (isCheck && isStatus) {

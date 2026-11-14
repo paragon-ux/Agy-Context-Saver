@@ -14,14 +14,14 @@
 
 Applying the principles of **Full Cycle Product Development (FCPD)**, the product moves through a disciplined progression:
 - **Prototype / PoC**: Proven core hook interception and RTK token compression. *(Completed)*
-- **MVP Hardening**: Zero-dependency MCP server, 5 canonical tools, closed execution topology, and 150-line safe-harbor slice rule paired with `waymark_ask(..., plain: true)`. *(Shipped in v1.6.0–v1.8.0)*
-- **Product-Market Fit (PMF) & Validation**: Public validation, real-world bug triage, Antigravity ecosystem integration, and telemetry refinement. *(Active Phase)*
-- **Scaling & Ecosystem**: Modular skills expansion, high-throughput multi-agent orchestration, and enterprise-grade lifecycle resilience. *(Forward Roadmap)*
+- **MVP Hardening**: Zero-dependency runtime, closed execution topology, and 150-line bounded slice governance. *(Completed in v1.6.0–v1.8.1)*
+- **CLI-First Architecture (`v2.0.0`)**: Retired default MCP registration, introduced `agy-context` CLI + `lib/transcript-core.mjs`, delegated shell rewriting to `rtk hook antigravity` (`>= 1.1.0`), and standardized Antigravity 2.0 `read_file`/`edit_file`/`write_file` governance. *(Shipped in v2.0.0)*
+- **Scaling & Ecosystem**: Modular skills expansion, high-throughput multi-agent `/swarm` workflows, and enterprise-grade lifecycle resilience. *(Active / Forward)*
 
 ### What Agy-Context-Saver IS
-1. **Context Window Shield:** Prevents conversational context degradation and token exhaustion by offloading verbose shell and filesystem operations to RTK (Rust Token Killer).
-2. **Execution Governor:** Enforces closed execution topology, eliminates runaway polling loops (`manage_task status`), protects Antigravity internal state (`.system_generated/`), and guarantees synchronous command execution (`WaitMsBeforeAsync`).
-3. **Ergonomic Lifecycle & Diagnostics:** Provides lightweight MCP tools (`check_context_health`, `read_transcript`, `query_transcript`, `get_installation_status`, `sync_installation`) with zero external runtime dependencies. Subagent tooling lives in the separate [Agy-Squad](https://paragon-ux.github.io/agy-squad/) package.
+1. **Context Window Shield:** Prevents conversational context degradation and token exhaustion by offloading verbose shell and filesystem operations to RTK (`>= 1.1.0`).
+2. **Execution Governor:** Enforces closed execution topology, eliminates runaway polling loops (`manage_task status`), protects Antigravity internal state (`.system_generated/`), and expands unset `WaitMsBeforeAsync` to 10s.
+3. **CLI-First Transcript Forensics & Diagnostics:** Provides fast `agy-context transcript read|query|step|health` and `agy-context status|setup|uninstall` commands with zero MCP schema bloat. Subagent orchestration lives in the separate [Agy-Squad](https://paragon-ux.github.io/agy-squad/) package.
 
 ### What Agy-Context-Saver is NOT (Explicit Non-Goals & Anti-Patterns)
 - **NOT an Issue Tracker or Bug Ledger:** We will not bloat the engine with finding-to-disposition state machines (`FIXED_AND_VERIFIED`, `REJECTED`, `OPEN`) or Jira-style workflows. High-ceremony ledgers belong in task-specific prompt templates or Antigravity skills.
@@ -35,11 +35,11 @@ Applying the principles of **Full Cycle Product Development (FCPD)**, the produc
 
 ```mermaid
 flowchart TD
-    subgraph P1["Phase 1: Immediate & Shipped (v1.6.0 - v1.8.0 Milestone)"]
+    subgraph P1["Phase 1: Immediate & Shipped (v1.6.0 - v2.0.0 Milestone)"]
         direction TB
-        P1_A["Metric Hygiene: Labeled check_context_health Telemetry"]
-        P1_B["Subagent Decoupling: Extracted to Agy-Squad in v1.8.0"]
-        P1_C["Governance & Safe Harbor: 3-Tier Waymark + view_file + RTK"]
+        P1_A["Metric Hygiene: Labeled Transcript & Health Telemetry"]
+        P1_B["Subagent Decoupling: Extracted to Agy-Squad"]
+        P1_C["Governance & CLI 2.0: read_file Safe Harbor + RTK >= 1.1.0 + agy-context CLI"]
         P1_A --> P1_B --> P1_C
     end
 
@@ -71,7 +71,7 @@ flowchart TD
 #### 1.1 Metric Hygiene & Labeled Diagnostics *(Shipped)*
 - **Problem:** Lifetime machine-wide counters reported by `rtk gain` were occasionally conflated with single-session or per-task token savings.
 - **Implementation:** 
-  - Restructured `check_context_health` with explicit labeled sections:
+  - Restructured health reporting (`agy-context transcript health`) with explicit labeled sections:
     - `#### [Active Session Metrics]` (Steps, User Turns, Assistant Responses, Tool Calls, Raw Transcript Size, Busy-Polling Events).
     - `#### [Local RTK Environment]` (Binary status, installed version, explicit scoping note).
   - Documented metric distinction across `README.md`, `docs/governance.md`, and `docs/tools.md`.
@@ -87,23 +87,23 @@ flowchart TD
 #### 1.3 Freeze Core Governance & Safe Harbor *(Shipped)*
 - **Problem:** Frequent changes to execution hooks risk disrupting active agent interactions.
 - **Implementation:**
-  - Bounded line slice safe harbor: permitted targeted inspections via `view_file` ($\le 150$ lines, paired with `waymark_ask(..., plain: true)`) while routing spillovers and task logs to `rtk read`.
-  - Maintained root-level protection of `.system_generated/` (transcripts and active task logs).
-  - Preserved synchronous execution window expansion (`WaitMsBeforeAsync=10000`).
-- **Status:** Shipped and verified in `v1.6.0`–`v1.8.0`.
+  - Bounded line slice safe harbor: permitted targeted inspections via bounded `read_file` ($\le 150$ lines, or full-file audits $\le 800\text{L}/45\text{ KiB}$) paired with `rtk grep`/`rtk find` while routing spillovers and task logs to `rtk read`.
+  - Maintained segment-aware root-level protection of `.system_generated/` (transcripts and active task logs).
+  - Preserved synchronous execution window expansion (`WaitMsBeforeAsync=10000` when unset).
+- **Status:** Shipped and verified in `v1.6.0`–`v2.0.0`.
 
 #### 1.4 Subagent Separation into Agy-Squad *(Shipped in v1.8.0)*
 - **Problem:** Subagent prompt generation (`subagent_brief`) and squad orchestration belong in a dedicated orchestration package rather than the core context governor.
 - **Implementation:**
-  - Extracted `subagent_brief` and squad dispatch into the standalone `Agy-Squad` package in `v1.8.0`, streamlining `Agy-Context-Saver` to 5 focused MCP tools.
-- **Status:** Shipped and verified in `v1.8.0`.
+  - Extracted `subagent_brief` and squad dispatch into the standalone `Agy-Squad` package in `v1.8.0`; retired default MCP registration cleanly in `v2.0.0`.
+- **Status:** Shipped and verified.
 
-#### 1.5 Cross-Platform Execution Guard Stability *(Shipped)*
-- **Problem:** Differences between POSIX shells and Windows PowerShell can introduce command rewriting stalls or quote mismatches.
+#### 1.5 Cross-Platform Execution Guard & CLI 2.0 Stability *(Shipped)*
+- **Problem:** Differences between POSIX shells and Windows PowerShell, bespoke regex rewrites, and Antigravity 2.0 schema shifts created brittle failure modes.
 - **Implementation:**
-  - Hardened command unwrapping (`cmd /c`, `powershell -Command`) and trailing dot requirements for Windows (`rtk rg "<pattern>" .`).
-  - Automated regression testing across Windows and POSIX in 10 test suites (`npm test`).
-- **Status:** Shipped and verified in `v1.8.0`.
+  - Delegated rewriting to `rtk hook antigravity` (`>= 1.1.0`) and shipped `lib/transcript-core.mjs` + `bin/agy-context.mjs`.
+  - Automated regression testing across Windows and POSIX in **11 test suites** (`npm test`).
+- **Status:** Shipped and verified in `v2.0.0`.
 
 ---
 
@@ -114,7 +114,7 @@ flowchart TD
 #### 2.1 Full Cycle Public Validation & Bug Triage Loop
 - **Problem:** Real-world developer usage across different Antigravity versions and model backends surfaces unexpected corner cases (e.g. specialized CLI flags, deep subagent nesting, non-standard project layouts).
 - **Action:**
-  - Establish an agile feedback-to-patch loop: collect diagnostic reports from public users running `npm run status` and `check_context_health`.
+  - Establish an agile feedback-to-patch loop: collect diagnostic reports from public users running `agy-context status` and `agy-context transcript health`.
   - Prioritize rapid triage and remediation of real-world workflow frictions over theoretical optimizations.
   - Continually validate against emerging Antigravity agent models and core CLI releases.
 - **Success Criteria:** Sub-48h triage and remediation cycle for confirmed real-world compatibility issues; 100% backward-compatible patch releases.
@@ -122,8 +122,8 @@ flowchart TD
 #### 2.2 Deep Antigravity Ecosystem & Plugin Distribution
 - **Problem:** Manual installation friction or lack of discoverability limits developer adoption.
 - **Action:**
-  - Ensure zero-friction one-click installation via Antigravity's first-class plugin registry and CLI (`npx agy-context-saver install`).
-  - Maximize in-editor discoverability through user slash commands (`/mcp:agy-context-saver:context_shield`) and IDE suggested prompts in `plugin.json`.
+  - Ensure zero-friction installation via Antigravity's plugin registry and CLI (`npx --package=agy-context-saver agy-context setup`).
+  - Maximize in-editor discoverability through concise rules (`rules/AGENTS.md`), skills (`skills/context-governance/SKILL.md`), and IDE suggested prompts in `plugin.json`.
   - Integrate with Antigravity UI panels and sidecars where visual telemetry adds developer value.
 - **Success Criteria:** Zero-friction installation on clean Antigravity installs; instant activation via slash commands.
 
@@ -155,11 +155,11 @@ flowchart TD
 - **Success Criteria:** 100% offline functionality, instantaneous installation, zero security advisory churn.
 
 #### 3.3 Self-Healing Multi-Layer Synchronization Engine
-- **Problem:** Manual configuration file edits or external plugin changes can desynchronize hooks or MCP settings.
+- **Problem:** Manual configuration file edits or external plugin changes can desynchronize hooks or CLI shims.
 - **Action:**
-  - Expand `sync_installation` to detect and repair configuration drift autonomously.
+  - Expand `agy-context setup` (`scripts/install-register.mjs`) to detect and repair configuration drift autonomously and sweep duplicate legacy MCP caches.
   - Automatically maintain timestamped `.bak` backups before modifying any configuration file.
-- **Success Criteria:** Fully deterministic, self-healing runtime with one-click recovery.
+- **Success Criteria:** Fully deterministic, self-healing runtime with single-command recovery.
 
 ---
 
@@ -169,9 +169,9 @@ flowchart TD
 | :--- | :---: | :---: | :--- |
 | **O-001 / O-005: Finding-to-Disposition Ledgers** | ❌ No | **REJECT (Engine)**<br>*(Skill Optional)* | Over-engineers a context plugin into a bug tracker. High-ceremony finding tracking belongs in task-specific prompt templates, not core code. |
 | **O-002: Security Veto Gates** | ❌ No | **REJECT (Engine)** | Imposing security-specific completion blocks globally breaks generalist workflows (drafting, research, prototyping). |
-| **O-003 / O-007: Enforced Blind-Workspace Jails** | ❌ No | **REJECT** | Agy-Context-Saver is an MCP plugin, not an OS hypervisor. Real-world agents require shared project access. Benchmark blinding belongs in test fixture design. |
+| **O-003 / O-007: Enforced Blind-Workspace Jails** | ❌ No | **REJECT** | Agy-Context-Saver is a context/hook plugin, not an OS hypervisor. Real-world agents require shared project access. Benchmark blinding belongs in test fixture design. |
 | **O-004: Claim-Level Citation Verifiers** | ❌ No | **REJECT** | Orthogonal to context optimization and command rewriting. Belongs in specialized research agent prompts. |
-| **O-008: Auditable Execution Provenance** | ⚠️ Partial | **ADOPT (Lightweight)** | Maintain clean, operational health metrics via `check_context_health` and transcript tools without heavy telemetry bloat. |
+| **O-008: Auditable Execution Provenance** | ⚠️ Partial | **ADOPT (Lightweight)** | Maintain clean, operational health metrics via `agy-context transcript health` and `query` without heavy telemetry bloat. |
 | **O-016: Scoped Efficiency Metrics** | ✅ Yes | **ADOPT (v1.6.0)** | Essential hygiene: Clearly delineate between active session transcript bytes and cumulative host RTK tokens saved. |
 
 ---

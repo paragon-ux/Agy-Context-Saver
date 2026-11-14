@@ -1,8 +1,8 @@
 # Antigravity Execution & Context Governance (Agy-Context-Saver + RTK)
 
 ## Core Architectural Boundary
-- **RTK (Rust Token Killer)**: Owns shell command transparent rewriting, output reduction, and compact codebase inspection (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`, `rtk err`, `rtk summary`).
-- **Agy-Context-Saver**: Owns Antigravity lifecycle governance, Reactive Wakeup enforcement, transcript forensics, and session integrity.
+- **RTK (Rust Token Killer >= 1.1.0)**: Owns shell command transparent rewriting (`rtk hook antigravity`), output reduction, and compact codebase inspection (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`, `rtk err`, `rtk summary`).
+- **Agy-Context-Saver (v2.0.0 CLI-First)**: Owns Antigravity lifecycle governance, Reactive Wakeup enforcement, transcript forensics (`agy-context transcript ...`), and session integrity.
 
 ---
 
@@ -30,33 +30,37 @@
 
 ---
 
-## Layer 2: Transparent Shell Execution & Unified 3-Tier Codebase Inspection
-- **Native Shell Commands**: Run shell commands normally using `run_command`. The PreToolUse hook transparently rewrites supported commands via RTK (`git`, `pytest`, `cargo`, `npm`, etc.) to produce ultra-compact outputs.
-- **Canonical 3-Tier Codebase & File Inspection**: Unbounded full-file reads and unoptimized search tools (`grep_search`, `find_by_name`, `list_dir`) are blocked for workspace files. Follow the 3-tier hierarchy:
-  1. **Tier 1 — Structural Discovery (`waymark_ask` with `plain: true`)**: Locate exact `[StartLine, EndLine]` coordinates via `waymark_ask(..., plain: true)` across all 23 supported formats (code ASTs + `markdown`, `yaml`, `json`, `toml`, `bash`). Always pass `plain: true` (~19–466 tokens, zero shell quoting or stdin hazards).
-  2. **Tier 2 — Precision Workspace File Reading (`view_file` Hybrid Slice Policy)**: Pass the exact `StartLine` and `EndLine` from `waymark_ask` into `view_file` (bounded slices of `1–150` lines) to preserve 1-indexed line numbers for `replace_file_content` and avoid terminal stdout truncation. Partial slices of `151–800` lines are denied; an explicit one-pass full-file audit (`StartLine: 1, EndLine: <TotalLines>`) is permitted only when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
-  3. **Tier 3 — RTK Boundaries (`rtk read`, `rtk find`, `rtk rg`, `rtk err`, `rtk summary`)**:
-     - **Spillovers & Task Logs**: Read `.system_generated/steps/<step>/output.txt` spillovers and completed `tasks/<taskId>.log` files via `rtk read <path>` (with `--head-lines` / `--tail-lines`). Never use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for edits.
+## Layer 2: Transparent Shell Execution & Unified Codebase Inspection
+- **Native Shell Commands**: Run shell commands normally using `run_command`. The PreToolUse hook delegates command rewriting to `rtk hook antigravity` (`git`, `pytest`, `cargo`, `npm`, etc.) to produce ultra-compact outputs.
+- **Unified Codebase & File Inspection**: Unbounded full-file reads and unoptimized search tools (`grep_search`, `find_by_name`, `list_dir`) are blocked for workspace files. Follow this hierarchy:
+  1. **Tier 1 — Compact Search & Discovery (`rtk grep`, `rtk find`, `rtk ls`)**:
+     - **Prose / Regex / Symbol Discovery**: Use `rtk grep "<pattern>" <path>` via `run_command` to locate exact `[StartLine, EndLine]` coordinates without dumping unoptimized search payloads. Always provide an explicit target path (e.g., `.` or `src/`) to prevent stdin pipe stalls.
      - **Directory / File Discovery**:
-       - **Windows**: Use `rtk find <path>` or PowerShell `dir` / `Get-ChildItem`. (Avoid `rtk ls` or `rtk tree` on Windows as they rely on POSIX binaries/flags).
+       - **Windows**: Use `rtk find <path>` or PowerShell `dir` / `Get-ChildItem`.
        - **POSIX / Linux / macOS**: Use `rtk find <path>`, `rtk ls <path>`, or `rtk tree`.
-     - **Prose / Regex Search (when symbol, heading, or config key is unknown)**:
-       - **Windows**: Use `rtk rg "<pattern>" .` (explicit target `.` is required to prevent stdin pipe hanging) or `rg "<pattern>" .`.
-       - **POSIX / Linux / macOS**: Use `rtk grep "<pattern>"` or `rtk rg "<pattern>"`.
+  2. **Tier 2 — Precision Workspace File Reading (`read_file` Hybrid Slice Policy)**:
+     - Pass exact `StartLine` and `EndLine` into `read_file` (bounded slices of `1–150` lines) to preserve 1-indexed line numbers for `edit_file` and `write_file` without terminal stdout truncation.
+     - Partial slices of `151–800` lines and `ByteOffset`-only unbounded reads are denied; an explicit one-pass full-file audit (`StartLine: 1, EndLine: <TotalLines>`) is permitted only when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
+  3. **Tier 3 — RTK Spillover & Diagnostic Boundaries (`rtk read`, `rtk err`, `rtk summary`)**:
+     - **Spillovers & Task Logs**: Read `.system_generated/steps/<step>/output.txt` spillovers (or use bounded `read_file` $\le 150$ lines) and completed `tasks/<taskId>.log` files via `rtk read <path>` (with `--head-lines` / `--tail-lines`). Never use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for `edit_file` / `write_file`.
      - **Command Diagnostics**: `rtk err <cmd>` (errors/warnings only) and `rtk summary <cmd>` (2-line heuristic summary).
-- **Antigravity Special Files Safe Harbor**: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/` configs) are permitted via `view_file` without slice bounds.
-- **Protected Internal State**: Direct native inspection of `.system_generated/` (transcripts, task logs, progress files) is strictly forbidden. Use Agy MCP tools `read_transcript` and `query_transcript`.
+- **Antigravity Special Files Safe Harbor**: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/` configs) are permitted via `read_file` without slice bounds, and bounded `read_file` ($\le 150$ lines) is permitted on `.system_generated/steps/<n>/output.txt`.
+- **Protected Internal State & Transcript Forensics (`agy-context transcript ...`)**: Direct native inspection of `.system_generated/` transcripts, task logs, or progress files is strictly forbidden. Use the zero-MCP `agy-context` CLI via `run_command`:
+  - `agy-context transcript read [--id <uuid>] [--mode compact|full] [--last-turns N] [--include-thinking] [--json]`
+  - `agy-context transcript query [--id <uuid>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--include-thinking] [--json]`
+  - `agy-context transcript step --id <uuid> --step <N> [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--json]`
+  - `agy-context transcript health [--id <uuid>] [--json]`
 - **Git CRLF/LF Warning Hygiene**: Git's line-ending conversion notices (`warning: LF will be replaced by CRLF the next time Git touches it` / `warning: CRLF will be replaced by LF...`) are non-actionable diagnostic noise. Suppress them during repo operations (via `git -c core.safecrlf=false` or `git config --global core.safecrlf false`) and do not propagate them into task outputs or conversation context.
 
 ---
 
 ## Layer 3: Synchronous Execution
-- **Maximum Synchronous Window**: Non-daemon `run_command` calls are automatically set to `WaitMsBeforeAsync: 10000` to complete synchronously and prevent unnecessary background detachment.
+- **Maximum Synchronous Window**: Non-daemon `run_command` calls default to `WaitMsBeforeAsync: 10000` when omitted to complete synchronously and prevent unnecessary background detachment (explicit positive caller values are preserved).
 - **Targeted Test Execution & Opt-In Fail-Fast (LH-11)**:
   - **Targeted Invocations**: In interactive turns, prefer targeting specific test files or directories (e.g. `pytest tests/test_core.py`) rather than running full multi-minute repository sweeps.
   - **Fail-Fast Flags are Opt-In**: Fail-fast flags (`-x`, `--maxfail=1`) are opt-in. Use them when quickly debugging a localized failure, but omit them when assessing the full blast radius across the codebase to avoid the "whack-a-mole" loop.
   - **Coordinated Watchdog Mandatory for Full Sweeps**: When running full multi-minute test sweeps without `-x`, agents **MUST** pair execution with the **Coordinated Watchdog Protocol** (`schedule(DurationSeconds=45, ...)`) and output a **Pre-Yield Status Card**. Never yield silently.
-- **Benchmark / Evaluator Integrity**: Never mutate benchmark definitions, prompt templates, or scoring artifacts during an active evaluation without explicit user confirmation.
+- **Benchmark / Evaluator Integrity**: Never mutate benchmark definitions, prompt templates, or scoring artifacts (`edit_file`, `write_file`, or shell writes) during an active evaluation without explicit user confirmation.
 
 ---
 
@@ -67,33 +71,24 @@ When an agent or developer tests this framework, follow this exact sequence with
    ```bash
    npm run status
    # or
-   node mcp/index.js status
+   agy-context status
    ```
-   *Expected*: Reports `HEALTHY & ACTIVE 🛡️` across plugin link, hook, MCP config, schemas, and RTK.
+   *Expected*: Reports `HEALTHY & ACTIVE` across plugin link, `agy-context-saver` hook, `agy-context` CLI shim, RTK (`>= 1.1.0`), and MCP cleanup (`0` duplicate MCP configs/schemas).
 
 2. **Execute Full Automated Test Suite**:
    ```bash
    npm test
    ```
-   *Expected*: All 10 test suites pass (hook unit tests, MCP protocol tests, output governance, E2E probes, performance probes, live system validation, lifecycle rollback, check-only read-only safety, malformed config preservation, RTK ledger fresh install).
+   *Expected*: All 11 test suites pass.
 
-3. **Verify Individual Layers On-Demand**:
-   - Governance Hook: `node tests/test-hook.mjs`
-   - MCP Protocol & JSON-RPC: `node tests/test-mcp.mjs`
-   - Output Governance: `node tests/test-output-governance.mjs`
-   - E2E Probes: `node tests/test-e2e-probes.mjs`
-   - Performance Probes: `node tests/test-performance-probes.mjs`
-   - Live System Checks: `node tests/test-installed-verification.mjs`
-   - Lifecycle & Rollback: `node tests/test-lifecycle-rollback.mjs`
+3. **Verify Transcript CLI On-Demand**:
+   - `agy-context transcript health --id <uuid>`
+   - `agy-context transcript read --id <uuid> --last-turns 3 --mode compact`
+   - `agy-context transcript query --id <uuid> --query "<pattern>" --summary`
+   - `agy-context transcript step --id <uuid> --step 0 --field content`
 
-4. **Verify MCP Tools in Antigravity**:
-   - `get_installation_status`: Inspect live integration layers.
-   - `check_context_health`: Pass `{ "transcriptPath": "<path-to-transcript.jsonl>" }`.
-   - `read_transcript`: Pass `{ "conversationId": "<uuid>", "lastTurns": 3, "mode": "compact" }`.
-   - `query_transcript`: Pass `{ "conversationId": "<uuid>", "query": "<pattern>", "summaryOnly": true }`.
-
-5. **Operational Anti-Patterns (What NOT to do)**:
-   - ❌ **Do NOT run `npm start` or `node mcp/index.js` interactively**: It starts the stdio JSON-RPC daemon and waits indefinitely on stdin.
+4. **Operational Anti-Patterns (What NOT to do)**:
    - ❌ **Do NOT run `manage_task(Action='status')` loops**: Status polling is governed; 5 polls trigger the `force_ask` circuit breaker.
-   - ❌ **Do NOT run `npm run uninstall` as an isolated test**: It strips the live hook from `~/.gemini/config/`. If run, immediately re-run `npm run setup`.
-   - ❌ **Do NOT omit explicit target paths with `rtk rg`**: Always provide a path (e.g. `rtk rg "pattern" .`) to prevent stdin blocking.
+   - ❌ **Do NOT run `npm run uninstall` as an isolated test**: It strips the live hook and CLI shims from `~/.gemini/`. If run, immediately re-run `npm run setup`.
+   - ❌ **Do NOT omit explicit target paths with `rtk grep`**: Always provide a path (e.g. `rtk grep "pattern" .`) to prevent stdin pipe stalls.
+   - ❌ **Do NOT chain `agy-context transcript ...` commands**: Run `agy-context transcript ...` as a strictly single, unchained `run_command` invocation without `&&`, `||`, `;`, `|`, redirects, or `..` traversal.
