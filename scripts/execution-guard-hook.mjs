@@ -182,11 +182,73 @@ function matchesRawProtectedInternalState(targetPath) {
   if (/\.system_generated(?:$|[\/\\])/i.test(targetPath)) return true;
   if (/(?:^|[\/\\'"`\s=:])\.system_gen/i.test(targetPath)) return true;
   if (/['"]\.system_['"]\s*(?:[+.]\s*)?['"]gen/i.test(targetPath)) return true;
+  if (/(?:^|[^a-zA-Z0-9_-])system_generated\b/i.test(targetPath)) return true;
   if (/\btranscript(?:_full)?\.jsonl\b/i.test(targetPath)) return true;
   if (/\.gemini[\/\\]+antigravity[\/\\]+brain[\/\\]+.*(?:\$|logs[\/\\]|tasks[\/\\]|steps[\/\\])/i.test(targetPath)) {
     return true;
   }
+  // Block hidden segments (e.g. .s*/*/*, .*) or wildcard globs directly under brain/<convId>/ (allowing .agents/)
+  if (/\.gemini[\/\\]+antigravity[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]+)?(?:\.(?!agents(?:$|[\/\\]))|[*?\[])/i.test(targetPath)) {
+    return true;
+  }
+  // Protect Agy-Context-Saver state directory and session/policy JSON files
+  if (/\b(?:transcript-access|agy-session-governance-state|agy-rtk-rewrite-cache)\.json\b/i.test(targetPath)) return true;
+  if (/\bagy-session-[a-zA-Z0-9_-]+\.json\b/i.test(targetPath)) return true;
+  if (/[\/\\]\.local[\/\\]+state[\/\\]+agy-context-saver(?:$|[\/\\'"`\s])/i.test(targetPath)) return true;
+  if (/[\/\\]AppData[\/\\]+Local[\/\\]+agy-context-saver(?:$|[\/\\'"`\s])/i.test(targetPath)) return true;
+  try {
+    const stateDirNorm = getStateDir().replace(/\\/g, "/");
+    const targetNorm = targetPath.replace(/\\/g, "/");
+    if (stateDirNorm && targetNorm.includes(stateDirNorm)) return true;
+  } catch {}
   if (/\bbase64\b[\s\S]*\|\s*(?:[^\s|]+\/)?(?:ba|z|da|a)?sh\b/i.test(targetPath)) return true;
+  return false;
+}
+
+function isProtectedShellOrScriptOperation(text) {
+  if (!text || typeof text !== "string") return false;
+  if (isProtectedInternalState(text)) return true;
+
+  // Non-canonical or wrapped agy-context transcript invocations that did not pass checkAgyContextTranscriptCommand
+  if (/(?:^|[\s;|&('"\/\\])agy-context(?:-saver)?(?:\.m?js)?['"]?\s+(?:-[^\s;|&'"]+\s+)*transcript(?:\s|$|['";|&)])/i.test(text)) {
+    return true;
+  }
+
+  // Inline interpreter or script execution importing/spawning transcript-core.mjs, bin/agy-context.mjs, or mcp/index.js
+  if (
+    /(?:\b(?:import|require|spawn|spawnSync|exec|execSync|execFile|execFileSync|popen|system|subprocess)\b|(?:^|[\s;|&(])(?:node|python[23]?|perl|ruby|php|bash|sh|zsh|dash)\b[^\n;|&]*?(?:\s-[a-z]*[ec]\b|<<))[\s\S]*?(?:\btranscript-core(?:\.m?js)?\b|(?:bin[\/\\]+|\b)agy-context(?:-saver)?\.m?js\b|\bmcp[\/\\]+index\.js\b)/i.test(
+      text
+    )
+  ) {
+    return true;
+  }
+
+  // Block environment variable redirection of governance state or brain roots inside shell commands/scripts
+  if (/(?:^|[\s;|&(])(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|XDG_STATE_HOME|LOCALAPPDATA|GEMINI_CONVERSATION_ID)=/i.test(text)) {
+    return true;
+  }
+  if (
+    /(?:process\.env|os\.environ)\s*(?:\.\s*(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|XDG_STATE_HOME|LOCALAPPDATA|GEMINI_CONVERSATION_ID)\b|\[\s*['"](?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|XDG_STATE_HOME|LOCALAPPDATA|GEMINI_CONVERSATION_ID)['"]\s*\])/i.test(
+      text
+    )
+  ) {
+    return true;
+  }
+
+  // Block symlinks, bulk copies/archives, file reads, or directory enumeration of <brainDir>/<convId> outside /scratch/, /browser_sandbox/, or .agents/ (in either order)
+  const hasUnprotectedBrainRef =
+    /\.gemini[\/\\]+antigravity[\/\\]+brain[\/\\]+(?![^\s'"]*[\/\\](?:scratch|browser_sandbox|\.agents)(?:$|[\/\\])|[^\s'"]*\.(?:md|txt|json|png|jpg|jpeg|svg|html|css|webp|pdf)\b)/i.test(
+      text
+    );
+  if (
+    hasUnprotectedBrainRef &&
+    /\b(?:ln|cp|mv|rsync|tar|zip|find|readdir|readdirSync|scandir|listdir|walk|glob|iglob|readFile|readFileSync|createReadStream|open|openSync)\b/i.test(
+      text
+    )
+  ) {
+    return true;
+  }
+
   return false;
 }
 
@@ -1051,12 +1113,46 @@ function isPathInsideDir(candidatePath, baseDir) {
 
 function normalizeCmdName(token) {
   const base = path.basename(token.replace(/\\/g, "/")).toLowerCase();
-  return base.replace(/\.(exe|cmd|bat)$/i, "");
+  return base.replace(/\.(exe|cmd|bat|mjs|cjs|js)$/i, "");
 }
 
 // ============================================================================
 // Internal State & `agy-context transcript` Governance
 // ============================================================================
+
+const TRANSCRIPT_READ_SUBCOMMANDS = new Set([
+  "read",
+  "query",
+  "step",
+  "health",
+  "list",
+  "ls",
+  "grep",
+  "search",
+  "find",
+  "stats",
+  "info",
+  "tools",
+  "outline",
+  "summary"
+]);
+const TRANSCRIPT_HELP_SUBCOMMANDS = new Set(["help", "--help", "-h"]);
+const TRANSCRIPT_ADMIN_SUBCOMMANDS = new Set(["access", "policy"]);
+const COMMAND_WRAPPERS = new Set([
+  "command",
+  "builtin",
+  "exec",
+  "nohup",
+  "time",
+  "nice",
+  "timeout",
+  "stdbuf",
+  "setsid",
+  "chrt",
+  "ionice",
+  "taskset",
+  "xargs"
+]);
 
 function isAllowedAgyContextScriptPath(scriptToken) {
   if (!scriptToken || hasDotDotTraversal(scriptToken)) return false;
@@ -1080,9 +1176,56 @@ function isAllowedAgyContextScriptPath(scriptToken) {
   return false;
 }
 
+function isAllowedAgyContextBinaryToken(binToken) {
+  if (!binToken || hasDotDotTraversal(binToken)) return false;
+  const normalized = binToken.replace(/\\/g, "/");
+  if (!normalized.includes("/")) {
+    const base = normalizeCmdName(normalized);
+    return base === "agy-context" || base === "agy-context-saver";
+  }
+  if (isAllowedAgyContextScriptPath(binToken)) return true;
+  if (/\/\.gemini\/antigravity\/bin\/agy-context(?:-saver)?(?:\.(?:exe|cmd|bat))?$/i.test(normalized)) {
+    return true;
+  }
+  return false;
+}
+
 function extractWrappedScriptInfo(segText) {
   const trimmed = (segText || "").trim();
   if (!trimmed) return null;
+
+  // Unpack `env -S "..."` or `env --split-string="..."`
+  const rawTokens = tokenizeShellWordsDetailed(trimmed);
+  for (let i = 0; i < rawTokens.length; i++) {
+    const tok = rawTokens[i];
+    if (normalizeCmdName(tok.value) === "env") {
+      for (let j = i + 1; j < rawTokens.length; j++) {
+        const sub = rawTokens[j].value;
+        if ((sub === "-S" || sub === "--split-string") && rawTokens[j + 1]) {
+          const restAfter = rawTokens.slice(j + 2).map((t) => t.value).join(" ");
+          return {
+            hadEnvPrefix: true,
+            innerScript: `${rawTokens[j + 1].value}${restAfter ? " " + restAfter : ""}`.trim()
+          };
+        }
+        if (sub.startsWith("-S") && sub.length > 2) {
+          const restAfter = rawTokens.slice(j + 1).map((t) => t.value).join(" ");
+          return {
+            hadEnvPrefix: true,
+            innerScript: `${sub.slice(2)}${restAfter ? " " + restAfter : ""}`.trim()
+          };
+        }
+        if (sub.startsWith("--split-string=")) {
+          const restAfter = rawTokens.slice(j + 1).map((t) => t.value).join(" ");
+          return {
+            hadEnvPrefix: true,
+            innerScript: `${sub.slice("--split-string=".length)}${restAfter ? " " + restAfter : ""}`.trim()
+          };
+        }
+      }
+    }
+  }
+
   const { prefix: envPrefix, body } = splitEnvPrefix(trimmed);
   const effective = (body || trimmed).trim();
   const detailed = tokenizeShellWordsDetailed(effective);
@@ -1106,6 +1249,25 @@ function extractWrappedScriptInfo(segText) {
       }
     }
   }
+  if (COMMAND_WRAPPERS.has(cmd0) && detailed.length >= 2) {
+    let subStart = 1;
+    while (subStart < detailed.length && detailed[subStart].value.startsWith("-")) {
+      const fl = detailed[subStart].value;
+      subStart++;
+      if ((cmd0 === "nice" && fl === "-n") || (cmd0 === "timeout" && (fl === "-k" || fl === "-s"))) {
+        if (subStart < detailed.length) subStart++;
+      }
+    }
+    if (cmd0 === "timeout" && subStart < detailed.length && /^\d/.test(detailed[subStart].value)) {
+      subStart++;
+    }
+    if (subStart < detailed.length) {
+      return {
+        hadEnvPrefix: true,
+        innerScript: detailed.slice(subStart).map((t) => t.value).join(" ")
+      };
+    }
+  }
   return null;
 }
 
@@ -1113,16 +1275,50 @@ function parseAgyContextTranscriptTokens(tokens) {
   if (!Array.isArray(tokens) || tokens.length === 0) return null;
   const cmd0 = normalizeCmdName(tokens[0]);
   let subOffset = -1;
+  let hasNodeFlags = false;
+  let invalidBinaryPath = false;
+
   if ((cmd0 === "agy-context" || cmd0 === "agy-context-saver") && tokens[1] === "transcript") {
     subOffset = 2;
-  } else if (cmd0 === "node" && tokens.length >= 3 && isAllowedAgyContextScriptPath(tokens[1]) && tokens[2] === "transcript") {
-    subOffset = 3;
+    if (!isAllowedAgyContextBinaryToken(tokens[0])) {
+      invalidBinaryPath = true;
+    }
+  } else if (cmd0 === "node" && tokens.length >= 3) {
+    for (let i = 1; i < tokens.length - 1; i++) {
+      const tok = tokens[i];
+      if (
+        (isAllowedAgyContextScriptPath(tok) || normalizeCmdName(tok) === "agy-context" || normalizeCmdName(tok) === "agy-context-saver") &&
+        tokens[i + 1] === "transcript"
+      ) {
+        subOffset = i + 2;
+        hasNodeFlags = i !== 1;
+        if (!isAllowedAgyContextScriptPath(tok)) {
+          invalidBinaryPath = true;
+        }
+        break;
+      }
+    }
   }
+
   if (subOffset === -1) return null;
-  const subcommand = tokens[subOffset];
-  const validSubcommands = new Set(["read", "query", "step", "health"]);
-  if (!validSubcommands.has(subcommand)) return null;
-  return { subOffset, subcommand, tokens };
+  const rawSub = tokens[subOffset];
+  const subcommand = rawSub !== undefined ? String(rawSub).trim() : "help";
+  const isReadSub = TRANSCRIPT_READ_SUBCOMMANDS.has(subcommand);
+  const isHelpSub = TRANSCRIPT_HELP_SUBCOMMANDS.has(subcommand);
+  const isAdminSub = TRANSCRIPT_ADMIN_SUBCOMMANDS.has(subcommand);
+  const isKnownSubcommand = isReadSub || isHelpSub || isAdminSub;
+
+  return {
+    subOffset,
+    subcommand,
+    isReadSub,
+    isHelpSub,
+    isAdminSub,
+    isKnownSubcommand,
+    hasNodeFlags,
+    invalidBinaryPath,
+    tokens
+  };
 }
 
 function findAgyContextTranscriptUsage(segments, depth = 0) {
@@ -1161,25 +1357,668 @@ function findAgyContextTranscriptUsage(segments, depth = 0) {
   return null;
 }
 
+// ============================================================================
+// Transcript Access Policy & Lineage Engine (Refined Approach D)
+// ============================================================================
+
+const HOOK_GRANT_TTL_MS = 10000;
+const STANDALONE_DIRECTIVE_LINE_RE = /^(?:@[a-zA-Z0-9_-]+\s+)?\[agy-transcript-access:\s*(deny|self-only|allow)\]\s*$/i;
+
+function getTranscriptAccessPolicyPath() {
+  return path.join(getStateDir(), "transcript-access.json");
+}
+
+function normalizePatternList(rawList) {
+  if (!rawList) return [];
+  const arr = Array.isArray(rawList)
+    ? rawList
+    : String(rawList)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+  return Array.from(new Set(arr.map((s) => String(s).trim()).filter(Boolean)));
+}
+
+function readTranscriptAccessStore() {
+  const filePath = getTranscriptAccessPolicyPath();
+  const now = Date.now();
+  const baseStore = {
+    version: 1,
+    activeOwnerId: null,
+    policies: {},
+    lastHookGrant: null,
+    lastAccessMutationGrant: null
+  };
+  try {
+    if (!fs.existsSync(filePath)) return baseStore;
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    if (!parsed || typeof parsed !== "object") return baseStore;
+
+    const policies = {};
+    const rawPolicies = parsed.policies && typeof parsed.policies === "object" ? parsed.policies : {};
+    for (const [ownerId, pol] of Object.entries(rawPolicies)) {
+      if (!pol || typeof pol !== "object") continue;
+      const updatedAt = Number(pol.updatedAt || pol.createdAt || 0);
+      const ttlMs = Number(pol.ttlMs) > 0 ? Number(pol.ttlMs) : STATE_TTL_MS;
+      if (updatedAt > 0 && (now - updatedAt) < ttlMs) {
+        policies[ownerId] = {
+          ownerId: String(pol.ownerId || ownerId),
+          mode: ["open", "allowlist", "self-only", "deny"].includes(pol.mode) ? pol.mode : "open",
+          allow: normalizePatternList(pol.allow),
+          deny: normalizePatternList(pol.deny),
+          createdAt: Number(pol.createdAt || updatedAt),
+          updatedAt,
+          ttlMs
+        };
+      }
+    }
+
+    let activeOwnerId = parsed.activeOwnerId && policies[parsed.activeOwnerId] ? parsed.activeOwnerId : null;
+    if (!activeOwnerId) {
+      const sortedOwners = Object.values(policies).sort((a, b) => b.updatedAt - a.updatedAt);
+      if (sortedOwners.length > 0) activeOwnerId = sortedOwners[0].ownerId;
+    }
+
+    const lastHookGrant =
+      parsed.lastHookGrant &&
+      typeof parsed.lastHookGrant === "object" &&
+      typeof parsed.lastHookGrant.ts === "number" &&
+      (now - parsed.lastHookGrant.ts) < HOOK_GRANT_TTL_MS
+        ? parsed.lastHookGrant
+        : null;
+
+    const lastAccessMutationGrant =
+      parsed.lastAccessMutationGrant &&
+      typeof parsed.lastAccessMutationGrant === "object" &&
+      typeof parsed.lastAccessMutationGrant.ts === "number" &&
+      (now - parsed.lastAccessMutationGrant.ts) < HOOK_GRANT_TTL_MS
+        ? parsed.lastAccessMutationGrant
+        : null;
+
+    return {
+      version: 1,
+      activeOwnerId,
+      policies,
+      lastHookGrant,
+      lastAccessMutationGrant
+    };
+  } catch {
+    return baseStore;
+  }
+}
+
+function writeTranscriptAccessStore(store) {
+  ensureStateDir();
+  const filePath = getTranscriptAccessPolicyPath();
+  try {
+    const payload = JSON.stringify(
+      {
+        version: 1,
+        activeOwnerId: store.activeOwnerId || null,
+        policies: store.policies || {},
+        lastHookGrant: store.lastHookGrant || null,
+        lastAccessMutationGrant: store.lastAccessMutationGrant || null
+      },
+      null,
+      2
+    );
+    const tmpFile = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    fs.writeFileSync(tmpFile, payload, "utf-8");
+    try {
+      fs.renameSync(tmpFile, filePath);
+    } catch {
+      fs.writeFileSync(filePath, payload, "utf-8");
+      try { fs.unlinkSync(tmpFile); } catch {}
+    }
+  } catch {}
+}
+
+function recordTranscriptHookGrant({
+  callerConvId = "global",
+  subcommand = "read",
+  targetConvId = null,
+  mode = "open",
+  isMutation = false
+} = {}) {
+  const store = readTranscriptAccessStore();
+  const now = Date.now();
+  if (isMutation) {
+    store.lastAccessMutationGrant = {
+      callerConvId,
+      ts: now
+    };
+  } else {
+    store.lastHookGrant = {
+      callerConvId,
+      subcommand,
+      targetConvId,
+      mode,
+      ts: now
+    };
+  }
+  writeTranscriptAccessStore(store);
+}
+
+function extractFirstLineDirective(bodyText) {
+  if (!bodyText || typeof bodyText !== "string") return null;
+  let cleaned = bodyText.replace(/<\/SYSTEM_MESSAGE>[\s\S]*$/i, "");
+  cleaned = cleaned.replace(/^\s*<USER_REQUEST>\s*/i, "");
+  const lines = cleaned.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const m = trimmed.match(STANDALONE_DIRECTIVE_LINE_RE);
+    return m ? m[1].toLowerCase() : null;
+  }
+  return null;
+}
+
 /**
- * Checks if a command is a valid, strictly single, unchained `agy-context transcript ...` invocation.
- * Denies any chained, env-prefixed, wrapped (`bash -c`, `env`, subshell), or escaping usage anywhere in the command.
- * Returns { matched: boolean, allowed: boolean, reason?: string }.
+ * Inspects Steps 0–2 of `<brainDir>/<convId>/.system_generated/logs/transcript.jsonl`
+ * to deterministically classify top-level user chats vs. `/swarm` workers vs. subagents,
+ * extract `parentConvId` and `@rosterName`, and parse any first-line `[agy-transcript-access: ...]` directive.
  */
-function checkAgyContextTranscriptCommand(segments) {
+function getCallerLineage(convId) {
+  if (!convId || convId === "global") {
+    return {
+      transcriptFound: false,
+      isTopLevelUserSession: false,
+      isChildSession: false,
+      isSwarmChild: false,
+      parentConvId: null,
+      rosterName: null,
+      launchDirective: null,
+      birthTimeMs: 0
+    };
+  }
+
+  const session = getSessionState(convId);
+  if (session.lineage && session.lineage.transcriptFound) {
+    return session.lineage;
+  }
+
+  const brainDir = getBrainDir();
+  const compactPath = path.join(brainDir, convId, ".system_generated", "logs", "transcript.jsonl");
+  const fullPath = path.join(brainDir, convId, ".system_generated", "logs", "transcript_full.jsonl");
+  const targetFile = fs.existsSync(compactPath) ? compactPath : (fs.existsSync(fullPath) ? fullPath : null);
+
+  if (!targetFile) {
+    return {
+      transcriptFound: false,
+      isTopLevelUserSession: false,
+      isChildSession: false,
+      isSwarmChild: false,
+      parentConvId: null,
+      rosterName: null,
+      launchDirective: null,
+      birthTimeMs: 0
+    };
+  }
+
+  let birthTimeMs = Date.now();
+  let headStr = "";
+  try {
+    const st = fs.statSync(targetFile);
+    const candidates = [st.birthtimeMs, st.ctimeMs, st.mtimeMs].filter((n) => Number.isFinite(n) && n > 0);
+    if (candidates.length > 0) birthTimeMs = Math.min(...candidates);
+
+    const fd = fs.openSync(targetFile, "r");
+    try {
+      const buf = Buffer.alloc(16384);
+      const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+      headStr = buf.toString("utf-8", 0, bytesRead);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {}
+
+  let isTopLevelUserSession = false;
+  let isChildSession = false;
+  let isSwarmChild = false;
+  let parentConvId = null;
+  let rosterName = null;
+  let launchDirective = null;
+
+  const lines = headStr.split(/\r?\n/).filter((l) => l.trim()).slice(0, 4);
+  for (let i = 0; i < lines.length; i++) {
+    let item = null;
+    try {
+      item = JSON.parse(lines[i]);
+    } catch {
+      continue;
+    }
+    const content = typeof item?.content === "string" ? item.content : "";
+    if (i === 0 && (item?.type === "USER_INPUT" || item?.source === "USER_EXPLICIT")) {
+      isTopLevelUserSession = true;
+      launchDirective = extractFirstLineDirective(content);
+      break;
+    }
+
+    if (item?.type === "SYSTEM_MESSAGE" || item?.source === "SYSTEM") {
+      const senderMatch = content.match(/\[Message\][^\n]*\bsender=([a-zA-Z0-9_-]{4,})\b/);
+      if (senderMatch) {
+        isChildSession = true;
+        if (!parentConvId) parentConvId = senderMatch[1];
+      }
+
+      const swarmAssignMatch = content.match(
+        /Your assignment \(recorded on the board as #\d+ for @([a-zA-Z0-9_-]+)\):([\s\S]*)$/
+      );
+      if (swarmAssignMatch) {
+        isChildSession = true;
+        isSwarmChild = true;
+        rosterName = swarmAssignMatch[1];
+        const dir = extractFirstLineDirective(swarmAssignMatch[2]);
+        if (dir) launchDirective = dir;
+        break;
+      }
+
+      if (senderMatch && i === 0 && !content.includes("content=[swarm] new board message")) {
+        const msgBodyMatch = content.match(/\bpriority=MESSAGE_PRIORITY_[A-Z_]+\s+content=([\s\S]*)$/);
+        if (msgBodyMatch) {
+          const dir = extractFirstLineDirective(msgBodyMatch[1]);
+          if (dir) launchDirective = dir;
+        }
+      }
+    }
+  }
+
+  const lineage = {
+    transcriptFound: lines.length > 0,
+    isTopLevelUserSession,
+    isChildSession,
+    isSwarmChild,
+    parentConvId,
+    rosterName,
+    launchDirective,
+    birthTimeMs
+  };
+
+  if (lineage.transcriptFound) {
+    session.lineage = lineage;
+    saveSessionState(convId, session, { updatePollTime: false });
+  }
+  return lineage;
+}
+
+function matchesAgentPattern(pattern, callerConvId, rosterName) {
+  if (!pattern) return false;
+  const rawPat = String(pattern).trim().toLowerCase();
+  if (!rawPat) return false;
+  const isRosterPat = rawPat.startsWith("@");
+  const cleanPat = isRosterPat ? rawPat.slice(1) : rawPat;
+  const isGlob = cleanPat.endsWith("*");
+  const prefix = isGlob ? cleanPat.slice(0, -1) : cleanPat;
+
+  if (rosterName) {
+    const cleanRoster = String(rosterName).trim().toLowerCase().replace(/^@/, "");
+    if (isGlob ? cleanRoster.startsWith(prefix) : cleanRoster === cleanPat) {
+      return true;
+    }
+  }
+  if (!isRosterPat && callerConvId) {
+    const cleanId = String(callerConvId).trim().toLowerCase();
+    if (isGlob ? cleanId.startsWith(prefix) : cleanId === cleanPat) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function matchesAgentList(list, callerConvId, rosterName) {
+  if (!Array.isArray(list) || list.length === 0) return false;
+  return list.some((pat) => matchesAgentPattern(pat, callerConvId, rosterName));
+}
+
+function findGoverningPolicyForCaller(store, convId, lineage) {
+  const policies = store?.policies || {};
+  const policyList = Object.values(policies).sort((a, b) => b.updatedAt - a.updatedAt);
+  if (policyList.length === 0) return null;
+
+  // 1. If caller is an owner itself, return its own policy
+  if (convId && policies[convId]) {
+    return policies[convId];
+  }
+
+  // 2. If caller is explicitly listed in any active policy's deny or allow list
+  for (const pol of policyList) {
+    if (matchesAgentList(pol.deny, convId, lineage.rosterName) || matchesAgentList(pol.allow, convId, lineage.rosterName)) {
+      return pol;
+    }
+  }
+
+  // 3. Verified top-level user conversation (`USER_INPUT` at Step 0) is NEVER subject to another session's child lock
+  if (lineage.isTopLevelUserSession && !lineage.isChildSession) {
+    return null;
+  }
+
+  // 4. Child session with explicit `sender=<parentConvId>` in Step 0/1
+  if (lineage.isChildSession && lineage.parentConvId) {
+    return policies[lineage.parentConvId] || policies["local-operator"] || policies["global"] || null;
+  }
+
+  // 5. Fallback for synthetic test conversationIds (when transcript file does not exist on disk)
+  if (!lineage.transcriptFound) {
+    return (store.activeOwnerId && policies[store.activeOwnerId]) || policyList[0] || null;
+  }
+
+  return null;
+}
+
+function evaluateCallerTranscriptAccess(convId) {
+  const lineage = getCallerLineage(convId);
+  const store = readTranscriptAccessStore();
+  const policy = findGoverningPolicyForCaller(store, convId, lineage);
+
+  // Tier 1: Policy owner
+  if (policy && convId && policy.ownerId === convId) {
+    return {
+      allowed: true,
+      mode: "open",
+      source: "owner",
+      isOwner: true,
+      isRestrictedChild: false,
+      rosterName: lineage.rosterName,
+      ownerId: policy.ownerId
+    };
+  }
+
+  // Tier 2: Explicit CLI --deny match
+  if (policy && matchesAgentList(policy.deny, convId, lineage.rosterName)) {
+    return {
+      allowed: false,
+      mode: "deny",
+      source: "cli-deny-list",
+      isOwner: false,
+      isRestrictedChild: true,
+      rosterName: lineage.rosterName,
+      ownerId: policy.ownerId
+    };
+  }
+
+  // Tier 3: Explicit CLI --allow match
+  if (policy && matchesAgentList(policy.allow, convId, lineage.rosterName)) {
+    return {
+      allowed: true,
+      mode: "open",
+      source: "cli-allow-list",
+      isOwner: false,
+      isRestrictedChild: false,
+      rosterName: lineage.rosterName,
+      ownerId: policy.ownerId
+    };
+  }
+
+  // Tier 4: First-line launch directive (`[agy-transcript-access: allow|self-only|deny]`)
+  if (lineage.launchDirective) {
+    if (lineage.launchDirective === "deny") {
+      return {
+        allowed: false,
+        mode: "deny",
+        source: "launch-directive",
+        isOwner: false,
+        isRestrictedChild: true,
+        rosterName: lineage.rosterName,
+        ownerId: policy ? policy.ownerId : lineage.parentConvId
+      };
+    }
+    // If parent updated policy to deny/allowlist AFTER child launch, parent mid-session lock overrides
+    const parentOverrodeMidSession =
+      Boolean(policy) &&
+      (policy.mode === "deny" || policy.mode === "allowlist") &&
+      lineage.birthTimeMs > 0 &&
+      policy.updatedAt > lineage.birthTimeMs + 1000;
+
+    if (parentOverrodeMidSession) {
+      return {
+        allowed: false,
+        mode: policy.mode,
+        source: "cli-policy-override",
+        isOwner: false,
+        isRestrictedChild: true,
+        rosterName: lineage.rosterName,
+        ownerId: policy.ownerId
+      };
+    }
+
+    if (lineage.launchDirective === "self-only") {
+      return {
+        allowed: true,
+        mode: "self-only",
+        source: "launch-directive",
+        isOwner: false,
+        isRestrictedChild: true,
+        rosterName: lineage.rosterName,
+        ownerId: policy ? policy.ownerId : lineage.parentConvId
+      };
+    }
+    if (lineage.launchDirective === "allow") {
+      return {
+        allowed: true,
+        mode: "open",
+        source: "launch-directive",
+        isOwner: false,
+        isRestrictedChild: false,
+        rosterName: lineage.rosterName,
+        ownerId: policy ? policy.ownerId : lineage.parentConvId
+      };
+    }
+  }
+
+  // Tier 5: Cohort default mode from governing parent policy
+  if (policy) {
+    if (policy.mode === "deny" || policy.mode === "allowlist") {
+      return {
+        allowed: false,
+        mode: policy.mode,
+        source: "cli-policy",
+        isOwner: false,
+        isRestrictedChild: true,
+        rosterName: lineage.rosterName,
+        ownerId: policy.ownerId
+      };
+    }
+    if (policy.mode === "self-only") {
+      return {
+        allowed: true,
+        mode: "self-only",
+        source: "cli-policy",
+        isOwner: false,
+        isRestrictedChild: true,
+        rosterName: lineage.rosterName,
+        ownerId: policy.ownerId
+      };
+    }
+  }
+
+  return {
+    allowed: true,
+    mode: "open",
+    source: "default",
+    isOwner: !lineage.isChildSession,
+    isRestrictedChild: false,
+    rosterName: lineage.rosterName,
+    ownerId: policy ? policy.ownerId : null
+  };
+}
+
+function canCallerMutateTranscriptAccess(convId) {
+  const lineage = getCallerLineage(convId);
+  if (lineage.isChildSession || lineage.isSwarmChild) {
+    return false;
+  }
+  if (lineage.launchDirective === "deny" || lineage.launchDirective === "self-only") {
+    return false;
+  }
+  const store = readTranscriptAccessStore();
+  const policy = findGoverningPolicyForCaller(store, convId, lineage);
+  if (policy && convId && policy.ownerId !== convId && !lineage.isTopLevelUserSession) {
+    return false;
+  }
+  return true;
+}
+
+function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
+  const READ_VALUE_FLAGS = new Set(["id", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "file"]);
+  const QUERY_VALUE_FLAGS = new Set([
+    "id",
+    "query",
+    "roles",
+    "mode",
+    "start",
+    "end",
+    "last-turns",
+    "last",
+    "tail",
+    "limit",
+    "field",
+    "file"
+  ]);
+  const STEP_VALUE_FLAGS = new Set([
+    "id",
+    "step",
+    "start",
+    "end",
+    "field",
+    "mode",
+    "tail",
+    "tail-lines",
+    "head",
+    "head-lines",
+    "file"
+  ]);
+  const HEALTH_VALUE_FLAGS = new Set(["id", "file"]);
+
+  let valueFlags = READ_VALUE_FLAGS;
+  if (subcommand === "query" || subcommand === "grep" || subcommand === "search" || subcommand === "find" || subcommand === "tools") {
+    valueFlags = QUERY_VALUE_FLAGS;
+  } else if (subcommand === "step") {
+    valueFlags = STEP_VALUE_FLAGS;
+  } else if (subcommand === "health" || subcommand === "stats" || subcommand === "info") {
+    valueFlags = HEALTH_VALUE_FLAGS;
+  }
+
+  const opts = {};
+  const positionals = [];
+  for (let i = 0; i < restTokens.length; i++) {
+    const tok = restTokens[i];
+    if (!tok.startsWith("-") || tok === "-") {
+      positionals.push(tok);
+      continue;
+    }
+    if (!tok.startsWith("--")) continue;
+    const eqIdx = tok.indexOf("=");
+    const key = eqIdx === -1 ? tok.slice(2) : tok.slice(2, eqIdx);
+    const inlineVal = eqIdx === -1 ? null : tok.slice(eqIdx + 1);
+    if (valueFlags.has(key)) {
+      if (inlineVal !== null) {
+        opts[key] = inlineVal;
+      } else if (i + 1 < restTokens.length) {
+        opts[key] = restTokens[++i];
+      }
+    }
+  }
+
+  const posCopy = [...positionals];
+  if (subcommand === "query" || subcommand === "grep" || subcommand === "search" || subcommand === "find" || subcommand === "tools") {
+    if (opts.query === undefined && posCopy.length >= 1) {
+      opts.query = posCopy.shift();
+    }
+    if (opts.id === undefined && posCopy.length >= 1) {
+      opts.id = posCopy.shift();
+    }
+  } else if (subcommand === "step") {
+    if (opts.step === undefined && posCopy.length >= 1) {
+      opts.step = posCopy.shift();
+    }
+    if (opts.id === undefined && posCopy.length >= 1) {
+      opts.id = posCopy.shift();
+    }
+  } else if (
+    subcommand === "read" ||
+    subcommand === "outline" ||
+    subcommand === "summary" ||
+    subcommand === "health" ||
+    subcommand === "stats" ||
+    subcommand === "info"
+  ) {
+    if (opts.id === undefined && posCopy.length >= 1) {
+      opts.id = posCopy.shift();
+    }
+  }
+
+  if (posCopy.length > 0) {
+    return {
+      error: `Antigravity Execution Governance: Unexpected positional arguments '${posCopy.join(" ")}' for 'agy-context transcript ${subcommand}'.`
+    };
+  }
+
+  return {
+    targetId: opts.id ? String(opts.id).trim() : null,
+    explicitFile: opts.file ? String(opts.file).trim() : null
+  };
+}
+
+function buildTranscriptAccessDenial({ subcommand, mode, source, callerConvId, rosterName, detail }) {
+  const label = rosterName ? `@${rosterName} (${callerConvId})` : callerConvId;
+  const extra = detail ? ` ${detail}` : "";
+  return (
+    `Antigravity Execution Governance: 'agy-context transcript ${subcommand}' is restricted for this session (${label}) by parent governance [mode=${mode}, source=${source}].${extra} ` +
+    `Do NOT retry transcript inspection commands or attempt direct '.system_generated' file/shell reads; proceed with your assigned task using your workspace files and task brief.`
+  );
+}
+
+/**
+ * Checks if a command is a valid, strictly single, unchained `agy-context transcript ...` invocation
+ * and enforces parent-scoped transcript access governance.
+ */
+function checkAgyContextTranscriptCommand(segments, convId = "global") {
   if (segments.length === 0) return { matched: false, allowed: false };
   const match = findAgyContextTranscriptUsage(segments);
   if (!match) {
     return { matched: false, allowed: false };
   }
 
-  const { seg, segIndex, totalSegs, hadWrapper, subOffset, tokens } = match;
-  // Must be strictly single segment at index 0, unchained, unwrapped, no redirects/heredocs/subshells
-  if (totalSegs !== 1 || segIndex !== 0 || hadWrapper || seg.hasRedirect || seg.hasHeredoc || seg.hasSubshell) {
+  const {
+    seg,
+    segIndex,
+    totalSegs,
+    hadWrapper,
+    subOffset,
+    subcommand,
+    isReadSub,
+    isHelpSub,
+    isAdminSub,
+    isKnownSubcommand,
+    hasNodeFlags,
+    invalidBinaryPath,
+    tokens
+  } = match;
+
+  // Must be strictly single segment at index 0, unchained, unwrapped, no redirects/heredocs/subshells/node-flags
+  if (
+    totalSegs !== 1 ||
+    segIndex !== 0 ||
+    hadWrapper ||
+    hasNodeFlags ||
+    invalidBinaryPath ||
+    seg.hasRedirect ||
+    seg.hasHeredoc ||
+    seg.hasSubshell
+  ) {
     return {
       matched: true,
       allowed: false,
-      reason: "Antigravity Execution Governance: 'agy-context transcript' access to .system_generated must be strictly single and unchained (no chaining, wrappers, env prefixes, redirects, heredocs, or subshells)."
+      reason:
+        "Antigravity Execution Governance: 'agy-context transcript' access to .system_generated must be strictly single and unchained (no chaining, wrappers, env prefixes, node flags, redirects, heredocs, or subshells)."
+    };
+  }
+
+  if (!isKnownSubcommand) {
+    return {
+      matched: true,
+      allowed: false,
+      reason: `Antigravity Execution Governance: Unknown 'agy-context transcript' subcommand '${subcommand}'. Expected read, query, step, health, list, or access.`
     };
   }
 
@@ -1218,7 +2057,168 @@ function checkAgyContextTranscriptCommand(segments) {
     }
   }
 
-  return { matched: true, allowed: true };
+  if (isHelpSub) {
+    return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: false };
+  }
+
+  const restTokens = tokens.slice(subOffset + 1);
+  if (restTokens.length === 1 && (restTokens[0] === "--help" || restTokens[0] === "-h")) {
+    return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: false };
+  }
+
+  if (isAdminSub) {
+    const hasMutationToken = restTokens.some((t) => {
+      const low = String(t).toLowerCase();
+      return (
+        low === "--off" ||
+        low === "--deny-children" ||
+        low === "--on" ||
+        low === "--reset" ||
+        low === "--self-only" ||
+        low === "--mode" ||
+        low.startsWith("--mode=") ||
+        low === "--allow" ||
+        low.startsWith("--allow=") ||
+        low === "--deny" ||
+        low.startsWith("--deny=") ||
+        low === "--ttl" ||
+        low.startsWith("--ttl=") ||
+        low === "off" ||
+        low === "deny" ||
+        low === "lock" ||
+        low === "on" ||
+        low === "open" ||
+        low === "reset" ||
+        low === "unlock" ||
+        low === "self-only"
+      );
+    });
+
+    if (hasMutationToken && !canCallerMutateTranscriptAccess(convId)) {
+      return {
+        matched: true,
+        allowed: false,
+        isAccessDenial: true,
+        reason:
+          "Antigravity Execution Governance: Only the parent/coordinator session may modify 'agy-context transcript access' policy. Child sessions cannot unlock or alter transcript governance."
+      };
+    }
+
+    return {
+      matched: true,
+      allowed: true,
+      subcommand,
+      mode: "open",
+      needsReadGrant: false,
+      isAccessMutation: hasMutationToken
+    };
+  }
+
+  if (isReadSub) {
+    const accessEval = evaluateCallerTranscriptAccess(convId);
+    if (!accessEval.allowed) {
+      return {
+        matched: true,
+        allowed: false,
+        isAccessDenial: true,
+        reason: buildTranscriptAccessDenial({
+          subcommand,
+          mode: accessEval.mode,
+          source: accessEval.source,
+          callerConvId: convId,
+          rosterName: accessEval.rosterName
+        })
+      };
+    }
+
+    const targetInfo = extractTargetConvIdFromTranscriptTokens(subcommand, restTokens);
+    if (targetInfo.error) {
+      return {
+        matched: true,
+        allowed: false,
+        reason: targetInfo.error
+      };
+    }
+
+    if (accessEval.mode === "self-only") {
+      if (subcommand === "list" || subcommand === "ls") {
+        return {
+          matched: true,
+          allowed: false,
+          isAccessDenial: true,
+          reason: buildTranscriptAccessDenial({
+            subcommand,
+            mode: "self-only",
+            source: accessEval.source,
+            callerConvId: convId,
+            rosterName: accessEval.rosterName,
+            detail: "'list'/'ls' across sessions is disabled in self-only mode."
+          })
+        };
+      }
+
+      if (targetInfo.explicitFile) {
+        const selfBrainDir = path.join(getBrainDir(), convId);
+        if (!isPathInsideDir(targetInfo.explicitFile, selfBrainDir)) {
+          return {
+            matched: true,
+            allowed: false,
+            isAccessDenial: true,
+            reason: buildTranscriptAccessDenial({
+              subcommand,
+              mode: "self-only",
+              source: accessEval.source,
+              callerConvId: convId,
+              rosterName: accessEval.rosterName,
+              detail: `Cross-session '--file' access outside '${convId}' is disabled in self-only mode.`
+            })
+          };
+        }
+      }
+
+      if (targetInfo.targetId && targetInfo.targetId.toLowerCase() !== "current" && targetInfo.targetId !== convId) {
+        return {
+          matched: true,
+          allowed: false,
+          isAccessDenial: true,
+          reason: buildTranscriptAccessDenial({
+            subcommand,
+            mode: "self-only",
+            source: accessEval.source,
+            callerConvId: convId,
+            rosterName: accessEval.rosterName,
+            detail: `Cross-session inspection of '${targetInfo.targetId}' is disabled in self-only mode (you may only inspect your own session '${convId}').`
+          })
+        };
+      }
+
+      const needsSelfIdInjection =
+        !targetInfo.explicitFile &&
+        (!targetInfo.targetId || targetInfo.targetId.toLowerCase() === "current") &&
+        Boolean(convId && convId !== "global");
+
+      return {
+        matched: true,
+        allowed: true,
+        subcommand,
+        mode: "self-only",
+        targetConvId: convId,
+        needsReadGrant: true,
+        injectSelfId: needsSelfIdInjection ? convId : null
+      };
+    }
+
+    return {
+      matched: true,
+      allowed: true,
+      subcommand,
+      mode: "open",
+      needsReadGrant: true,
+      targetConvId: targetInfo.targetId || null
+    };
+  }
+
+  return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: false };
 }
 
 /**
@@ -1358,9 +2358,12 @@ function getSegmentCmdName(seg) {
  * bash/sh/eval inner scripts, nested subshells, and interpreter/xargs heredoc bodies).
  * Plain documentation heredocs (e.g. `cat > file <<'EOF'`) and non-code prompt text remain exempt.
  */
-function collectInspectableTexts(segments, depth = 0) {
+function collectInspectableTexts(segments, depth = 0, options = {}) {
   if (depth > 4) return [];
   const texts = [];
+  const isRestrictedChild = Boolean(options.isRestrictedChild);
+  const osTmpNorm = os.tmpdir().replace(/\\/g, "/");
+
   for (let idx = 0; idx < segments.length; idx++) {
     const seg = segments[idx];
     const segCmd = getSegmentCmdName(seg);
@@ -1377,13 +2380,13 @@ function collectInspectableTexts(segments, depth = 0) {
 
     const wrapped = extractWrappedScriptInfo(seg.text);
     if (wrapped && wrapped.innerScript) {
-      texts.push(...collectInspectableTexts(splitShellSegments(wrapped.innerScript), depth + 1));
+      texts.push(...collectInspectableTexts(splitShellSegments(wrapped.innerScript), depth + 1, options));
     }
 
     if (Array.isArray(seg.subshells)) {
       for (const sub of seg.subshells) {
         const subSegs = splitShellSegments(sub);
-        texts.push(...collectInspectableTexts(subSegs, depth + 1));
+        texts.push(...collectInspectableTexts(subSegs, depth + 1, options));
       }
     }
 
@@ -1391,18 +2394,62 @@ function collectInspectableTexts(segments, depth = 0) {
       texts.push("base64 | sh");
     }
 
+    // Inspect on-disk script files executed by shell/code interpreters (when in /tmp, /scratch, non-script extension, or restricted child)
+    if (SHELL_INTERPRETERS.has(segCmd) || CODE_INTERPRETERS.has(segCmd)) {
+      const segTokens = tokenizeShellWords(seg.text || "");
+      for (let tIdx = 1; tIdx < segTokens.length; tIdx++) {
+        let tok = String(segTokens[tIdx] || "").trim();
+        if (!tok || tok.startsWith("-")) continue;
+        if (tok.startsWith("<")) tok = tok.slice(1).trim();
+        if (!tok || isAllowedAgyContextScriptPath(tok)) continue;
+        try {
+          const resolvedFile = path.resolve(tok);
+          const normFile = resolvedFile.replace(/\\/g, "/");
+          const isTmpOrScratchFile =
+            normFile.startsWith("/tmp/") ||
+            normFile.startsWith("/var/tmp/") ||
+            normFile.startsWith(osTmpNorm + "/") ||
+            normFile.includes("/scratch/");
+          const isNonScriptExt = !isExecutableScriptPath(normFile);
+          if (isTmpOrScratchFile || isNonScriptExt || isRestrictedChild) {
+            if (fs.existsSync(resolvedFile)) {
+              const st = fs.statSync(resolvedFile);
+              if (st.isFile() && st.size > 0 && st.size <= 131072) {
+                texts.push(fs.readFileSync(resolvedFile, "utf-8"));
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+
     if (Array.isArray(seg.heredocBodies) && seg.heredocBodies.length > 0) {
       const hasShellConsumer = pipelineCmds.some((c) => SHELL_INTERPRETERS.has(c));
       const hasXargsConsumer = pipelineCmds.some((c) => c === "xargs");
       const hasCodeConsumer = !seg.hasWriteRedirect && pipelineCmds.some((c) => CODE_INTERPRETERS.has(c));
+      let writesExecutableOrTmpScript = false;
+      if (seg.hasWriteRedirect) {
+        const redirectTargets = extractRedirectTargets(tokenizeShellWordsDetailed(seg.text || ""));
+        writesExecutableOrTmpScript = redirectTargets.some((t) => {
+          const normT = String(t || "").replace(/\\/g, "/");
+          return (
+            isExecutableScriptPath(normT) ||
+            normT.startsWith("/tmp/") ||
+            normT.startsWith("/var/tmp/") ||
+            normT.startsWith(osTmpNorm + "/")
+          );
+        });
+      }
 
       for (const hdBody of seg.heredocBodies) {
         if (!hdBody) continue;
         if (hasShellConsumer) {
-          texts.push(...collectInspectableTexts(splitShellSegments(hdBody), depth + 1));
+          texts.push(...collectInspectableTexts(splitShellSegments(hdBody), depth + 1, options));
         } else if (hasXargsConsumer) {
           texts.push(hdBody);
         } else if (hasCodeConsumer && CODE_FILE_ACCESS_REGEX.test(hdBody)) {
+          texts.push(hdBody);
+        } else if (writesExecutableOrTmpScript || /^\s*#!/.test(hdBody)) {
           texts.push(hdBody);
         }
       }
@@ -2009,7 +3056,22 @@ function denyRunningTask(taskId, convId) {
 // Denial Helpers & File Metrics
 // ============================================================================
 
-function buildInternalStateShellDenial() {
+function buildInternalStateShellDenial(convId = "global") {
+  const accessEval = evaluateCallerTranscriptAccess(convId);
+  if (!accessEval.allowed) {
+    return (
+      "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n" +
+      "- Transcript inspection ('agy-context transcript' and '.system_generated/logs/') is DISABLED for this session by parent governance (L6 Transcript Isolation). Do NOT retry transcript commands or alternative file/shell reads; proceed using only your assigned workspace files and task brief.\n" +
+      "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
+    );
+  }
+  if (accessEval.mode === "self-only") {
+    return (
+      "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n" +
+      `- Cross-session transcript inspection is DISABLED for this session (mode: self-only). You may only inspect your own transcript via 'agy-context transcript read --id ${convId} --mode compact' via run_command.\n` +
+      "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
+    );
+  }
   return (
     "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
     "- To inspect conversation transcripts: Run 'agy-context transcript read --id <uuid> --mode compact' or 'agy-context transcript query --id <uuid> --query \"<pattern>\" --summary' via run_command.\n" +
@@ -2017,12 +3079,88 @@ function buildInternalStateShellDenial() {
   );
 }
 
-function buildInternalStateToolDenial() {
+function buildInternalStateToolDenial(convId = "global") {
+  const accessEval = evaluateCallerTranscriptAccess(convId);
+  if (!accessEval.allowed) {
+    return (
+      "Antigravity Execution Governance: Direct access to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n" +
+      "- Transcript inspection ('agy-context transcript' and '.system_generated/logs/') is DISABLED for this session by parent governance (L6 Transcript Isolation). Do NOT retry transcript commands or alternative file/shell reads; proceed using only your assigned workspace files and task brief.\n" +
+      "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
+    );
+  }
+  if (accessEval.mode === "self-only") {
+    return (
+      "Antigravity Execution Governance: Direct access to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n" +
+      `- Cross-session transcript inspection is DISABLED for this session (mode: self-only). You may only inspect your own transcript via 'agy-context transcript read --id ${convId} --mode compact' via run_command.\n` +
+      "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
+    );
+  }
   return (
     "Antigravity Execution Governance: Direct access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
     "- To inspect conversation transcripts: Run 'agy-context transcript read --id <uuid> --mode compact' or 'agy-context transcript query --id <uuid> --query \"<pattern>\" --summary' via run_command.\n" +
     "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
   );
+}
+
+function isProtectedGovernanceFileMutation(targetPath, convId = "global") {
+  if (!targetPath || typeof targetPath !== "string") return false;
+  const norm = targetPath.replace(/\\/g, "/");
+  // Installed hook, plugin, & hooks.json in ~/.gemini/config are always protected from direct agent edit/rm
+  if (
+    /\/\.gemini\/(?:config|antigravity)\/hooks\.json(?:\.bak)?$/i.test(norm) ||
+    /\/\.gemini\/config\/scripts\/execution-guard-hook\.mjs$/i.test(norm) ||
+    /\/\.gemini\/config\/plugins\/agy-context-saver(?:$|[\/\\])/i.test(norm) ||
+    /\/\.gemini\/antigravity\/bin\/agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?$/i.test(norm)
+  ) {
+    return true;
+  }
+  // When caller is a restricted child session, also block mutating repo governance source files
+  const accessEval = evaluateCallerTranscriptAccess(convId);
+  if (accessEval.isRestrictedChild) {
+    if (
+      /(?:^|[\/\\])(?:execution-guard-hook\.mjs|transcript-core\.mjs|agy-context\.mjs|state-dir\.mjs|install-register\.mjs|hooks\.json)$/i.test(
+        norm
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasGovernanceMutationInText(text, convId = "global") {
+  if (!text || typeof text !== "string") return false;
+  const norm = text.replace(/\\/g, "/");
+  const hasMutationOp =
+    /\b(?:rm|del|remove-item|mv|cp|tee|truncate|shred|install|sed|perl|chmod|chown|ln|dd|patch|writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rmSync|rmdir|rmdirSync|rename|renameSync|truncateSync|chmodSync|copyFile|copyFileSync|WriteAllText|Delete|Remove)\b|>/i.test(
+      norm
+    );
+  if (!hasMutationOp) return false;
+
+  if (
+    /\/\.gemini\/(?:config|antigravity)\/hooks\.json(?:\.bak)?\b/i.test(norm) ||
+    /\/\.gemini\/config\/scripts\/execution-guard-hook\.mjs\b/i.test(norm) ||
+    /\/\.gemini\/config\/plugins\/agy-context-saver(?:$|[\/\\\s'"])/i.test(norm) ||
+    /\/\.gemini\/antigravity\/bin\/agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?\b/i.test(norm)
+  ) {
+    return true;
+  }
+
+  if (evaluateCallerTranscriptAccess(convId).isRestrictedChild) {
+    if (
+      /\b(?:execution-guard-hook\.mjs|transcript-core\.mjs|agy-context\.mjs|state-dir\.mjs|install-register\.mjs|hooks\.json)\b/i.test(
+        norm
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isExecutableScriptPath(targetPath) {
+  if (!targetPath || typeof targetPath !== "string") return false;
+  return /\.(?:m?js|cjs|ts|mts|cts|py|sh|bash|zsh|pl|rb|php|ps1|cmd|bat)$/i.test(targetPath.trim());
 }
 
 function escapeDoubleQuotedArg(str) {
@@ -2142,8 +3280,25 @@ try {
 
     const segments = splitShellSegments(rawCmd);
 
-    // LH-09-B: Shell command mutation of protected benchmark artifacts
-    const SHELL_MUTATION_VERBS = new Set(["rm", "del", "remove-item", "mv", "cp", "tee", "truncate", "shred", "install"]);
+    // LH-09-B: Shell command mutation of protected benchmark & governance artifacts
+    const SHELL_MUTATION_VERBS = new Set([
+      "rm",
+      "del",
+      "remove-item",
+      "mv",
+      "cp",
+      "tee",
+      "truncate",
+      "shred",
+      "install",
+      "sed",
+      "perl",
+      "chmod",
+      "chown",
+      "ln",
+      "dd",
+      "patch"
+    ]);
     for (const seg of segments) {
       const segTexts = [seg.text, ...(seg.subshells || [])];
       for (const st of segTexts) {
@@ -2166,6 +3321,13 @@ try {
             ? detailed.slice(cmdIdx + 1).map((t) => t.value).filter((v) => !v.includes("\n"))
             : [];
           const candidateTokens = [...redirectTargets, ...argCandidates];
+          if (candidateTokens.some((tok) => isProtectedGovernanceFileMutation(tok, convId))) {
+            respond({
+              decision: "deny",
+              reason:
+                "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited."
+            });
+          }
           if (candidateTokens.some((tok) => isProtectedBenchmarkPath(tok))) {
             respond({
               decision: "force_ask",
@@ -2177,9 +3339,20 @@ try {
       }
     }
 
-    // Check agy-context transcript CLI exemption (strictly single unchained, --file inside <brainDir>)
-    const agyTranscriptCheck = checkAgyContextTranscriptCommand(segments);
+    // Check agy-context transcript CLI exemption & parent-scoped access governance
+    const agyTranscriptCheck = checkAgyContextTranscriptCommand(segments, convId);
     if (agyTranscriptCheck.matched && !agyTranscriptCheck.allowed) {
+      if (agyTranscriptCheck.isAccessDenial) {
+        const session = getSessionState(convId);
+        session.transcriptDenials = (session.transcriptDenials || 0) + 1;
+        saveSessionState(convId, session, { updatePollTime: false });
+        if (session.transcriptDenials >= 5) {
+          respond({
+            decision: "force_ask",
+            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: restricted session '${convId}' attempted forbidden 'agy-context transcript' access ${session.transcriptDenials} times. ${agyTranscriptCheck.reason}`
+          });
+        }
+      }
       respond({
         decision: "deny",
         reason: agyTranscriptCheck.reason
@@ -2190,18 +3363,44 @@ try {
     let isSpillover = false;
     let taskMatch = null;
     if (!agyTranscriptCheck.allowed) {
-      const inspectableTexts = collectInspectableTexts(segments);
+      const callerAccess = evaluateCallerTranscriptAccess(convId);
+      const inspectableTexts = collectInspectableTexts(segments, 0, {
+        isRestrictedChild: callerAccess.isRestrictedChild
+      });
       const inspectableCombined = inspectableTexts.join("\n");
       const singleTokens = segments.length === 1 ? tokenizeShellWords(segments[0].text) : [];
       const spilloverTok = findStepSpilloverToken(singleTokens);
       isSpillover = Boolean(spilloverTok);
       taskMatch = getTaskLogMatch(inspectableCombined);
 
-      // Check 1: Other protected internal state (transcripts, scheduler, arbitrary .txt in steps/)
-      if (!isSpillover && !taskMatch && isProtectedInternalState(inspectableCombined)) {
+      // Block unwrapped shell/interpreter mutations of governance/hook files
+      if (hasGovernanceMutationInText(inspectableCombined, convId)) {
         respond({
           decision: "deny",
-          reason: buildInternalStateShellDenial()
+          reason:
+            "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited."
+        });
+      }
+
+      // Block restricted child sessions from running setup/install/uninstall/restore-backups lifecycle commands
+      if (
+        /\bagy-context(?:-saver)?(?:\.m?js)?\s+(?:--?(?:setup|install|uninstall|restore-backups)|setup|install|uninstall|restore-backups)\b|\bnpm\s+run\s+(?:setup|uninstall)\b|\binstall-register\.mjs\b/i.test(
+          inspectableCombined
+        ) &&
+        callerAccess.isRestrictedChild
+      ) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Restricted child sessions cannot execute plugin lifecycle setup or uninstall commands."
+        });
+      }
+
+      // Check 1: Other protected internal state (transcripts, governance state, non-canonical agy-context transcript, interpreter imports)
+      if (!isSpillover && !taskMatch && isProtectedShellOrScriptOperation(inspectableCombined)) {
+        respond({
+          decision: "deny",
+          reason: buildInternalStateShellDenial(convId)
         });
       }
 
@@ -2211,7 +3410,7 @@ try {
           decision: "deny",
           reason: isSpillover
             ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'rtk read <path>' command (no chaining, redirects, subshells, or '..' traversal)."
-            : buildInternalStateShellDenial()
+            : buildInternalStateShellDenial(convId)
         });
       }
 
@@ -2219,6 +3418,16 @@ try {
       if (taskMatch && getTaskState(taskMatch, convId) === "RUNNING") {
         denyRunningTask(taskMatch.id, convId);
       }
+    }
+
+    if (agyTranscriptCheck.allowed && (agyTranscriptCheck.needsReadGrant || agyTranscriptCheck.isAccessMutation)) {
+      recordTranscriptHookGrant({
+        callerConvId: convId,
+        subcommand: agyTranscriptCheck.subcommand,
+        targetConvId: agyTranscriptCheck.targetConvId || null,
+        mode: agyTranscriptCheck.mode || "open",
+        isMutation: Boolean(agyTranscriptCheck.isAccessMutation)
+      });
     }
 
     // Delegate command rewriting to `rtk hook antigravity` (>= 1.1.0)
@@ -2240,6 +3449,17 @@ try {
         rgAvailable: false,
         rtkPrefix: "rtk"
       });
+    }
+
+    // In self-only mode, deterministically inject --id <convId> when --id and --file were omitted (or --id current / positional current)
+    if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectSelfId) {
+      if (/--id(?:=|\s+)["']?current["']?\b/i.test(effectiveCmd)) {
+        effectiveCmd = effectiveCmd.replace(/--id(?:=|\s+)["']?current["']?\b/i, `--id ${agyTranscriptCheck.injectSelfId}`);
+      } else if (/\s+["']?current["']?\s*$/i.test(effectiveCmd)) {
+        effectiveCmd = effectiveCmd.replace(/\s+["']?current["']?\s*$/i, ` --id ${agyTranscriptCheck.injectSelfId}`);
+      } else {
+        effectiveCmd = `${effectiveCmd.trim()} --id ${agyTranscriptCheck.injectSelfId}`;
+      }
     }
 
     const isRtkRead = isRtkReadCommand(effectiveCmd);
@@ -2384,7 +3604,7 @@ try {
     if (isProtectedInternalState(target) || isProtectedInternalState(JSON.stringify(args))) {
       respond({
         decision: "deny",
-        reason: buildInternalStateToolDenial()
+        reason: buildInternalStateToolDenial(convId)
       });
     }
 
@@ -2603,7 +3823,7 @@ try {
   }
 
   // =========================================================================
-  // 4. Benchmark & Evaluator Mutation Protection (LH-09)
+  // 4. Benchmark, Governance & Evaluator Mutation Protection (LH-09 & LH-02)
   // =========================================================================
   if (
     toolName === "replace_file_content" ||
@@ -2615,9 +3835,45 @@ try {
     if (isProtectedInternalState(targetFile)) {
       respond({
         decision: "deny",
-        reason: buildInternalStateToolDenial(toolName)
+        reason: buildInternalStateToolDenial(convId)
       });
     }
+    if (isProtectedGovernanceFileMutation(targetFile, convId)) {
+      respond({
+        decision: "deny",
+        reason:
+          "Antigravity Execution Governance: Direct mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited."
+      });
+    }
+
+    const bodyContent = String(
+      args.Content ||
+        args.content ||
+        args.file_content ||
+        args.Replacement ||
+        args.replacement ||
+        args.new_string ||
+        ""
+    );
+    const normTarget = targetFile.replace(/\\/g, "/");
+    const isTmpOrScratch =
+      normTarget.startsWith("/tmp/") ||
+      normTarget.startsWith("/var/tmp/") ||
+      normTarget.includes("/scratch/") ||
+      normTarget.startsWith("scratch/") ||
+      normTarget.startsWith(os.tmpdir().replace(/\\/g, "/") + "/");
+    const isScript = isExecutableScriptPath(targetFile) || /^\s*#!/.test(bodyContent);
+    const callerAccess = evaluateCallerTranscriptAccess(convId);
+
+    if (isScript && bodyContent && (callerAccess.isRestrictedChild || isTmpOrScratch)) {
+      if (isProtectedShellOrScriptOperation(bodyContent)) {
+        respond({
+          decision: "deny",
+          reason: buildInternalStateShellDenial(convId)
+        });
+      }
+    }
+
     if (isProtectedBenchmarkPath(targetFile)) {
       respond({
         decision: "force_ask",

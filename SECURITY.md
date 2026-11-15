@@ -2,22 +2,30 @@
 
 ## Supported releases
 
-Security fixes should target the latest supported release. If an older release is affected, maintainers will document whether a fix or workaround is available.
+Security fixes target the latest release (`2.0.x`).
 
 ## Reporting a vulnerability
 
-Please do **not** report exploitable details in a public issue or pull request.
+Do **not** report exploitable details in a public issue or pull request.
 
-Preferred path: use GitHub's **private vulnerability reporting** for this repository from the repository's Security tab. Repository owners should enable private vulnerability reporting before the public release. If that feature is unavailable, contact the maintainers privately through the contact method published on the repository owner's GitHub profile and ask for a secure reporting channel.
+Use GitHub's **private vulnerability reporting** from this repository's Security tab. Include the affected version or commit, operating system, Node.js version, impact, minimal reproduction steps, and redacted logs. Never attach raw Antigravity transcript files or user credentials.
 
-Include the affected version/commit, operating system, Node version, impact, minimal reproduction steps, and any relevant logs with secrets and personal transcript contents removed. Do not attach raw Antigravity transcript files unless the maintainer has agreed on a secure transfer method.
+## Response targets
 
-## Response expectations
-
-Maintainers will make a reasonable effort to acknowledge reports within seven calendar days and provide a status update within fourteen calendar days. These are targets, not a guarantee; response time may vary based on severity and maintainer availability.
-
-Please allow time for triage and a coordinated fix before public disclosure. The reporter and maintainers should agree on a disclosure date when practical.
+Maintainers aim to acknowledge reports within 7 calendar days and provide a status update within 14 calendar days. Please allow time for triage and a coordinated fix before public disclosure.
 
 ## Security-sensitive areas
 
-The project installs executable hooks, modifies user-level Antigravity configuration, provisions an external native binary, and inspects local transcripts. Reports involving unintended config replacement, code execution, path traversal, archive extraction, integrity verification, or transcript data exposure should identify the exact reproduction conditions whenever possible.
+`Agy-Context-Saver` installs a `PreToolUse` hook, updates user-level Antigravity configuration files, provisions the `rtk` binary with SHA-256 verification, and inspects local session transcripts.
+
+### Transcript access & hook security architecture (`v2.0.0`)
+
+`scripts/execution-guard-hook.mjs` and `lib/transcript-core.mjs` enforce defense-in-depth boundaries so restricted child subagents (`EnableWriteTools: true`) and `/swarm` workers cannot read unauthorized transcripts or tamper with governance state:
+
+- **Single-use `PreToolUse` capability grants (`lib/transcript-core.mjs`):** Authorized `agy-context transcript` reads and parent `transcript access` updates receive a 10-second single-use disk capability token (`lastHookGrant` / `lastAccessMutationGrant`) bound to the caller's `conversationId`, subcommand, and target conversation. `lib/transcript-core.mjs` verifies and consumes this token before reading transcripts or updating policies, blocking direct `node bin/agy-context.mjs` invocations, library imports, and chained calls.
+- **State directory protection (`getStateDir()`):** Direct file tool (`read_file`, `edit_file`, `write_file`) and shell access to `getStateDir()` (`~/.local/state/agy-context-saver` on POSIX or `%LOCALAPPDATA%\agy-context-saver` on Windows, including `transcript-access.json` and `agy-session-*.json`) is blocked, and environment variable overrides (`XDG_STATE_HOME`, `LOCALAPPDATA`, `AGY_TEST_PROFILE_DIR`, `AGY_BRAIN_DIR`, `GEMINI_CONVERSATION_ID`) inside shell commands or scripts are rejected.
+- **Executable script and heredoc scanning:** When `edit_file` or `write_file` writes executable scripts (`.mjs`, `.js`, `.cjs`, `.sh`, `.bash`, `.py`, `.ps1`) or when `run_command` executes inline interpreters (`node -e`, `python -c`), heredocs, or subshells, the hook scans the content for `.system_generated`, `transcript.jsonl`, `transcript_full.jsonl`, `transcript-core.mjs`, `bin/agy-context.mjs`, and `getStateDir()` references.
+- **Parent transcript access governance:**
+  - **5-tier precedence:** `1. Policy Owner` -> `2. Explicit CLI --deny` -> `3. Explicit CLI --allow` (supporting `@roster*` prefix globs such as `@audit-squad*`) -> `4. First-Line Launch Directive` (`[agy-transcript-access: deny|self-only|allow]` on the first non-empty line of a `SystemPrompt`, `Prompt`, or `brief`) -> `5. Cohort Default Mode` (`open`, `allowlist`, `self-only`, or `deny`).
+  - **Stale-lock protection:** Policies are keyed per parent (`policies[ownerId]`) with a 1-hour default TTL, Step 0 `USER_INPUT` top-level user sessions bypass foreign parent locks automatically, Step 0/1 `sender=<parentConvId>` binds child agents to their parent policy, and `agy-context status` displays the active `Transcript Access Policy`.
+- **Context-aware denials and 5-strike circuit breaker:** When transcript access is restricted for a caller, `.system_generated` denial messages omit `agy-context transcript` retry hints, and 5 cumulative blocked attempts trip the `force_ask` circuit breaker.

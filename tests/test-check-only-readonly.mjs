@@ -99,14 +99,14 @@ try {
   assert.notEqual(conflictCheck.status, 0, '--check --restore-backups must be rejected with non-zero exit code (D-05).');
   assert.equal(fs.readFileSync(hooksPath, 'utf8'), activeHooks, '--check --restore-backups must not overwrite active hooks.json with .bak.');
 
-  const mcpCliConflict = spawnSync(process.execPath, ['mcp/index.js', 'sync', '--check', '--restore-backups'], {
+  const cliConflict = spawnSync(process.execPath, ['bin/agy-context.mjs', 'setup', '--check', '--restore-backups'], {
     cwd: isolatedRepo,
     env,
     encoding: 'utf8',
     timeout: 30000,
   });
-  assert.notEqual(mcpCliConflict.status, 0, 'mcp/index.js sync --check --restore-backups must be rejected with non-zero exit code (D-05).');
-  assert.equal(fs.readFileSync(hooksPath, 'utf8'), activeHooks, 'mcp/index.js sync --check --restore-backups must not mutate hooks.json.');
+  assert.notEqual(cliConflict.status, 0, 'bin/agy-context.mjs setup --check --restore-backups must be rejected with non-zero exit code (D-05).');
+  assert.equal(fs.readFileSync(hooksPath, 'utf8'), activeHooks, 'bin/agy-context.mjs setup --check --restore-backups must not mutate hooks.json.');
   console.log('PASS: conflicting --check --restore-backups flags are rejected without mutating profile (D-05).');
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true });

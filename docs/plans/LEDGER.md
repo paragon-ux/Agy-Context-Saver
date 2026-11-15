@@ -33,7 +33,7 @@ This file is the **single source of truth** for Agy-Context-Saver's cross-cuttin
 
 | IDs | Registry |
 |---|---|
-| L1–L12, L16–L24, L28–L31; P0–P5, V1–V8 (subagents and the Docker sandbox) | Agy-Squad: `docs/plans/LEDGER.md` and `docs/plans/docker-sandbox-plan.md` |
+| L1-L12, L16-L24, L28-L31; P0-P5, V1-V8 (subagents and the Docker sandbox) | Agy-Squad: `docs/plans/LEDGER.md` and `docs/plans/docker-sandbox-plan.md` |
 
 ## Ledger
 
@@ -48,7 +48,7 @@ This file is the **single source of truth** for Agy-Context-Saver's cross-cuttin
 
 | ID | Item | Source | Status | Decision | Link |
 |---|---|---|---|---|---|
-| L13 | Root cause | main, 2026-10-15 | decided | `tests/test-mcp.mjs` ran `dispatch_squad` with `mode: "direct"`, which spawned 14 live host agents through the private language-server RPC. | — |
+| L13 | Root cause | main, 2026-10-15 | decided | `tests/test-mcp.mjs` ran `dispatch_squad` with `mode: "direct"`, which spawned 14 live host agents through the private language-server RPC. | none |
 | L14 | Remove direct mode | user, 2026-10-15 | done (`dd94778`) | `mcp/direct-rpc.mjs`, the direct test block and the `BypassSandbox` hook overwrite are gone from `main`. They survive only on the local branch `wip/subagent-squad` (never pushed) and were not carried into Agy-Squad. | Agy-Squad plan P0 |
 | L15 | Remove every subagent tool and script | user, 2026-10-15 | done (`dd94778`) | `subagent_brief`, its schema, the subagent tests and the subagent guidance are gone. The installer retires `subagent_brief.json` and `dispatch_squad.json` from existing installs. Kept: the anti-orphan exit handlers and the `isEntryPoint` guard. (This replaces two earlier versions of the row: keep everything, then keep the simple brief. The user's words win.) | Agy-Squad plan P0 |
 
@@ -60,3 +60,10 @@ This file is the **single source of truth** for Agy-Context-Saver's cross-cuttin
 | L26 | Subagent orchestration and the sandbox live in a separate repository | user, 2026-10-15 | done (`dd94778`, Agy-Squad `8e461bf`) | Agy-Context-Saver already fulfills its purpose without subagents, so keep what works separate from what's under construction. Each repo ships as its own installable package, like waymark-engine. | Agy-Squad |
 | L27 | Name and location of the new repository | user, 2026-10-15 | done (Agy-Squad `8e461bf`) | `Frameworks/Agy-Squad`. | Agy-Squad |
 | L34 | Version for the release without `subagent_brief` | user, 2026-10-15 | done (`dd94778`) | 1.8.0, a minor bump: the release adds no features. | `CHANGELOG.md` |
+
+### CLI-first architecture & parent transcript governance (v2.0.0)
+
+| ID | Item | Source | Status | Decision | Link |
+|---|---|---|---|---|---|
+| L35 | CLI-First Transcript Engine, subcommand aliases, step-slicing, and RTK `>= 1.1.0` delegation | user, main, 2026-11-14 | done (`50d6c99`, `acdb3c7`, `21b0a9e`, `50aa4a8`) | Retired default MCP registration, shipped `bin/agy-context.mjs` + `lib/transcript-core.mjs` with subcommand aliases (`read`/`outline`/`summary`, `query`/`grep`/`search`/`find`/`tools`, `step` batch/range `N,M`, `N-M`, `N..M` and `--head`/`--tail`/`--full`, `health`/`stats`/`info`, `list`/`ls`, `access`/`policy`) and field projection (`--field`, `--full-args`), registered `PreToolUse` in both plugin and global `hooks.json` for `/swarm` coverage, and delegated shell command rewriting to `rtk hook antigravity` (`>= 1.1.0`). | `bin/agy-context.mjs`, `lib/transcript-core.mjs` |
+| L36 | On-Demand Parent Transcript Access Governance | user, main, 2026-11-14 | done (`v2.0.0`) | Shipped parent-controlled child transcript governance via `agy-context transcript access` (`policy` alias) and first-line launch directives (`[agy-transcript-access: deny\|self-only\|allow]`) with prompt-echo immunity, governed by a 5-Tier Precedence Engine (`1. Policy Owner -> 2. Explicit CLI --deny -> 3. Explicit CLI --allow (@roster* globs) -> 4. First-Line Launch Directive -> 5. Cohort Default Mode`), 3-Layer Stale-Lock Immunity (parent-keyed 1h TTL `policies[ownerId]`, Step 0 `USER_INPUT` top-level session bypass, Step 0/1 `sender=<parentConvId>` child binding, and `agy-context status` visibility), single-use `PreToolUse` disk capability grants (`lastHookGrant` / `lastAccessMutationGrant`, 10s TTL) verified in `lib/transcript-core.mjs`, and 6-vector red-team hardening (`self-only` `--id <convId>` injection, `<stateDir>` and governance file/lifecycle mutation blocking for restricted children, heredoc/script content scanning, and 5-strike `force_ask` circuit breaker). | `scripts/execution-guard-hook.mjs`, `lib/transcript-core.mjs`, `docs/governance.md` |

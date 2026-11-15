@@ -15,7 +15,9 @@ import {
   queryTranscript,
   getStepDetail,
   checkContextHealth,
-  getBrainDir
+  getBrainDir,
+  manageTranscriptAccessPolicy,
+  verifyTranscriptCoreAccess
 } from "../lib/transcript-core.mjs";
 import {
   runInstall,
@@ -50,7 +52,8 @@ Transcript Commands:
   agy-context transcript step   [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--head N] [--tail N] [--full] [--json] [--file <path>]
   agy-context transcript health [--id <conv>] [--json] [--file <path>]
   agy-context transcript list   [--limit N] [--json]
-  Aliases: grep/search -> query | stats/info -> health | tools -> query --roles assistant --field tool_args | outline/summary -> query --summary --include-tools | ls -> list
+  agy-context transcript access [--status | --off | --on | --reset | --self-only | --mode <open|allowlist|self-only|deny> | --allow <id,@roster*...> | --deny <id,@roster*...> | --ttl <sec>] [--json]
+  Aliases: grep/search/find -> query | stats/info -> health | tools -> query --roles assistant --field tool_args | outline/summary -> query --summary --include-tools | ls -> list | policy -> access
 
 Lifecycle Commands:
   agy-context status            [--json]
@@ -424,6 +427,10 @@ async function handleTranscriptCommand(argv) {
       printHelp();
       process.exit(0);
     }
+    const accessCheck = verifyTranscriptCoreAccess({ subcommand: sub });
+    if (!accessCheck.allowed) {
+      emitError(accessCheck.error, Boolean(opts.json));
+    }
     const brainDir = getBrainDir();
     const limit = opts.limit !== undefined ? Math.max(1, Number(opts.limit) || 10) : 10;
     const entries = [];
@@ -458,7 +465,62 @@ async function handleTranscriptCommand(argv) {
     return;
   }
 
-  throw new Error(`Unknown transcript subcommand '${sub}'. Expected read, query, step, health, or list.`);
+  if (sub === "access" || sub === "policy") {
+    const { opts, positional } = parseFlags(rest, {
+      booleans: new Set(["status", "off", "deny-children", "on", "reset", "self-only", "json"]),
+      values: new Set(["mode", "allow", "deny", "ttl"])
+    });
+    if (opts.help) {
+      printHelp();
+      process.exit(0);
+    }
+    if (positional.length === 1 && !opts.status && !opts.off && !opts["deny-children"] && !opts.on && !opts.reset && !opts["self-only"] && opts.mode === undefined) {
+      const p0 = positional[0].toLowerCase();
+      if (p0 === "status") opts.status = true;
+      else if (p0 === "off" || p0 === "deny" || p0 === "lock") opts.off = true;
+      else if (p0 === "on" || p0 === "open" || p0 === "reset" || p0 === "unlock") opts.on = true;
+      else if (p0 === "self-only") opts["self-only"] = true;
+      else throw new Error(`Unexpected positional argument '${positional[0]}' for 'transcript ${sub}'.`);
+      positional.shift();
+    }
+    if (positional.length > 0) {
+      throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
+    }
+
+    const hasMutationFlag =
+      Boolean(opts.off) ||
+      Boolean(opts["deny-children"]) ||
+      Boolean(opts.on) ||
+      Boolean(opts.reset) ||
+      Boolean(opts["self-only"]) ||
+      opts.mode !== undefined ||
+      opts.allow !== undefined ||
+      opts.deny !== undefined ||
+      opts.ttl !== undefined;
+
+    const res = manageTranscriptAccessPolicy({
+      status: Boolean(opts.status) || !hasMutationFlag,
+      off: Boolean(opts.off),
+      denyChildren: Boolean(opts["deny-children"]),
+      on: Boolean(opts.on),
+      reset: Boolean(opts.reset),
+      selfOnly: Boolean(opts["self-only"]),
+      mode: opts.mode,
+      allow: opts.allow,
+      deny: opts.deny,
+      ttl: opts.ttl
+    });
+
+    if (opts.json) {
+      const { text, ...payload } = res;
+      console.log(JSON.stringify(payload, null, 2));
+    } else {
+      console.log(res.text);
+    }
+    return;
+  }
+
+  throw new Error(`Unknown transcript subcommand '${sub}'. Expected read, query, step, health, list, or access.`);
 }
 
 async function main() {

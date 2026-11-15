@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import {
   CircularRingBuffer,
@@ -12,13 +11,14 @@ import {
   queryTranscript,
   getStepDetail,
   checkContextHealth,
-  getRequiredBackoffSeconds
+  getRequiredBackoffSeconds,
+  manageTranscriptAccessPolicy,
+  recordTranscriptHookGrant
 } from "../lib/transcript-core.mjs";
 import { createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cliScript = path.resolve(__dirname, "../bin/agy-context.mjs");
-const mcpScript = path.resolve(__dirname, "../mcp/index.js");
 
 const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "agy-transcript-test-"));
 const brainDir = path.join(tempHome, ".gemini", "antigravity", "brain");
@@ -362,46 +362,7 @@ try {
     console.log("✓ Active swarm disambiguation, realpath containment, and bin/agy-context.mjs CLI verified");
   }
 
-  // ==========================================================================
-  // 6. Deprecated MCP Compatibility Wrapper Smoke Test (`mcp/index.js`)
-  // ==========================================================================
-  console.log("\n--- 6. Deprecated MCP Compatibility Wrapper (`mcp/index.js`) ---");
-  {
-    const proc = spawn(process.execPath, [mcpScript], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: testEnv
-    });
-    const rl = readline.createInterface({ input: proc.stdout });
-    const pending = new Map();
-    let idCounter = 1;
-    rl.on("line", (line) => {
-      if (!line.trim()) return;
-      const msg = JSON.parse(line);
-      if (msg.id && pending.has(msg.id)) {
-        pending.get(msg.id)(msg);
-        pending.delete(msg.id);
-      }
-    });
-    const send = (method, params = {}) => new Promise((resolve) => {
-      const id = idCounter++;
-      pending.set(id, resolve);
-      proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-    });
-
-    const init = await send("initialize", { protocolVersion: "2024-11-05" });
-    assert.equal(init.result.serverInfo.version, "2.0.0");
-    const tools = await send("tools/list");
-    assert.equal(tools.result.tools.length, 5);
-    const call = await send("tools/call", {
-      name: "query_transcript",
-      arguments: { conversationId: "conv-rich-forensic", query: "NEEDLE_IN_FULL_TAIL", mode: "auto" }
-    });
-    assert.match(call.result.content[0].text, /NEEDLE_IN_FULL_TAIL/);
-    proc.kill();
-    console.log("✓ Deprecated MCP compatibility wrapper cleanly delegates to v2.0.0 lib/transcript-core.mjs");
-  }
-
-  console.log("\n--- 7. Intuitive CLI Aliases, Positionals & Step Slicing ---");
+  console.log("\n--- 6. Intuitive CLI Aliases, Positionals & Step Slicing ---");
   {
     const convTarget = "conv-batch-range";
     const grepRes = runCli(["transcript", "grep", "FULL_ARGS_END_MARKER_OK", "--id", convTarget, "--include-tools", "--summary"]);
@@ -430,10 +391,60 @@ try {
     assert.ok(listJson.total >= 2 && Array.isArray(listJson.conversations), "transcript list must list conversations in brainDir");
     console.log("✓ grep/stats/tools/outline/list aliases, positional selectors, and step --tail/--head/--full verified");
   }
+
+  console.log("\n--- 7. Transcript Access Policy & Runtime Hook-Grant Verification ---");
+  {
+    const convTarget = "conv-batch-range";
+    // 1. Default status is OPEN
+    const stOpen = runCli(["transcript", "access", "--status", "--json"]);
+    assert.equal(stOpen.status, 0);
+    const stOpenJson = JSON.parse(stOpen.stdout);
+    assert.equal(stOpenJson.mode, "open");
+    assert.equal(stOpenJson.active, false);
+
+    // 2. Parent sets mode=deny via PreToolUse mutation grant
+    recordTranscriptHookGrant({ callerConvId: "parent-owner", subcommand: "access", mode: "open", isMutation: true });
+    const lockRes = runCli(["transcript", "access", "--off", "--json"]);
+    assert.equal(lockRes.status, 0, "Authorized parent transcript access --off must succeed");
+    const lockJson = JSON.parse(lockRes.stdout);
+    assert.equal(lockJson.mode, "deny");
+    assert.equal(lockJson.ownerId, "parent-owner");
+
+    // 3. Direct readTranscript / CLI list without a fresh PreToolUse hook grant MUST fail closed
+    manageTranscriptAccessPolicy({ off: true, _testAuthorizedOwner: "parent-owner" });
+    const blockedDirect = await readTranscript({ conversationId: convTarget });
+    assert.equal(blockedDirect.isError, true, "Direct readTranscript without PreToolUse hook grant must fail closed when policy is active");
+    assert.match(blockedDirect.text, /restricted by parent governance policy/);
+
+    const blockedList = runCli(["transcript", "list"]);
+    assert.notEqual(blockedList.status, 0, "CLI transcript list without PreToolUse hook grant must fail closed");
+
+    // 4. Child subprocess trying `transcript access --on` without PreToolUse mutation grant MUST fail closed
+    const unauthUnlock = runCli(["transcript", "access", "--on"]);
+    assert.notEqual(unauthUnlock.status, 0, "Unauthorized child subprocess transcript access --on must fail closed");
+
+    // 5. With a valid PreToolUse hook grant (mode: self-only), reading own transcript succeeds while reading other transcript fails
+    recordTranscriptHookGrant({ callerConvId: convTarget, subcommand: "read", targetConvId: convTarget, mode: "self-only" });
+    const allowedSelf = await readTranscript({ conversationId: convTarget, lastTurns: 1 });
+    assert.ok(!allowedSelf.isError, "Authorized self-only read of own transcript must succeed");
+
+    const blockedCross = await readTranscript({ conversationId: "conv-rich-forensic", lastTurns: 1 });
+    assert.equal(blockedCross.isError, true, "Cross-session read in self-only mode must fail closed inside transcript-core");
+
+    // 6. Parent resets policy back to OPEN
+    recordTranscriptHookGrant({ callerConvId: "parent-owner", subcommand: "access", mode: "open", isMutation: true });
+    const unlockRes = runCli(["transcript", "access", "--on", "--json"]);
+    assert.equal(unlockRes.status, 0, "Authorized parent transcript access --on must succeed");
+    const unlockJson = JSON.parse(unlockRes.stdout);
+    assert.equal(unlockJson.mode, "open");
+    assert.equal(unlockJson.active, false);
+
+    console.log("✓ Parent policy CLI, runtime hook-grant verification, self-only core containment, and anti-spoofing verified");
+  }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });
 }
 
 console.log("\n=================================================");
-console.log("ALL 2.0 TRANSCRIPT CORE, CLI & COMPAT TESTS PASSED!");
+console.log("ALL 2.0 TRANSCRIPT CORE & CLI TESTS PASSED!");
 console.log("=================================================");

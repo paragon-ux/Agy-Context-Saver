@@ -1,25 +1,23 @@
 # Antigravity Execution & Context Governance (Agy-Context-Saver + RTK)
 
-## Core Architectural Boundary
-- **RTK (Rust Token Killer >= 1.1.0)**: Owns shell command transparent rewriting (`rtk hook antigravity`), output reduction, and compact codebase inspection (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`, `rtk err`, `rtk summary`).
-- **Agy-Context-Saver (v2.0.0 CLI-First)**: Owns Antigravity lifecycle governance, Reactive Wakeup enforcement, transcript forensics (`agy-context transcript ...`), and session integrity.
+## Architectural Boundary
+- **RTK (`>= 1.1.0`)**: Rewrites shell commands via `rtk hook antigravity`, compresses command output, and provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`, `rtk read`, `rtk err`, `rtk summary`).
+- **Agy-Context-Saver (`v2.0.0`)**: Governs background task polling and Reactive Wakeup, bounds `read_file` slices, protects `.system_generated/` and the state directory, and provides transcript inspection and access control via `agy-context transcript`.
 
 ---
 
-## Layer 1: Background Tasks & Proportional Backoff Protocol (Reactive Wakeup SSOT)
-- **Zero-Tolerance on Busy-Polling**: Do NOT call `manage_task(Action='status')` in tight loops or schedule rapid timers to wait for running background tasks. Background tasks execute asynchronously and automatically resume the agent via **Reactive Wakeup** (`<SYSTEM_MESSAGE>`).
-- **Proportional Backoff Protocol**: Diagnostic inspections scale along an exponential backoff curve:
+## Layer 1: Background Tasks & Proportional Backoff
+- **No busy-polling**: Do not call `manage_task(Action='status')` in loops or schedule short timers to poll running background tasks. Background tasks resume the agent automatically via **Reactive Wakeup** (`<SYSTEM_MESSAGE>`).
+- **Proportional backoff**: Diagnostic status checks follow an exponential cooldown curve:
   $\text{Cooldown} = \min(600, \text{round}(30 \times 2.5^{\text{pollCount} - 1})) \quad [0\text{s} \to 30\text{s} \to 75\text{s} \to 188\text{s} \to 469\text{s} \to 600\text{s}]$
-  - Check #1 (Immediate upon launch): Permitted ($0\text{s}$).
-  - Premature status checks within an active backoff window are denied. 5 consecutive premature checks trigger the `force_ask` circuit breaker.
-  - Silent/hung background tasks: Once the backoff window elapses, a single diagnostic check is permitted to inspect logs, detect deadlocks, and issue `manage_task(Action='kill')` if needed.
-- **Coordinated Watchdog Protocol (`schedule`)**: For long-running background shell tasks (`run_command` builds, migrations, test suites) expected to take $> 15\text{s}$:
-  - Schedule a coordinated watchdog timer: `schedule(DurationSeconds=45, Prompt="Check status of background task-X", TimerCondition="task-X")`.
-  - Watchdog timers must satisfy `DurationSeconds >= Math.max(30, requiredBackoffSec)`, and each scheduled task watchdog advances the Proportional Backoff level ($30\text{s} \to 75\text{s} \to 188\text{s} \to 469\text{s} \to 600\text{s}$) so repeated $45\text{s}/60\text{s}$ timers are denied.
-  - **Swarm & Subagent Exemption (`swarm_wait` Only)**: NEVER pair `swarm_wait` or subagent launches with a one-shot `schedule` timer. `swarm_wait` sleeps at zero token cost and wakes immediately on board posts (while the dedicated `swarm_monitor` daemon cron handles stall checks); one-shot `schedule` timers polling a swarm or subagent are strictly denied.
-  - If the task completes early, Reactive Wakeup auto-cancels the timer and resumes the agent immediately.
-  - If the task is still running when the watchdog fires, perform a legal diagnostic check (`manage_task(status)`) and post a live progress update in chat for the user.
-- **Mandatory Pre-Yield Status Card**: When a command moves to the background, NEVER yield with a silent or generic one-liner. Output a structured Markdown card so the user is never left wondering if the IDE has stalled:
+  - Check #1 (immediate upon launch): permitted ($0\text{s}$).
+  - Premature checks inside an active backoff window are denied. 5 cumulative denials trip the `force_ask` circuit breaker.
+  - Once a backoff window elapses, one diagnostic check is permitted to inspect logs or issue `manage_task(Action='kill')`.
+- **Coordinated watchdog timers (`schedule`)**: For background shell tasks (`run_command` builds, migrations, full test runs) expected to take $> 15\text{s}$:
+  - Schedule a watchdog timer: `schedule(DurationSeconds=45, Prompt="Check status of background task-X", TimerCondition="task-X")`.
+  - Watchdog timers must satisfy `DurationSeconds >= Math.max(30, requiredBackoffSec)`. Each task watchdog advances the backoff level ($30\text{s} \to 75\text{s} \to 188\text{s} \to 469\text{s} \to 600\text{s}$), so repeated $45\text{s}/60\text{s}$ timers are denied.
+  - **Swarm and subagent exemption (`swarm_wait` only)**: Never pair `swarm_wait` or subagent launches with a one-shot `schedule` timer. `swarm_wait` sleeps at zero token cost and wakes on board posts; one-shot `schedule` timers polling a swarm or subagent are denied.
+- **Pre-yield status card**: When a command moves to the background, output a status card before ending your turn:
   ```markdown
   ### ⏳ Background Execution Started
   - **Command**: `<cmd>`
@@ -27,69 +25,43 @@
   - **Estimated Duration**: `~X minutes`
   - **Watchdog Active**: Coordinated check scheduled in 45s via Reactive Wakeup.
   ```
-- **Kill & Stdin Immediate Exemption**: `manage_task(Action='kill')` and `manage_task(Action='send_input')` are ALWAYS permitted immediately ($0\text{s}$ backoff, zero penalties).
+- **Immediate kill and stdin**: `manage_task(Action='kill')` and `manage_task(Action='send_input')` are always allowed immediately ($0\text{s}$ cooldown, zero penalties).
 
 ---
 
-## Layer 2: Transparent Shell Execution & Unified Codebase Inspection
-- **Native Shell Commands**: Run shell commands normally using `run_command`. The PreToolUse hook delegates command rewriting to `rtk hook antigravity` (`git`, `pytest`, `cargo`, `npm`, etc.) to produce ultra-compact outputs.
-- **Unified Codebase & File Inspection**: Unbounded full-file reads and unoptimized search tools (`grep_search`, `find_by_name`, `list_dir`) are blocked for workspace files. Follow this hierarchy:
-  1. **Tier 1 — Compact Search & Discovery (`rtk grep`, `rtk find`, `rtk ls`)**:
-     - **Prose / Regex / Symbol Discovery**: Use `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate exact `[StartLine, EndLine]` coordinates without dumping unoptimized search payloads. Always provide an explicit target path (e.g., `.` or `src/`) to prevent stdin pipe stalls.
-     - **Directory / File Discovery**:
-       - **Windows**: Use `rtk find <path>` or PowerShell `dir` / `Get-ChildItem`.
-       - **POSIX / Linux / macOS**: Use `rtk find <path>`, `rtk ls <path>`, or `rtk tree`.
-  2. **Tier 2 — Precision Workspace File Reading (`read_file` Hybrid Slice Policy)**:
-     - Pass exact `StartLine` and `EndLine` into `read_file` (bounded slices of `1–150` lines) to preserve 1-indexed line numbers for `edit_file` and `write_file` without terminal stdout truncation.
-     - Partial slices of `151–800` lines and `ByteOffset`-only unbounded reads are denied; an explicit one-pass full-file audit (`StartLine: 1, EndLine: <TotalLines>`) is permitted only when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
-  3. **Tier 3 — RTK Spillover & Diagnostic Boundaries (`rtk read`, `rtk err`, `rtk summary`)**:
-     - **Spillovers & Task Logs**: Read `.system_generated/steps/<step>/output.txt` spillovers (using bounded `read_file` $\le 150$ lines or `rtk read --tail-lines 150 <path>` / `--head-lines 150 <path>`) and completed `tasks/<taskId>.log` files via `rtk read <path>` (with `--head-lines` / `--tail-lines`). Never use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for `edit_file` / `write_file`.
-     - **Command Diagnostics**: `rtk err <cmd>` (errors/warnings only) and `rtk summary <cmd>` (2-line heuristic summary).
-- **Antigravity Special Files Safe Harbor**: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/` configs) are permitted via `read_file` without slice bounds, and bounded `read_file` ($\le 150$ lines) is permitted on `.system_generated/steps/<n>/output.txt`.
-- **Protected Internal State & Transcript Forensics (`agy-context transcript ...`)**: Direct native inspection of `.system_generated/` transcripts, task logs, or progress files is strictly forbidden. Use the zero-MCP `agy-context` CLI via `run_command` (prefer batch/range `--step N,M,K` / `--step N-M` and `query --start N --end M --roles assistant --field tool_args` over 1-by-1 single-step loops):
-  - `agy-context transcript read [--id <uuid>] [--mode compact|full] [--last-turns N] [--include-thinking] [--json]`
-  - `agy-context transcript query [--id <uuid>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--json]`
-  - `agy-context transcript step --id <uuid> (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--json]`
-  - `agy-context transcript health [--id <uuid>] [--json]`
-- **Git CRLF/LF Warning Hygiene**: Git's line-ending conversion notices (`warning: LF will be replaced by CRLF the next time Git touches it` / `warning: CRLF will be replaced by LF...`) are non-actionable diagnostic noise. Suppress them during repo operations (via `git -c core.safecrlf=false` or `git config --global core.safecrlf false`) and do not propagate them into task outputs or conversation context.
+## Layer 2: Shell Execution, Workspace Inspection & Transcript Governance
+- **Shell commands**: Run commands via `run_command`. The `PreToolUse` hook delegates command rewriting to `rtk hook antigravity` (`git`, `pytest`, `cargo`, `npm`, etc.).
+- **Workspace file and codebase inspection**: Unbounded full-file reads are blocked on workspace files. Follow this 3-tier workflow:
+  1. **Tier 1 (Search and discovery: `rtk grep`, `rtk find`, `rtk ls`)**:
+     - **Pattern and symbol search**: Run `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate `[StartLine, EndLine]` line numbers. Always pass an explicit path (such as `.` or `src/`) so `rtk grep` does not wait on stdin.
+     - **Directory and file listing**: Run `rtk find <path>`, `rtk ls <path>`, or `rtk tree` (or PowerShell `dir` / `Get-ChildItem` on Windows).
+  2. **Tier 2 (Workspace file reading: `read_file` slice policy)**:
+     - Pass `StartLine` and `EndLine` to `read_file` in bounded slices of `1-150` lines to preserve 1-indexed line numbers for `edit_file` and `write_file`.
+     - Partial slices of `151-800` lines and `ByteOffset`-only unbounded reads are denied. A single-pass full-file read (`StartLine: 1, EndLine: <TotalLines>`) is permitted when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
+  3. **Tier 3 (Spillovers and diagnostics: `rtk read`, `rtk err`, `rtk summary`)**:
+     - **Spillovers and task logs**: Read `.system_generated/steps/<step>/output.txt` spillovers via bounded `read_file` ($\le 150$ lines) or `rtk read --tail-lines 150 <path>` / `--head-lines 150 <path>`, and completed `tasks/<taskId>.log` files via `rtk read <path>`. Do not use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for `edit_file` or `write_file`.
+     - **Command diagnostics**: Use `rtk err <cmd>` (errors and warnings only) and `rtk summary <cmd>` (2-line summary).
+- **Safe harbor files**: Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `.gemini/config/` files) are allowed via `read_file` without slice bounds.
+- **Transcript forensics (`agy-context transcript`)**: Direct file or shell access to `.system_generated/` transcripts, task logs, progress files, or `getStateDir()` (`~/.local/state/agy-context-saver`) is blocked. Run `agy-context transcript` as a single unchained `run_command` (no `&&`, `||`, `;`, `|`, redirects, or `..` traversal; prefer batch step ranges `step <N,M|N-M>` and `query --start N --end M` over single-step loops):
+  - `agy-context transcript read [<id>] [--id <uuid>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--outline] [--include-thinking] [--json]` (aliases: `outline`, `summary`)
+  - `agy-context transcript query [<pattern>] [<id>] [--id <uuid>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:Key|all] [--include-thinking] [--json]` (aliases: `grep`, `search`, `find`, `tools`)
+  - `agy-context transcript step [<N|N,M|N-M|N..M>] [<id>] [--id <uuid>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:Key|all] [--head N] [--tail N] [--full] [--json]`
+  - `agy-context transcript health [<id>] [--id <uuid>] [--json]` (aliases: `stats`, `info`)
+  - `agy-context transcript list [--limit N] [--json]` (alias: `ls`)
+  - `agy-context transcript access [status|off|on|reset|self-only] [--status | --off (--deny-children) | --on (--reset) | --self-only | --mode <open|allowlist|self-only|deny> | --allow <id,@roster*...> | --deny <id,@roster*...> | --ttl <sec>] [--json]` (alias: `policy`)
+- **Parent transcript access control**:
+  - **CLI policy**: Parents can restrict or scope child transcript access mid-session via `agy-context transcript access` (`policy`), using `--off` (`--deny-children`), `--self-only`, `--mode <open|allowlist|self-only|deny>`, `--allow <id,@roster*...>`, `--deny <id,@roster*...>`, `--ttl <sec>`, and `--on` (`--reset`).
+  - **First-line launch directives**: Place `[agy-transcript-access: deny]`, `[agy-transcript-access: self-only]`, or `[agy-transcript-access: allow]` on the first non-empty line of a `define_subagent` `SystemPrompt`, `invoke_subagent` `Prompt`, or `/swarm` worker `brief` (later lines and code blocks are ignored).
+  - **Precedence**: `1. Policy Owner` -> `2. Explicit CLI --deny` -> `3. Explicit CLI --allow` (supports `@roster*` prefix globs such as `@audit-squad*`) -> `4. First-Line Launch Directive` -> `5. Cohort Default Mode`.
+  - **When restricted**: If transcript access is denied for a child agent, do not retry `agy-context transcript` or probe `.system_generated` / `getStateDir()`; 5 blocked attempts trigger the `force_ask` circuit breaker.
+- **Git line-ending warnings**: Suppress non-actionable Git CRLF/LF notices during repo operations (`git -c core.safecrlf=false`).
 
 ---
 
 ## Layer 3: Synchronous Execution
-- **Maximum Synchronous Window**: Non-daemon `run_command` calls default to `WaitMsBeforeAsync: 10000` when omitted to complete synchronously and prevent unnecessary background detachment (explicit positive caller values are preserved).
-- **Targeted Test Execution & Opt-In Fail-Fast (LH-11)**:
-  - **Targeted Invocations**: In interactive turns, prefer targeting specific test files or directories (e.g. `pytest tests/test_core.py`) rather than running full multi-minute repository sweeps.
-  - **Fail-Fast Flags are Opt-In**: Fail-fast flags (`-x`, `--maxfail=1`) are opt-in. Use them when quickly debugging a localized failure, but omit them when assessing the full blast radius across the codebase to avoid the "whack-a-mole" loop.
-  - **Coordinated Watchdog Mandatory for Full Sweeps**: When running full multi-minute test sweeps without `-x`, agents **MUST** pair execution with the **Coordinated Watchdog Protocol** (`schedule(DurationSeconds=45, ...)`) and output a **Pre-Yield Status Card**. Never yield silently.
-- **Benchmark / Evaluator Integrity**: Never mutate benchmark definitions, prompt templates, or scoring artifacts (`edit_file`, `write_file`, or shell writes) during an active evaluation without explicit user confirmation.
-
----
-
-## Appendix: Zero-Guesswork Testing & Verification Playbook
-When an agent or developer tests this framework, follow this exact sequence without guessing:
-
-1. **Verify Live Registration & Health (Fast, non-blocking)**:
-   ```bash
-   npm run status
-   # or
-   agy-context status
-   ```
-   *Expected*: Reports `HEALTHY & ACTIVE` across plugin link, `agy-context-saver` hook, `agy-context` CLI shim, RTK (`>= 1.1.0`), and MCP cleanup (`0` duplicate MCP configs/schemas).
-
-2. **Execute Full Automated Test Suite**:
-   ```bash
-   npm test
-   ```
-   *Expected*: All 11 test suites pass.
-
-3. **Verify Transcript CLI On-Demand**:
-   - `agy-context transcript health --id <uuid>`
-   - `agy-context transcript read --id <uuid> --last-turns 3 --mode compact`
-   - `agy-context transcript query --id <uuid> --query "<pattern>" --summary`
-   - `agy-context transcript step --id <uuid> --step 0 --field content`
-
-4. **Operational Anti-Patterns (What NOT to do)**:
-   - ❌ **Do NOT run `manage_task(Action='status')` loops**: Status polling is governed; 5 polls trigger the `force_ask` circuit breaker.
-   - ❌ **Do NOT run `npm run uninstall` as an isolated test**: It strips the live hook and CLI shims from `~/.gemini/`. If run, immediately re-run `npm run setup`.
-   - ❌ **Do NOT omit explicit target paths with `rtk grep`**: Always provide a path (e.g. `rtk grep -rnE "pattern" .`) to prevent stdin pipe stalls.
-   - ❌ **Do NOT chain `agy-context transcript ...` commands**: Run `agy-context transcript ...` as a strictly single, unchained `run_command` invocation without `&&`, `||`, `;`, `|`, redirects, or `..` traversal.
+- **Default 10s synchronous window**: Non-daemon `run_command` calls default to `WaitMsBeforeAsync: 10000` when omitted so short commands complete in-turn (explicit caller values are preserved).
+- **Targeted test execution**:
+  - In interactive turns, target specific test files or directories rather than running multi-minute full-repo suites.
+  - Use fail-fast flags (`-x`, `--maxfail=1`) when debugging a localized failure; omit them when checking full blast radius.
+  - Pair multi-minute test sweeps with a `schedule(DurationSeconds=45, ...)` watchdog timer and a Pre-Yield Status Card.
+- **Benchmark integrity**: Never modify benchmark definitions, prompt templates, or scoring files (`edit_file`, `write_file`, or shell writes) during an evaluation without user confirmation.

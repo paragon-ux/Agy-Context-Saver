@@ -1,103 +1,114 @@
 # Lifecycle Governance & Hooks
 
-The core of `Agy-Context-Saver` is its proactive **Lifecycle Governor** (`agy-context-saver`), executed during `PreToolUse` lifecycle events before the agent calls native Antigravity tools.
+The `PreToolUse` hook (`agy-context-saver`, implemented in `scripts/execution-guard-hook.mjs`) evaluates tool calls before Antigravity executes shell commands, file reads/writes, or background task checks.
 
-!!! tip "Automatic Context Governance"
-    `rules/AGENTS.md` and `skills/context-governance/SKILL.md` are installed natively into the plugin so agents receive 3-layer RTK + `agy-context` governance automatically across sessions.
-
----
-
-## The PreToolUse Interception Architecture
-
-```mermaid
-sequenceDiagram
-    participant LLM as Agent Model
-    participant Hook as agy-context-saver (Hook)
-    participant Host as Antigravity Host
-    participant RTK as RTK >= 1.1.0 Optimizer
-    participant Tool as Native Tool / CLI
-
-    LLM->>Host: Tool Invocation Intent
-    Host->>Hook: Stdin: JSON Payload (<5ms)
-    alt Layer 1: Denied Polling (status within cooldown)
-        Hook-->>Host: decision: "deny", reason: "Yield turn to Reactive Wakeup"
-        Host-->>LLM: Intercepted: Yield and wait for reactive notification
-    alt Layer 2: Shell Command Rewriting
-        Hook-->>Host: decision: "allow", rewrite: "git status" -> "rtk git status"
-        Host->>RTK: Execute compressed via RTK (10s synchronous window)
-    alt Layer 2: Workspace Codebase Inspection
-        Hook-->>Host: decision: "deny", redirect: "Use rtk grep / rtk find + bounded read_file"
-        Host-->>LLM: Intercepted: Full-file inspection routed to RTK CLI
-    alt Layer 2: Transcript File Access (.system_generated)
-        Hook-->>Host: decision: "deny", redirect: "Use agy-context transcript read|query|step|health"
-        Host-->>LLM: Intercepted: Internal state protected; use agy-context CLI
-    alt Layer 3: Synchronous run_command Window
-        Hook-->>Host: decision: "allow", upgrade: WaitMsBeforeAsync -> 10000
-        Host->>Tool: Execute with expanded 10s sync window
-    else Valid Tool Call
-        Hook-->>Host: decision: "allow"
-        Host->>Tool: Execute normally
-    end
-```
+![PreToolUse hook interception flow](assets/hook-interception-flow.svg)
 
 ---
 
-## Canonical 3-Layer Governance Invariants
+## 3-Layer Governance Rules
 
-### Layer 1: Reactive Lifecycle & Polling Immunity
+### Layer 1: Reactive Lifecycle & Polling Backoff
 
-#### 1. The Proportional Backoff Engine
-Instead of busy-waiting on background tasks, agents must yield control to **Reactive Wakeup** (`<SYSTEM_MESSAGE>`). When diagnostic status checks are legally required, intervals scale along an exponential curve:
+#### 1. Exponential Backoff on Task Status Checks
+Instead of polling `manage_task(Action='status')` in loops, agents yield their turn and wait for **Reactive Wakeup** (`<SYSTEM_MESSAGE>`). Diagnostic status checks follow an exponential cooldown curve:
 
 $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5^{\max(0, \text{pollCount} - 1)}\right)\right)$$
 
-| Check # | Required Cooldown | Lifecycle Phase / Purpose | Action if Premature |
+| Check # | Required Cooldown | Purpose | Action if Premature |
 | :---: | :---: | :--- | :--- |
-| **Check 1** | **0s (Immediate)** | Baseline check upon launch | **ALLOWED** (`pollCount = 1`) |
-| **Check 2** | **30s** | Quick check for fast tasks | **DENIED** with countdown |
-| **Check 3** | **75s (~1.25m)** | Standard build progress | **DENIED** with countdown |
-| **Check 4** | **188s (~3.1m)** | Heavy test suite | **DENIED** with countdown |
-| **Check 5** | **469s (~7.8m)** | Deep build / hung process | **DENIED** with countdown |
-| **Check 6+** | **600s (10m)** | Prolonged process | Denied; trips circuit breaker |
+| **Check 1** | **0s (immediate)** | Initial check upon launch | **Allowed** (`pollCount = 1`) |
+| **Check 2** | **30s** | Check for fast tasks | **Denied** with remaining cooldown |
+| **Check 3** | **75s** | Standard build progress | **Denied** with remaining cooldown |
+| **Check 4** | **188s** | Test suite check | **Denied** with remaining cooldown |
+| **Check 5** | **469s** | Long build or hung process | **Denied** with remaining cooldown |
+| **Check 6+** | **600s** | Prolonged process | **Denied**; trips `force_ask` circuit breaker |
 
-- **Immediate Operations**: `manage_task(Action='kill')` and `manage_task(Action='send_input')` are **always allowed immediately** (0s cooldown, zero penalties).
-- **Watchdog Coordination**: Any `schedule` task watchdog timer must be $\ge \max(30, \text{requiredBackoffSeconds})$ and pair with a structured Pre-Yield Status Card.
-- **5-Strike Circuit Breaker**: At **5 cumulative denials**, the governor trips a `force_ask` circuit breaker: execution is suspended and control is returned to the user via an interactive prompt.
-- **Task Output Log Lifecycle Gating**:
-  - *While RUNNING*: Inspecting `tasks/<taskId>.log` via native tools or shell commands is strictly **DENIED** under Proportional Backoff.
-  - *When COMPLETED*: Inspecting completed task logs is **ALLOWED** via `rtk read tasks/<taskId>.log` under lifecycle governance.
-
----
-
-### Layer 2: Transparent CLI & Codebase Streamlining
-
-#### 1. Transparent Shell Command Rewriting
-Shell commands executed via `run_command` (`git`, `pytest`, `cargo`, `npm`, etc.) are transparently rewritten to their RTK equivalents (`rtk git`, `rtk pytest`), reducing stdout/stderr token consumption by up to 80% without requiring agent behavior changes.
-
-#### 2. Canonical Codebase Inspection Routing
-Native tools that bypass RTK token filtering on workspace source files (`read_file` without bounds, `view_file`, `grep_search`, `find_by_name`, `list_dir`) are intercepted and routed to RTK canonical CLI commands (`rtk grep`, `rtk find`, `rtk ls`) paired with bounded `read_file(StartLine, EndLine <= 150)`. Explicit full-file audits ($\le 800$ lines and $\le 45\text{ KiB}$) and Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `.gemini/config/`) are permitted via safe harbor.
-
-#### 3. Step Output Spillover Safe Harbor
-Antigravity runtime step output spillovers (`.system_generated/steps/<step>/output.txt`) are allowed via bounded `read_file(StartLine, EndLine <= 150)` or single unchained `rtk read <path>` calls.
-
-#### 4. The Transcript Guard
-Direct native inspection of `.system_generated/logs/transcript.jsonl` is blocked. Agents are routed to the unchained `agy-context transcript read|query|step|health` CLI commands.
+- **Immediate operations:** `manage_task(Action='kill')` and `manage_task(Action='send_input')` are always allowed immediately (`0s` cooldown, zero penalties).
+- **Watchdog timers:** Any `schedule` task watchdog timer must set `DurationSeconds >= Math.max(30, requiredBackoffSeconds)` and pair with a Pre-Yield Status Card. One-shot `schedule` timers polling a `/swarm` or subagent are denied (`swarm_wait` sleeps at zero token cost).
+- **5-strike circuit breaker:** At 5 cumulative denials across polling, internal state, or transcript access checks, the hook returns `force_ask` to pause execution and prompt the user.
+- **Task log lifecycle gating:**
+  - *While running:* reading `tasks/<taskId>.log` via file tools or shell commands is denied under the backoff curve.
+  - *When completed:* reading `tasks/<taskId>.log` is allowed via a single unchained `rtk read tasks/<taskId>.log` call.
 
 ---
 
-### Layer 3: Synchronous Execution
+### Layer 2: Shell Rewriting, File Slices & Transcript Governance
 
-#### 1. Synchronous Window Expansion
-On native `run_command` invocations without an explicit caller timeout, the hook upgrades `WaitMsBeforeAsync` to **10,000ms** (unless `IsDaemon: true`), allowing commands to complete synchronously while preserving explicit caller values.
-
-#### 2. Benchmark & Evaluator Safeguard
-Mutations to benchmark definitions, test evaluation templates, or scoring artifacts (via `edit_file`, `write_file`, or shell commands) are protected behind mandatory `force_ask` user approval.
+1. **Shell command rewriting:** `run_command` calls (`git`, `pytest`, `cargo`, `npm`, etc.) are rewritten via `rtk hook antigravity` (`rtk git`, `rtk pytest`).
+2. **Workspace file slices:** Unbounded `read_file` calls on workspace files are redirected to `rtk grep`, `rtk find`, and `rtk ls` paired with bounded `read_file(StartLine, EndLine <= 150)` slices. Full-file reads (`StartLine: 1, EndLine: <TotalLines>`) are allowed when the file on disk is `<= 800` lines and `<= 45 KiB`. Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `.gemini/config/`) pass Safe Harbor without slice bounds.
+3. **Step output spillovers:** `.system_generated/steps/<step>/output.txt` files are readable via bounded `read_file(StartLine, EndLine <= 150)` or a single unchained `rtk read <path>` command.
+4. **Transcript and state protection:** Direct file or shell access to `.system_generated/logs/transcript*` and `getStateDir()` (`~/.local/state/agy-context-saver`) is blocked. Authorized sessions inspect transcripts via unchained `agy-context transcript` commands.
 
 ---
 
-## Enterprise Non-Destructive Safety Guarantees
+### Layer 3: Synchronous Execution & Benchmark Integrity
 
-1. **Foreign Configuration Preservation**: Non-Agy hooks (e.g. `waymark-continuity`) in `~/.gemini/config/hooks.json` and third-party MCP servers in `~/.gemini/config/mcp_config.json` are strictly preserved during setup, synchronization, and rollback.
-2. **Atomic Backups**: Modifying global `hooks.json` or pruning legacy `agy-context-saver*` keys from `mcp_config.json` automatically writes timestamped `.bak` backups before applying any change.
-3. **Zero Runtime Dependencies**: Written in 100% native Node.js standard library with 0 external npm dependencies and sub-5ms hook execution.
-4. **Fail-Closed on Governed Operations (LH-10)**: If an unhandled error occurs while evaluating a governed tool, the governor fails closed (`decision: "deny"`) to guarantee security. Non-governed tools fail open.
+1. **10s synchronous window:** On non-daemon `run_command` calls where `WaitMsBeforeAsync` is omitted, the hook sets `WaitMsBeforeAsync` to `10,000ms` while preserving explicit caller timeouts.
+2. **Benchmark file protection:** Edits or writes targeting benchmark definitions, evaluation templates, or scoring files require `force_ask` user confirmation.
+
+---
+
+## Parent Transcript Access Control
+
+In multi-agent runs (`define_subagent`, `invoke_subagent`, `/swarm`, and Agy-Squad), a parent coordinator can isolate child workers from reading parent or sibling transcripts while allowing integrity auditors to inspect worker trajectories.
+
+![Parent transcript access precedence and capability grants](assets/transcript-access-governance.svg)
+
+### 1. CLI Control (`agy-context transcript access` / `policy`)
+
+```bash
+# Check active policy status (shorthand: status)
+agy-context transcript access --status
+agy-context transcript policy status
+
+# Deny transcript access to all child subagents and /swarm workers (shorthand: off)
+agy-context transcript access --off
+
+# Restrict children to reading only their own conversation transcript (shorthand: self-only)
+agy-context transcript access --self-only
+
+# Allow Agy-Squad flat auditors via @roster* prefix globs while blocking other children
+agy-context transcript access --mode allowlist --allow @audit-squad*,@verifier
+
+# Deny specific workers or set a custom TTL in seconds
+agy-context transcript access --mode open --deny @worker* --ttl 1800
+
+# Restore open access for the parent cohort (shorthands: on, reset)
+agy-context transcript access --on
+```
+
+### 2. First-Line Launch Directives
+
+To scope an individual child at launch without changing the cohort-wide CLI policy, place a directive on the **first non-empty line** of a `define_subagent` `SystemPrompt`, `invoke_subagent` `Prompt`, or `/swarm` `brief`:
+
+- `[agy-transcript-access: deny]`: blocks all `agy-context transcript` commands for that child.
+- `[agy-transcript-access: self-only]`: restricts that child to its own `<callerConvId>` transcript (disabling `list`/`ls` and `--file`).
+- `[agy-transcript-access: allow]`: allows transcript reads for that child even when the cohort default mode is `deny` or `self-only` (unless overridden by an explicit CLI `--deny`).
+
+The lineage parser checks only the first non-empty line of the child's initial assignment (`Step 0` / `Step 1`), ignoring directives mentioned in later paragraphs or code blocks.
+
+### 3. 5-Tier Precedence Order
+
+| Tier | Rule | Behavior |
+| :---: | :--- | :--- |
+| **1** | **Policy Owner** | Parent session (`ownerId`) always has full read and policy mutation access |
+| **2** | **Explicit CLI `--deny`** | Denies matching `<convId>` or `@roster*` prefix glob immediately |
+| **3** | **Explicit CLI `--allow`** | Allows matching `<convId>` or `@roster*` prefix glob (such as `@audit-squad*`) |
+| **4** | **First-Line Launch Directive** | Applies `[agy-transcript-access: deny \| self-only \| allow]` from child launch brief |
+| **5** | **Cohort Default Mode** | Applies base policy mode (`open`, `allowlist`, `self-only`, or `deny`) |
+
+### 4. Stale-Lock Protection & Runtime Hardening
+
+- **1-hour TTL and parent-keyed store:** Policies live under `policies[ownerId]` in `<stateDir>/transcript-access.json` with a 3600-second default TTL.
+- **Top-level session bypass:** A root user conversation (`Step 0` is `USER_INPUT` without a `<SYSTEM_MESSAGE>` `sender=<parentConvId>` header) is never restricted by another session's policy.
+- **Single-use capability grants:** When a restriction is active, `PreToolUse` writes a 10-second single-use capability token (`lastHookGrant` or `lastAccessMutationGrant`) to `<stateDir>/transcript-access.json`. `lib/transcript-core.mjs` verifies and clears the token on first use, blocking direct `node bin/agy-context.mjs`, library imports, and chained commands.
+- **Child lifecycle and file protection:** Restricted children cannot run `setup`, `install`, `uninstall`, or `restore-backups`, and cannot modify `~/.gemini/config/plugins/agy-context-saver/`, `~/.gemini/config/scripts/execution-guard-hook.mjs`, `hooks.json`, or `<stateDir>/transcript-access.json`.
+
+---
+
+## Safety Invariants
+
+1. **Foreign configuration preservation:** Existing third-party hooks in `~/.gemini/config/hooks.json` and third-party MCP servers in `~/.gemini/config/mcp_config.json` remain untouched during setup and uninstall.
+2. **Timestamped backups:** Modifying global `hooks.json` or cleaning stale `agy-context-saver*` entries from `mcp_config.json` writes `.bak` backups first.
+3. **Fail-closed on governed tools:** If an unexpected error occurs while evaluating a governed tool (`run_command`, `read_file`, `edit_file`, `write_file`, `manage_task`, `schedule`), the hook returns `decision: "deny"`.

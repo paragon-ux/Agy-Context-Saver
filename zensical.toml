@@ -1,7 +1,7 @@
 [project]
 site_url = "https://paragon-ux.github.io/agy-context-saver/"
 site_name = "Agy-Context-Saver Documentation"
-site_description = "Universal Model Context Protocol (MCP) server & lifecycle governor purpose-built for Google Antigravity"
+site_description = "CLI-first transcript forensic engine & lifecycle governor built for Google Antigravity"
 site_author = "paragon-ux"
 copyright = "Copyright &copy; 2026 paragon-ux. Released under the MIT License."
 
@@ -11,7 +11,7 @@ repo_name = "paragon-ux/agy-context-saver"
 nav = [
   { "Overview" = "index.md" },
   { "Installation & Setup" = "installation.md" },
-  { "Tools & Prompts" = "tools.md" },
+  { "CLI & Hook Reference" = "tools.md" },
   { "Lifecycle Governance" = "governance.md" },
   { "Architecture & Internals" = "architecture.md" },
   { "Product Roadmap" = "roadmap.md" },

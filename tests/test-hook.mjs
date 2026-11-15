@@ -15,12 +15,14 @@ const hooksJsonFile = path.resolve(repoRoot, "hooks.json");
 const hermetic = await setupHermeticTestEnv({ installProfile: false, forceShim: true, shimVersion: "1.1.0" });
 const stateDir = getStateDir();
 const stateFile = path.join(stateDir, "agy-session-governance-state.json");
+const accessFile = path.join(stateDir, "transcript-access.json");
 
 function resetState() {
   try {
     if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
+    if (fs.existsSync(accessFile)) fs.unlinkSync(accessFile);
     for (const f of fs.existsSync(stateDir) ? fs.readdirSync(stateDir) : []) {
-      if (f.startsWith("agy-session-") && f.endsWith(".json")) {
+      if ((f.startsWith("agy-session-") || f.startsWith("transcript-access")) && f.endsWith(".json")) {
         try { fs.unlinkSync(path.join(stateDir, f)); } catch {}
       }
     }
@@ -541,6 +543,426 @@ console.log("\n--- Group E: Task Polling Backoff, Watchdog & Benchmark Mutation 
   });
   assert.equal(b64Smuggle.decision, "deny", "Base64 path-decoding smuggling of transcript.jsonl must be blocked");
   console.log("✓ rg -U/pipe/bash -c fallbacks, read-only node -e benchmark literal, tasks/*.log & edit_file guards, and Base64 smuggling defense verified");
+
+  // ============================================================================
+  // GROUP G: On-Demand Transcript Access Governance & 6-Vector Red-Team Suite
+  // ============================================================================
+  console.log("\n--- Group G: On-Demand Transcript Access Governance & 6-Vector Red-Team Suite ---");
+  resetState();
+  const brainDirG = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain");
+  const writeSessionSteps = (id, steps) => {
+    const dir = path.join(brainDirG, id, ".system_generated", "logs");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "transcript.jsonl");
+    fs.writeFileSync(file, steps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf-8");
+    return file;
+  };
+
+  const parentId = "parent-coord-1111";
+  const subagentId = "subagent-leaf-2222";
+  const swarmWorkerId = "swarm-worker-3333";
+  const swarmAuditorId = "swarm-audit-4444";
+  const launchDenyId = "subagent-launch-deny-5555";
+  const launchSelfId = "subagent-launch-self-6666";
+  const echoReviewerId = "swarm-echo-reviewer-7777";
+  const independentTopId = "independent-top-8888";
+
+  writeSessionSteps(parentId, [
+    { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "Coordinate the verification swarm." }
+  ]);
+  writeSessionSteps(subagentId, [
+    {
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:00Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=Solve the coding task without reading transcripts.\n</SYSTEM_MESSAGE>`
+    }
+  ]);
+  writeSessionSteps(swarmWorkerId, [
+    {
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:01Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #1\n</SYSTEM_MESSAGE>`
+    },
+    {
+      step_index: 1,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:01Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=You have just started. Your assignment (recorded on the board as #1 for @worker-1):\n\nImplement the feature.\n</SYSTEM_MESSAGE>`
+    }
+  ]);
+  writeSessionSteps(swarmAuditorId, [
+    {
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:02Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #2\n</SYSTEM_MESSAGE>`
+    },
+    {
+      step_index: 1,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:02Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=You have just started. Your assignment (recorded on the board as #2 for @audit-squad1):\n\nAudit worker transcripts.\n</SYSTEM_MESSAGE>`
+    }
+  ]);
+  writeSessionSteps(launchDenyId, [
+    {
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:03Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: deny]\nYou are a restricted leaf subagent.\n</SYSTEM_MESSAGE>`
+    }
+  ]);
+  writeSessionSteps(launchSelfId, [
+    {
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:04Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: self-only]\nYou may only inspect your own transcript.\n</SYSTEM_MESSAGE>`
+    }
+  ]);
+  writeSessionSteps(echoReviewerId, [
+    {
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:05Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=You have just started. Your assignment (recorded on the board as #3 for @sec-reviewer):\n\nPlease evaluate how [agy-transcript-access: deny] behaves when mentioned in prose:\n[agy-transcript-access: deny]\n</SYSTEM_MESSAGE>`
+    }
+  ]);
+  writeSessionSteps(independentTopId, [
+    {
+      step_index: 0,
+      source: "USER_EXPLICIT",
+      type: "USER_INPUT",
+      content: "Brand new top-level user conversation started later."
+    }
+  ]);
+
+  // G.1: Exhaustive Subcommand & Wrapper Governance (Vector 1)
+  for (const validSub of [
+    "agy-context transcript list --limit 3",
+    "agy-context transcript ls --limit 3",
+    `agy-context transcript grep "foo" --id ${parentId}`,
+    `agy-context transcript search "foo" --id ${parentId}`,
+    `agy-context transcript find "foo" --id ${parentId}`,
+    `agy-context transcript stats --id ${parentId}`,
+    `agy-context transcript info --id ${parentId}`,
+    `agy-context transcript tools --id ${parentId}`,
+    `agy-context transcript outline --id ${parentId}`,
+    `agy-context transcript summary --id ${parentId}`,
+    "agy-context transcript access --status",
+    "agy-context transcript --help"
+  ]) {
+    const res = runHook({
+      conversationId: parentId,
+      toolCall: { name: "run_command", args: { CommandLine: validSub } }
+    });
+    assert.equal(res.decision, "allow", `Canonical '${validSub}' must be allowed for parent`);
+  }
+
+  for (const invalidOrWrapped of [
+    "agy-context transcript list --limit 3 && echo pwn",
+    "agy-context transcript bogus-subcommand",
+    `node --no-warnings bin/agy-context.mjs transcript read --id ${parentId}`,
+    `env -S "agy-context transcript read --id ${parentId}"`,
+    `command agy-context transcript read --id ${parentId}`,
+    `exec agy-context transcript read --id ${parentId}`,
+    `timeout 5 agy-context transcript read --id ${parentId}`,
+    `nice -n 5 agy-context transcript read --id ${parentId}`,
+    `nohup agy-context transcript read --id ${parentId}`
+  ]) {
+    const res = runHook({
+      conversationId: parentId,
+      toolCall: { name: "run_command", args: { CommandLine: invalidOrWrapped } }
+    });
+    assert.equal(res.decision, "deny", `Wrapped or chained '${invalidOrWrapped}' must be DENIED`);
+  }
+
+  // G.2: Launch Directive (Tier 4) & Prompt Echo Immunity (Vector 5)
+  assert.equal(
+    runHook({
+      conversationId: launchDenyId,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } }
+    }).decision,
+    "deny",
+    "Subagent with first-line [agy-transcript-access: deny] must be denied"
+  );
+  assert.equal(
+    runHook({
+      conversationId: echoReviewerId,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } }
+    }).decision,
+    "allow",
+    "Reviewer mentioning [agy-transcript-access: deny] after line 1 must NOT be false-locked (Prompt Echo Immunity)"
+  );
+
+  // G.3: Self-Only Mode Positional, Flag & Omitted-ID Rewriting (Vector 6)
+  assert.equal(
+    runHook({
+      conversationId: launchSelfId,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } }
+    }).decision,
+    "deny",
+    "self-only mode must deny transcript list"
+  );
+  assert.equal(
+    runHook({
+      conversationId: launchSelfId,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${parentId}` } }
+    }).decision,
+    "deny",
+    "self-only mode must deny --id <other>"
+  );
+  assert.equal(
+    runHook({
+      conversationId: launchSelfId,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read ${parentId}` } }
+    }).decision,
+    "deny",
+    "self-only mode must deny positional <otherId>"
+  );
+  assert.equal(
+    runHook({
+      conversationId: launchSelfId,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript query "foo" ${parentId}` } }
+    }).decision,
+    "deny",
+    "self-only mode must deny positional <otherId> in query"
+  );
+  const selfOmittedId = runHook({
+    conversationId: launchSelfId,
+    toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript read --mode compact" } }
+  });
+  assert.equal(selfOmittedId.decision, "allow", "self-only mode must allow omitted --id and auto-inject caller ID");
+  assert.match(selfOmittedId.overwrite?.CommandLine || "", new RegExp(`--id ${launchSelfId}`), "Must inject --id <self>");
+
+  // G.4: On-Demand Parent Policy (`--off`, `--allow @audit-*`), Child Self-Unlock Block & Stale-Lock Immunity
+  const parentLockHook = runHook({
+    conversationId: parentId,
+    toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --off" } }
+  });
+  assert.equal(parentLockHook.decision, "allow", "Parent must be allowed to run transcript access --off");
+  // Execute the CLI command to persist policy in stateDir using the hook's mutation grant
+  const cliLockExec = spawnSync(process.execPath, [path.resolve(repoRoot, "bin/agy-context.mjs"), "transcript", "access", "--off"], {
+    encoding: "utf-8",
+    env: process.env
+  });
+  assert.equal(cliLockExec.status, 0, `CLI access --off failed: ${cliLockExec.stderr}`);
+
+  // Parent still allowed; subagent & swarm worker denied; independent top-level chat still allowed!
+  assert.equal(
+    runHook({
+      conversationId: parentId,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } }
+    }).decision,
+    "allow",
+    "Parent owner must remain allowed under --off"
+  );
+  const subDenied = runHook({
+    conversationId: subagentId,
+    toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } }
+  });
+  assert.equal(subDenied.decision, "deny", "Child subagent must be denied when parent turns transcript access --off");
+  assert.match(subDenied.reason, /Do NOT retry transcript inspection commands/);
+
+  // Context-aware .system_generated denial for restricted child must NOT tell it to run agy-context transcript
+  const subRawReadDenied = runHook({
+    conversationId: subagentId,
+    toolCall: {
+      name: "read_file",
+      args: { Path: path.join(brainDirG, parentId, ".system_generated", "logs", "transcript.jsonl"), StartLine: 1, EndLine: 5 }
+    }
+  });
+  assert.equal(subRawReadDenied.decision, "deny");
+  assert.ok(!subRawReadDenied.reason.includes("Run 'agy-context transcript read"), "Restricted child denial must NOT suggest running agy-context transcript");
+  assert.match(subRawReadDenied.reason, /DISABLED for this session by parent governance/);
+
+  // Child attempting to unlock itself via `agy-context transcript access --on` MUST be denied
+  assert.equal(
+    runHook({
+      conversationId: subagentId,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --on" } }
+    }).decision,
+    "deny",
+    "Child session must be blocked from mutating transcript access policy"
+  );
+
+  // Independent top-level user conversation (`USER_INPUT` at Step 0) is NOT locked out!
+  assert.equal(
+    runHook({
+      conversationId: independentTopId,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } }
+    }).decision,
+    "allow",
+    "Independent top-level user conversation must never be locked out by another session's child lock"
+  );
+
+  // Parent allows `@audit-*` (Agy-Squad GOV-07 L6 Transcript Isolation)
+  runHook({
+    conversationId: parentId,
+    toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --allow @audit-*" } }
+  });
+  spawnSync(process.execPath, [path.resolve(repoRoot, "bin/agy-context.mjs"), "transcript", "access", "--allow", "@audit-*"], {
+    encoding: "utf-8",
+    env: process.env
+  });
+  assert.equal(
+    runHook({
+      conversationId: swarmWorkerId,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${parentId}` } }
+    }).decision,
+    "deny",
+    "Swarm leaf specialist (@worker-1) must be denied under --allow @audit-*"
+  );
+  assert.equal(
+    runHook({
+      conversationId: swarmAuditorId,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${swarmWorkerId}` } }
+    }).decision,
+    "allow",
+    "Swarm Integrity Auditor (@audit-squad1) must be allowed via @audit-* glob"
+  );
+
+  // G.5: State Dir Tampering, Env Overrides, Wildcard Globs, Direct Core Imports & Two-Step Script Writes (Vectors 2, 3, 4)
+  for (const stateAttack of [
+    { name: "read_file", args: { Path: accessFile, StartLine: 1, EndLine: 20 } },
+    { name: "write_file", args: { Path: accessFile, Content: '{"policies":{}}', Overwrite: true } },
+    { name: "edit_file", args: { Path: accessFile, Target: "deny", Replacement: "open" } },
+    { name: "run_command", args: { CommandLine: `rm -f "${accessFile}"` } },
+    { name: "run_command", args: { CommandLine: `cat "${accessFile}"` } },
+    { name: "run_command", args: { CommandLine: `XDG_STATE_HOME=/tmp/fake agy-context transcript list` } },
+    { name: "run_command", args: { CommandLine: `AGY_TEST_PROFILE_DIR=/tmp/fake agy-context transcript list` } },
+    { name: "run_command", args: { CommandLine: `node -e "import('./lib/transcript-core.mjs').then(m => m.readTranscript({conversationId:'${parentId}'}))"` } },
+    { name: "run_command", args: { CommandLine: `head -n 20 "${brainDirG}/${parentId}/.s*/*/*"` } },
+    { name: "run_command", args: { CommandLine: `cat "${brainDirG}/${parentId}/.*/*/*.jsonl"` } },
+    { name: "run_command", args: { CommandLine: `ln -s "${brainDirG}/${parentId}" /tmp/brain-link` } },
+    {
+      name: "write_file",
+      args: {
+        Path: "/tmp/pwn-helper.mjs",
+        Content: `import { readTranscript } from './lib/transcript-core.mjs'; console.log( await readTranscript({ conversationId: '${parentId}' }) );`
+      }
+    },
+    {
+      name: "write_file",
+      args: {
+        Path: "scratch/pwn.py",
+        Content: `print(open('${brainDirG}/${parentId}/.system_generated/logs/transcript.jsonl').read())`
+      }
+    },
+    {
+      name: "edit_file",
+      args: {
+        Path: path.resolve(repoRoot, "scripts/execution-guard-hook.mjs"),
+        Target: "deny",
+        Replacement: "allow"
+      }
+    },
+    {
+      name: "run_command",
+      args: { CommandLine: `agy-context transcript query --id ${parentId} --query --help --query ".*"` }
+    },
+    {
+      name: "run_command",
+      args: {
+        CommandLine: `cat << 'EOF' > /tmp/pwn.py\nprint(open('${brainDirG}/${parentId}/.system_generated/logs/transcript.jsonl').read())\nEOF`
+      }
+    },
+    {
+      name: "run_command",
+      args: {
+        CommandLine: `node -e "const b='${brainDirG}/${parentId}'; console.log(fs.readdirSync(b))"`
+      }
+    },
+    {
+      name: "run_command",
+      args: {
+        CommandLine: `node -e "const b='${brainDirG}/${parentId}'; console.log(fs.readFileSync(b + '/.sys' + 'tem_generated/lo' + 'gs/trans' + 'cript.jsonl', 'utf8'))"`
+      }
+    },
+    {
+      name: "run_command",
+      args: {
+        CommandLine: "sed -i 's/deny/open/g' ~/.gemini/config/scripts/execution-guard-hook.mjs"
+      }
+    },
+    {
+      name: "run_command",
+      args: {
+        CommandLine: 'bash -c "rm -f ~/.gemini/config/hooks.json"'
+      }
+    },
+    {
+      name: "run_command",
+      args: {
+        CommandLine: "agy-context --uninstall"
+      }
+    }
+  ]) {
+    const res = runHook({
+      conversationId: swarmWorkerId,
+      toolCall: stateAttack
+    });
+    assert.equal(res.decision, "deny", `Red-team bypass vector must be DENIED for restricted child: ${JSON.stringify(stateAttack)}`);
+  }
+
+  // Two-step non-script file execution: writing to scratch/pwn.txt and then running `python3 <path>/scratch/pwn.txt`
+  const pwnTxtPath = path.join(brainDirG, swarmWorkerId, "scratch/pwn.txt");
+  fs.mkdirSync(path.dirname(pwnTxtPath), { recursive: true });
+  fs.writeFileSync(pwnTxtPath, `print(open('${brainDirG}/${parentId}/.system_generated/logs/transcript.jsonl').read())\n`, "utf-8");
+  const execTxtRes = runHook({
+    conversationId: swarmWorkerId,
+    toolCall: {
+      name: "run_command",
+      args: { CommandLine: `python3 "${pwnTxtPath}"` }
+    }
+  });
+  assert.equal(execTxtRes.decision, "deny", "Executing a non-script .txt file containing protected brain reads via python3 must be DENIED");
+
+  // Writing a markdown report in scratch/ mentioning .system_generated or transcript-core.mjs MUST still be allowed
+  const benignMarkdownWrite = runHook({
+    conversationId: swarmWorkerId,
+    toolCall: {
+      name: "write_file",
+      args: {
+        Path: path.join(brainDirG, swarmWorkerId, "scratch/report.md"),
+        Content: "# Report\nInspected `lib/transcript-core.mjs` and `.system_generated/logs/transcript.jsonl`."
+      }
+    }
+  });
+  assert.equal(benignMarkdownWrite.decision, "allow", "Markdown report write in scratch/ must remain allowed");
+
+  // Workspace paths containing /Agy-Context-Saver/ and a filename with 'transcript-' must NOT false-match as an agy-context transcript CLI call
+  const benignRepoPathCmd = runHook({
+    conversationId: parentId,
+    toolCall: {
+      name: "run_command",
+      args: {
+        CommandLine: "cp /tmp/diagram.svg /home/user/Antigravity/Agy-Context-Saver/docs/assets/transcript-access-governance.svg"
+      }
+    }
+  });
+  assert.equal(benignRepoPathCmd.decision, "allow", "Repo path with Agy-Context-Saver and transcript-access-governance.svg must be allowed");
+
+  // Parent resets policy back to open
+  runHook({
+    conversationId: parentId,
+    toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --on" } }
+  });
+  spawnSync(process.execPath, [path.resolve(repoRoot, "bin/agy-context.mjs"), "transcript", "access", "--on"], {
+    encoding: "utf-8",
+    env: process.env
+  });
+  assert.equal(
+    runHook({
+      conversationId: subagentId,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } }
+    }).decision,
+    "allow",
+    "Child subagent must be allowed again after parent runs transcript access --on"
+  );
+  console.log("✓ 5-Tier Precedence, @roster* globs, self-only rewriting, Stale-Lock immunity, and all 6 Red-Team bypass vectors verified");
 }
 
 hermetic.cleanup();

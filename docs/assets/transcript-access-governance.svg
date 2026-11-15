@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-flowchart" viewBox="0 0 804 702" width="804" height="702" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_r:var(--pele-radius,4px);--_fm:var(--pele-font-mono,monospace);font:16px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,sans-serif)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="flowchart">
+  <style>
+    :root {
+      --pele-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+      --pele-bg: #ffffff;
+      --pele-fg: #1f2328;
+      --pele-muted: #656d76;
+      --pele-line: #57606a;
+      --pele-surface: #f6f8fa;
+      --pele-surface-alt: #eaeef2;
+      --pele-border: #d0d7de;
+      --pele-accent: #0969da;
+      --pele-series-1: #0969da;
+      --pele-series-2: #1a7f37;
+      --pele-series-3: #9a6700;
+      --pele-series-4: #8250df;
+      --pele-series-5: #cf222e;
+      --pele-series-6: #bf3989;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --pele-bg: #0d1117;
+        --pele-fg: #e6edf3;
+        --pele-muted: #8b949e;
+        --pele-line: #8b949e;
+        --pele-surface: #161b22;
+        --pele-surface-alt: #21262d;
+        --pele-border: #30363d;
+        --pele-accent: #2f81f7;
+        --pele-series-1: #2f81f7;
+        --pele-series-2: #3fb950;
+        --pele-series-3: #d29922;
+        --pele-series-4: #a371f7;
+        --pele-series-5: #f85149;
+        --pele-series-6: #db61a2;
+      }
+    }
+  </style>
+<g class="pele-clusters"><g class="pele-cluster" data-id="Enforcement"><rect x="160.7" y="526" width="481.87" height="168" fill="var(--_a)" fill-opacity="0.5" stroke="var(--_b)" style="rx:var(--_r)"/></g><g class="pele-cluster" data-id="Precedence"><rect x="8" y="264" width="787.28" height="189" fill="var(--_a)" fill-opacity="0.5" stroke="var(--_b)" style="rx:var(--_r)"/></g><g class="pele-cluster" data-id="Input"><rect x="143.93" y="8" width="515.42" height="168" fill="var(--_a)" fill-opacity="0.5" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-cluster-label" fill="var(--_m)" x="316.23" y="33.6" text-anchor="middle">1. Caller Context &amp; Lineage (Step 0 / Step 1)</text></g></g><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge" data-id="L_Input_Precedence_0"><path d="M401.64,176L401.64,257"/><path class="pele-marker" d="M401.64,264L398.28,256L405,256Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_Precedence_Enforcement_0"><path d="M401.64,453L401.64,519"/><path class="pele-marker" d="M401.64,526L398.28,518L405,518Z" fill="var(--_l)" stroke="none"/></g></g><g class="pele-cluster-titles"><g class="pele-cluster-title" data-id="Enforcement"><text fill="none" stroke="color-mix(in srgb,var(--_a) 50%,var(--_bg))" stroke-width="5" stroke-linejoin="round" x="317.87" y="551.6" text-anchor="middle">3. Runtime Decision &amp; Defense in Depth</text><text class="pele-cluster-label" fill="var(--_m)" x="317.87" y="551.6" text-anchor="middle">3. Runtime Decision &amp; Defense in Depth</text></g><g class="pele-cluster-title" data-id="Precedence"><text fill="none" stroke="color-mix(in srgb,var(--_a) 50%,var(--_bg))" stroke-width="5" stroke-linejoin="round" x="233.85" y="289.6" text-anchor="middle">2. 5-Tier Precedence Engine (PreToolUse + transcript-core)</text><text class="pele-cluster-label" fill="var(--_m)" x="233.85" y="289.6" text-anchor="middle">2. 5-Tier Precedence Engine (PreToolUse + transcript-core)</text></g></g><g class="pele-edge-labels" font-size="14"><g class="pele-edge-label" data-id="L_Input_Precedence_0"><rect x="309.71" y="198.5" width="183.85" height="36" rx="3" fill="var(--_bg)"/><text text-anchor="middle" xml:space="preserve"><tspan x="401.64" y="212.4">agy-context transcript / state</tspan><tspan x="401.64" y="230.4">check</tspan></text></g><g class="pele-edge-label" data-id="L_Precedence_Enforcement_0"><rect x="311.67" y="475.5" width="179.95" height="21" rx="3" fill="var(--_bg)"/><text x="401.64" y="490.9" text-anchor="middle">verify &amp; consume disk grant</text></g></g><g class="pele-nodes"><g class="pele-node pele-shape-rect" data-id="I1" transform="translate(270.18,102)"><rect x="-106.25" y="-43.5" width="212.5" height="87" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-15.4">Top-Level User Session</tspan><tspan x="0" y="5.6">(Step 0 USER_INPUT -&gt;</tspan><tspan x="0" y="26.6">bypass)</tspan></text></g><g class="pele-node pele-shape-rect" data-id="I2" transform="translate(527.89,102)"><rect x="-111.46" y="-54" width="222.93" height="108" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-25.9">Child Subagent or /swarm</tspan><tspan x="0" y="-4.9">Worker</tspan><tspan x="0" y="16.1">(sender=&lt;parentConvId&gt; |</tspan><tspan x="0" y="37.1">@roster)</tspan></text></g><g class="pele-node pele-shape-rect" data-id="T1" transform="translate(134.02,368.5)"><rect x="-106.02" y="-43.5" width="212.05" height="87" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-15.4">Tiers 1-2: Owner &amp; Deny</tspan><tspan x="0" y="5.6">1. Policy Owner (parent)</tspan><tspan x="0" y="26.6">2. Explicit CLI --deny</tspan></text></g><g class="pele-node pele-shape-rect" data-id="T2" transform="translate(394.06,368.5)"><rect x="-114.02" y="-64.5" width="228.03" height="129" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-36.4">Tiers 3-4: Allow &amp; Directive</tspan><tspan x="0" y="-15.4">3. Explicit CLI --allow</tspan><tspan x="0" y="5.6">(@roster*)</tspan><tspan x="0" y="26.6">4. First-Line Launch</tspan><tspan x="0" y="47.6">Directive</tspan></text></g><g class="pele-node pele-shape-rect" data-id="T3" transform="translate(661.68,368.5)"><rect x="-113.6" y="-54" width="227.2" height="108" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-25.9">Tier 5: Cohort Mode</tspan><tspan x="0" y="-4.9">5. Default Mode</tspan><tspan x="0" y="16.1">(open | allowlist | self-only |</tspan><tspan x="0" y="37.1">deny)</tspan></text></g><g class="pele-node pele-shape-rect" data-id="E1" transform="translate(281.18,620)"><rect x="-100.47" y="-54" width="200.94" height="108" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-25.9">Allow + 10s Single-Use</tspan><tspan x="0" y="-4.9">Disk Grant</tspan><tspan x="0" y="16.1">(pins --id &lt;convId&gt; in</tspan><tspan x="0" y="37.1">self-only mode)</tspan></text></g><g class="pele-node pele-shape-rect" data-id="E2" transform="translate(522.11,620)"><rect x="-100.46" y="-54" width="200.93" height="108" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-25.9">Deny + Context-Aware</tspan><tspan x="0" y="-4.9">Rejection</tspan><tspan x="0" y="16.1">(5 cumulative strikes -&gt;</tspan><tspan x="0" y="37.1">force_ask)</tspan></text></g></g></svg>

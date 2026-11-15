@@ -1,19 +1,18 @@
 # Publishing & Verification
 
-This guide outlines the quality checks, clean-room verification procedures, and release processes for `Agy-Context-Saver`.
+This guide covers the preflight checks, test suite matrix, and release workflow for `Agy-Context-Saver`.
 
 ---
 
 ## Packaging Whitelist
 
-The published npm package is strictly constrained via the `"files"` whitelist in `package.json`:
+The `"files"` list in `package.json` defines the published npm package contents:
 
 ```json
 "files": [
   "assets",
-  "bin",
+  "bin/agy-context.mjs",
   "lib",
-  "mcp",
   "scripts",
   "rules",
   "skills",
@@ -27,64 +26,61 @@ The published npm package is strictly constrained via the `"files"` whitelist in
 ]
 ```
 
-### Excluded Development Artifacts
+Excluded from the npm tarball:
 - `tests/` (unit, integration, and lifecycle test suites)
-- `docs/` and `zensical.toml` (hosted on GitHub Pages)
-- Temporary databases, scratch scripts, and logs
+- `docs/` and `zensical.toml` (published to GitHub Pages)
+- Local `.gitignore`d binaries (such as `bin/rtk`), temporary files, and scratch directories
 
 ---
 
-## Clean-Room Verification Procedure
+## Verification Pipeline
 
-Before releasing any version or publishing to npm, execute the full release pipeline:
+Run all four stages before tagging a release:
 
-### Stage 1: Release Preflight & Installation Check
+### Stage 1: Release preflight and read-only check
 ```bash
-npm run preflight
+node scripts/release-preflight.mjs
 node scripts/install-register.mjs --check
 ```
-Verifies package metadata, plugin `hooks.json` schema integrity, `lib/transcript-core.mjs` / `bin/agy-context.mjs`, RTK `>= 1.1.0` requirement, and clean-profile non-mutation.
+`scripts/release-preflight.mjs` checks `package.json` metadata, `hooks.json` matcher coverage (`read_file`, `edit_file`, `write_file`, `run_command`), `lib/transcript-core.mjs` and `bin/agy-context.mjs` entrypoints, absence of legacy root `mcp/` or `mcp_config.json`, `README.md` test suite count parity (11 suites), `SECURITY.md`/`CONTRIBUTING.md`/`CODE_OF_CONDUCT.md` presence, `MIN_RTK_VERSION >= 1.1.0`, and zero runtime npm dependencies. `node scripts/install-register.mjs --check` validates RTK `>= 1.1.0` and user config syntax without writing to disk.
 
-### Stage 2: Automated Test Matrix
+### Stage 2: Automated test matrix
 ```bash
 npm test
 ```
-Executes all 11 verification suites:
-1. Hook governance & RTK `>= 1.1.0` delegation tests (`tests/test-hook.mjs`)
-2. Streaming transcript core, CLI & deprecated MCP wrapper tests (`tests/test-transcript.mjs`)
-3. Live host RTK `>= 1.1.0` integration contract tests (`tests/test-rtk-integration.mjs`)
-4. Output inspection governance & lifecycle gating tests (`tests/test-output-governance.mjs`)
-5. End-to-end edge case & fail-closed probes (`tests/test-e2e-probes.mjs`)
-6. Performance, streaming & memory probes (`tests/test-performance-probes.mjs`)
-7. Live installed system validation (`tests/test-installed-verification.mjs`)
-8. Full lifecycle installation, `ACS-HOOK-11` sweep & rollback tests (`tests/test-lifecycle-rollback.mjs`)
-9. Check-only read-only isolation regression test (`tests/test-check-only-readonly.mjs`)
-10. Malformed config preservation fail-closed regression test (`tests/test-malformed-config-preservation.mjs`)
-11. RTK ledger fresh-install quirks (`tests/test-rtk-ledger-fresh-install.mjs`)
+Runs all 11 test suites in isolated temporary profiles:
+1. Hook governance, RTK `>= 1.1.0` delegation, `agy-context transcript` pass-through, `self-only` `--id <convId>` injection, and transcript access hardening (`tests/test-hook.mjs`)
+2. Streaming transcript core, CLI aliases, step range slicing, and single-use capability grants (`tests/test-transcript.mjs`)
+3. Live host RTK `>= 1.1.0` integration contract and `agy-context transcript` pass-through (`tests/test-rtk-integration.mjs`)
+4. Output spillover and completed task log lifecycle gating (`tests/test-output-governance.mjs`)
+5. End-to-end edge cases and fail-closed probes (`tests/test-e2e-probes.mjs`)
+6. Performance, streaming, and file-descriptor cleanup probes (`tests/test-performance-probes.mjs`)
+7. Installed system verification (`tests/test-installed-verification.mjs`)
+8. Lifecycle installation, stale MCP cleanup, and backup rollback (`tests/test-lifecycle-rollback.mjs`)
+9. Check-only read-only isolation regression check (`tests/test-check-only-readonly.mjs`)
+10. Malformed config preservation fail-closed check (`tests/test-malformed-config-preservation.mjs`)
+11. RTK ledger fresh-install verification (`tests/test-rtk-ledger-fresh-install.mjs`)
 
-### Stage 3: Tarball Dry-Run Inspection
+### Stage 3: Tarball dry-run check
 ```bash
 npm pack --dry-run
 ```
-Verifies clean packaging of `bin/`, `lib/`, `scripts/`, `rules/`, `skills/`, and zero development/test file leaks into distribution.
+Confirms that only the whitelisted CLI, library, hook, rule, skill, and asset files are included in the tarball.
 
-### Stage 4: Documentation Build
+### Stage 4: Documentation build
 ```bash
 zensical build
 ```
-Validates Markdown syntax, navigation structure, and asset paths with zero build warnings.
+Validates Markdown links, navigation entries, and SVG assets.
 
 ---
 
-## Release & Publication
+## Tagging & Publishing (`release-tag.yml`)
 
-Once all 4 verification stages pass:
+Pushing a `v*` tag triggers `.github/workflows/release-tag.yml`, which runs the verification matrix across Linux, macOS, and Windows (Node 22 and 24), creates the GitHub Release, and publishes to npm via OIDC Trusted Publishing (`npm publish --access public --provenance`):
 
 ```bash
-# 1. Commit and tag release
-git commit -m "chore(release): prepare v2.0.0"
+git commit -m "chore(release): v2.0.0"
 git tag -a v2.0.0 -m "Release v2.0.0"
-
-# 2. Publish to npm registry
-npm publish --access public
+git push origin main --follow-tags
 ```

@@ -18,6 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureRtkInstalled, findExistingRtk } from "./provision-rtk.mjs";
 import { getStateDir, removeLegacyTmpState } from "./state-dir.mjs";
+import { formatTranscriptAccessStatus } from "../lib/transcript-core.mjs";
 
 const fsPromises = fs.promises;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -247,7 +248,8 @@ export function detectExistingInstallation() {
       },
       cliShim,
       mcp,
-      rtk: rtkInfo
+      rtk: rtkInfo,
+      transcriptAccess: formatTranscriptAccessStatus()
     }
   };
 }
@@ -751,6 +753,10 @@ export function runStatus(options = {}) {
   );
   log(
     `- MCP Cleanup: ${existing.details.mcp.clean ? "CLEAN (0 duplicate MCP configs/schemas)" : existing.details.mcp.duplicateCount + " legacy MCP config/schema entries present"}`
+  );
+  const ta = existing.details.transcriptAccess || formatTranscriptAccessStatus();
+  log(
+    `- Transcript Access Policy: ${ta.active ? `${ta.mode.toUpperCase()} (owner: ${ta.ownerId})` : "OPEN (default)"}`
   );
 
   log(

@@ -7,102 +7,100 @@ description: >-
 
 # Context Governance & Execution Guard (Agy-Context-Saver + RTK)
 
-Agy-Context-Saver and RTK protect session transcript health and LLM attention by transparently compressing command outputs, preventing repetitive background polling loops, and routing codebase and transcript inspection to compact CLI interfaces.
+`Agy-Context-Saver` and `RTK` compress shell output, enforce bounded workspace file reads, stop background-task busy-polling, and provide CLI commands for conversation transcript inspection and access control.
 
-## Architectural Boundaries
+## Architectural Boundary
 
-- **RTK (Rust Token Killer >= 1.1.0)**: Owns shell command rewriting (`rtk hook antigravity`), terminal output compression, and canonical codebase inspection (`rtk read`, `rtk grep`, `rtk find`, `rtk ls`, `rtk err`, `rtk summary`).
-- **Agy-Context-Saver (v2.0.0 CLI-First)**: Owns Antigravity lifecycle governance, Reactive Wakeup enforcement, transcript forensics (`agy-context transcript ...`), and session integrity.
-
----
-
-## Unified Codebase & File Inspection
-
-Unbounded full-file `read_file` calls and unoptimized search tools (`grep_search`, `find_by_name`, `list_dir`) bypass token compression and are guarded:
-
-1. **Tier 1 — Compact Search & Discovery (`rtk grep`, `rtk find`, `rtk ls`)**:
-   - **Prose / Regex / Symbol Discovery**: Use `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate exact `[StartLine, EndLine]` coordinates. Always specify an explicit path (e.g., `.` or `src/`) to avoid stdin pipe stalls.
-   - **Directory / File Discovery**:
-     - **Windows**: Use `rtk find <path>` or PowerShell `dir` / `Get-ChildItem`.
-     - **POSIX / Linux / macOS**: Use `rtk find <path>`, `rtk ls <path>`, or `rtk tree`.
-2. **Tier 2 — Precision Workspace File Reading (`read_file` Hybrid Slice Policy)**:
-   - Pass `StartLine` and `EndLine` into `read_file` (bounded slices of `1–150` lines) to preserve exact 1-indexed line numbers for `edit_file` and `write_file` without terminal stdout truncation.
-   - Partial slices of `151–800` lines and `ByteOffset`-only unbounded reads are denied; an explicit one-pass full-file audit (`StartLine: 1, EndLine: <TotalLines>`) is permitted only when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
-3. **Tier 3 — RTK Spillover & Diagnostic Boundaries (`rtk read`, `rtk err`, `rtk summary`)**:
-   - **Spillovers & Task Logs**: Read `.system_generated/steps/<step>/output.txt` spillovers (or use bounded `read_file` $\le 150$ lines) and completed `tasks/<taskId>.log` files via `rtk read <path>` (`--head-lines` / `--tail-lines`). Never use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for `edit_file` / `write_file`.
-   - `rtk err <cmd>`: Runs command and displays only errors/warnings.
-   - `rtk summary <cmd>`: Runs command and produces a 2-line technical summary.
-
-*Safe Harbor*: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/`) may be viewed directly via `read_file` without slice bounds, and `.system_generated/steps/<n>/output.txt` supports bounded `read_file` ($\le 150$ lines).
+- **RTK (`>= 1.1.0`)**: Rewrites shell commands (`rtk hook antigravity`), compresses command output, and provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`, `rtk read`, `rtk err`, `rtk summary`).
+- **Agy-Context-Saver (`v2.0.0`)**: Enforces Reactive Wakeup backoff, bounds `read_file` slices, protects `.system_generated/` and the state directory, and exposes `agy-context transcript`.
 
 ---
 
-## Available `agy-context` CLI Commands
+## Workspace File & Codebase Inspection
 
-Run `agy-context` directly via `run_command` (installed as an executable shim in `~/.gemini/antigravity/bin/agy-context`; run `agy-context transcript ...` as a single unchained command):
+Unbounded full-file `read_file` calls on workspace files are blocked by the `PreToolUse` hook:
 
-### 1. `agy-context transcript health`
-Performs streaming inspection of `transcript.jsonl` to calculate turn budgets, step counts, raw payload size, RTK status, and detect backoff/polling violations.
+1. **Tier 1 (Search and discovery: `rtk grep`, `rtk find`, `rtk ls`)**:
+   - **Pattern and symbol search**: Run `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate `[StartLine, EndLine]` coordinates. Always pass an explicit target path (such as `.` or `src/`) so `rtk grep` does not wait on stdin.
+   - **Directory and file listing**: Run `rtk find <path>`, `rtk ls <path>`, or `rtk tree` (or PowerShell `dir` / `Get-ChildItem` on Windows).
+2. **Tier 2 (Workspace file reading: `read_file` slice policy)**:
+   - Pass `StartLine` and `EndLine` into `read_file` in bounded slices of `1-150` lines to preserve 1-indexed line numbers for `edit_file` and `write_file`.
+   - Partial slices of `151-800` lines and `ByteOffset`-only unbounded reads are denied. An explicit full-file read (`StartLine: 1, EndLine: <TotalLines>`) is allowed when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
+3. **Tier 3 (Spillovers and diagnostics: `rtk read`, `rtk err`, `rtk summary`)**:
+   - **Spillovers and task logs**: Read `.system_generated/steps/<step>/output.txt` spillovers (via bounded `read_file` $\le 150$ lines or `rtk read <path>`) and completed `tasks/<taskId>.log` files via `rtk read <path>` (`--head-lines` / `--tail-lines`). Never use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for `edit_file` or `write_file`.
+   - `rtk err <cmd>`: Runs a command and prints only errors and warnings.
+   - `rtk summary <cmd>`: Runs a command and prints a 2-line summary.
+
+*Safe harbor*: Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `.gemini/config/`) may be read via `read_file` without slice bounds, and `.system_generated/steps/<n>/output.txt` supports bounded `read_file` ($\le 150$ lines).
+
+---
+
+## `agy-context` CLI Commands
+
+Run `agy-context` via `run_command` (`~/.gemini/antigravity/bin/agy-context`). Invoke `agy-context transcript ...` as a single unchained command without `&&`, `||`, `;`, `|`, or redirects:
+
+### 1. `agy-context transcript health` (aliases: `stats`, `info`)
+Checks turn counts, step counts, raw transcript size, RTK status, and busy-polling events.
 ```bash
-agy-context transcript health [--id <conv>] [--json] [--file <path>]
+agy-context transcript health [<id>] [--id <conv>] [--json] [--file <path>]
 ```
 
-### 2. `agy-context transcript read`
-Quickly reads recent conversation turns from an Antigravity transcript in clean Markdown format with zero JSON noise.
+### 2. `agy-context transcript read` (aliases: `outline`, `summary`)
+Streams recent conversation turns in Markdown, or prints a 1-line-per-step outline when `--outline` (or `outline` / `summary`) is used.
 ```bash
-agy-context transcript read [--id <conv>] [--mode compact|full] [--last-turns N] [--include-thinking] [--json] [--file <path>]
+agy-context transcript read [<id>] [--id <conv>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--outline] [--include-thinking] [--json] [--file <path>]
 ```
 
-### 3. `agy-context transcript query`
-Granular query and forensic filtering engine for transcripts with keyword/regex search, auto-dereferencing of truncated payloads, role filtering (`user`, `assistant`, `subagent`, `tool`, `generic`, `system`, `error`, `all`; defaults to `all`), untruncated `--full-args` / `--field` inspection across ranges, and compact summaries.
-- **Zero-Truncation Multi-Step Forensic Pattern**:
-  1. `agy-context transcript query --id <conv> --start 0 --end 100 --include-tools --summary` (compact 1-line-per-step index with `[ERROR]` badges)
-  2. `agy-context transcript query --id <conv> --start 0 --end 100 --roles assistant --field tool_args` (all untruncated tool call arguments in one call)
-  3. `agy-context transcript step --id <conv> --step <N,M,K|N-M> --field content` (batch-extract specific error/tool outputs without 1-by-1 `--step <N>` loops)
+### 3. `agy-context transcript query` (aliases: `grep`, `search`, `find`, `tools`)
+Searches transcripts by regex or substring with automatic dereferencing of truncated fields, role filtering (`user`, `assistant`, `subagent`, `tool`, `generic`, `system`, `error`, `all`), and `--full-args` / `--field` projection. The `tools` alias defaults to `--roles assistant --field tool_args --include-tools`.
+- **Multi-step forensic workflow**:
+  1. `agy-context transcript outline [<conv>] --start 0 --end 100` (1-line-per-step index with `[ERROR]` and `[tools: ...]` tags)
+  2. `agy-context transcript tools [<conv>] --start 0 --end 100` (all untruncated tool call arguments in one call)
+  3. `agy-context transcript step <N,M,K|N-M> [<conv>] --field content` (batch-extract specific step outputs without 1-by-1 `--step <N>` loops)
 ```bash
-agy-context transcript query [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--json] [--file <path>]
+agy-context transcript query [<pattern>] [<id>] [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:Key|all] [--include-thinking] [--json] [--file <path>]
 ```
 
 ### 4. `agy-context transcript step`
-Surgically dereferences full un-truncated content or specific fields (`content`, `thinking`, `tool_calls`, `tool_args`, `tool_args:<Key>`, `all`) for one step or a single-pass batch/range of steps (`--step 2,8,14`, `--step 2-10`, `--step 2..10`, or `--start 2 --end 10`) from `transcript_full.jsonl`.
+Extracts untruncated content or specific fields (`content`, `thinking`, `tool_calls`, `tool_args`, `tool_args:<Key>`, `all`) for one step or a batch/range of steps (`2,8,14`, `2-10`, `2..10`, or `--start 2 --end 10`) from `transcript_full.jsonl`, with optional `--head <N>`, `--tail <N>`, and `--full` slicing.
 ```bash
-agy-context transcript step --id <conv> (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--json] [--file <path>]
+agy-context transcript step [<N|N,M|N-M|N..M>] [<id>] [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:Key|all] [--head N] [--tail N] [--full] [--json] [--file <path>]
 ```
 
-### 5. `agy-context status` & `agy-context setup`
-Audits or synchronizes the Antigravity 2.0 integration layers (Native Plugin Link, `agy-context-saver` hook in `hooks.json`, `agy-context` CLI shim, RTK `>= 1.1.0`, and legacy MCP cleanup).
+### 5. `agy-context transcript list` (alias: `ls`)
+Lists recent conversations in the Antigravity brain directory sorted by modification time.
 ```bash
-agy-context status
+agy-context transcript list [--limit N] [--json]
+```
+
+### 6. `agy-context transcript access` (alias: `policy`)
+Controls parent transcript access policies for child subagents and `/swarm` workers.
+```bash
+agy-context transcript access [status|off|on|reset|self-only] [--status | --off (--deny-children) | --on (--reset) | --self-only | --mode <open|allowlist|self-only|deny> | --allow <id,@roster*...> | --deny <id,@roster*...> | --ttl <sec>] [--json]
+```
+- **First-line launch directives**: Place `[agy-transcript-access: deny]`, `[agy-transcript-access: self-only]`, or `[agy-transcript-access: allow]` on the first non-empty line of a `define_subagent` `SystemPrompt`, `invoke_subagent` `Prompt`, or `/swarm` worker `brief` (later lines and code blocks are ignored).
+- **5-tier precedence**: `1. Policy Owner` -> `2. Explicit CLI --deny` -> `3. Explicit CLI --allow` (supports `@roster*` prefix globs such as `@audit-squad*`) -> `4. First-Line Launch Directive` -> `5. Cohort Default Mode`.
+- **Stale-lock protection**: Policies (`policies[ownerId]`) expire after a 1-hour default TTL, Step 0 `USER_INPUT` top-level user sessions bypass child locks automatically, Step 0/1 `sender=<parentConvId>` binds child agents to their parent policy, and `agy-context status` displays the active `Transcript Access Policy`.
+
+### 7. `agy-context status` & `agy-context setup`
+Audits or synchronizes the plugin link, `PreToolUse` hook, CLI shims, RTK (`>= 1.1.0`), and `Transcript Access Policy`.
+```bash
+agy-context status [--json]
 agy-context setup [--check] [--allow-degraded]
 agy-context uninstall [--restore-backups]
 ```
 
 ---
 
-## 3-Layer Governance Invariants
+## Governance Summary
 
-1. **Layer 1: Reactive Lifecycle & Polling Immunity**:
-   - Never busy-wait on `manage_task(Action='status')` or rapid polling timers.
-   - Stop calling tools and yield the turn for native Reactive Wakeup (`<SYSTEM_MESSAGE>`).
-   - Diagnostic status inspections follow exponential backoff: $\min(600, \text{round}(30 \times 2.5^{\text{pollCount}-1}))$.
-   - 5 cumulative denials trigger the `force_ask` circuit breaker.
-   - For background shell tasks $>15\text{s}$, schedule coordinated watchdog timers: `schedule(DurationSeconds=45, TimerCondition="task-X")` and output a structured Pre-Yield Status Card. Each task watchdog advances the Proportional Backoff level (`30s -> 75s -> 188s -> 469s -> 600s`), blocking repeated 45s/60s timer loops.
-   - **Swarm & Subagent Exemption (`swarm_wait` Only)**: Never pair `swarm_wait` or subagents with a one-shot `schedule` timer; `swarm_wait` sleeps at zero token cost and wakes immediately on board posts, and one-shot `schedule` timers polling a swarm or subagent are strictly denied.
-
-2. **Layer 2: Transparent CLI & Codebase Streamlining**:
-   - Shell commands transparently rewrite via `rtk hook antigravity` (`rtk git`, `rtk pytest`, `rtk cargo`, etc.).
-   - Workspace file inspection follows `rtk grep` / `rtk find` $\to$ bounded `read_file(StartLine, EndLine)` $\to$ `edit_file` / `write_file`, while `rtk read` handles step spillovers and completed task logs.
-   - Direct access to `.system_generated/` transcripts is strictly denied; use `agy-context transcript read|query|step|health`.
-   - **Log Hygiene (Git CRLF/LF Notice Stripping)**: Repetitive Git line-ending notices (`warning: LF will be replaced by CRLF` / `warning: CRLF will be replaced by LF...`) are non-actionable environment noise. Agy-Context-Saver automatically strips these warning lines across forensic transcript parsers, and agents suppress them at the source (`git -c core.safecrlf=false`) to protect context window tokens.
-
-3. **Layer 3: Synchronous Execution**:
-   - Non-daemon `run_command` calls without an explicit `WaitMsBeforeAsync` default to 10,000ms to eliminate unnecessary detachment.
-
----
-
-## Quick Verification & Health Check
-
-To verify installation health and run test validation:
-- **Health Check**: `agy-context status` or `npm run status` (verifies plugin link, hook, CLI shim, RTK `>= 1.1.0`, and 0 legacy MCP configs/schemas).
-- **Test Suite**: `npm test` (runs all 11 test suites).
-- Detailed verification playbooks and release steps reside in `docs/publishing.md`.
+1. **Layer 1 (Reactive lifecycle and backoff)**:
+   - Do not busy-wait on `manage_task(Action='status')` or short polling timers; end the turn and wait for Reactive Wakeup (`<SYSTEM_MESSAGE>`).
+   - Status checks follow exponential backoff: $\min(600, \text{round}(30 \times 2.5^{\text{pollCount}-1}))$. 5 cumulative denials trigger the `force_ask` circuit breaker.
+   - For background shell tasks $>15\text{s}$, schedule `schedule(DurationSeconds=45, TimerCondition="task-X")` and output a Pre-Yield Status Card. Never pair `swarm_wait` or subagents with a one-shot `schedule` timer.
+2. **Layer 2 (Shell rewriting, file slices, and transcript access)**:
+   - Shell commands rewrite via `rtk hook antigravity`.
+   - Workspace inspection uses `rtk grep` / `rtk find` -> bounded `read_file(StartLine, EndLine)` -> `edit_file` / `write_file`, while `rtk read` reads step spillovers and completed task logs.
+   - Direct access to `.system_generated/` or `getStateDir()` is denied; use `agy-context transcript` when permitted by the parent's access policy.
+3. **Layer 3 (Synchronous window)**:
+   - Non-daemon `run_command` calls without an explicit `WaitMsBeforeAsync` default to 10,000ms.

@@ -74,6 +74,9 @@ if (pkg) {
   if (exists('mcp_config.json')) {
     errors.push('Legacy mcp_config.json is still present at repository root; remove it for 2.0 CLI-first release.');
   }
+  if (exists('mcp')) {
+    errors.push('Legacy mcp/ directory is still present at repository root; remove it for 2.0 CLI-first release.');
+  }
 
   const hooksText = readText('hooks.json');
   if (hooksText) {
