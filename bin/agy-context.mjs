@@ -17,7 +17,8 @@ import {
   checkContextHealth,
   getBrainDir,
   manageTranscriptAccessPolicy,
-  verifyTranscriptCoreAccess
+  verifyTranscriptCoreAccess,
+  consumeTranscriptAccessGrant
 } from "../lib/transcript-core.mjs";
 import {
   runInstall,
@@ -165,6 +166,7 @@ function validateExplicitFileFlag(fileArg) {
 }
 
 function emitError(message, asJson = false, extra = {}) {
+  consumeTranscriptAccessGrant();
   if (asJson) {
     console.error(JSON.stringify({ isError: true, error: message, ...extra }, null, 2));
   } else {
@@ -213,7 +215,8 @@ async function handleTranscriptCommand(argv) {
         includeToolCalls: true,
         fullArgs: Boolean(opts["full-args"]),
         includeThinking: Boolean(opts["include-thinking"]),
-        allowExternalPaths: false
+        allowExternalPaths: false,
+        subcommand: sub
       });
       if (res.isError) {
         emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
@@ -317,7 +320,8 @@ async function handleTranscriptCommand(argv) {
       fullArgs: Boolean(opts["full-args"]),
       field: opts.field,
       includeThinking: Boolean(opts["include-thinking"]),
-      allowExternalPaths: false
+      allowExternalPaths: false,
+      subcommand: sub
     });
 
     if (res.isError) {

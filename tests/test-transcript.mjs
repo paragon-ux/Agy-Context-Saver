@@ -423,15 +423,90 @@ try {
     const unauthUnlock = runCli(["transcript", "access", "--on"]);
     assert.notEqual(unauthUnlock.status, 0, "Unauthorized child subprocess transcript access --on must fail closed");
 
-    // 5. With a valid PreToolUse hook grant (mode: self-only), reading own transcript succeeds while reading other transcript fails
+    // 5. With a valid PreToolUse hook grant (mode: self-only), reading own transcript succeeds ONCE (single-use in-process & cross-process)
     recordTranscriptHookGrant({ callerConvId: convTarget, subcommand: "read", targetConvId: convTarget, mode: "self-only" });
     const allowedSelf = await readTranscript({ conversationId: convTarget, lastTurns: 1 });
     assert.ok(!allowedSelf.isError, "Authorized self-only read of own transcript must succeed");
 
+    const blockedSameProcessReuse = await readTranscript({ conversationId: convTarget, lastTurns: 1 });
+    assert.equal(blockedSameProcessReuse.isError, true, "Second call in the same process must fail closed after single-use grant consumption (L39)");
+
+    // 5b. Cross-session --id read in self-only mode fails closed even with a fresh grant
+    recordTranscriptHookGrant({ callerConvId: convTarget, subcommand: "read", targetConvId: convTarget, mode: "self-only" });
     const blockedCross = await readTranscript({ conversationId: "conv-rich-forensic", lastTurns: 1 });
     assert.equal(blockedCross.isError, true, "Cross-session read in self-only mode must fail closed inside transcript-core");
 
-    // 6. Parent resets policy back to OPEN
+    // 5c. Explicit --file outside caller's brain directory fails closed inside transcript-core under self-only and active policies (L38)
+    const externalJsonl = path.join(tempHome, "external-outside-brain.jsonl");
+    fs.writeFileSync(externalJsonl, JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "outside" }) + "\n", "utf-8");
+
+    recordTranscriptHookGrant({ callerConvId: convTarget, subcommand: "read", targetConvId: convTarget, mode: "self-only" });
+    const blockedExternalSelfOnly = await readTranscript({ filePath: externalJsonl, lastTurns: 1 });
+    assert.equal(blockedExternalSelfOnly.isError, true, "Self-only --file outside caller brain folder must fail closed inside transcript-core (L38)");
+    assert.match(blockedExternalSelfOnly.text, /Cross-session '--file' access outside/);
+
+    const otherBrainTranscript = path.join(brainDir, "conv-rich-forensic", ".system_generated", "logs", "transcript.jsonl");
+    recordTranscriptHookGrant({ callerConvId: convTarget, subcommand: "read", targetConvId: convTarget, mode: "self-only" });
+    const blockedSiblingFileSelfOnly = await readTranscript({ filePath: otherBrainTranscript, lastTurns: 1 });
+    assert.equal(blockedSiblingFileSelfOnly.isError, true, "Self-only --file pointing to another session's brain folder must fail closed (L38)");
+
+    recordTranscriptHookGrant({ callerConvId: "allowlisted-worker", subcommand: "read", mode: "open" });
+    const blockedExternalUnderPolicy = await readTranscript({ filePath: externalJsonl, lastTurns: 1 });
+    assert.equal(blockedExternalUnderPolicy.isError, true, "External --file outside brainDir must fail closed while any parent policy is active (L38)");
+    assert.match(blockedExternalUnderPolicy.text, /escapes brain directory/);
+
+    // 5d. Subcommand and targetConvId grant binding (L39)
+    recordTranscriptHookGrant({ callerConvId: "allowlisted-worker", subcommand: "health", targetConvId: convTarget, mode: "open" });
+    const blockedSubcommandMismatch = await readTranscript({ conversationId: convTarget, lastTurns: 1 });
+    assert.equal(blockedSubcommandMismatch.isError, true, "Grant for 'health' must be rejected when calling readTranscript (L39)");
+    assert.match(blockedSubcommandMismatch.text, /subcommand mismatch/);
+
+    // Caller-supplied subcommand override (e.g., passing subcommand:'health' or 'resolve' to readTranscript) must be ignored
+    recordTranscriptHookGrant({ callerConvId: "allowlisted-worker", subcommand: "health", targetConvId: convTarget, mode: "open" });
+    const blockedSubOverride = await readTranscript({ conversationId: convTarget, lastTurns: 1, subcommand: "health" });
+    assert.equal(blockedSubOverride.isError, true, "Caller-supplied subcommand option on readTranscript must not bypass grant binding (Defect 3A)");
+
+    recordTranscriptHookGrant({ callerConvId: "allowlisted-worker", subcommand: "read", targetConvId: convTarget, mode: "open" });
+    const blockedTargetMismatch = await readTranscript({ conversationId: "conv-rich-forensic", lastTurns: 1 });
+    assert.equal(blockedTargetMismatch.isError, true, "Grant bound to convTarget must be rejected when requesting conv-rich-forensic (L39)");
+    assert.match(blockedTargetMismatch.text, /target mismatch/);
+
+    // Grant issued for 'current' must reject explicit cross-session conversationId (Defect 3B)
+    recordTranscriptHookGrant({ callerConvId: "allowlisted-worker", subcommand: "read", targetConvId: "current", mode: "open" });
+    const blockedCurrentWildcard = await readTranscript({ conversationId: "conv-rich-forensic", lastTurns: 1 });
+    assert.equal(blockedCurrentWildcard.isError, true, "Grant for 'current' must reject explicit cross-session conversationId (Defect 3B)");
+    assert.match(blockedCurrentWildcard.text, /target mismatch/);
+
+    // Early validation error in getStepDetail must consume disk grant (Defect 2A)
+    recordTranscriptHookGrant({ callerConvId: convTarget, subcommand: "step", targetConvId: convTarget, mode: "self-only" });
+    const invalidStepRes = await getStepDetail({ conversationId: convTarget, stepIndex: "invalid-selector" });
+    assert.equal(invalidStepRes.isError, true, "Invalid step selector must return error");
+    const reuseAfterInvalidStep = await getStepDetail({ conversationId: convTarget, stepIndex: 1 });
+    assert.equal(reuseAfterInvalidStep.isError, true, "Grant must be consumed even when getStepDetail fails early validation (Defect 2A)");
+
+    // Concurrent Promise.all([getStepDetail, readTranscript]) must not share in-memory grant (Defect 2B)
+    recordTranscriptHookGrant({ callerConvId: convTarget, subcommand: "step", targetConvId: convTarget, mode: "self-only" });
+    const [concStep, concRead] = await Promise.all([
+      getStepDetail({ conversationId: convTarget, stepIndex: 1 }),
+      readTranscript({ conversationId: convTarget, lastTurns: 1 })
+    ]);
+    assert.ok(!concStep.isError, "Authorized getStepDetail in Promise.all must succeed");
+    assert.equal(concRead.isError, true, "Concurrent readTranscript in Promise.all must not reuse getStepDetail's grant (Defect 2B)");
+
+    // Governance mismatch on getStepDetail(--id) must preserve exact governance error (Defect 2C)
+    recordTranscriptHookGrant({ callerConvId: "allowlisted-worker", subcommand: "step", targetConvId: convTarget, mode: "open" });
+    const stepTargetMismatch = await getStepDetail({ conversationId: "conv-rich-forensic", stepIndex: 1 });
+    assert.equal(stepTargetMismatch.isError, true);
+    assert.match(stepTargetMismatch.text, /target mismatch/, "getStepDetail must preserve exact governance error on --id (Defect 2C)");
+
+    // checkContextHealth with external transcriptPath spoofing callerConvId must fail under active restriction (Defect 1A)
+    const spoofedExternalFile = path.join(tempHome, `${convTarget}.jsonl`);
+    fs.writeFileSync(spoofedExternalFile, JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "spoof" }) + "\n", "utf-8");
+    recordTranscriptHookGrant({ callerConvId: convTarget, subcommand: "health", targetConvId: convTarget, mode: "self-only" });
+    const blockedSpoofHealth = await checkContextHealth({ transcriptPath: spoofedExternalFile });
+    assert.equal(blockedSpoofHealth.isError, true, "checkContextHealth with external transcriptPath must fail under active restriction (Defect 1A)");
+
+    //6. Parent resets policy back to OPEN
     recordTranscriptHookGrant({ callerConvId: "parent-owner", subcommand: "access", mode: "open", isMutation: true });
     const unlockRes = runCli(["transcript", "access", "--on", "--json"]);
     assert.equal(unlockRes.status, 0, "Authorized parent transcript access --on must succeed");

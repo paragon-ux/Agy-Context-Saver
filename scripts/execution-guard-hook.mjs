@@ -2212,13 +2212,42 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       };
     }
 
+    let resolvedTargetConvId = targetInfo.targetId || null;
+    if (targetInfo.explicitFile) {
+      if (accessEval.ownerId && !accessEval.isOwner && !isPathInsideDir(targetInfo.explicitFile, getBrainDir())) {
+        return {
+          matched: true,
+          allowed: false,
+          isAccessDenial: true,
+          reason: buildTranscriptAccessDenial({
+            subcommand,
+            mode: accessEval.mode,
+            source: accessEval.source,
+            callerConvId: convId,
+            rosterName: accessEval.rosterName,
+            detail: `'--file' paths outside '${getBrainDir()}' are disabled while a parent transcript access policy is active.`
+          })
+        };
+      }
+      if (isPathInsideDir(targetInfo.explicitFile, getBrainDir())) {
+        const rel = path.relative(
+          tryRealpath(path.resolve(getBrainDir())),
+          tryRealpath(path.resolve(targetInfo.explicitFile))
+        );
+        const firstSeg = rel.split(path.sep)[0];
+        if (firstSeg && firstSeg !== "." && firstSeg !== "..") {
+          resolvedTargetConvId = firstSeg;
+        }
+      }
+    }
+
     return {
       matched: true,
       allowed: true,
       subcommand,
       mode: "open",
       needsReadGrant: true,
-      targetConvId: targetInfo.targetId || null
+      targetConvId: resolvedTargetConvId
     };
   }
 

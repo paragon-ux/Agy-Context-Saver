@@ -1,6 +1,6 @@
 {
   "name": "agy-context-saver",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "PreToolUse execution hook and transcript CLI (agy-context) for Google Antigravity, paired with RTK",
   "main": "lib/transcript-core.mjs",
   "bin": {

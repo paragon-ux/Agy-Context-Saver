@@ -1,6 +1,6 @@
 # Architecture & Internals
 
-`Agy-Context-Saver` (`v2.0.0`) pairs a `PreToolUse` hook (`scripts/execution-guard-hook.mjs`) with a streaming transcript engine (`lib/transcript-core.mjs`, `bin/agy-context.mjs`) and **RTK (`>= 1.1.0`)**.
+`Agy-Context-Saver` (`v2.0.x`) pairs a `PreToolUse` hook (`scripts/execution-guard-hook.mjs`) with a streaming transcript engine (`lib/transcript-core.mjs`, `bin/agy-context.mjs`) and **RTK (`>= 1.1.0`)**.
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
@@ -13,7 +13,7 @@
 - Searches and lists workspace files (`rtk grep`, `rtk find`, `rtk ls`, `rtk tree`, `rtk read`).
 - Filters command output to errors or summaries (`rtk err`, `rtk summary`).
 
-### Agy-Context-Saver (`v2.0.0`)
+### Agy-Context-Saver (`v2.0.x`)
 - Enforces Reactive Wakeup backoff on `manage_task` and `schedule`, backed by a 5-strike `force_ask` circuit breaker.
 - Bounds workspace `read_file` slices (`<= 150` lines, or explicit `1..TotalLines` reads on files `<= 800` lines and `<= 45 KiB`).
 - Protects `.system_generated/` and the state directory (`getStateDir()`, `~/.local/state/agy-context-saver`).
@@ -74,8 +74,8 @@ To ensure a parent session running `agy-context transcript access --off` never l
 2. **Top-level `USER_INPUT` bypass and child `sender=` binding:** Top-level user sessions (`Step 0` is `USER_INPUT` with no `<SYSTEM_MESSAGE>` `sender=<parentConvId>` header) bypass foreign parent restrictions, while child subagents and `/swarm` workers bind to their `sender=<parentConvId>` parent policy.
 3. **`agy-context status` reporting:** `agy-context status` displays the active policy mode, owner session ID, allow/deny lists, and remaining TTL.
 
-### 4. Single-Use Capability Grants
-When `PreToolUse` authorizes a transcript read or policy mutation while a restriction is active, it writes a 10-second single-use token (`lastHookGrant` or `lastAccessMutationGrant`) to `<stateDir>/transcript-access.json`. `verifyTranscriptCoreAccess()` and `manageTranscriptAccessPolicy()` in `lib/transcript-core.mjs` consume and clear the token on first use, blocking direct `node bin/agy-context.mjs` invocations, library imports, and chained calls.
+### 4. Single-Use Capability Grants & Path Containment
+When `PreToolUse` authorizes a transcript read or policy mutation while a restriction is active, it writes a 10-second single-use token to `<stateDir>/transcript-access.json`: read grants (`lastHookGrant`) bind `callerConvId`, canonical `subcommand`, `targetConvId`, and `mode`, while policy mutation grants (`lastAccessMutationGrant`) bind `callerConvId`. `verifyTranscriptCoreAccess()` and `manageTranscriptAccessPolicy()` in `lib/transcript-core.mjs` verify those fields, clear the disk token on verification, and clear the in-memory grant synchronously upon path resolution (before async stream I/O begins) and on any early error, while `resolveTranscriptPath()` independently restricts `--file` to `<brainDir>/<callerConvId>` in `self-only` mode and `<brainDir>` under any active policy or launch restriction. Together, the hook and CLI provide application-layer defense-in-depth (not an OS-kernel sandbox).
 
 ---
 

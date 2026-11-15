@@ -13,9 +13,15 @@ export const RTK_VERSION = "v1.1.0";
 export const MIN_RTK_VERSION = "1.1.0";
 export const MIN_COMPATIBLE_RTK_VERSION = MIN_RTK_VERSION;
 
-// Pinned SHA-256 checksums per release asset. Empty until verified v1.1.0 hashes are pinned;
-// ensureRtkInstalled fails closed with manual install instructions when an asset hash is absent.
-export const RTK_CHECKSUMS = {};
+// Pinned SHA-256 checksums per release asset from https://github.com/rtk-ai/rtk/releases/download/v1.1.0/checksums.txt;
+// ensureRtkInstalled verifies the downloaded archive before extraction and fails closed on any mismatch.
+export const RTK_CHECKSUMS = {
+  "rtk-x86_64-pc-windows-msvc.zip": "c9a8f7a8bad471e64a343314168f38d2399a06fa327cdf5772fb0e645d99ea6f",
+  "rtk-aarch64-apple-darwin.tar.gz": "8da773b0954cf90b115ec95c4e4eb420f04c39de233c5db102246a6caf073ba7",
+  "rtk-x86_64-apple-darwin.tar.gz": "1e23e8b9542b58428e6409c49b1c3fb92c4c0d5125da72e80f002a46086a6c20",
+  "rtk-x86_64-unknown-linux-musl.tar.gz": "9454ad1b9489daa57ab0a9f4ebe2faaf4dc82b8a0f26c9e5135151abd7c9378d",
+  "rtk-aarch64-unknown-linux-gnu.tar.gz": "a5c00c3ab0129884bcb757d348afc1a650efa0f4f0769da97c341f28f89719ed"
+};
 
 export function isCompatibleRtkVersion(versionStr) {
   if (!versionStr || typeof versionStr !== "string") return false;

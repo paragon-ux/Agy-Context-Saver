@@ -83,7 +83,7 @@ agy-context transcript access --on
 To scope an individual child at launch without changing the cohort-wide CLI policy, place a directive on the **first non-empty line** of a `define_subagent` `SystemPrompt`, `invoke_subagent` `Prompt`, or `/swarm` `brief`:
 
 - `[agy-transcript-access: deny]`: blocks all `agy-context transcript` commands for that child.
-- `[agy-transcript-access: self-only]`: restricts that child to its own `<callerConvId>` transcript (disabling `list`/`ls` and `--file`).
+- `[agy-transcript-access: self-only]`: restricts that child to its own `<callerConvId>` transcript (disabling `list`/`ls` and cross-session `--file` paths outside `<brainDir>/<callerConvId>`).
 - `[agy-transcript-access: allow]`: allows transcript reads for that child even when the cohort default mode is `deny` or `self-only` (unless overridden by an explicit CLI `--deny`).
 
 The lineage parser checks only the first non-empty line of the child's initial assignment (`Step 0` / `Step 1`), ignoring directives mentioned in later paragraphs or code blocks.
@@ -102,7 +102,7 @@ The lineage parser checks only the first non-empty line of the child's initial a
 
 - **1-hour TTL and parent-keyed store:** Policies live under `policies[ownerId]` in `<stateDir>/transcript-access.json` with a 3600-second default TTL.
 - **Top-level session bypass:** A root user conversation (`Step 0` is `USER_INPUT` without a `<SYSTEM_MESSAGE>` `sender=<parentConvId>` header) is never restricted by another session's policy.
-- **Single-use capability grants:** When a restriction is active, `PreToolUse` writes a 10-second single-use capability token (`lastHookGrant` or `lastAccessMutationGrant`) to `<stateDir>/transcript-access.json`. `lib/transcript-core.mjs` verifies and clears the token on first use, blocking direct `node bin/agy-context.mjs`, library imports, and chained commands.
+- **Single-use capability grants and `--file` containment:** When a restriction is active, `PreToolUse` writes a 10-second single-use capability token to `<stateDir>/transcript-access.json`: read grants (`lastHookGrant`) bind `callerConvId`, canonical `subcommand`, `targetConvId`, and `mode`, while policy mutation grants (`lastAccessMutationGrant`) bind `callerConvId`. `lib/transcript-core.mjs` verifies all bound fields, clears the disk token on verification, clears the in-memory grant synchronously upon path resolution (before async stream I/O begins) and on any early error, and independently restricts `--file` to `<brainDir>/<callerConvId>` in `self-only` mode and `<brainDir>` under any active policy or launch restriction. These controls provide application-layer `PreToolUse` and CLI defense-in-depth rather than an OS-kernel sandbox.
 - **Child lifecycle and file protection:** Restricted children cannot run `setup`, `install`, `uninstall`, or `restore-backups`, and cannot modify `~/.gemini/config/plugins/agy-context-saver/`, `~/.gemini/config/scripts/execution-guard-hook.mjs`, `hooks.json`, or `<stateDir>/transcript-access.json`.
 
 ---

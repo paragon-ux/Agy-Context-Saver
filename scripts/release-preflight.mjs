@@ -44,6 +44,26 @@ if (pkg) {
     errors.push(`package.json version is not a valid semver release version: ${JSON.stringify(pkg.version)}.`);
   }
 
+  const pluginText = readText('plugin.json');
+  if (pluginText) {
+    try {
+      const pluginManifest = JSON.parse(pluginText);
+      if (pluginManifest.name !== pkg.name) {
+        errors.push(`plugin.json name ${JSON.stringify(pluginManifest.name)} does not match package.json name ${JSON.stringify(pkg.name)}.`);
+      }
+      if (pluginManifest.version !== pkg.version) {
+        errors.push(`plugin.json version ${JSON.stringify(pluginManifest.version)} does not match package.json version ${JSON.stringify(pkg.version)}.`);
+      }
+    } catch (error) {
+      errors.push(`plugin.json is not valid JSON: ${error.message}`);
+    }
+  }
+
+  const changelogText = readText('CHANGELOG.md');
+  if (changelogText && pkg.version && !changelogText.includes(`## [${pkg.version}]`)) {
+    errors.push(`CHANGELOG.md is missing a release heading for current version "## [${pkg.version}]".`);
+  }
+
   const requiredMetadata = [
     ['repository.url', pkg.repository?.url],
     ['homepage', pkg.homepage],

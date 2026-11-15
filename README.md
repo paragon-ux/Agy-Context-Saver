@@ -22,7 +22,7 @@ The repository ships four components:
 
 - **Node.js:** `>= 22.0.0`
 - **Google Antigravity:** Antigravity 2.0+ (Desktop IDE or `agy` CLI)
-- **RTK:** `>= 1.1.0` on `PATH` (or provisioned into the plugin `bin/` directory during setup)
+- **RTK:** `>= 1.1.0` (`brew install rtk`, `cargo install --locked rtk`, or downloaded automatically into `bin/` during `agy-context setup` with pinned SHA-256 verification)
 
 ### Install and verify
 
@@ -36,6 +36,8 @@ npm run setup
 # Check installation and active policy status
 agy-context status
 ```
+
+> **Upgrading from v1.x:** Running `agy-context setup` automatically removes legacy `mcp_config.json` entries, sweeps stale `~/.gemini/antigravity/mcp/agy-context-saver*` schema caches, and replaces the retired v1.x MCP server with the on-demand `agy-context` CLI and updated `PreToolUse` hook.
 
 To remove the plugin link, hook entries, and CLI shims:
 

@@ -5,6 +5,18 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-11-15
+
+### Added
+- **Pinned `rtk v1.1.0` Release Checksums (`scripts/provision-rtk.mjs`, `tests/test-rtk-ledger-fresh-install.mjs`)**: Pinned verified SHA-256 digests from upstream `rtk v1.1.0` `checksums.txt` across all 5 supported platform archives (`win32-x64`, `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`) so clean installs without a pre-installed `rtk` binary can automatically download and verify `rtk v1.1.0` fail-closed.
+
+### Security
+- **Operation-Bound, Single-Invocation Capability Grants (`lib/transcript-core.mjs`, `bin/agy-context.mjs`, `scripts/execution-guard-hook.mjs`)**: Bound `verifyTranscriptCoreAccess()` to canonical subcommand (`read`, `query`, `step`, `health`, `list`) and recorded `targetConvId`, and cleared the in-memory `processVerifiedGrant` synchronously upon path resolution (before async stream I/O begins) and on any early error (`L39`) so grants cannot be reused within the same process, shared across concurrent `Promise.all` calls, or repurposed across mismatched subcommands or conversation targets.
+- **Independent `--file` Brain-Directory Containment (`lib/transcript-core.mjs`, `scripts/execution-guard-hook.mjs`)**: Enforced independent `isContainedInDir()` checks on `--file` (`explicitFile`) inside `resolveTranscriptPath()` (`<brainDir>/<callerConvId>` in `self-only` mode and `<brainDir>` whenever any parent access policy or first-line launch restriction is active) and updated `extractConvId()` to resolve conversation folder IDs relative to `getBrainDir()` (`L38`).
+
+### Changed
+- **Documentation & Release Hygiene (`README.md`, `SECURITY.md`, `docs/installation.md`, `docs/governance.md`, `docs/architecture.md`, `docs/plans/LEDGER.md`, `scripts/release-preflight.mjs`)**: Added a `v1.x` to `v2.0` migration note and explicit `RTK >= 1.1.0` prerequisite details to `README.md` (`L37`), clarified application-layer `PreToolUse`/CLI defense-in-depth boundaries vs. OS-kernel sandboxing and `--id` vs. `--file` containment rules (`L40`), and enforced `plugin.json` / `package.json` / `CHANGELOG.md` version parity in `scripts/release-preflight.mjs`.
+
 ## [2.0.0] - 2026-11-14
 
 ### Added

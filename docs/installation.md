@@ -8,6 +8,7 @@
 
 - **Node.js**: Version 22.0.0 or later (`>=22` required; tested on Node 22 and 24 across Windows, macOS, and Linux).
 - **Google Antigravity**: Antigravity 2.0+ (Windows, macOS, or Linux).
+- **RTK (`>= 1.1.0`)**: Either pre-installed on `PATH` (`brew install rtk`, `cargo install --locked rtk`, or the official install script) or automatically downloaded into `bin/` during `agy-context setup` and verified against pinned `rtk v1.1.0` SHA-256 release checksums.
 
 ---
 
@@ -62,7 +63,7 @@ You can also run the platform installer scripts directly:
 
 ## Health Auditing & Verification
 
-Audit all v2.0.0 integration layers from your shell:
+Audit all v2.0.x integration layers from your shell:
 
 ```bash
 agy-context status

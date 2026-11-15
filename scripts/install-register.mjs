@@ -23,6 +23,13 @@ import { formatTranscriptAccessStatus } from "../lib/transcript-core.mjs";
 const fsPromises = fs.promises;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
+const PACKAGE_VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.0.1";
+  } catch {
+    return "2.0.1";
+  }
+})();
 
 const homeDir = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
 const geminiConfigDir = path.join(homeDir, ".gemini", "config");
@@ -455,9 +462,9 @@ export async function runInstall(options = {}) {
     if (existing.details.cliShim.exists) {
       log(`   [OK] CLI Shims (agy-context): Installed in ${antigravityBinDir}`);
     }
-    log("\nRe-verifying and synchronizing to v2.0.0...");
+    log(`\nRe-verifying and synchronizing to v${PACKAGE_VERSION}...`);
   } else {
-    log("Fresh installation of Agy-Context-Saver v2.0.0...");
+    log(`Fresh installation of Agy-Context-Saver v${PACKAGE_VERSION}...`);
   }
 
   // 0. Pre-flight Validation: Verify configuration directory write access
@@ -779,7 +786,7 @@ export {
 
 function printCliHelp() {
   console.log(`
-Agy-Context-Saver Registration & Lifecycle Engine (v2.0.0)
+Agy-Context-Saver Registration & Lifecycle Engine (v${PACKAGE_VERSION})
 
 Usage:
   node scripts/install-register.mjs [command/option]
@@ -791,7 +798,7 @@ Commands & Options:
   --restore-backups            Restore original configuration backup files (*.bak) (standalone or during uninstall)
   --allow-degraded             Allow installation to proceed even if RTK optimizer provisioning fails
   --help, -h, help             Show this help message
-  (no arguments)               Synchronize and verify v2.0.0 CLI-first installation
+  (no arguments)               Synchronize and verify v${PACKAGE_VERSION} CLI-first installation
 `);
 }
 
