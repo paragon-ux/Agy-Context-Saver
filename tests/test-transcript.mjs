@@ -400,6 +400,36 @@ try {
     proc.kill();
     console.log("✓ Deprecated MCP compatibility wrapper cleanly delegates to v2.0.0 lib/transcript-core.mjs");
   }
+
+  console.log("\n--- 7. Intuitive CLI Aliases, Positionals & Step Slicing ---");
+  {
+    const convTarget = "conv-batch-range";
+    const grepRes = runCli(["transcript", "grep", "FULL_ARGS_END_MARKER_OK", "--id", convTarget, "--include-tools", "--summary"]);
+    assert.equal(grepRes.status, 0, "transcript grep positional alias must succeed");
+    assert.ok(grepRes.stdout.includes("Step 1"), "transcript grep --summary must output matched steps");
+
+    const statsRes = runCli(["transcript", "stats", convTarget]);
+    assert.equal(statsRes.status, 0, "transcript stats positional <id> alias must succeed");
+    assert.ok(statsRes.stdout.includes("Health") || statsRes.stdout.includes("HEALTHY"), "transcript stats must output health report");
+
+    const toolsRes = runCli(["transcript", "tools", "--id", convTarget, "--start", "1", "--end", "2"]);
+    assert.equal(toolsRes.status, 0, "transcript tools alias must succeed");
+    assert.ok(toolsRes.stdout.includes("CommandLine"), "transcript tools must extract tool_args");
+
+    const outlineRes = runCli(["transcript", "read", "--id", convTarget, "--outline"]);
+    assert.equal(outlineRes.status, 0, "transcript read --outline must succeed");
+    assert.ok(outlineRes.stdout.includes("Step 1"), "transcript read --outline must delegate to summary outline");
+
+    const stepTailRes = runCli(["transcript", "step", "1-2", "--id", convTarget, "--field", "tool_args", "--tail", "5", "--full"]);
+    assert.equal(stepTailRes.status, 0, "transcript step positional selector with --tail and --full must succeed");
+    assert.ok(stepTailRes.stdout.includes("Step 1") && stepTailRes.stdout.includes("Step 2"), "step 1-2 must return both steps");
+
+    const listRes = runCli(["transcript", "list", "--limit", "5", "--json"]);
+    assert.equal(listRes.status, 0, "transcript list --json must succeed");
+    const listJson = JSON.parse(listRes.stdout);
+    assert.ok(listJson.total >= 2 && Array.isArray(listJson.conversations), "transcript list must list conversations in brainDir");
+    console.log("✓ grep/stats/tools/outline/list aliases, positional selectors, and step --tail/--head/--full verified");
+  }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });
 }

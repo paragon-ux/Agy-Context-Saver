@@ -399,7 +399,12 @@ console.log("\n--- Group D: Quote/Heredoc Shell Parser & agy-context CLI Exempti
     `node <<'EOF'\nfs.readFileSync("${validBrainTranscript}", "utf8")\nEOF`,
     `xargs head -n 2 <<'EOF'\n${validBrainTranscript}\nEOF`,
     `bash <<'EOF'\ncat "${validBrainTranscript}"\nEOF`,
-    `echo Y2F0IC9ldGMvcGFzc3dkCg== | base64 -d | bash`
+    `echo Y2F0IC9ldGMvcGFzc3dkCg== | base64 -d | bash`,
+    `python3 -c "import base64; p=base64.b64decode('${Buffer.from(validBrainTranscript).toString("base64")}').decode(); print(open(p).readline())"`,
+    `head -n 1 "$(echo '${Buffer.from(validBrainTranscript).toString("base64")}' | base64 -d)"`,
+    `node -e "console.log(require('fs').readFileSync(Buffer.from('${Buffer.from(validBrainTranscript).toString("base64")}','base64').toString(),'utf8').slice(0,60))"`,
+    `node -e "console.log(require('fs').readFileSync(Buffer.from('${Buffer.from(validBrainTranscript).toString("hex")}','hex').toString(),'utf8').slice(0,60))"`,
+    `echo '${Buffer.from(validBrainTranscript).toString("base64")}' | base64 -d | xargs head -n 1`
   ]) {
     const outBypass = runHook({
       toolCall: { name: "run_command", args: { CommandLine: dangerous, WaitMsBeforeAsync: 5000 } }
@@ -441,9 +446,14 @@ console.log("\n--- Group E: Task Polling Backoff, Watchdog & Benchmark Mutation 
   // kill and send_input always allowed immediately
   assert.equal(runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "kill", TaskId: "t1" } } }).decision, "allow");
 
-  // Short schedule polling timer denied; non-polling reminder allowed
+  // Short schedule polling timer denied; non-polling reminder allowed; swarm polling one-shot denied; repeated 60s task watchdog denied
   resetState();
   assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 5, Prompt: "Check status of task-1", TimerCondition: "task-1" } } }).decision, "deny");
+  assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 60, Prompt: "Check status of Clarity Wave 2 swarm", TimerCondition: "any" } } }).decision, "deny");
+  assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { CronExpression: "*/3 * * * *", IsDaemon: true, Prompt: "[monitor] tick: check the swarm for a stall" } } }).decision, "allow");
+  assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-1", TimerCondition: "task-1" } } }).decision, "allow");
+  assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 60, Prompt: "Check status of task-1", TimerCondition: "task-1" } } }).decision, "deny", "Second task watchdog must require Level 2 backoff (>= 75s), blocking repeated 60s timers");
+  assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 75, Prompt: "Check status of task-1", TimerCondition: "task-1" } } }).decision, "allow");
   assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 10, Prompt: "Remind me about coffee" } } }).decision, "allow");
 
   // LH-09 Benchmark protection on edit_file, write_file, relative paths, and shell redirection/rm
@@ -475,6 +485,62 @@ console.log("\n--- Group E: Task Polling Backoff, Watchdog & Benchmark Mutation 
   });
   assert.equal(dedupSecond.decision, "allow", "Duplicate hook invocation for same toolCall.id must replay allow without double-counting");
   console.log("✓ Backoff circuit breaker, schedule watchdog, dual-hook deduplication, and 2.0 edit_file/write_file LH-09 protection verified");
+
+  console.log("\n--- Group F: Wave 1 & Wave 2 Adversarial Live Remediations ---");
+  const emptyBinEnv = {
+    ...process.env,
+    PATH: `${path.dirname(process.execPath)}${path.delimiter}${path.join(hermetic.profileDir, "rtk-shim-bin")}`
+  };
+  // 1. rg -U, piped rg | sed, and bash -c "rg ... | awk" when host rg is absent
+  const rgUOut = runHook(
+    { conversationId: "conv-wave-fixes", toolCall: { name: "run_command", args: { CommandLine: 'rg -U "try" scripts/' } } },
+    emptyBinEnv
+  );
+  assert.equal(rgUOut.decision, "allow");
+  assert.ok(!rgUOut.overwrite?.CommandLine?.includes("-U"), "rg -U flag must be stripped or fallback cleanly");
+
+  const rgPipeOut = runHook(
+    { conversationId: "conv-wave-fixes", toolCall: { name: "run_command", args: { CommandLine: "rg -n 'catch' scripts/ | sed -n '1,5p'" } } },
+    emptyBinEnv
+  );
+  assert.equal(rgPipeOut.decision, "allow");
+  assert.match(rgPipeOut.overwrite?.CommandLine || "", /grep -r -E\b/, "Piped rg must fallback to grep -r -E when host rg is absent");
+
+  const rgBashCOut = runHook(
+    { conversationId: "conv-wave-fixes", toolCall: { name: "run_command", args: { CommandLine: "bash -c \"rg -n 'throw' scripts/ | awk -F: '{print \\$1}'\"" } } },
+    emptyBinEnv
+  );
+  assert.equal(rgBashCOut.decision, "allow");
+  assert.match(rgBashCOut.overwrite?.CommandLine || "", /grep -r -E\b/, "bash -c rg must fallback to grep -r -E when host rg is absent");
+
+  // 2. Read-only node -e mentioning benchmark string literal allowed
+  const nodeBenchReadOnly = runHook({
+    conversationId: "conv-wave-fixes",
+    toolCall: { name: "run_command", args: { CommandLine: 'node -e \'const target = "scratch/benchmarks/probe.json"; console.log(target);\'' } }
+  });
+  assert.equal(nodeBenchReadOnly.decision, "allow", "Read-only node -e string literal mentioning benchmark path must be allowed");
+
+  // 3. Raw cat/head on tasks/*.log and edit_file on transcript.jsonl blocked
+  const rawTaskLog = runHook({
+    conversationId: "conv-wave-fixes",
+    toolCall: { name: "run_command", args: { CommandLine: "head -n 5 /tmp/brain/conv/.system_generated/tasks/task-99.log" } }
+  });
+  assert.equal(rawTaskLog.decision, "deny", "Raw head on .system_generated/tasks/*.log must be blocked");
+
+  const editTranscript = runHook({
+    conversationId: "conv-wave-fixes",
+    toolCall: { name: "edit_file", args: { Path: "/tmp/brain/conv/.system_generated/logs/transcript.jsonl", Target: "a", Replacement: "b" } }
+  });
+  assert.equal(editTranscript.decision, "deny", "Native edit_file on .system_generated/logs/transcript.jsonl must be blocked");
+
+  // 4. Base64 path-decoding smuggling blocked
+  const b64Path = Buffer.from("/tmp/brain/conv/.system_generated/logs/transcript.jsonl").toString("base64");
+  const b64Smuggle = runHook({
+    conversationId: "conv-wave-fixes",
+    toolCall: { name: "run_command", args: { CommandLine: `head -n 1 "$(echo ${b64Path} | base64 -d)"` } }
+  });
+  assert.equal(b64Smuggle.decision, "deny", "Base64 path-decoding smuggling of transcript.jsonl must be blocked");
+  console.log("✓ rg -U/pipe/bash -c fallbacks, read-only node -e benchmark literal, tasks/*.log & edit_file guards, and Base64 smuggling defense verified");
 }
 
 hermetic.cleanup();

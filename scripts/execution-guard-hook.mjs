@@ -177,10 +177,7 @@ function saveSessionState(convId = "global", entry, { updatePollTime = true } = 
   } catch {}
 }
 
-/**
- * Checks if target path or shell operand references Antigravity internal state or obfuscated smuggling.
- */
-function isProtectedInternalState(targetPath) {
+function matchesRawProtectedInternalState(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
   if (/\.system_generated(?:$|[\/\\])/i.test(targetPath)) return true;
   if (/(?:^|[\/\\'"`\s=:])\.system_gen/i.test(targetPath)) return true;
@@ -190,6 +187,77 @@ function isProtectedInternalState(targetPath) {
     return true;
   }
   if (/\bbase64\b[\s\S]*\|\s*(?:[^\s|]+\/)?(?:ba|z|da|a)?sh\b/i.test(targetPath)) return true;
+  return false;
+}
+
+/**
+ * Checks if target path or shell operand references Antigravity internal state or obfuscated smuggling
+ * (including runtime Base64, URL-safe Base64, Hex, escape, or char-code path decoding).
+ */
+function isProtectedInternalState(targetPath) {
+  if (!targetPath || typeof targetPath !== "string") return false;
+  if (matchesRawProtectedInternalState(targetPath)) return true;
+
+  // Decode candidate Base64 / URL-safe Base64 substrings (length >= 16) to block runtime path decoding
+  // e.g. python3 b64decode(...), node Buffer.from(..., 'base64'), $(echo <b64> | base64 -d)
+  const b64Matches = targetPath.match(/[A-Za-z0-9+/_-]{16,}={0,2}/g);
+  if (b64Matches) {
+    for (const rawTok of b64Matches) {
+      const norm = rawTok.replace(/-/g, "+").replace(/_/g, "/");
+      for (const offset of [0, 1, 2]) {
+        const slice = norm.slice(offset);
+        if (slice.length < 16) continue;
+        try {
+          const decoded = Buffer.from(slice, "base64").toString("utf-8");
+          if (
+            matchesRawProtectedInternalState(decoded) ||
+            /\.system_gen|transcript(?:_full)?\.jsonl/i.test(decoded)
+          ) {
+            return true;
+          }
+        } catch {}
+      }
+    }
+  }
+
+  // Decode candidate Hex substrings (length >= 24) to block Buffer.from(..., 'hex') / bytes.fromhex(...) / xxd -r
+  const hexMatches = targetPath.match(/[0-9a-fA-F]{24,}/g);
+  if (hexMatches) {
+    for (const rawHex of hexMatches) {
+      for (const offset of [0, 1]) {
+        const slice = rawHex.slice(offset);
+        const evenSlice = slice.length % 2 === 0 ? slice : slice.slice(0, -1);
+        if (evenSlice.length < 24) continue;
+        try {
+          const decoded = Buffer.from(evenSlice, "hex").toString("utf-8");
+          if (
+            matchesRawProtectedInternalState(decoded) ||
+            /\.system_gen|transcript(?:_full)?\.jsonl/i.test(decoded)
+          ) {
+            return true;
+          }
+        } catch {}
+      }
+    }
+  }
+
+  // Decode \xNN hex escapes or String.fromCharCode / chr() integer sequences
+  if (/\\x[0-9a-fA-F]{2}/.test(targetPath)) {
+    const unescaped = targetPath.replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+    if (matchesRawProtectedInternalState(unescaped) || /\.system_gen|transcript(?:_full)?\.jsonl/i.test(unescaped)) {
+      return true;
+    }
+  }
+  if (/(?:fromCharCode|\bchr\s*\(|\bbytes\s*\(\s*\[)/i.test(targetPath)) {
+    const nums = targetPath.match(/\b(?:3[2-9]|[4-9]\d|1[01]\d|12[0-6])\b/g);
+    if (nums && nums.length >= 10) {
+      const decoded = nums.map((n) => String.fromCharCode(Number(n))).join("");
+      if (matchesRawProtectedInternalState(decoded) || /\.system_gen|transcript(?:_full)?\.jsonl/i.test(decoded)) {
+        return true;
+      }
+    }
+  }
+
   return false;
 }
 
@@ -1185,7 +1253,7 @@ const SEARCH_VALUE_FLAGS = new Set([
  * Extracts inspectable path tokens for a segment, ignoring benign echo/printf text
  * and ignoring literal search patterns on grep/rg commands (inspecting only target paths).
  */
-function getInspectableTextForSegment(seg) {
+function getInspectableTextForSegment(seg, opts = {}) {
   const { body } = splitEnvPrefix(seg.text);
   const allTokens = tokenizeShellWordsDetailed(seg.text);
   const detailed = body ? tokenizeShellWordsDetailed(body) : allTokens;
@@ -1194,8 +1262,9 @@ function getInspectableTextForSegment(seg) {
   const cmd0 = normalizeCmdName(detailed[0].value);
   const cmd1 = detailed[1] ? normalizeCmdName(detailed[1].value) : "";
 
-  // Benign echo / printf: only inspect redirect targets (never printed prose)
-  if (cmd0 === "echo" || cmd0 === "printf" || cmd0 === "write-output") {
+  // Benign standalone echo / printf: only inspect redirect targets (never printed prose),
+  // UNLESS piped into a downstream command (e.g. `echo <b64> | base64 -d | xargs head`)
+  if (!opts.hasDownstreamPipe && (cmd0 === "echo" || cmd0 === "printf" || cmd0 === "write-output")) {
     const redirects = extractRedirectTargets(allTokens);
     return redirects.join(" ");
   }
@@ -1294,7 +1363,16 @@ function collectInspectableTexts(segments, depth = 0) {
   const texts = [];
   for (let idx = 0; idx < segments.length; idx++) {
     const seg = segments[idx];
-    const inspectable = getInspectableTextForSegment(seg);
+    const segCmd = getSegmentCmdName(seg);
+    const pipelineCmds = [segCmd];
+    for (let j = idx + 1; j < segments.length; j++) {
+      const nextSeg = segments[j];
+      if (nextSeg.leadingSep !== "|" && nextSeg.leadingSep !== "|&") break;
+      pipelineCmds.push(getSegmentCmdName(nextSeg));
+    }
+    const downstreamCmds = pipelineCmds.slice(1);
+
+    const inspectable = getInspectableTextForSegment(seg, { hasDownstreamPipe: downstreamCmds.length > 0 });
     if (inspectable) texts.push(inspectable);
 
     const wrapped = extractWrappedScriptInfo(seg.text);
@@ -1309,14 +1387,6 @@ function collectInspectableTexts(segments, depth = 0) {
       }
     }
 
-    const segCmd = getSegmentCmdName(seg);
-    const pipelineCmds = [segCmd];
-    for (let j = idx + 1; j < segments.length; j++) {
-      const nextSeg = segments[j];
-      if (nextSeg.leadingSep !== "|" && nextSeg.leadingSep !== "|&") break;
-      pipelineCmds.push(getSegmentCmdName(nextSeg));
-    }
-    const downstreamCmds = pipelineCmds.slice(1);
     if (segCmd === "base64" && downstreamCmds.some((c) => SHELL_INTERPRETERS.has(c) || CODE_INTERPRETERS.has(c))) {
       texts.push("base64 | sh");
     }
@@ -1366,11 +1436,23 @@ const RG_GREP_ZERO_ARG_FLAGS = new Map([
   ["-x", "-x"], ["--line-regexp", "-x"],
   ["-F", "-F"], ["--fixed-strings", "-F"],
   ["-E", "-E"], ["--extended-regexp", "-E"],
+  ["-P", "-P"], ["--pcre2", "-P"],
+  ["-a", "-a"], ["--text", "-a"],
+  ["-0", "-Z"], ["--null", "-Z"],
   ["-H", "-H"], ["--with-filename", "-H"],
-  ["-h", "-h"], ["--no-filename", "-h"],
+  ["-h", "-h"], ["--no-filename", "-h"], ["-I", "-h"],
   ["-q", "-q"], ["--quiet", "-q"],
   ["-s", "-s"], ["--no-messages", "-s"],
   ["-o", "-o"], ["--only-matching", "-o"]
+]);
+
+const RG_NOOP_FLAGS = new Set([
+  "--no-heading", "--heading", "-p", "--pretty", "--line-buffered",
+  "-U", "--multiline", "--multiline-dotall",
+  "-u", "-uu", "-uuu", "--unrestricted",
+  "--no-ignore", "--no-ignore-vcs", "--no-ignore-parent", "--no-ignore-global",
+  "--hidden", "-.", "--column", "--vimgrep", "--stats", "--json",
+  "--passthru", "--passthrough", "--no-config", "--one-file-system", "--sort-files"
 ]);
 
 const RG_GREP_VALUE_FLAGS = new Map([
@@ -1448,13 +1530,13 @@ function rewriteRtkRgSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false }
         hasFollow = true;
         continue;
       }
-      if (val === "--no-heading" || val === "--heading" || val === "-p" || val === "--pretty" || val === "--line-buffered") {
+      if (RG_NOOP_FLAGS.has(val)) {
         continue;
       }
       if (RG_GREP_ZERO_ARG_FLAGS.has(val)) {
         const mapped = RG_GREP_ZERO_ARG_FLAGS.get(val);
         if (mapped === "-i") hasIgnoreCase = true;
-        if (mapped === "-E") hasExtended = true;
+        if (mapped === "-E" || mapped === "-P") hasExtended = true;
         if (mapped === "-F") hasFixed = true;
         grepFlags.push(mapped);
         continue;
@@ -1505,8 +1587,8 @@ function rewriteRtkRgSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false }
         continue;
       }
 
-      // Attached short flags like -in, -ni, -lw, -nS (exclude -r which is --replace in rg!)
-      if (/^-[inlcvwxFEHhqsoSL]+$/.test(val)) {
+      // Attached short flags like -in, -ni, -lw, -nS, -nU (exclude -r which is --replace in rg!)
+      if (/^-[inlcvwxFEHhqsoSLPaUup]+$/.test(val)) {
         let clean = "-";
         for (const ch of val.slice(1)) {
           if (ch === "S") {
@@ -1517,8 +1599,11 @@ function rewriteRtkRgSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false }
             hasFollow = true;
             continue;
           }
+          if (ch === "U" || ch === "u" || ch === "p") {
+            continue;
+          }
           if (ch === "i") hasIgnoreCase = true;
-          if (ch === "E") hasExtended = true;
+          if (ch === "E" || ch === "P") hasExtended = true;
           if (ch === "F") hasFixed = true;
           clean += ch;
         }
@@ -1731,6 +1816,13 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
 
   const rtkMatch = effMatchTarget.match(/^((?:["']?[^\s"']*[/\\])?rtk(?:\.exe|\.cmd|\.bat)?["']?\s+)([\s\S]+)$/i);
   if (!rtkMatch) {
+    // When host `rg` is absent, also rewrite bare `rg` in pipelines or `bash -c` subshells to `grep`/`find`
+    if (!rgAvailable && /^rg(?:\.exe)?(?=\s|$)/i.test(effMatchTarget)) {
+      const mapped = rewriteRtkRgSegment("", effMatchTarget, { inPipeline });
+      if (mapped !== effMatchTarget) {
+        return `${effEnvPrefix}${mapped}`;
+      }
+    }
     return trimmedEff;
   }
 
@@ -1868,6 +1960,24 @@ function isTaskPollSchedule(args = {}) {
 }
 
 /**
+ * Detects one-shot `schedule` timers used to poll a `/swarm` or subagent instead of
+ * relying on `swarm_wait` or native Reactive Wakeup.
+ * Exempts the dedicated `swarm_monitor` daemon cron (`CronExpression` + `IsDaemon: true`).
+ */
+function isSwarmPollSchedule(args = {}) {
+  const isDaemon = args.IsDaemon === true || args.isDaemon === true;
+  const cron = String(args.CronExpression || args.cronExpression || "").trim();
+  if (isDaemon && cron) return false;
+
+  const prompt = String(args.Prompt || args.prompt || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+  const cond = String(args.TimerCondition || args.timerCondition || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+  return (
+    /\b(?:swarm|subagent|subagents|squad|board)\b/i.test(prompt) ||
+    (cond === "any" && /\b(?:check|status|poll|monitor|wait|worker|lead|auditor)\b/i.test(prompt))
+  );
+}
+
+/**
  * Denies reading the log of an actively RUNNING task: records the denial, trips the circuit
  * breaker at 5 cumulative denials, otherwise answers with the Proportional Backoff message.
  */
@@ -1960,7 +2070,10 @@ try {
     respond({ decision: "allow" });
   }
 
-  isGovernedTool = true;
+  // Only pre-classify as governed before JSON.parse when the tool name field itself matches a governed tool
+  isGovernedTool = /"(?:name|tool_name)"\s*:\s*"(?:run_command|read_file|view_file|read_many_files|grep_search|find_by_name|list_dir|manage_task|schedule|replace_file_content|write_to_file|write_file|edit_file)"/i.test(
+    inputRaw
+  );
   const payload = JSON.parse(inputRaw);
   const toolCall = payload.toolCall || payload.tool_call || {};
   const toolName = String(toolCall.name || toolCall.tool_name || "").trim().toLowerCase();
@@ -2003,8 +2116,7 @@ try {
         matchedCall.response.decision === "allow"
           ? { decision: "allow" }
           : matchedCall.response;
-      process.stdout.write(JSON.stringify(replay) + "\n");
-      process.exit(0);
+      respond(replay);
     }
     dedupRecordCtx = {
       convId,
@@ -2031,15 +2143,29 @@ try {
     const segments = splitShellSegments(rawCmd);
 
     // LH-09-B: Shell command mutation of protected benchmark artifacts
+    const SHELL_MUTATION_VERBS = new Set(["rm", "del", "remove-item", "mv", "cp", "tee", "truncate", "shred", "install"]);
     for (const seg of segments) {
       const segTexts = [seg.text, ...(seg.subshells || [])];
       for (const st of segTexts) {
-        if (seg.hasWriteRedirect || /\b(?:rm|del|Remove-Item)\b/i.test(st)) {
-          const detailed = tokenizeShellWordsDetailed(st);
-          const candidateTokens = [
-            ...detailed.map((t) => t.value),
-            ...extractRedirectTargets(detailed)
-          ];
+        const detailed = tokenizeShellWordsDetailed(st);
+        if (detailed.length === 0) continue;
+        let cmdIdx = 0;
+        while (
+          cmdIdx < detailed.length &&
+          (/^[A-Za-z_][A-Za-z0-9_]*=/.test(detailed[cmdIdx].value) ||
+            detailed[cmdIdx].value === "env" ||
+            detailed[cmdIdx].value === "sudo")
+        ) {
+          cmdIdx++;
+        }
+        const verb = cmdIdx < detailed.length ? normalizeCmdName(detailed[cmdIdx].value) : "";
+        const isMutatingVerb = SHELL_MUTATION_VERBS.has(verb);
+        if (seg.hasWriteRedirect || isMutatingVerb) {
+          const redirectTargets = extractRedirectTargets(detailed);
+          const argCandidates = isMutatingVerb
+            ? detailed.slice(cmdIdx + 1).map((t) => t.value).filter((v) => !v.includes("\n"))
+            : [];
+          const candidateTokens = [...redirectTargets, ...argCandidates];
           if (candidateTokens.some((tok) => isProtectedBenchmarkPath(tok))) {
             respond({
               decision: "force_ask",
@@ -2117,6 +2243,7 @@ try {
     }
 
     const isRtkRead = isRtkReadCommand(effectiveCmd);
+    const isExplicitRtkRead = isRtkReadCommand(rawCmd) && isRtkRead;
 
     // Check 3: Step Output Spillover Safe Harbor (strictly single unchained `rtk read` only)
     if (isSpillover && !isRtkRead) {
@@ -2128,7 +2255,7 @@ try {
     }
 
     // Check 4: Completed / unknown-state task log: allow only through strictly single unchained `rtk read`
-    if (taskMatch && !isRtkRead) {
+    if (taskMatch && !isExplicitRtkRead) {
       respond({
         decision: "deny",
         reason:
@@ -2136,6 +2263,23 @@ try {
           "- Once completed, inspect output using 'rtk read <path>' via run_command.\n" +
           "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
       });
+    }
+
+    // Prevent cascading secondary spillover when `rtk read` is invoked without line bounds on a >45 KiB spillover/task log
+    if (isRtkRead && (isSpillover || taskMatch)) {
+      const hasLineBoundFlag = /(?:^|\s)(?:--head-lines|--tail-lines|--max-lines|-m|--level|-l)(?:=|\s|$)/.test(effectiveCmd);
+      if (!hasLineBoundFlag) {
+        const rtkTokens = tokenizeShellWords(effectiveCmd);
+        const pathTok = rtkTokens.slice(2).find((t) => !t.startsWith("-"));
+        if (pathTok) {
+          try {
+            const st = fs.statSync(pathTok);
+            if (st.isFile() && st.size > 46080) {
+              effectiveCmd = effectiveCmd.replace(/^(\S+\s+read\b)/i, "$1 --tail-lines 150");
+            }
+          } catch {}
+        }
+      }
     }
 
     const isDaemon = args.IsDaemon === true || args.isDaemon === true;
@@ -2410,6 +2554,19 @@ try {
   if (toolName === "schedule") {
     const duration = Number(args.DurationSeconds || args.durationSeconds || args.duration || 0);
 
+    if (isSwarmPollSchedule(args)) {
+      const session = getSessionState(convId);
+      session.denials++;
+      saveSessionState(convId, session);
+      respond({
+        decision: "deny",
+        reason:
+          "Antigravity Execution Governance: Using one-shot 'schedule' timers to poll a swarm or subagent is strictly prohibited. " +
+          "For '/swarm', call 'swarm_wait' directly without a 'schedule' timer (it sleeps at zero token cost and wakes immediately when any board message arrives, while the dedicated 'swarm_monitor' daemon cron checks for stalls). " +
+          "For subagents, stop calling tools and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+      });
+    }
+
     if (isTaskPollSchedule(args)) {
       const session = getSessionState(convId);
       const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(session.pollCount));
@@ -2432,7 +2589,12 @@ try {
         });
       }
 
-      // If duration >= requiredBackoffSec, watchdog timer is permitted!
+      // If duration >= requiredBackoffSec, watchdog timer is permitted AND advances backoff level
+      // so repeated 45s/60s timers without exponential backoff are blocked on subsequent turns:
+      session.pollCount = Math.max(1, session.pollCount) + 1;
+      session.lastPollTime = Date.now();
+      session.denials = 0;
+      saveSessionState(convId, session);
       respond({ decision: "allow" });
     }
 
@@ -2450,6 +2612,12 @@ try {
     toolName === "edit_file"
   ) {
     const targetFile = String(args.Path || args.path || args.TargetFile || args.targetFile || "").trim();
+    if (isProtectedInternalState(targetFile)) {
+      respond({
+        decision: "deny",
+        reason: buildInternalStateToolDenial(toolName)
+      });
+    }
     if (isProtectedBenchmarkPath(targetFile)) {
       respond({
         decision: "force_ask",

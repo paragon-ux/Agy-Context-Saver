@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "node ./scripts/execution-guard-hook.mjs",
-            "timeout": 5
+            "timeout": 10
           }
         ]
       }

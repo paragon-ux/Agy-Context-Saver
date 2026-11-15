@@ -13,9 +13,10 @@
   - Check #1 (Immediate upon launch): Permitted ($0\text{s}$).
   - Premature status checks within an active backoff window are denied. 5 consecutive premature checks trigger the `force_ask` circuit breaker.
   - Silent/hung background tasks: Once the backoff window elapses, a single diagnostic check is permitted to inspect logs, detect deadlocks, and issue `manage_task(Action='kill')` if needed.
-- **Coordinated Watchdog Protocol (`schedule`)**: For long-running operations (builds, migrations, test suites) expected to take $> 15\text{s}$:
+- **Coordinated Watchdog Protocol (`schedule`)**: For long-running background shell tasks (`run_command` builds, migrations, test suites) expected to take $> 15\text{s}$:
   - Schedule a coordinated watchdog timer: `schedule(DurationSeconds=45, Prompt="Check status of background task-X", TimerCondition="task-X")`.
-  - Watchdog timers must satisfy `DurationSeconds >= Math.max(30, requiredBackoffSec)`. Short timers are denied.
+  - Watchdog timers must satisfy `DurationSeconds >= Math.max(30, requiredBackoffSec)`, and each scheduled task watchdog advances the Proportional Backoff level ($30\text{s} \to 75\text{s} \to 188\text{s} \to 469\text{s} \to 600\text{s}$) so repeated $45\text{s}/60\text{s}$ timers are denied.
+  - **Swarm & Subagent Exemption (`swarm_wait` Only)**: NEVER pair `swarm_wait` or subagent launches with a one-shot `schedule` timer. `swarm_wait` sleeps at zero token cost and wakes immediately on board posts (while the dedicated `swarm_monitor` daemon cron handles stall checks); one-shot `schedule` timers polling a swarm or subagent are strictly denied.
   - If the task completes early, Reactive Wakeup auto-cancels the timer and resumes the agent immediately.
   - If the task is still running when the watchdog fires, perform a legal diagnostic check (`manage_task(status)`) and post a live progress update in chat for the user.
 - **Mandatory Pre-Yield Status Card**: When a command moves to the background, NEVER yield with a silent or generic one-liner. Output a structured Markdown card so the user is never left wondering if the IDE has stalled:
@@ -42,10 +43,10 @@
      - Pass exact `StartLine` and `EndLine` into `read_file` (bounded slices of `1–150` lines) to preserve 1-indexed line numbers for `edit_file` and `write_file` without terminal stdout truncation.
      - Partial slices of `151–800` lines and `ByteOffset`-only unbounded reads are denied; an explicit one-pass full-file audit (`StartLine: 1, EndLine: <TotalLines>`) is permitted only when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
   3. **Tier 3 — RTK Spillover & Diagnostic Boundaries (`rtk read`, `rtk err`, `rtk summary`)**:
-     - **Spillovers & Task Logs**: Read `.system_generated/steps/<step>/output.txt` spillovers (or use bounded `read_file` $\le 150$ lines) and completed `tasks/<taskId>.log` files via `rtk read <path>` (with `--head-lines` / `--tail-lines`). Never use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for `edit_file` / `write_file`.
+     - **Spillovers & Task Logs**: Read `.system_generated/steps/<step>/output.txt` spillovers (using bounded `read_file` $\le 150$ lines or `rtk read --tail-lines 150 <path>` / `--head-lines 150 <path>`) and completed `tasks/<taskId>.log` files via `rtk read <path>` (with `--head-lines` / `--tail-lines`). Never use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for `edit_file` / `write_file`.
      - **Command Diagnostics**: `rtk err <cmd>` (errors/warnings only) and `rtk summary <cmd>` (2-line heuristic summary).
 - **Antigravity Special Files Safe Harbor**: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/` configs) are permitted via `read_file` without slice bounds, and bounded `read_file` ($\le 150$ lines) is permitted on `.system_generated/steps/<n>/output.txt`.
-- **Protected Internal State & Transcript Forensics (`agy-context transcript ...`)**: Direct native inspection of `.system_generated/` transcripts, task logs, or progress files is strictly forbidden. Use the zero-MCP `agy-context` CLI via `run_command`:
+- **Protected Internal State & Transcript Forensics (`agy-context transcript ...`)**: Direct native inspection of `.system_generated/` transcripts, task logs, or progress files is strictly forbidden. Use the zero-MCP `agy-context` CLI via `run_command` (prefer batch/range `--step N,M,K` / `--step N-M` and `query --start N --end M --roles assistant --field tool_args` over 1-by-1 single-step loops):
   - `agy-context transcript read [--id <uuid>] [--mode compact|full] [--last-turns N] [--include-thinking] [--json]`
   - `agy-context transcript query [--id <uuid>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--json]`
   - `agy-context transcript step --id <uuid> (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--json]`

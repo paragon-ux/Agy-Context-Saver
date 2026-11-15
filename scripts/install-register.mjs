@@ -539,7 +539,7 @@ export async function runInstall(options = {}) {
           {
             type: "command",
             command: `node "${destHookNormalized}"`,
-            timeout: 5
+            timeout: 10
           }
         ]
       }
@@ -816,15 +816,20 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     process.exit(1);
   }
 
-  if (isCheck) {
-    await runInstall({ checkOnly: true, allowDegraded });
-  } else if (isStatus) {
-    runStatus();
-  } else if (isUninstall) {
-    await runUninstall({ restoreBackups: isRestoreBackups });
-  } else if (isRestoreBackups) {
-    await runRestoreBackups();
-  } else {
-    await runInstall({ allowDegraded });
+  try {
+    if (isCheck) {
+      await runInstall({ checkOnly: true, allowDegraded });
+    } else if (isStatus) {
+      runStatus();
+    } else if (isUninstall) {
+      await runUninstall({ restoreBackups: isRestoreBackups });
+    } else if (isRestoreBackups) {
+      await runRestoreBackups();
+    } else {
+      await runInstall({ allowDegraded });
+    }
+  } catch (err) {
+    console.error(`Error: ${err && err.message ? err.message : String(err)}`);
+    process.exit(1);
   }
 }

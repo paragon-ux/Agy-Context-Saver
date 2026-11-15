@@ -55,6 +55,10 @@ agy-context transcript read [--id <conv>] [--mode compact|full] [--last-turns N]
 
 ### 3. `agy-context transcript query`
 Granular query and forensic filtering engine for transcripts with keyword/regex search, auto-dereferencing of truncated payloads, role filtering (`user`, `assistant`, `subagent`, `tool`, `generic`, `system`, `error`, `all`; defaults to `all`), untruncated `--full-args` / `--field` inspection across ranges, and compact summaries.
+- **Zero-Truncation Multi-Step Forensic Pattern**:
+  1. `agy-context transcript query --id <conv> --start 0 --end 100 --include-tools --summary` (compact 1-line-per-step index with `[ERROR]` badges)
+  2. `agy-context transcript query --id <conv> --start 0 --end 100 --roles assistant --field tool_args` (all untruncated tool call arguments in one call)
+  3. `agy-context transcript step --id <conv> --step <N,M,K|N-M> --field content` (batch-extract specific error/tool outputs without 1-by-1 `--step <N>` loops)
 ```bash
 agy-context transcript query [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--json] [--file <path>]
 ```
@@ -82,7 +86,8 @@ agy-context uninstall [--restore-backups]
    - Stop calling tools and yield the turn for native Reactive Wakeup (`<SYSTEM_MESSAGE>`).
    - Diagnostic status inspections follow exponential backoff: $\min(600, \text{round}(30 \times 2.5^{\text{pollCount}-1}))$.
    - 5 cumulative denials trigger the `force_ask` circuit breaker.
-   - For operations $>15\text{s}$, schedule coordinated watchdog timers: `schedule(DurationSeconds=45, TimerCondition="task-X")` and output a structured Pre-Yield Status Card.
+   - For background shell tasks $>15\text{s}$, schedule coordinated watchdog timers: `schedule(DurationSeconds=45, TimerCondition="task-X")` and output a structured Pre-Yield Status Card. Each task watchdog advances the Proportional Backoff level (`30s -> 75s -> 188s -> 469s -> 600s`), blocking repeated 45s/60s timer loops.
+   - **Swarm & Subagent Exemption (`swarm_wait` Only)**: Never pair `swarm_wait` or subagents with a one-shot `schedule` timer; `swarm_wait` sleeps at zero token cost and wakes immediately on board posts, and one-shot `schedule` timers polling a swarm or subagent are strictly denied.
 
 2. **Layer 2: Transparent CLI & Codebase Streamlining**:
    - Shell commands transparently rewrite via `rtk hook antigravity` (`rtk git`, `rtk pytest`, `rtk cargo`, etc.).

@@ -14,7 +14,8 @@ import {
   readTranscript,
   queryTranscript,
   getStepDetail,
-  checkContextHealth
+  checkContextHealth,
+  getBrainDir
 } from "../lib/transcript-core.mjs";
 import {
   runInstall,
@@ -44,10 +45,12 @@ Usage:
   agy-context <command> [options]
 
 Transcript Commands:
-  agy-context transcript read   [--id <conv>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--include-thinking] [--json] [--file <path>]
+  agy-context transcript read   [--id <conv>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--outline] [--include-thinking] [--json] [--file <path>]
   agy-context transcript query  [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--json] [--file <path>]
-  agy-context transcript step   [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--json] [--file <path>]
+  agy-context transcript step   [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--head N] [--tail N] [--full] [--json] [--file <path>]
   agy-context transcript health [--id <conv>] [--json] [--file <path>]
+  agy-context transcript list   [--limit N] [--json]
+  Aliases: grep/search -> query | stats/info -> health | tools -> query --roles assistant --field tool_args | outline/summary -> query --summary --include-tools | ls -> list
 
 Lifecycle Commands:
   agy-context status            [--json]
@@ -176,26 +179,58 @@ async function handleTranscriptCommand(argv) {
 
   const rest = argv.slice(1);
 
-  if (sub === "read") {
+  if (sub === "read" || sub === "outline" || sub === "summary") {
     const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["include-thinking", "json"]),
-      values: new Set(["id", "mode", "last-turns", "offset", "limit", "file"])
+      booleans: new Set(["include-thinking", "outline", "summary", "include-tools", "full-args", "json"]),
+      values: new Set(["id", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "file"])
     });
     if (opts.help) {
       printHelp();
       process.exit(0);
     }
-    if (positional.length > 0) {
-      throw new Error(`Unexpected positional arguments for 'transcript read': ${positional.join(" ")}`);
+    if (opts.id === undefined && positional.length === 1) {
+      opts.id = positional.shift();
     }
+    if (positional.length > 0) {
+      throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
+    }
+    const explicitFile = validateExplicitFileFlag(opts.file);
+    const limit = parseOptionalInt(opts.limit, "limit");
+
+    if (sub === "outline" || sub === "summary" || opts.outline || opts.summary) {
+      const startStep = parseOptionalInt(opts.start, "start");
+      const endStep = parseOptionalInt(opts.end, "end");
+      const res = await queryTranscript({
+        conversationId: opts.id,
+        filePath: explicitFile,
+        startStep: startStep !== undefined ? startStep : 0,
+        endStep: endStep !== undefined ? endStep : 999999,
+        maxResults: limit !== undefined ? limit : 500,
+        summaryOnly: true,
+        includeToolCalls: true,
+        fullArgs: Boolean(opts["full-args"]),
+        includeThinking: Boolean(opts["include-thinking"]),
+        allowExternalPaths: false
+      });
+      if (res.isError) {
+        emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
+      }
+      if (opts.json) {
+        const { text, ...payload } = res;
+        console.log(JSON.stringify(payload, null, 2));
+      } else {
+        console.log(res.text);
+      }
+      return;
+    }
+
     const mode = opts.mode || "compact";
     if (mode !== "compact" && mode !== "full") {
       throw new Error(`Invalid --mode '${mode}' for 'transcript read' (expected 'compact' or 'full').`);
     }
-    const explicitFile = validateExplicitFileFlag(opts.file);
-    const lastTurns = parseOptionalInt(opts["last-turns"], "last-turns");
+    const rawLastTurns = opts["last-turns"] !== undefined ? opts["last-turns"] : (opts.last !== undefined ? opts.last : opts.tail);
+    const lastTurns = parseOptionalInt(rawLastTurns, "last-turns");
     const offset = parseOptionalInt(opts.offset, "offset");
-    const limit = parseOptionalInt(opts.limit, "limit");
 
     const res = await readTranscript({
       conversationId: opts.id,
@@ -220,17 +255,35 @@ async function handleTranscriptCommand(argv) {
     return;
   }
 
-  if (sub === "query") {
+  if (sub === "query" || sub === "grep" || sub === "search" || sub === "find" || sub === "tools") {
     const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["summary", "include-tools", "full-args", "include-thinking", "json"]),
-      values: new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "limit", "field", "file"])
+      booleans: new Set(["summary", "outline", "include-tools", "full-args", "include-thinking", "json"]),
+      values: new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "last", "tail", "limit", "field", "file"])
     });
     if (opts.help) {
       printHelp();
       process.exit(0);
     }
+    if (sub === "grep" || sub === "search" || sub === "find") {
+      opts["include-tools"] = true;
+    }
+    if (sub === "tools") {
+      if (!opts.roles) opts.roles = "assistant";
+      if (!opts.field) opts.field = "tool_args";
+      opts["include-tools"] = true;
+      if (opts.start === undefined && opts.last === undefined && opts["last-turns"] === undefined && opts.tail === undefined) {
+        opts.start = "0";
+        if (opts.end === undefined) opts.end = "999999";
+      }
+    }
+    if (opts.query === undefined && positional.length >= 1) {
+      opts.query = positional.shift();
+    }
+    if (opts.id === undefined && positional.length >= 1) {
+      opts.id = positional.shift();
+    }
     if (positional.length > 0) {
-      throw new Error(`Unexpected positional arguments for 'transcript query': ${positional.join(" ")}`);
+      throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
     }
     const mode = opts.mode || "auto";
     if (mode !== "auto" && mode !== "compact" && mode !== "full") {
@@ -239,7 +292,8 @@ async function handleTranscriptCommand(argv) {
     const explicitFile = validateExplicitFileFlag(opts.file);
     const startStep = parseOptionalInt(opts.start, "start");
     const endStep = parseOptionalInt(opts.end, "end");
-    const lastTurns = parseOptionalInt(opts["last-turns"], "last-turns");
+    const rawLastTurns = opts["last-turns"] !== undefined ? opts["last-turns"] : (opts.last !== undefined ? opts.last : opts.tail);
+    const lastTurns = parseOptionalInt(rawLastTurns, "last-turns");
     const maxResults = parseOptionalInt(opts.limit, "limit");
     const roles = opts.roles
       ? opts.roles.split(",").map((r) => r.trim()).filter(Boolean)
@@ -255,7 +309,7 @@ async function handleTranscriptCommand(argv) {
       endStep,
       lastTurns,
       maxResults,
-      summaryOnly: Boolean(opts.summary),
+      summaryOnly: Boolean(opts.summary || opts.outline),
       includeToolCalls: Boolean(opts["include-tools"]),
       fullArgs: Boolean(opts["full-args"]),
       field: opts.field,
@@ -277,18 +331,26 @@ async function handleTranscriptCommand(argv) {
 
   if (sub === "step") {
     const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["json"]),
-      values: new Set(["id", "step", "start", "end", "field", "file"])
+      booleans: new Set(["json", "full"]),
+      values: new Set(["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "file"])
     });
     if (opts.help) {
       printHelp();
       process.exit(0);
+    }
+    if (opts.step === undefined && positional.length >= 1) {
+      opts.step = positional.shift();
+    }
+    if (opts.id === undefined && positional.length >= 1) {
+      opts.id = positional.shift();
     }
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript step': ${positional.join(" ")}`);
     }
     const startStep = parseOptionalInt(opts.start, "start");
     const endStep = parseOptionalInt(opts.end, "end");
+    const tailLines = parseOptionalInt(opts["tail-lines"] !== undefined ? opts["tail-lines"] : opts.tail, "tail");
+    const headLines = parseOptionalInt(opts["head-lines"] !== undefined ? opts["head-lines"] : opts.head, "head");
     if (opts.step === undefined && startStep === undefined && endStep === undefined) {
       throw new Error(`Missing required flag '--step <N|N,M|N-M>' (or '--start N --end M') for 'transcript step'.`);
     }
@@ -301,6 +363,8 @@ async function handleTranscriptCommand(argv) {
       startStep,
       endStep,
       field: opts.field || "all",
+      headLines,
+      tailLines,
       allowExternalPaths: false
     });
 
@@ -316,7 +380,7 @@ async function handleTranscriptCommand(argv) {
     return;
   }
 
-  if (sub === "health") {
+  if (sub === "health" || sub === "stats" || sub === "info") {
     const { opts, positional } = parseFlags(rest, {
       booleans: new Set(["json"]),
       values: new Set(["id", "file"])
@@ -325,8 +389,11 @@ async function handleTranscriptCommand(argv) {
       printHelp();
       process.exit(0);
     }
+    if (opts.id === undefined && positional.length === 1) {
+      opts.id = positional.shift();
+    }
     if (positional.length > 0) {
-      throw new Error(`Unexpected positional arguments for 'transcript health': ${positional.join(" ")}`);
+      throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
     }
     const explicitFile = validateExplicitFileFlag(opts.file);
 
@@ -348,7 +415,50 @@ async function handleTranscriptCommand(argv) {
     return;
   }
 
-  throw new Error(`Unknown transcript subcommand '${sub}'. Expected read, query, step, or health.`);
+  if (sub === "list" || sub === "ls") {
+    const { opts } = parseFlags(rest, {
+      booleans: new Set(["json"]),
+      values: new Set(["limit"])
+    });
+    if (opts.help) {
+      printHelp();
+      process.exit(0);
+    }
+    const brainDir = getBrainDir();
+    const limit = opts.limit !== undefined ? Math.max(1, Number(opts.limit) || 10) : 10;
+    const entries = [];
+    if (brainDir && fs.existsSync(brainDir)) {
+      for (const name of fs.readdirSync(brainDir)) {
+        const convDir = path.join(brainDir, name);
+        const transcriptFile = path.join(convDir, ".system_generated", "logs", "transcript.jsonl");
+        if (fs.existsSync(transcriptFile)) {
+          try {
+            const stat = fs.statSync(transcriptFile);
+            entries.push({
+              conversationId: name,
+              updatedAt: stat.mtime.toISOString(),
+              mtimeMs: stat.mtimeMs,
+              bytes: stat.size
+            });
+          } catch {}
+        }
+      }
+      entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    }
+    const sliced = entries.slice(0, limit).map(({ mtimeMs, ...restItem }) => restItem);
+    if (opts.json) {
+      console.log(JSON.stringify({ total: entries.length, conversations: sliced }, null, 2));
+    } else {
+      const lines = [`Recent Conversations (${sliced.length} of ${entries.length} in ${brainDir}):`];
+      for (const item of sliced) {
+        lines.push(`- ${item.conversationId} | updated: ${item.updatedAt} | ${(item.bytes / 1024).toFixed(1)} KB`);
+      }
+      console.log(lines.join("\n"));
+    }
+    return;
+  }
+
+  throw new Error(`Unknown transcript subcommand '${sub}'. Expected read, query, step, health, or list.`);
 }
 
 async function main() {
