@@ -20,6 +20,23 @@ export function prependToPath(dir, env = process.env) {
 }
 
 /**
+ * Returns a shallow-cloned env object with PATH (and Windows Path) replaced cleanly.
+ */
+export function withEnvPath(newPath, baseEnv = process.env) {
+  const out = { ...baseEnv };
+  for (const k of Object.keys(out)) {
+    if (k.toLowerCase() === "path") {
+      delete out[k];
+    }
+  }
+  out.PATH = newPath;
+  if (process.platform === "win32") {
+    out.Path = newPath;
+  }
+  return out;
+}
+
+/**
  * Creates a deterministic cross-platform RTK (>= 1.1.0) executable shim in `targetDir`.
  * Supports `--version`, `hook antigravity`, `rewrite`, `read`, `grep`, and `git`.
  */
@@ -143,7 +160,7 @@ process.exit(0);
     return cmdPath;
   } else {
     const binPath = path.join(targetDir, "rtk");
-    fs.writeFileSync(binPath, shimCode, "utf-8");
+    fs.writeFileSync(binPath, `#!/bin/sh\nexec "${process.execPath}" "${shimJsPath}" "$@"\n`, "utf-8");
     fs.chmodSync(binPath, 0o755);
     return binPath;
   }
@@ -213,8 +230,12 @@ export function seedHermeticConversationFixture(profileDir, convId = HERMETIC_CO
 export function runRtkCli(args, options = {}) {
   const res = spawnSync("rtk", args, { encoding: "utf-8", ...options });
   if (process.platform === "win32" && res.error && (res.error.code === "ENOENT" || res.error.code === "EINVAL")) {
+    const comspec =
+      process.env.ComSpec ||
+      process.env.COMSPEC ||
+      path.join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", "cmd.exe");
     const quotedArgs = args.map((a) => (/\s|["&|<>^]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ");
-    return spawnSync("cmd.exe", ["/d", "/s", "/c", `rtk ${quotedArgs}`], { encoding: "utf-8", ...options });
+    return spawnSync(comspec, ["/d", "/s", "/c", `rtk ${quotedArgs}`], { encoding: "utf-8", ...options });
   }
   return res;
 }

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { setupHermeticTestEnv, createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
+import { setupHermeticTestEnv, createRtkShim, prependToPath, withEnvPath } from "./helpers/hermetic-fixture.mjs";
 import { getStateDir } from "../scripts/state-dir.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -126,10 +126,7 @@ console.log("\n--- Group B: RTK >= 1.1.0 Delegation & Edge-Case Guards ---");
 
 // B.4: Never emit `rtk rg` when `rg` binary is absent on PATH (ACS-HOOK-15)
 {
-  const emptyBinEnv = {
-    ...process.env,
-    PATH: `${path.dirname(process.execPath)}${path.delimiter}${path.join(hermetic.profileDir, "rtk-shim-bin")}`
-  };
+  const emptyBinEnv = withEnvPath(path.join(hermetic.profileDir, "rtk-shim-bin"));
   const outSimpleRg = runHook(
     { toolCall: { name: "run_command", args: { CommandLine: 'rg -n "HOOK_KEY" scripts/', WaitMsBeforeAsync: 5000 } } },
     emptyBinEnv
@@ -489,10 +486,7 @@ console.log("\n--- Group E: Task Polling Backoff, Watchdog & Benchmark Mutation 
   console.log("✓ Backoff circuit breaker, schedule watchdog, dual-hook deduplication, and 2.0 edit_file/write_file LH-09 protection verified");
 
   console.log("\n--- Group F: Wave 1 & Wave 2 Adversarial Live Remediations ---");
-  const emptyBinEnv = {
-    ...process.env,
-    PATH: `${path.dirname(process.execPath)}${path.delimiter}${path.join(hermetic.profileDir, "rtk-shim-bin")}`
-  };
+  const emptyBinEnv = withEnvPath(path.join(hermetic.profileDir, "rtk-shim-bin"));
   // 1. rg -U, piped rg | sed, and bash -c "rg ... | awk" when host rg is absent
   const rgUOut = runHook(
     { conversationId: "conv-wave-fixes", toolCall: { name: "run_command", args: { CommandLine: 'rg -U "try" scripts/' } } },

@@ -532,9 +532,13 @@ function getLocalRtkCandidate() {
 function spawnRtk(bin, args, opts) {
   if (!bin) return { error: Object.assign(new Error("ENOENT"), { code: "ENOENT" }), status: null, stdout: "", stderr: "" };
   if (os.platform() === "win32" && /\.(cmd|bat)$/i.test(bin)) {
+    const comspec =
+      process.env.ComSpec ||
+      process.env.COMSPEC ||
+      path.join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", "cmd.exe");
     const quotedBin = /\s/.test(bin) ? `"${bin}"` : bin;
     const quotedArgs = args.map((a) => (/\s|["&|<>^]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ");
-    return spawnSync("cmd.exe", ["/d", "/s", "/c", `"${quotedBin} ${quotedArgs}"`], { ...opts, windowsVerbatimArguments: true });
+    return spawnSync(comspec, ["/d", "/s", "/c", `"${quotedBin} ${quotedArgs}"`], { ...opts, windowsVerbatimArguments: true });
   }
   return spawnSync(bin, args, opts);
 }

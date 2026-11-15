@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { findExistingRtk } from "../scripts/provision-rtk.mjs";
-import { createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
+import { createRtkShim, prependToPath, withEnvPath } from "./helpers/hermetic-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const hookScript = path.resolve(__dirname, "../scripts/execution-guard-hook.mjs");
@@ -27,6 +27,7 @@ function runHook(payload, env) {
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-rtk-int-"));
 
 try {
+  process.env.AGY_TEST_PROFILE_DIR = tempDir;
   const hostRtk = findExistingRtk({ silent: true });
   let testEnv = { ...process.env, AGY_TEST_PROFILE_DIR: tempDir };
   let modeLabel = "LIVE HOST RTK";
@@ -79,31 +80,27 @@ try {
     const firstExe = resolvedWhich.status === 0 ? resolvedWhich.stdout.trim().split(/\r?\n/)[0] : hostRtk.path;
     rtkExeDir = path.dirname(path.isAbsolute(firstExe) ? firstExe : hostRtk.path);
   }
-  const rgCheck = spawnSync(process.platform === "win32" ? "where" : "which", ["rg"], { encoding: "utf-8" });
-  const rtkSharesDirWithRg = rgCheck.status === 0 && rgCheck.stdout && path.dirname(rgCheck.stdout.trim().split(/\r?\n/)[0]) === rtkExeDir;
+  const rgExts = process.platform === "win32" ? [".exe", ".cmd", ".bat"] : [""];
+  const rtkSharesDirWithRg = rgExts.some((ext) => fs.existsSync(path.join(rtkExeDir, `rg${ext}`)));
   if (!rtkSharesDirWithRg) {
-    const noRgEnv = { ...testEnv, PATH: `${rtkExeDir}${path.delimiter}/usr/bin:/bin` };
-    // Only run no-rg guard check when /usr/bin and /bin actually lack rg
-    const probeRg = spawnSync(process.platform === "win32" ? "where" : "which", ["rg"], { env: noRgEnv });
-    if (probeRg.status !== 0) {
-      const rgFallback = runHook(
-        { toolCall: { name: "run_command", args: { CommandLine: 'rg -n "GOVERNED_TOOLS" scripts/', WaitMsBeforeAsync: 5000 } } },
-        noRgEnv
-      );
-      assert.equal(rgFallback.decision, "allow");
-      assert.match(rgFallback.overwrite?.CommandLine || "", /^rtk grep\b/, "Simple rg must map to rtk grep when rg is absent");
-      assert.equal((rgFallback.overwrite?.CommandLine || "").includes("rtk rg"), false, "Must never emit rtk rg when rg is absent");
-      console.log(`✓ Absent 'rg' binary guarded -> '${rgFallback.overwrite?.CommandLine}'`);
+    const noRgEnv = withEnvPath(rtkExeDir, testEnv);
+    const rgFallback = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: 'rg -n "GOVERNED_TOOLS" scripts/', WaitMsBeforeAsync: 5000 } } },
+      noRgEnv
+    );
+    assert.equal(rgFallback.decision, "allow");
+    assert.match(rgFallback.overwrite?.CommandLine || "", /^rtk grep\b/, "Simple rg must map to rtk grep when rg is absent");
+    assert.equal((rgFallback.overwrite?.CommandLine || "").includes("rtk rg"), false, "Must never emit rtk rg when rg is absent");
+    console.log(`✓ Absent 'rg' binary guarded -> '${rgFallback.overwrite?.CommandLine}'`);
 
-      const envRgFallback = runHook(
-        { toolCall: { name: "run_command", args: { CommandLine: 'FOO=1 rg -n "GOVERNED_TOOLS" scripts/', WaitMsBeforeAsync: 5000 } } },
-        noRgEnv
-      );
-      assert.equal(envRgFallback.decision, "allow");
-      assert.match(envRgFallback.overwrite?.CommandLine || "", /^FOO=1 rtk grep\b/);
-      assert.equal((envRgFallback.overwrite?.CommandLine || "").includes("rtk rg"), false);
-      console.log(`✓ Env-prefixed absent 'rg' guarded -> '${envRgFallback.overwrite?.CommandLine}'`);
-    }
+    const envRgFallback = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: 'FOO=1 rg -n "GOVERNED_TOOLS" scripts/', WaitMsBeforeAsync: 5000 } } },
+      noRgEnv
+    );
+    assert.equal(envRgFallback.decision, "allow");
+    assert.match(envRgFallback.overwrite?.CommandLine || "", /^FOO=1 rtk grep\b/);
+    assert.equal((envRgFallback.overwrite?.CommandLine || "").includes("rtk rg"), false);
+    console.log(`✓ Env-prefixed absent 'rg' guarded -> '${envRgFallback.overwrite?.CommandLine}'`);
   }
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });

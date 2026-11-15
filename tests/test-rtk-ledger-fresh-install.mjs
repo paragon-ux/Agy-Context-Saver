@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { setupHermeticTestEnv } from "./helpers/hermetic-fixture.mjs";
+import { setupHermeticTestEnv, withEnvPath } from "./helpers/hermetic-fixture.mjs";
 import { ensureRtkConfigured, getRtkConfigPath } from "../scripts/provision-rtk.mjs";
 
 console.log("=================================================");
@@ -84,7 +84,7 @@ assert.equal(unsetWaitOutput.overwrite?.WaitMsBeforeAsync, 10000, "Unset WaitMsB
 
 // --- TEST 4: Search/Find/List Routing Hints ---
 console.log("\n--- 4. Search, Find & List Native Tool Routing ---");
-const noRgEnv = { ...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${path.join(profileDir, "rtk-shim-bin")}` };
+const noRgEnv = withEnvPath(path.join(profileDir, "rtk-shim-bin"));
 const grepOutput = runHook(
   { toolCall: { name: "grep_search", args: { query: "export function" } } },
   noRgEnv
