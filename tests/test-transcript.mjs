@@ -227,7 +227,60 @@ try {
     assert.equal(exitErrRes.matchedCount, 1, "roles=['error'] must match header exit code 7 and skip Command output prose");
     assert.match(exitErrRes.text, /Step 3/);
 
-    console.log("✓ Truncated tail auto-search, generic/default roles, exit-code errors, summary formatting, and multi-tool args verified");
+    // Batch multi-step & range extraction in `transcript step`, `--full-args` / `--field` in `transcript query`, and auto-expanded range defaultMaxResults
+    const batchConv = "conv-batch-range";
+    const batchLogs = path.join(brainDir, batchConv, ".system_generated", "logs");
+    fs.mkdirSync(batchLogs, { recursive: true });
+    const longCommand = "mkdir -p scratch/agy-squad/live-w2/squad-squad1/specialist-1 && sed -n '1,15p' scripts/state-dir.mjs > scratch/agy-squad/live-w2/squad-squad1/specialist-1/slice-a.txt && echo FULL_ARGS_END_MARKER_OK";
+    const batchSteps = Array.from({ length: 12 }, (_, idx) => ({
+      step_index: idx + 1,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      content: `Step ${idx + 1} body`,
+      tool_calls: [{ name: "run_command", args: { CommandLine: `${longCommand}_${idx + 1}` } }],
+      created_at: `2026-11-10T10:00:${String(idx + 10).padStart(2, "0")}Z`
+    }));
+    fs.writeFileSync(path.join(batchLogs, "transcript.jsonl"), batchSteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+    fs.writeFileSync(path.join(batchLogs, "transcript_full.jsonl"), batchSteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+
+    // 1) Multi-step CSV & range selector (`--step 2,5-7,10..11` and `--start 1 --end 3`)
+    const multiStepCli = runCli(["transcript", "step", "--id", batchConv, "--step", "2,5-6,10..11", "--field", "tool_args", "--json"]);
+    assert.equal(multiStepCli.status, 0, multiStepCli.stderr);
+    const multiStepJson = JSON.parse(multiStepCli.stdout);
+    assert.deepEqual(multiStepJson.stepIndices, [2, 5, 6, 10, 11]);
+    assert.equal(multiStepJson.steps.length, 5);
+    assert.match(multiStepJson.steps[0].data[0].args.CommandLine, /FULL_ARGS_END_MARKER_OK_2/);
+
+    const rangeStepCli = runCli(["transcript", "step", "--id", batchConv, "--start", "1", "--end", "3", "--field", "tool_args"]);
+    assert.equal(rangeStepCli.status, 0, rangeStepCli.stderr);
+    assert.match(rangeStepCli.stdout, /Step 1 Tool Arguments/);
+    assert.match(rangeStepCli.stdout, /Step 2 Tool Arguments/);
+    assert.match(rangeStepCli.stdout, /Step 3 Tool Arguments/);
+    assert.match(rangeStepCli.stdout, /FULL_ARGS_END_MARKER_OK_3/);
+
+    // 2) Auto-expanded defaultMaxResults when `--start` and `--end` are both passed (returns all 10 steps in [1, 10] instead of clamping at 5)
+    const rangeQueryRes = await queryTranscript({
+      conversationId: batchConv,
+      startStep: 1,
+      endStep: 10
+    });
+    assert.equal(rangeQueryRes.displayedCount, 10, "Explicit [startStep, endStep] range without maxResults must auto-expand up to 50 steps instead of clamping at 5");
+    assert.doesNotMatch(rangeQueryRes.text, /FULL_ARGS_END_MARKER_OK_1/, "Default query without fullArgs clamps >80c strings");
+
+    // 3) `--full-args` and `--field tool_args` on `transcript query` preserve >80c CommandLine arguments
+    const fullArgsCli = runCli(["transcript", "query", "--id", batchConv, "--start", "1", "--end", "4", "--full-args"]);
+    assert.equal(fullArgsCli.status, 0, fullArgsCli.stderr);
+    assert.match(fullArgsCli.stdout, /FULL_ARGS_END_MARKER_OK_1/);
+    assert.match(fullArgsCli.stdout, /FULL_ARGS_END_MARKER_OK_4/);
+
+    const fieldQueryCli = runCli(["transcript", "query", "--id", batchConv, "--start", "2", "--end", "3", "--field", "tool_args"]);
+    assert.equal(fieldQueryCli.status, 0, fieldQueryCli.stderr);
+    assert.match(fieldQueryCli.stdout, /### Step 2 Tool Arguments/);
+    assert.match(fieldQueryCli.stdout, /FULL_ARGS_END_MARKER_OK_2/);
+    assert.match(fieldQueryCli.stdout, /### Step 3 Tool Arguments/);
+    assert.match(fieldQueryCli.stdout, /FULL_ARGS_END_MARKER_OK_3/);
+
+    console.log("✓ Truncated tail auto-search, generic/default roles, exit-code errors, summary formatting, batch step ranges, and --full-args/--field query verified");
   }
 
   // ==========================================================================

@@ -45,8 +45,8 @@ Usage:
 
 Transcript Commands:
   agy-context transcript read   [--id <conv>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--include-thinking] [--json] [--file <path>]
-  agy-context transcript query  [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--include-thinking] [--json] [--file <path>]
-  agy-context transcript step   [--id <conv>] --step <N> [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--json] [--file <path>]
+  agy-context transcript query  [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--json] [--file <path>]
+  agy-context transcript step   [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--json] [--file <path>]
   agy-context transcript health [--id <conv>] [--json] [--file <path>]
 
 Lifecycle Commands:
@@ -222,8 +222,8 @@ async function handleTranscriptCommand(argv) {
 
   if (sub === "query") {
     const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["summary", "include-tools", "include-thinking", "json"]),
-      values: new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "limit", "file"])
+      booleans: new Set(["summary", "include-tools", "full-args", "include-thinking", "json"]),
+      values: new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "limit", "field", "file"])
     });
     if (opts.help) {
       printHelp();
@@ -257,6 +257,8 @@ async function handleTranscriptCommand(argv) {
       maxResults,
       summaryOnly: Boolean(opts.summary),
       includeToolCalls: Boolean(opts["include-tools"]),
+      fullArgs: Boolean(opts["full-args"]),
+      field: opts.field,
       includeThinking: Boolean(opts["include-thinking"]),
       allowExternalPaths: false
     });
@@ -276,7 +278,7 @@ async function handleTranscriptCommand(argv) {
   if (sub === "step") {
     const { opts, positional } = parseFlags(rest, {
       booleans: new Set(["json"]),
-      values: new Set(["id", "step", "field", "file"])
+      values: new Set(["id", "step", "start", "end", "field", "file"])
     });
     if (opts.help) {
       printHelp();
@@ -285,16 +287,19 @@ async function handleTranscriptCommand(argv) {
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript step': ${positional.join(" ")}`);
     }
-    if (opts.step === undefined) {
-      throw new Error(`Missing required flag '--step <N>' for 'transcript step'.`);
+    const startStep = parseOptionalInt(opts.start, "start");
+    const endStep = parseOptionalInt(opts.end, "end");
+    if (opts.step === undefined && startStep === undefined && endStep === undefined) {
+      throw new Error(`Missing required flag '--step <N|N,M|N-M>' (or '--start N --end M') for 'transcript step'.`);
     }
-    const stepIndex = parseOptionalInt(opts.step, "step");
     const explicitFile = validateExplicitFileFlag(opts.file);
 
     const res = await getStepDetail({
       conversationId: opts.id,
       filePath: explicitFile,
-      stepIndex,
+      stepIndex: opts.step,
+      startStep,
+      endStep,
       field: opts.field || "all",
       allowExternalPaths: false
     });

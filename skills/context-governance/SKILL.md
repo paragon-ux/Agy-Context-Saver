@@ -54,15 +54,15 @@ agy-context transcript read [--id <conv>] [--mode compact|full] [--last-turns N]
 ```
 
 ### 3. `agy-context transcript query`
-Granular query and forensic filtering engine for transcripts with keyword/regex search, auto-dereferencing of truncated payloads, role filtering (`user`, `assistant`, `subagent`, `tool`, `generic`, `system`, `error`, `all`; defaults to `all`), and compact summaries.
+Granular query and forensic filtering engine for transcripts with keyword/regex search, auto-dereferencing of truncated payloads, role filtering (`user`, `assistant`, `subagent`, `tool`, `generic`, `system`, `error`, `all`; defaults to `all`), untruncated `--full-args` / `--field` inspection across ranges, and compact summaries.
 ```bash
-agy-context transcript query [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--include-thinking] [--json] [--file <path>]
+agy-context transcript query [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--json] [--file <path>]
 ```
 
 ### 4. `agy-context transcript step`
-Surgically dereferences full un-truncated content or specific fields (`content`, `thinking`, `tool_calls`, `tool_args`, `tool_args:<Key>`, `all`) for a single step from `transcript_full.jsonl`.
+Surgically dereferences full un-truncated content or specific fields (`content`, `thinking`, `tool_calls`, `tool_args`, `tool_args:<Key>`, `all`) for one step or a single-pass batch/range of steps (`--step 2,8,14`, `--step 2-10`, `--step 2..10`, or `--start 2 --end 10`) from `transcript_full.jsonl`.
 ```bash
-agy-context transcript step --id <conv> --step <N> [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--json] [--file <path>]
+agy-context transcript step --id <conv> (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--json] [--file <path>]
 ```
 
 ### 5. `agy-context status` & `agy-context setup`

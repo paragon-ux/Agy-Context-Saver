@@ -47,8 +47,8 @@
 - **Antigravity Special Files Safe Harbor**: Documented Antigravity special files (`SKILL.md`, brain artifacts, `.gemini/config/` configs) are permitted via `read_file` without slice bounds, and bounded `read_file` ($\le 150$ lines) is permitted on `.system_generated/steps/<n>/output.txt`.
 - **Protected Internal State & Transcript Forensics (`agy-context transcript ...`)**: Direct native inspection of `.system_generated/` transcripts, task logs, or progress files is strictly forbidden. Use the zero-MCP `agy-context` CLI via `run_command`:
   - `agy-context transcript read [--id <uuid>] [--mode compact|full] [--last-turns N] [--include-thinking] [--json]`
-  - `agy-context transcript query [--id <uuid>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--include-thinking] [--json]`
-  - `agy-context transcript step --id <uuid> --step <N> [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--json]`
+  - `agy-context transcript query [--id <uuid>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--json]`
+  - `agy-context transcript step --id <uuid> (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--json]`
   - `agy-context transcript health [--id <uuid>] [--json]`
 - **Git CRLF/LF Warning Hygiene**: Git's line-ending conversion notices (`warning: LF will be replaced by CRLF the next time Git touches it` / `warning: CRLF will be replaced by LF...`) are non-actionable diagnostic noise. Suppress them during repo operations (via `git -c core.safecrlf=false` or `git config --global core.safecrlf false`) and do not propagate them into task outputs or conversation context.
 
