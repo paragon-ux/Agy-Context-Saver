@@ -43,10 +43,13 @@ for (const tool of ["manage_task", "schedule", "run_command", "read_file", "edit
   assert.ok(hookMatcher.includes(tool), `Matcher includes ${tool}`);
 }
 
-// Global hooks.json must NOT double-register execution-guard or agy-context-saver, while preserving foreign hooks
+// Global hooks.json must prune legacy execution-guard, register agy-context-saver for /swarm workers, and preserve foreign hooks
+const mirroredHook = path.join(geminiConfigDir, "scripts", "execution-guard-hook.mjs");
+assert.ok(fs.existsSync(mirroredHook), `Mirrored global hook script missing at ${mirroredHook}`);
 const globalHooks = JSON.parse(fs.readFileSync(globalHooksJsonPath, "utf-8"));
 assert.equal(globalHooks["execution-guard"], undefined, "Legacy execution-guard must not be in global hooks.json");
-assert.equal(globalHooks["agy-context-saver"], undefined, "agy-context-saver must not double-register in global hooks.json");
+assert.ok(globalHooks["agy-context-saver"]?.PreToolUse?.[0]?.hooks?.[0]?.command?.includes("execution-guard-hook.mjs"), "agy-context-saver must register in global hooks.json for /swarm workers");
+assert.equal(globalHooks["agy-context-saver"]?.PreToolUse?.[0]?.matcher, hookMatcher, "Global hooks.json matcher must match plugin hooks.json");
 assert.ok(globalHooks["waymark-continuity"], "Foreign hook waymark-continuity must remain preserved");
 
 // Default MCP retired cleanly
@@ -57,7 +60,7 @@ if (fs.existsSync(antigravityMcpRootDir)) {
   const stale = fs.readdirSync(antigravityMcpRootDir).filter((n) => n.startsWith("agy-context-saver"));
   assert.deepEqual(stale, [], "Zero agy-context-saver* MCP schema directories may remain");
 }
-console.log("✓ Single-source plugin hooks.json active, zero duplicate global hooks/MCP configs preserved foreign entries");
+console.log("✓ Plugin + global hooks.json active for coordinator & /swarm workers; zero duplicate MCP configs; foreign entries preserved");
 
 // --- 2. Detection & RTK Config ---
 console.log("\n--- 2. Installer Status & RTK Config Verification ---");
@@ -67,7 +70,9 @@ assert.equal(detection.isInstalled, true);
 assert.equal(detection.isComplete, true);
 assert.equal(detection.details.plugin.exists, true);
 assert.equal(detection.details.hook.registered, true);
-assert.equal(detection.details.hook.duplicateGlobalHookPresent, false);
+assert.equal(detection.details.hook.pluginHookRegistered, true);
+assert.equal(detection.details.hook.globalHookRegistered, true);
+assert.equal(detection.details.hook.mirroredHookExists, true);
 assert.equal(detection.details.cliShim.exists, true);
 assert.equal(detection.details.mcp.clean, true);
 assert.ok(detection.details.rtk, "RTK >= 1.1.0 must be detected");

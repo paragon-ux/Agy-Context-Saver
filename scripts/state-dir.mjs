@@ -4,6 +4,7 @@
  * State lives in a folder owned by this user, never in the shared os.tmpdir():
  *   Windows: %LOCALAPPDATA%\agy-context-saver
  *   POSIX:   $XDG_STATE_HOME/agy-context-saver (default ~/.local/state/agy-context-saver)
+ *   Legacy versions (<= 1.7.0) left session JSON files in os.tmpdir(); cleaned on setup/uninstall.
  * Under AGY_TEST_PROFILE_DIR the same layout is rooted in the test profile.
  *
  * The hook is mirrored into ~/.gemini/config/scripts as a standalone file, so it keeps an

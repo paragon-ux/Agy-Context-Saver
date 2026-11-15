@@ -30,6 +30,7 @@ const pluginDest = path.join(pluginsDir, "agy-context-saver");
 const scriptsDir = path.join(geminiConfigDir, "scripts");
 const hooksJsonPath = path.join(geminiConfigDir, "hooks.json");
 const hooksBakPath = path.join(geminiConfigDir, "hooks.json.bak");
+const configJsonPath = path.join(geminiConfigDir, "config.json");
 const mcpJsonPath = path.join(geminiConfigDir, "mcp_config.json");
 const mcpBakPath = path.join(geminiConfigDir, "mcp_config.json.bak");
 const antigravityMcpRootDir = path.join(homeDir, ".gemini", "antigravity", "mcp");
@@ -37,12 +38,24 @@ const antigravityMcpDir = path.join(antigravityMcpRootDir, "agy-context-saver");
 const antigravityBinDir = path.join(homeDir, ".gemini", "antigravity", "bin");
 
 const sourceHook = path.join(repoRoot, "scripts", "execution-guard-hook.mjs");
+const repoHooksJsonPath = path.join(repoRoot, "hooks.json");
 const destHook = path.join(scriptsDir, "execution-guard-hook.mjs");
 const destHookNormalized = destHook.replace(/\\/g, "/");
 
 const HOOK_KEY = "agy-context-saver";
 const LEGACY_HOOK_KEY = "execution-guard";
 const CLI_SHIM_NAMES = ["agy-context", "agy-context-saver"];
+const DEFAULT_HOOK_MATCHER =
+  "manage_task|schedule|run_command|view_file|read_file|read_many_files|grep_search|find_by_name|list_dir|replace_file_content|write_file|write_to_file|edit_file";
+
+function getExpectedHookMatcher() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(repoHooksJsonPath, "utf-8"));
+    const matcher = cfg?.[HOOK_KEY]?.PreToolUse?.[0]?.matcher;
+    if (typeof matcher === "string" && matcher.trim()) return matcher;
+  } catch {}
+  return DEFAULT_HOOK_MATCHER;
+}
 
 function isLegacyAgyMcpKey(key) {
   return key === "agy-context-saver" || key.startsWith("agy-context-saver");
@@ -156,43 +169,54 @@ export function detectExistingInstallation() {
     }
   }
 
-  let hookRegistered = false;
-  let hookCommand = null;
+  let pluginHookRegistered = false;
+  let pluginHookCommand = null;
   const pluginHooksPath = path.join(pluginDest, "hooks.json");
   if (fs.existsSync(pluginHooksPath)) {
     try {
       const pCfg = JSON.parse(fs.readFileSync(pluginHooksPath, "utf-8"));
       const h = pCfg?.[HOOK_KEY];
       if (h) {
-        hookCommand = h.PreToolUse?.[0]?.hooks?.[0]?.command ?? null;
-        hookRegistered = Boolean(hookCommand) && !String(hookCommand).includes("ANTIGRAVITY_PLUGIN_ROOT");
+        pluginHookCommand = h.PreToolUse?.[0]?.hooks?.[0]?.command ?? null;
+        pluginHookRegistered = Boolean(pluginHookCommand) && !String(pluginHookCommand).includes("ANTIGRAVITY_PLUGIN_ROOT");
       }
     } catch {}
   }
 
   let legacyHookPresent = false;
-  let duplicateGlobalHookPresent = false;
+  let globalHookRegistered = false;
+  let globalHookCommand = null;
+  const expectedMatcher = getExpectedHookMatcher();
   if (fs.existsSync(hooksJsonPath)) {
     try {
       const cfg = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
       legacyHookPresent = Boolean(cfg?.[LEGACY_HOOK_KEY]);
-      duplicateGlobalHookPresent = Boolean(cfg?.[HOOK_KEY]);
+      const gh = cfg?.[HOOK_KEY];
+      if (gh) {
+        globalHookCommand = gh.PreToolUse?.[0]?.hooks?.[0]?.command ?? null;
+        const globalMatcher = gh.PreToolUse?.[0]?.matcher ?? "";
+        globalHookRegistered =
+          Boolean(globalHookCommand) &&
+          String(globalHookCommand).replace(/\\/g, "/").includes(destHookNormalized) &&
+          globalMatcher === expectedMatcher;
+      }
     } catch {}
   }
 
   const pluginHookScript = path.join(pluginDest, "scripts", "execution-guard-hook.mjs");
   const scriptExists = fs.existsSync(pluginHookScript);
-  const legacyMirroredHookExists = fs.existsSync(destHook);
+  const mirroredHookExists = fs.existsSync(destHook);
   const cliShim = detectCliShims();
   const mcp = findLegacyMcpArtifacts();
   const rtkInfo = findExistingRtk();
+  const hookRegistered = pluginHookRegistered && globalHookRegistered && mirroredHookExists;
 
   const isInstalled =
     pluginExists ||
-    hookRegistered ||
+    pluginHookRegistered ||
+    globalHookRegistered ||
     legacyHookPresent ||
-    duplicateGlobalHookPresent ||
-    legacyMirroredHookExists ||
+    mirroredHookExists ||
     cliShim.exists ||
     mcp.legacyMcpKeys.length > 0 ||
     mcp.legacySchemaDirs.length > 0;
@@ -202,7 +226,6 @@ export function detectExistingInstallation() {
     hookRegistered &&
     scriptExists &&
     !legacyHookPresent &&
-    !duplicateGlobalHookPresent &&
     cliShim.exists &&
     Boolean(rtkInfo) &&
     mcp.clean;
@@ -215,9 +238,11 @@ export function detectExistingInstallation() {
       hook: {
         key: HOOK_KEY,
         registered: hookRegistered,
+        pluginHookRegistered,
+        globalHookRegistered,
+        mirroredHookExists,
         legacyHookPresent,
-        duplicateGlobalHookPresent,
-        command: hookCommand,
+        command: globalHookCommand || pluginHookCommand,
         scriptExists
       },
       cliShim,
@@ -379,6 +404,7 @@ export async function runInstall(options = {}) {
   // Pre-flight Fail-Closed Validation: Verify existing configs BEFORE ANY DISK MUTATION OR CHECK RETURN
   const validatedHooks = parseAndValidateJsonConfig(hooksJsonPath, "hooks");
   const validatedMcp = parseAndValidateJsonConfig(mcpJsonPath, "mcp");
+  const validatedConfig = parseAndValidateJsonConfig(configJsonPath, "config");
 
   const existing = detectExistingInstallation();
 
@@ -390,10 +416,12 @@ export async function runInstall(options = {}) {
         log(`   [OK] Native Plugin Link: ${pluginDest}`);
       }
       if (existing.details.hook.registered) {
-        log(`   [OK] Governor Hook (${HOOK_KEY}): Active via plugin hooks.json`);
+        log(`   [OK] Governor Hook (${HOOK_KEY}): Active via plugin + global hooks.json`);
+      } else if (existing.details.hook.pluginHookRegistered) {
+        log(`   [WARN] Global hooks.json entry missing/stale for /swarm workers (run setup to synchronize)`);
       }
-      if (existing.details.hook.legacyHookPresent || existing.details.hook.duplicateGlobalHookPresent) {
-        log(`   [WARN] Global hooks.json has legacy/duplicate hook entry (run setup to clean up)`);
+      if (existing.details.hook.legacyHookPresent) {
+        log(`   [WARN] Global hooks.json has legacy 'execution-guard' entry (run setup to clean up)`);
       }
       if (existing.details.cliShim.exists) {
         log(`   [OK] CLI Shims (agy-context): Installed in ${antigravityBinDir}`);
@@ -420,7 +448,7 @@ export async function runInstall(options = {}) {
       log(`   [OK] Native Plugin Link: ${pluginDest}`);
     }
     if (existing.details.hook.registered) {
-      log(`   [OK] Governor Hook (${HOOK_KEY}): Active via plugin hooks.json`);
+      log(`   [OK] Governor Hook (${HOOK_KEY}): Active via plugin + global hooks.json`);
     }
     if (existing.details.cliShim.exists) {
       log(`   [OK] CLI Shims (agy-context): Installed in ${antigravityBinDir}`);
@@ -491,31 +519,69 @@ export async function runInstall(options = {}) {
     log(`[OK] Native Antigravity Plugin verified: ${pluginDest}`);
   }
 
-  // 2. Single-source hook governance via plugin hooks.json (ACS-HOOK-14):
-  //    Prune legacy "execution-guard" and any duplicate "agy-context-saver" from ~/.gemini/config/hooks.json,
-  //    and remove any stale mirrored hook script in ~/.gemini/config/scripts/ so PreToolUse never fires twice.
-  if (fs.existsSync(hooksJsonPath) && validatedHooks && (validatedHooks[LEGACY_HOOK_KEY] || validatedHooks[HOOK_KEY])) {
-    if (!fs.existsSync(hooksBakPath)) {
-      try {
-        await fsPromises.copyFile(hooksJsonPath, hooksBakPath);
-        log(`[OK] Created configuration backup: ${hooksBakPath}`);
-      } catch (err) {
-        warn(`[WARN] Could not create backup of ${hooksJsonPath}: ${err.message}`);
+  // 2. Dual-surface hook governance (plugin hooks.json + global hooks.json for /swarm workers):
+  //    Mirror execution-guard-hook.mjs to ~/.gemini/config/scripts/execution-guard-hook.mjs and register
+  //    "agy-context-saver" in ~/.gemini/config/hooks.json so native /swarm workers (which load global hooks.json
+  //    rather than plugin hooks.json) execute PreToolUse reliably alongside coordinator idempotency deduplication.
+  await fsPromises.mkdir(scriptsDir, { recursive: true });
+  const hookUpdated = await safeCopyFileIfChanged(sourceHook, destHook);
+  log(`[OK] Mirrored hook script ${hookUpdated ? "updated" : "verified"}: ${destHook}`);
+
+  const hookMatcher = getExpectedHookMatcher();
+  const nextHooks = validatedHooks ? { ...validatedHooks } : {};
+  const hadLegacyHook = Boolean(nextHooks[LEGACY_HOOK_KEY]);
+  delete nextHooks[LEGACY_HOOK_KEY];
+  nextHooks[HOOK_KEY] = {
+    PreToolUse: [
+      {
+        matcher: hookMatcher,
+        hooks: [
+          {
+            type: "command",
+            command: `node "${destHookNormalized}"`,
+            timeout: 5
+          }
+        ]
       }
-    }
-    const nextHooks = { ...validatedHooks };
-    delete nextHooks[LEGACY_HOOK_KEY];
-    delete nextHooks[HOOK_KEY];
-    await safeWriteFileIfChanged(hooksJsonPath, JSON.stringify(nextHooks, null, 2));
-    log(`[OK] Pruned legacy/duplicate global hook keys from: ${hooksJsonPath}`);
-  }
-  if (fs.existsSync(destHook)) {
+    ]
+  };
+  const nextHooksRaw = JSON.stringify(nextHooks, null, 2);
+  let hooksNeedsBackup = false;
+  if (fs.existsSync(hooksJsonPath) && !fs.existsSync(hooksBakPath)) {
     try {
-      await fsPromises.unlink(destHook);
-      log(`[OK] Removed stale mirrored hook script: ${destHook}`);
+      const currentRaw = fs.readFileSync(hooksJsonPath, "utf-8");
+      hooksNeedsBackup = currentRaw !== nextHooksRaw && (hadLegacyHook || Object.keys(validatedHooks || {}).length > 0);
     } catch {}
   }
-  log(`[OK] Lifecycle hook (${HOOK_KEY}) active via plugin hooks.json (single registration)`);
+  if (hooksNeedsBackup) {
+    try {
+      await fsPromises.copyFile(hooksJsonPath, hooksBakPath);
+      log(`[OK] Created configuration backup: ${hooksBakPath}`);
+    } catch (err) {
+      warn(`[WARN] Could not create backup of ${hooksJsonPath}: ${err.message}`);
+    }
+  }
+  const hooksChanged = await safeWriteFileIfChanged(hooksJsonPath, nextHooksRaw);
+  log(`[OK] Lifecycle hook (${HOOK_KEY}) ${hooksChanged ? "registered" : "verified"} in: ${hooksJsonPath} + plugin hooks.json`);
+
+  // 3. Ensure ~/.gemini/config/config.json enables plugin if present
+  if (validatedConfig && typeof validatedConfig === "object") {
+    const prevPluginEntry = validatedConfig.plugins?.[HOOK_KEY];
+    if (!prevPluginEntry || prevPluginEntry.enabled !== true) {
+      const nextConfig = {
+        ...validatedConfig,
+        plugins: {
+          ...(validatedConfig.plugins && typeof validatedConfig.plugins === "object" ? validatedConfig.plugins : {}),
+          [HOOK_KEY]: {
+            ...(prevPluginEntry && typeof prevPluginEntry === "object" ? prevPluginEntry : {}),
+            enabled: true
+          }
+        }
+      };
+      await safeWriteFileIfChanged(configJsonPath, JSON.stringify(nextConfig, null, 2));
+      log(`[OK] Enabled plugin '${HOOK_KEY}' in: ${configJsonPath}`);
+    }
+  }
 
   // 4. Retire default MCP registration & sweep all agy-context-saver* schema directories (ACS-HOOK-11)
   await stripLegacyMcpRegistrations(validatedMcp, { log, warn });
@@ -561,7 +627,7 @@ export async function runUninstall(options = {}) {
     }
   }
 
-  // 3. Remove both current and legacy hook keys from hooks.json
+  // 3. Remove both current and legacy hook keys from hooks.json, and plugin toggle from config.json
   if (fs.existsSync(hooksJsonPath)) {
     try {
       const hooksConfig = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
@@ -570,6 +636,16 @@ export async function runUninstall(options = {}) {
         delete hooksConfig[HOOK_KEY];
         await safeWriteFileIfChanged(hooksJsonPath, JSON.stringify(hooksConfig, null, 2));
         log(`[OK] Removed hook registration from: ${hooksJsonPath}`);
+      }
+    } catch {}
+  }
+  if (fs.existsSync(configJsonPath)) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(configJsonPath, "utf-8"));
+      if (cfg && typeof cfg === "object" && cfg.plugins && typeof cfg.plugins === "object" && HOOK_KEY in cfg.plugins) {
+        delete cfg.plugins[HOOK_KEY];
+        await safeWriteFileIfChanged(configJsonPath, JSON.stringify(cfg, null, 2));
+        log(`[OK] Removed '${HOOK_KEY}' plugin entry from: ${configJsonPath}`);
       }
     } catch {}
   }
@@ -659,8 +735,13 @@ export function runStatus(options = {}) {
   const existing = detectExistingInstallation();
   log("Checking Agy-Context-Saver installation status...\n");
   log(`- Native Plugin Link: ${existing.details.plugin.exists ? "ACTIVE (" + pluginDest + ")" : "NOT LINKED"}`);
+  const hookStatusLabel = existing.details.hook.registered
+    ? "ACTIVE (plugin + global hooks.json)"
+    : existing.details.hook.pluginHookRegistered
+      ? "PARTIAL (plugin hooks.json only; global /swarm hook missing)"
+      : "NOT REGISTERED";
   log(
-    `- Execution Governor Hook (${HOOK_KEY}): ${existing.details.hook.registered ? "ACTIVE (plugin hooks.json)" : "NOT REGISTERED"}${existing.details.hook.legacyHookPresent ? " (legacy 'execution-guard' in global hooks.json)" : ""}${existing.details.hook.duplicateGlobalHookPresent ? " (duplicate global entry in hooks.json)" : ""}`
+    `- Execution Governor Hook (${HOOK_KEY}): ${hookStatusLabel}${existing.details.hook.legacyHookPresent ? " (legacy 'execution-guard' in global hooks.json)" : ""}`
   );
   log(
     `- CLI Shim (agy-context): ${existing.details.cliShim.exists ? "INSTALLED (" + antigravityBinDir + ")" : "MISSING"}`

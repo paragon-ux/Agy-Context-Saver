@@ -66,7 +66,8 @@ try {
 
   const installedHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
   assert.equal(installedHooks["execution-guard"], undefined, "Legacy execution-guard key must be pruned");
-  assert.equal(installedHooks["agy-context-saver"], undefined, "Duplicate global agy-context-saver key must be pruned");
+  assert.ok(fs.existsSync(destHook), "Mirrored hook script must be installed for /swarm workers");
+  assert.ok(installedHooks["agy-context-saver"]?.PreToolUse?.[0]?.hooks?.[0]?.command?.includes("execution-guard-hook.mjs"), "Global agy-context-saver hook must be registered for /swarm workers");
   assert.ok(installedHooks["foreign-preservation-hook"], "Foreign hook must be preserved");
 
   const installedMcp = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));

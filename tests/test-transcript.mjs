@@ -206,7 +206,28 @@ try {
       field: "tool_args:Path"
     });
     assert.match(pathKeyOnly.text, /lib\/transcript-core\.mjs/);
-    console.log("✓ Truncated tail auto-search, structured error role, summary tool/error formatting, and multi-tool args verified");
+    // Default query includes GENERIC & SYSTEM steps; `--roles generic` & `--roles error` include non-zero shell exit codes
+    const genericConv = "conv-generic-exit";
+    const genericLogs = path.join(brainDir, genericConv, ".system_generated", "logs");
+    fs.mkdirSync(genericLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(genericLogs, "transcript_full.jsonl"),
+      [
+        JSON.stringify({ step_index: 1, type: "SYSTEM_MESSAGE", content: "Swarm wakeup", created_at: "2026-11-10T10:00:00Z" }),
+        JSON.stringify({ step_index: 2, type: "GENERIC", status: "DONE", content: "Created At: x\nCommand exited with code 0.\nShowing docs mentioning Command exited with code 7.", created_at: "2026-11-10T10:00:05Z" }),
+        JSON.stringify({ step_index: 3, type: "GENERIC", status: "DONE", content: "Created At: x\nCompleted At: y\nCommand exited with code 7.\n\nCommand output:\nfatal probe error", created_at: "2026-11-10T10:00:10Z" })
+      ].join("\n") + "\n"
+    );
+    const defaultQueryCli = runCli(["transcript", "query", "--id", genericConv, "--query", "fatal probe error", "--summary"]);
+    assert.equal(defaultQueryCli.status, 0, defaultQueryCli.stderr);
+    assert.match(defaultQueryCli.stdout, /Step 3 \| GENERIC/);
+    const genericRoleRes = await queryTranscript({ conversationId: genericConv, roles: ["generic"] });
+    assert.equal(genericRoleRes.matchedCount, 2, "roles=['generic'] must return GENERIC steps");
+    const exitErrRes = await queryTranscript({ conversationId: genericConv, roles: ["error"] });
+    assert.equal(exitErrRes.matchedCount, 1, "roles=['error'] must match header exit code 7 and skip Command output prose");
+    assert.match(exitErrRes.text, /Step 3/);
+
+    console.log("✓ Truncated tail auto-search, generic/default roles, exit-code errors, summary formatting, and multi-tool args verified");
   }
 
   // ==========================================================================

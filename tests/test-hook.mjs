@@ -136,13 +136,38 @@ console.log("\n--- Group B: RTK >= 1.1.0 Delegation & Edge-Case Guards ---");
   assert.match(outSimpleRg.overwrite?.CommandLine || "", /rtk grep/);
   assert.equal((outSimpleRg.overwrite?.CommandLine || "").includes("rtk rg"), false, "Must NEVER emit rtk rg when rg is absent");
 
-  // Unsupported rg-only flag (-t js) falls back cleanly instead of emitting `rtk rg`
+  // Unsupported rg-only flag (-t js) maps cleanly to rtk grep --include instead of emitting `rtk rg`
   const outUnsupportedRg = runHook(
     { toolCall: { name: "run_command", args: { CommandLine: 'rg -t js "HOOK_KEY" scripts/', WaitMsBeforeAsync: 5000 } } },
     emptyBinEnv
   );
   assert.equal(outUnsupportedRg.decision, "allow");
-  assert.equal((outUnsupportedRg.overwrite?.CommandLine || "").includes("rtk rg"), false, "Must strip rtk prefix when rg-only flags cannot map to grep");
+  assert.equal((outUnsupportedRg.overwrite?.CommandLine || "").includes("rtk rg"), false, "Must NEVER emit rtk rg when rg is absent");
+  assert.match(outUnsupportedRg.overwrite?.CommandLine || "", /rtk grep.*--include=\*\.js/);
+
+  // Direct `rtk grep "a|b" lib/` & `rtk grep -rn "a|b" lib/` normalize to `-r` + `-E` when rg is absent
+  const outRtkGrepDir = runHook(
+    { toolCall: { name: "run_command", args: { CommandLine: 'rtk grep "HOOK_KEY|LEGACY_HOOK_KEY" scripts/', WaitMsBeforeAsync: 5000 } } },
+    emptyBinEnv
+  );
+  assert.equal(outRtkGrepDir.decision, "allow");
+  assert.match(outRtkGrepDir.overwrite?.CommandLine || "", /^rtk grep -r -E\b/);
+
+  const outRtkGrepPipe = runHook(
+    { toolCall: { name: "run_command", args: { CommandLine: 'echo "abc" | rtk grep "a|b"', WaitMsBeforeAsync: 5000 } } },
+    emptyBinEnv
+  );
+  assert.equal(outRtkGrepPipe.decision, "allow");
+  assert.match(outRtkGrepPipe.overwrite?.CommandLine || "", /\|\s*rtk grep -E\b/);
+  assert.equal(/\brtk grep\b[^|]*-r\b/.test(outRtkGrepPipe.overwrite?.CommandLine || ""), false, "Piped rtk grep must NOT inject -r");
+
+  // `rg -S` (smart-case) and `rg -g "*.mjs"` map cleanly instead of falling back to nonexistent `rg`
+  const outSmartRg = runHook(
+    { toolCall: { name: "run_command", args: { CommandLine: 'rg -S -g "*.mjs" "hook_key" scripts/', WaitMsBeforeAsync: 5000 } } },
+    emptyBinEnv
+  );
+  assert.equal(outSmartRg.decision, "allow");
+  assert.match(outSmartRg.overwrite?.CommandLine || "", /rtk grep -r -i -E --include=\*\.mjs/);
 
   // Env-prefixed commands still guard absent `rg` and revert lossy `wc` (HOOK-REV-02)
   const outEnvRg = runHook(
@@ -238,63 +263,65 @@ console.log("\n--- Group C: read_file & view_file Safe Harbor + Hybrid Slice ---
 
   // Guarded full-file audit (<= 800 lines, <= 45 KiB) using explicit StartLine=1..TotalLines
   const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-audit-file-"));
-  const smallFile = path.join(auditDir, "small.js");
-  fs.writeFileSync(smallFile, Array.from({ length: 220 }, (_, i) => `const x${i} = ${i};`).join("\n"), "utf-8");
-  const fullSmallAudit = runHook({
-    toolCall: { name: "read_file", args: { Path: smallFile, StartLine: 1, EndLine: 220 } }
-  });
-  assert.equal(fullSmallAudit.decision, "allow", "Explicit full-file read_file (<=800L & <=45KiB) allowed");
+  try {
+    const smallFile = path.join(auditDir, "small.js");
+    fs.writeFileSync(smallFile, Array.from({ length: 220 }, (_, i) => `const x${i} = ${i};`).join("\n"), "utf-8");
+    const fullSmallAudit = runHook({
+      toolCall: { name: "read_file", args: { Path: smallFile, StartLine: 1, EndLine: 220 } }
+    });
+    assert.equal(fullSmallAudit.decision, "allow", "Explicit full-file read_file (<=800L & <=45KiB) allowed");
 
-  const partialOver = runHook({
-    toolCall: { name: "read_file", args: { Path: smallFile, StartLine: 1, EndLine: 180 } }
-  });
-  assert.equal(partialOver.decision, "deny", "Partial slice 1..180 of 220-line file must be denied");
+    const partialOver = runHook({
+      toolCall: { name: "read_file", args: { Path: smallFile, StartLine: 1, EndLine: 180 } }
+    });
+    assert.equal(partialOver.decision, "deny", "Partial slice 1..180 of 220-line file must be denied");
 
-  // Step spillover bounded read_file <= 150 lines allowed, > 150 or unbounded denied
-  const boundedSpillover = runHook({
-    toolCall: {
-      name: "read_file",
-      args: { Path: "/home/user/.gemini/antigravity/brain/conv-1/.system_generated/steps/42/output.txt", StartLine: 1, EndLine: 150 }
-    }
-  });
-  assert.equal(boundedSpillover.decision, "allow", "Bounded read_file <=150 lines on step spillover allowed");
-
-  const fakeSpillover = runHook({
-    toolCall: {
-      name: "read_file",
-      args: { Path: "/home/user/.gemini/antigravity/brain/conv-1/.system_generated/steps/42/output_bak.txt", StartLine: 1, EndLine: 50 }
-    }
-  });
-  assert.equal(fakeSpillover.decision, "deny", "Non-output.txt spillover lookalike must be denied");
-
-  // Symmetrical `view_file` Safe Harbor, bounded slice, unbounded deny, and spillover deny (HOOK-REV-03)
-  assert.equal(
-    runHook({ toolCall: { name: "view_file", args: { AbsolutePath: "/home/user/repo/.agents/skills/swarm/SKILL.md" } } }).decision,
-    "allow",
-    "view_file on SKILL.md must pass Safe Harbor"
-  );
-  assert.equal(
-    runHook({ toolCall: { name: "view_file", args: { AbsolutePath: "/home/user/repo/src/app.js", StartLine: 1, EndLine: 150 } } }).decision,
-    "allow",
-    "view_file 150-line slice must be allowed"
-  );
-  assert.equal(
-    runHook({ toolCall: { name: "view_file", args: { AbsolutePath: "/home/user/repo/src/app.js" } } }).decision,
-    "deny",
-    "view_file unbounded read must be denied"
-  );
-  assert.equal(
-    runHook({
+    // Step spillover bounded read_file <= 150 lines allowed, > 150 or unbounded denied
+    const boundedSpillover = runHook({
       toolCall: {
-        name: "view_file",
-        args: { AbsolutePath: "/home/user/.gemini/antigravity/brain/conv-1/.system_generated/steps/42/output.txt", StartLine: 1, EndLine: 50 }
+        name: "read_file",
+        args: { Path: "/home/user/.gemini/antigravity/brain/conv-1/.system_generated/steps/42/output.txt", StartLine: 1, EndLine: 150 }
       }
-    }).decision,
-    "deny",
-    "view_file on step spillover must stay denied (use read_file or rtk read)"
-  );
+    });
+    assert.equal(boundedSpillover.decision, "allow", "Bounded read_file <=150 lines on step spillover allowed");
 
-  fs.rmSync(auditDir, { recursive: true, force: true });
+    const fakeSpillover = runHook({
+      toolCall: {
+        name: "read_file",
+        args: { Path: "/home/user/.gemini/antigravity/brain/conv-1/.system_generated/steps/42/output_bak.txt", StartLine: 1, EndLine: 50 }
+      }
+    });
+    assert.equal(fakeSpillover.decision, "deny", "Non-output.txt spillover lookalike must be denied");
+
+    // Symmetrical `view_file` Safe Harbor, bounded slice, unbounded deny, and spillover deny (HOOK-REV-03)
+    assert.equal(
+      runHook({ toolCall: { name: "view_file", args: { AbsolutePath: "/home/user/repo/.agents/skills/swarm/SKILL.md" } } }).decision,
+      "allow",
+      "view_file on SKILL.md must pass Safe Harbor"
+    );
+    assert.equal(
+      runHook({ toolCall: { name: "view_file", args: { AbsolutePath: "/home/user/repo/src/app.js", StartLine: 1, EndLine: 150 } } }).decision,
+      "allow",
+      "view_file 150-line slice must be allowed"
+    );
+    assert.equal(
+      runHook({ toolCall: { name: "view_file", args: { AbsolutePath: "/home/user/repo/src/app.js" } } }).decision,
+      "deny",
+      "view_file unbounded read must be denied"
+    );
+    assert.equal(
+      runHook({
+        toolCall: {
+          name: "view_file",
+          args: { AbsolutePath: "/home/user/.gemini/antigravity/brain/conv-1/.system_generated/steps/42/output.txt", StartLine: 1, EndLine: 50 }
+        }
+      }).decision,
+      "deny",
+      "view_file on step spillover must stay denied (use read_file or rtk read)"
+    );
+  } finally {
+    fs.rmSync(auditDir, { recursive: true, force: true });
+  }
   console.log("✓ Symmetrical read_file / view_file Safe Harbor, Hybrid Slice, and spillover bounds verified");
 }
 
@@ -349,22 +376,49 @@ console.log("\n--- Group D: Quote/Heredoc Shell Parser & agy-context CLI Exempti
   });
   assert.equal(outCliFileOk.decision, "allow");
 
-  // D.6: Chained/redirected/subshell `agy-context transcript` & unspaced redirects MUST be DENIED (HOOK-REV-01)
+  // D.6: Chained/redirected/subshell/smuggled `agy-context transcript` & obfuscated bypasses MUST be DENIED
   for (const dangerous of [
     `agy-context transcript health --id abc && cat "${validBrainTranscript}"`,
+    `rtk read package.json && agy-context transcript health --id abc`,
+    `FOO=1 agy-context transcript health --id abc && head -n 5 package.json`,
+    `env agy-context transcript health --id abc && head -n 5 package.json`,
+    `bash -c "agy-context transcript health --id abc && head -n 5 package.json"`,
+    `(agy-context transcript health --id abc)`,
     `agy-context transcript read --id abc | head -n 5`,
     `agy-context transcript read --file /etc/passwd`,
     `agy-context transcript read --file "${brainDir}/../config/hooks.json"`,
     `rtk read .system_generated/steps/1/output.txt && cat /etc/passwd`,
     `echo "hi">.system_generated/logs/transcript.jsonl`,
-    `echo hi>>.system_generated/logs/transcript.jsonl`
+    `echo hi>>.system_generated/logs/transcript.jsonl`,
+    `cat .system_""generated/logs/transcript.jsonl`,
+    `head -n 2 .system_gene*/logs/transcript.jsonl`,
+    `cat \${D}generated/logs/transcript.jsonl`,
+    `node -e "console.log('.system_'+'generated')"`,
+    `grep -Ff "${validBrainTranscript}" package.json`,
+    `python3 - <<'EOF'\nprint(open("${validBrainTranscript}").read())\nEOF`,
+    `node <<'EOF'\nfs.readFileSync("${validBrainTranscript}", "utf8")\nEOF`,
+    `xargs head -n 2 <<'EOF'\n${validBrainTranscript}\nEOF`,
+    `bash <<'EOF'\ncat "${validBrainTranscript}"\nEOF`,
+    `echo Y2F0IC9ldGMvcGFzc3dkCg== | base64 -d | bash`
   ]) {
     const outBypass = runHook({
       toolCall: { name: "run_command", args: { CommandLine: dangerous, WaitMsBeforeAsync: 5000 } }
     });
     assert.equal(outBypass.decision, "deny", `Dangerous chained/escape command must be DENIED: ${dangerous}`);
   }
-  console.log("✓ Heredoc/echo/pattern immunity and strict unchained agy-context CLI exemption verified");
+
+  // Benign markdown documentation heredoc writing to scratch report MUST still be ALLOWED
+  const benignReportHeredoc = runHook({
+    toolCall: {
+      name: "run_command",
+      args: {
+        CommandLine: `cat <<'EOF' > scratch/report.md\nLayout of .system_generated/logs/transcript.jsonl and steps/1/output.txt\nEOF`,
+        WaitMsBeforeAsync: 5000
+      }
+    }
+  });
+  assert.equal(benignReportHeredoc.decision, "allow", "Benign report-writing heredoc mentioning transcript.jsonl must stay allowed");
+  console.log("✓ Heredoc/echo/pattern immunity, red-team smuggling defenses, and strict unchained agy-context CLI exemption verified");
 }
 
 // ============================================================================
@@ -405,7 +459,22 @@ console.log("\n--- Group E: Task Polling Backoff, Watchdog & Benchmark Mutation 
   }
   const safeEdit = runHook({ toolCall: { name: "edit_file", args: { Path: "/repo/src/utils.js", Target: "a", Replacement: "b" } } });
   assert.equal(safeEdit.decision, "allow");
-  console.log("✓ Backoff circuit breaker, schedule watchdog, and 2.0 edit_file/write_file LH-09 protection verified");
+
+  // Dual-hook idempotency deduplication (same toolCall.id does not double-increment pollCount)
+  resetState();
+  const dedupFirst = runHook({
+    conversationId: "conv-dedup-test",
+    stepIdx: 10,
+    toolCall: { id: "toolu_dedup_1", name: "manage_task", args: { Action: "status", TaskId: "t1" } }
+  });
+  assert.equal(dedupFirst.decision, "allow");
+  const dedupSecond = runHook({
+    conversationId: "conv-dedup-test",
+    stepIdx: 10,
+    toolCall: { id: "toolu_dedup_1", name: "manage_task", args: { Action: "status", TaskId: "t1" } }
+  });
+  assert.equal(dedupSecond.decision, "allow", "Duplicate hook invocation for same toolCall.id must replay allow without double-counting");
+  console.log("✓ Backoff circuit breaker, schedule watchdog, dual-hook deduplication, and 2.0 edit_file/write_file LH-09 protection verified");
 }
 
 hermetic.cleanup();

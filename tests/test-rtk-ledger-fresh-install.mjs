@@ -90,7 +90,7 @@ const grepOutput = runHook(
   noRgEnv
 );
 assert.equal(grepOutput.decision, "deny");
-assert.match(grepOutput.reason, /rtk grep -rn "export function" \./, "When rg is absent, grep_search routes to rtk grep -rn <pattern> .");
+assert.match(grepOutput.reason, /rtk grep -rnE "export function" \./, "When rg is absent, grep_search routes to rtk grep -rnE <pattern> .");
 
 const findOutput = runHook({ toolCall: { name: "find_by_name", args: { pattern: "*.mjs" } } });
 assert.equal(findOutput.decision, "deny");

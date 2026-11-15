@@ -34,7 +34,7 @@
 - **Native Shell Commands**: Run shell commands normally using `run_command`. The PreToolUse hook delegates command rewriting to `rtk hook antigravity` (`git`, `pytest`, `cargo`, `npm`, etc.) to produce ultra-compact outputs.
 - **Unified Codebase & File Inspection**: Unbounded full-file reads and unoptimized search tools (`grep_search`, `find_by_name`, `list_dir`) are blocked for workspace files. Follow this hierarchy:
   1. **Tier 1 — Compact Search & Discovery (`rtk grep`, `rtk find`, `rtk ls`)**:
-     - **Prose / Regex / Symbol Discovery**: Use `rtk grep "<pattern>" <path>` via `run_command` to locate exact `[StartLine, EndLine]` coordinates without dumping unoptimized search payloads. Always provide an explicit target path (e.g., `.` or `src/`) to prevent stdin pipe stalls.
+     - **Prose / Regex / Symbol Discovery**: Use `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate exact `[StartLine, EndLine]` coordinates without dumping unoptimized search payloads. Always provide an explicit target path (e.g., `.` or `src/`) to prevent stdin pipe stalls.
      - **Directory / File Discovery**:
        - **Windows**: Use `rtk find <path>` or PowerShell `dir` / `Get-ChildItem`.
        - **POSIX / Linux / macOS**: Use `rtk find <path>`, `rtk ls <path>`, or `rtk tree`.
@@ -90,5 +90,5 @@ When an agent or developer tests this framework, follow this exact sequence with
 4. **Operational Anti-Patterns (What NOT to do)**:
    - ❌ **Do NOT run `manage_task(Action='status')` loops**: Status polling is governed; 5 polls trigger the `force_ask` circuit breaker.
    - ❌ **Do NOT run `npm run uninstall` as an isolated test**: It strips the live hook and CLI shims from `~/.gemini/`. If run, immediately re-run `npm run setup`.
-   - ❌ **Do NOT omit explicit target paths with `rtk grep`**: Always provide a path (e.g. `rtk grep "pattern" .`) to prevent stdin pipe stalls.
+   - ❌ **Do NOT omit explicit target paths with `rtk grep`**: Always provide a path (e.g. `rtk grep -rnE "pattern" .`) to prevent stdin pipe stalls.
    - ❌ **Do NOT chain `agy-context transcript ...` commands**: Run `agy-context transcript ...` as a strictly single, unchained `run_command` invocation without `&&`, `||`, `;`, `|`, redirects, or `..` traversal.

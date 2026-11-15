@@ -243,7 +243,7 @@ async function handleTranscriptCommand(argv) {
     const maxResults = parseOptionalInt(opts.limit, "limit");
     const roles = opts.roles
       ? opts.roles.split(",").map((r) => r.trim()).filter(Boolean)
-      : ["user", "assistant"];
+      : ["all"];
 
     const res = await queryTranscript({
       conversationId: opts.id,

@@ -27,10 +27,13 @@ function exists(relativePath) {
 }
 
 let pkg;
-try {
-  pkg = JSON.parse(readText('package.json'));
-} catch (error) {
-  errors.push(`package.json is not valid JSON: ${error.message}`);
+const pkgText = readText('package.json');
+if (pkgText) {
+  try {
+    pkg = JSON.parse(pkgText);
+  } catch (error) {
+    errors.push(`package.json is not valid JSON: ${error.message}`);
+  }
 }
 
 if (pkg) {
@@ -72,22 +75,25 @@ if (pkg) {
     errors.push('Legacy mcp_config.json is still present at repository root; remove it for 2.0 CLI-first release.');
   }
 
-  try {
-    const pluginHooks = JSON.parse(readText('hooks.json'));
-    const hookCmd = pluginHooks?.['agy-context-saver']?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
-    const hookMatcher = pluginHooks?.['agy-context-saver']?.PreToolUse?.[0]?.matcher ?? '';
-    if (!hookCmd) {
-      errors.push('hooks.json must define "agy-context-saver".PreToolUse[0].hooks[0].command.');
-    } else if (hookCmd.includes('ANTIGRAVITY_PLUGIN_ROOT')) {
-      errors.push('hooks.json command must not use unexpanded ${ANTIGRAVITY_PLUGIN_ROOT}; use ./scripts/execution-guard-hook.mjs (cwd is plugin root).');
-    }
-    for (const tool of ['read_file', 'edit_file', 'write_file', 'run_command']) {
-      if (!hookMatcher.includes(tool)) {
-        errors.push(`hooks.json PreToolUse matcher must include ${tool}.`);
+  const hooksText = readText('hooks.json');
+  if (hooksText) {
+    try {
+      const pluginHooks = JSON.parse(hooksText);
+      const hookCmd = pluginHooks?.['agy-context-saver']?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
+      const hookMatcher = pluginHooks?.['agy-context-saver']?.PreToolUse?.[0]?.matcher ?? '';
+      if (!hookCmd) {
+        errors.push('hooks.json must define "agy-context-saver".PreToolUse[0].hooks[0].command.');
+      } else if (hookCmd.includes('ANTIGRAVITY_PLUGIN_ROOT')) {
+        errors.push('hooks.json command must not use unexpanded ${ANTIGRAVITY_PLUGIN_ROOT}; use ./scripts/execution-guard-hook.mjs (cwd is plugin root).');
       }
+      for (const tool of ['read_file', 'edit_file', 'write_file', 'run_command']) {
+        if (!hookMatcher.includes(tool)) {
+          errors.push(`hooks.json PreToolUse matcher must include ${tool}.`);
+        }
+      }
+    } catch (error) {
+      errors.push(`hooks.json is not valid JSON: ${error.message}`);
     }
-  } catch (error) {
-    errors.push(`hooks.json is not valid JSON: ${error.message}`);
   }
 
   for (const relativePath of requiredPackageFiles) {
@@ -127,7 +133,7 @@ if (pkg) {
     const readme = readText('README.md');
     const countMatch = readme.match(/Runs all\s+(\d+)\s+test suites?/i);
     if (!countMatch) {
-      errors.push('README.md must state the exact suite count using a sentence such as "Runs all 8 test suites".');
+      errors.push('README.md must state the exact suite count using a sentence such as "Runs all 11 test suites".');
     } else if (Number(countMatch[1]) !== suitePaths.length) {
       errors.push(`README.md says ${countMatch[1]} test suites, but package.json scripts.test runs ${suitePaths.length}.`);
     }

@@ -185,25 +185,28 @@ console.log("\n--- Group 3: CLI Step Extraction & CRLF Warning Stripping ---");
   assert.match(stepText, /Step 1 Content/);
 
   const crlfDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-crlf-cli-"));
-  const convId = "crlf-cli-conv";
-  const logsDir = path.join(crlfDir, convId, ".system_generated", "logs");
-  fs.mkdirSync(logsDir, { recursive: true });
-  const tFile = path.join(logsDir, "transcript.jsonl");
-  fs.writeFileSync(
-    tFile,
-    JSON.stringify({
-      step_index: 1,
-      type: "PLANNER_RESPONSE",
-      created_at: new Date().toISOString(),
-      content: "Building...\nwarning: in the working copy of 'sample.ts', LF will be replaced by CRLF the next time Git touches it\nok 1 - build passed\n"
-    }) + "\n",
-    "utf-8"
-  );
+  try {
+    const convId = "crlf-cli-conv";
+    const logsDir = path.join(crlfDir, convId, ".system_generated", "logs");
+    fs.mkdirSync(logsDir, { recursive: true });
+    const tFile = path.join(logsDir, "transcript.jsonl");
+    fs.writeFileSync(
+      tFile,
+      JSON.stringify({
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        created_at: new Date().toISOString(),
+        content: "Building...\nwarning: in the working copy of 'sample.ts', LF will be replaced by CRLF the next time Git touches it\nok 1 - build passed\n"
+      }) + "\n",
+      "utf-8"
+    );
 
-  const out = invokeCli(["transcript", "read", "--file", tFile, "--last-turns", "1"]);
-  assert.equal(out.includes("will be replaced by"), false);
-  assert.match(out, /ok 1 - build passed/);
-  fs.rmSync(crlfDir, { recursive: true, force: true });
+    const out = invokeCli(["transcript", "read", "--file", tFile, "--last-turns", "1"]);
+    assert.equal(out.includes("will be replaced by"), false);
+    assert.match(out, /ok 1 - build passed/);
+  } finally {
+    fs.rmSync(crlfDir, { recursive: true, force: true });
+  }
   console.log("✓ CLI surgical step extraction and CRLF warning stripping verified");
 }
 

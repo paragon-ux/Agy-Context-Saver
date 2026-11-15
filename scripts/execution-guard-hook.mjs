@@ -35,7 +35,38 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+const HOOK_DEDUP_TTL_MS = 5000;
+const HOOK_SAME_ARG_CROSS_SCRIPT_MS = 500;
+let dedupRecordCtx = null;
+
 function respond(obj) {
+  if (dedupRecordCtx && dedupRecordCtx.convId) {
+    try {
+      const latest = getSessionState(dedupRecordCtx.convId);
+      const now = Date.now();
+      let outSig = dedupRecordCtx.rawSig;
+      if (obj && obj.overwrite && typeof obj.overwrite === "object") {
+        try {
+          const parsedRaw = JSON.parse(dedupRecordCtx.rawSig);
+          outSig = JSON.stringify({ ...parsedRaw, ...obj.overwrite });
+        } catch {}
+      }
+      const prevList = Array.isArray(latest.recentHookCalls) ? latest.recentHookCalls : [];
+      const freshList = prevList.filter((e) => e && typeof e.ts === "number" && (now - e.ts) < HOOK_DEDUP_TTL_MS);
+      freshList.push({
+        ts: now,
+        callId: dedupRecordCtx.callId || "",
+        stepIdx: dedupRecordCtx.stepIdx !== undefined ? dedupRecordCtx.stepIdx : null,
+        toolName: dedupRecordCtx.toolName,
+        scriptPath: dedupRecordCtx.scriptPath,
+        rawSig: dedupRecordCtx.rawSig,
+        outSig,
+        response: obj
+      });
+      latest.recentHookCalls = freshList.slice(-8);
+      saveSessionState(dedupRecordCtx.convId, latest, { updatePollTime: false });
+    } catch {}
+  }
   process.stdout.write(JSON.stringify(obj) + "\n");
   process.exit(0);
 }
@@ -93,19 +124,23 @@ function getSessionState(convId = "global") {
     const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
     const entry = (parsed && typeof parsed.pollCount === "number") ? parsed : (parsed && parsed[convId]);
     const now = Date.now();
-    if (entry && typeof entry.lastPollTime === "number" && (now - entry.lastPollTime) < STATE_TTL_MS) {
+    const activityTime = Math.max(entry?.lastPollTime || 0, entry?.lastSeenTime || 0);
+    if (entry && activityTime > 0 && (now - activityTime) < STATE_TTL_MS) {
       return entry;
     }
   } catch {}
-  return { pollCount: 0, denials: 0, taskIds: [], lastPollTime: 0 };
+  return { pollCount: 0, denials: 0, taskIds: [], lastPollTime: 0, lastSeenTime: 0, recentHookCalls: [] };
 }
 
-function saveSessionState(convId = "global", entry) {
+function saveSessionState(convId = "global", entry, { updatePollTime = true } = {}) {
   const file = getStateFilePath(convId);
   ensureStateDir();
   try {
     const now = Date.now();
-    entry.lastPollTime = now;
+    entry.lastSeenTime = now;
+    if (updatePollTime) {
+      entry.lastPollTime = now;
+    }
     let toWrite;
     if (!convId || convId === "global") {
       let state = {};
@@ -119,8 +154,11 @@ function saveSessionState(convId = "global", entry) {
 
       // Prune stale entries
       const entries = Object.entries(state)
-        .filter(([_, v]) => v && typeof v.lastPollTime === "number" && (now - v.lastPollTime) < STATE_TTL_MS)
-        .sort((a, b) => (b[1].lastPollTime || 0) - (a[1].lastPollTime || 0))
+        .filter(([_, v]) => {
+          const ts = Math.max(v?.lastPollTime || 0, v?.lastSeenTime || 0);
+          return v && ts > 0 && (now - ts) < STATE_TTL_MS;
+        })
+        .sort((a, b) => Math.max(b[1].lastPollTime || 0, b[1].lastSeenTime || 0) - Math.max(a[1].lastPollTime || 0, a[1].lastSeenTime || 0))
         .slice(0, MAX_STATE_ENTRIES);
 
       toWrite = JSON.stringify(Object.fromEntries(entries));
@@ -140,11 +178,19 @@ function saveSessionState(convId = "global", entry) {
 }
 
 /**
- * Checks if target path references Antigravity internal state by root directory.
+ * Checks if target path or shell operand references Antigravity internal state or obfuscated smuggling.
  */
 function isProtectedInternalState(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
-  return /\.system_generated(?:$|[\/\\])/i.test(targetPath);
+  if (/\.system_generated(?:$|[\/\\])/i.test(targetPath)) return true;
+  if (/(?:^|[\/\\'"`\s=:])\.system_gen/i.test(targetPath)) return true;
+  if (/['"]\.system_['"]\s*(?:[+.]\s*)?['"]gen/i.test(targetPath)) return true;
+  if (/\btranscript(?:_full)?\.jsonl\b/i.test(targetPath)) return true;
+  if (/\.gemini[\/\\]+antigravity[\/\\]+brain[\/\\]+.*(?:\$|logs[\/\\]|tasks[\/\\]|steps[\/\\])/i.test(targetPath)) {
+    return true;
+  }
+  if (/\bbase64\b[\s\S]*\|\s*(?:[^\s|]+\/)?(?:ba|z|da|a)?sh\b/i.test(targetPath)) return true;
+  return false;
 }
 
 /**
@@ -966,49 +1012,114 @@ function isAllowedAgyContextScriptPath(scriptToken) {
   return false;
 }
 
+function extractWrappedScriptInfo(segText) {
+  const trimmed = (segText || "").trim();
+  if (!trimmed) return null;
+  const { prefix: envPrefix, body } = splitEnvPrefix(trimmed);
+  const effective = (body || trimmed).trim();
+  const detailed = tokenizeShellWordsDetailed(effective);
+  if (detailed.length === 0) return null;
+  const cmd0 = normalizeCmdName(detailed[0].value);
+  if (cmd0 === "eval" && detailed.length >= 2) {
+    return {
+      hadEnvPrefix: Boolean(envPrefix.trim()),
+      innerScript: detailed.slice(1).map((t) => t.value).join(" ")
+    };
+  }
+  if ((cmd0 === "bash" || cmd0 === "sh" || cmd0 === "zsh" || cmd0 === "dash") && detailed.length >= 3) {
+    for (let i = 1; i < detailed.length - 1; i++) {
+      const flag = detailed[i].value;
+      if (flag === "--") break;
+      if (/^-[a-z]*c$/i.test(flag)) {
+        return {
+          hadEnvPrefix: Boolean(envPrefix.trim()),
+          innerScript: detailed[i + 1].value
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function parseAgyContextTranscriptTokens(tokens) {
+  if (!Array.isArray(tokens) || tokens.length === 0) return null;
+  const cmd0 = normalizeCmdName(tokens[0]);
+  let subOffset = -1;
+  if ((cmd0 === "agy-context" || cmd0 === "agy-context-saver") && tokens[1] === "transcript") {
+    subOffset = 2;
+  } else if (cmd0 === "node" && tokens.length >= 3 && isAllowedAgyContextScriptPath(tokens[1]) && tokens[2] === "transcript") {
+    subOffset = 3;
+  }
+  if (subOffset === -1) return null;
+  const subcommand = tokens[subOffset];
+  const validSubcommands = new Set(["read", "query", "step", "health"]);
+  if (!validSubcommands.has(subcommand)) return null;
+  return { subOffset, subcommand, tokens };
+}
+
+function findAgyContextTranscriptUsage(segments, depth = 0) {
+  if (depth > 4) return null;
+  for (let idx = 0; idx < segments.length; idx++) {
+    const seg = segments[idx];
+    let text = (seg.text || "").trim();
+    let wrappedInSubshell = false;
+    while (text.startsWith("(") && text.endsWith(")")) {
+      wrappedInSubshell = true;
+      text = text.slice(1, -1).trim();
+    }
+    const { prefix: envPrefix, body } = splitEnvPrefix(text);
+    const hadWrapper = wrappedInSubshell || Boolean(envPrefix.trim());
+    const directTokens = tokenizeShellWords(body || text);
+    const parsedDirect = parseAgyContextTranscriptTokens(directTokens);
+    if (parsedDirect) {
+      return { ...parsedDirect, seg, segIndex: idx, totalSegs: segments.length, hadWrapper };
+    }
+    const wrapped = extractWrappedScriptInfo(text);
+    if (wrapped && wrapped.innerScript) {
+      const innerMatch = findAgyContextTranscriptUsage(splitShellSegments(wrapped.innerScript), depth + 1);
+      if (innerMatch) {
+        return { ...innerMatch, hadWrapper: true, totalSegs: Math.max(segments.length, innerMatch.totalSegs) };
+      }
+    }
+    if (Array.isArray(seg.subshells)) {
+      for (const sub of seg.subshells) {
+        const subMatch = findAgyContextTranscriptUsage(splitShellSegments(sub), depth + 1);
+        if (subMatch) {
+          return { ...subMatch, hadWrapper: true, totalSegs: Math.max(segments.length, 2) };
+        }
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Checks if a command is a valid, strictly single, unchained `agy-context transcript ...` invocation.
+ * Denies any chained, env-prefixed, wrapped (`bash -c`, `env`, subshell), or escaping usage anywhere in the command.
  * Returns { matched: boolean, allowed: boolean, reason?: string }.
  */
 function checkAgyContextTranscriptCommand(segments) {
   if (segments.length === 0) return { matched: false, allowed: false };
-  const firstTokens = tokenizeShellWords(segments[0].text);
-  if (firstTokens.length === 0) return { matched: false, allowed: false };
-
-  const cmd0 = normalizeCmdName(firstTokens[0]);
-  let subOffset = -1;
-
-  if ((cmd0 === "agy-context" || cmd0 === "agy-context-saver") && firstTokens[1] === "transcript") {
-    subOffset = 2;
-  } else if (cmd0 === "node" && firstTokens.length >= 3 && isAllowedAgyContextScriptPath(firstTokens[1]) && firstTokens[2] === "transcript") {
-    subOffset = 3;
-  }
-
-  if (subOffset === -1) {
+  const match = findAgyContextTranscriptUsage(segments);
+  if (!match) {
     return { matched: false, allowed: false };
   }
 
-  const subcommand = firstTokens[subOffset];
-  const validSubcommands = new Set(["read", "query", "step", "health"]);
-  if (!validSubcommands.has(subcommand)) {
-    return { matched: false, allowed: false };
-  }
-
-  // Must be strictly single, unchained, no redirects, no heredocs, no subshells
-  const seg = segments[0];
-  if (segments.length !== 1 || seg.hasRedirect || seg.hasHeredoc || seg.hasSubshell) {
+  const { seg, segIndex, totalSegs, hadWrapper, subOffset, tokens } = match;
+  // Must be strictly single segment at index 0, unchained, unwrapped, no redirects/heredocs/subshells
+  if (totalSegs !== 1 || segIndex !== 0 || hadWrapper || seg.hasRedirect || seg.hasHeredoc || seg.hasSubshell) {
     return {
       matched: true,
       allowed: false,
-      reason: "Antigravity Execution Governance: 'agy-context transcript' access to .system_generated must be strictly single and unchained (no chaining, redirects, heredocs, or subshells)."
+      reason: "Antigravity Execution Governance: 'agy-context transcript' access to .system_generated must be strictly single and unchained (no chaining, wrappers, env prefixes, redirects, heredocs, or subshells)."
     };
   }
 
   // Validate flags: disallow `..` traversal and `--file` outside <brainDir>
-  for (let i = subOffset + 1; i < firstTokens.length; i++) {
-    const tok = firstTokens[i];
+  for (let i = subOffset + 1; i < tokens.length; i++) {
+    const tok = tokens[i];
     if (tok === "--file") {
-      const val = firstTokens[i + 1];
+      const val = tokens[i + 1];
       if (!val || hasDotDotTraversal(val) || !isPathInsideDir(val, getBrainDir())) {
         return {
           matched: true,
@@ -1118,18 +1229,31 @@ function getInspectableTextForSegment(seg) {
         continue;
       }
       if (!afterDoubleDash && val.startsWith("-") && val !== "-") {
-        if (val === "-e" || val.startsWith("-e") || val === "--regexp" || val.startsWith("--regexp=")) {
+        if (val === "--regexp" || val.startsWith("--regexp=")) {
           hasExplicitPattern = true;
+          if (val === "--regexp" && i + 1 < detailed.length) i++;
+          continue;
         }
-        if (val === "-f" || val === "--file") {
+        if (val === "-f" || val === "--file" || (!val.startsWith("--") && /^-[^-]*f$/.test(val))) {
           if (detailed[i + 1]) targets.push(detailed[i + 1].value);
           i++;
+          hasExplicitPattern = true;
+          continue;
+        }
+        if (!val.startsWith("--") && /^-([^-]*)f(.+)$/.test(val)) {
+          const fIdx = val.indexOf("f");
+          targets.push(val.slice(fIdx + 1));
           hasExplicitPattern = true;
           continue;
         }
         if (val.startsWith("--file=")) {
           targets.push(val.slice("--file=".length));
           hasExplicitPattern = true;
+          continue;
+        }
+        if (!val.startsWith("--") && /^-[^-]*e/.test(val)) {
+          hasExplicitPattern = true;
+          if (/^-[^-]*e$/.test(val) && i + 1 < detailed.length) i++;
           continue;
         }
         if (SEARCH_VALUE_FLAGS.has(val) && i + 1 < detailed.length) {
@@ -1146,22 +1270,71 @@ function getInspectableTextForSegment(seg) {
     return targets.join(" ");
   }
 
-  return seg.text;
+  const unquotedJoined = allTokens.map((t) => t.value).join(" ");
+  return unquotedJoined && unquotedJoined !== seg.text ? `${seg.text}\n${unquotedJoined}` : seg.text;
+}
+
+const SHELL_INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh", "eval"]);
+const CODE_INTERPRETERS = new Set(["python", "python2", "python3", "node", "perl", "ruby", "php", "pwsh", "powershell"]);
+const CODE_FILE_ACCESS_REGEX = /\b(?:open|read|readFile|readFileSync|createReadStream|readdir|listdir|scandir|walk|glob|iglob|readlines|Path|subprocess|popen|system|exec|spawn|eval|require|import|from\s+\w+\s+import|__import__|getattr|b64decode|atob|fs\.|os\.|io\.|path\.)\b|Buffer\.from/i;
+
+function getSegmentCmdName(seg) {
+  const { body } = splitEnvPrefix(seg.text || "");
+  const tokens = tokenizeShellWords(body || seg.text || "");
+  return tokens.length > 0 ? normalizeCmdName(tokens[0]) : "";
 }
 
 /**
- * Recursively collects inspectable command texts (main segment + any nested subshells).
- * Heredoc bodies are intentionally NOT included so prose inside heredocs is never blocked.
+ * Recursively collects inspectable command texts (main segment, unquoted forms,
+ * bash/sh/eval inner scripts, nested subshells, and interpreter/xargs heredoc bodies).
+ * Plain documentation heredocs (e.g. `cat > file <<'EOF'`) and non-code prompt text remain exempt.
  */
-function collectInspectableTexts(segments) {
+function collectInspectableTexts(segments, depth = 0) {
+  if (depth > 4) return [];
   const texts = [];
-  for (const seg of segments) {
+  for (let idx = 0; idx < segments.length; idx++) {
+    const seg = segments[idx];
     const inspectable = getInspectableTextForSegment(seg);
     if (inspectable) texts.push(inspectable);
+
+    const wrapped = extractWrappedScriptInfo(seg.text);
+    if (wrapped && wrapped.innerScript) {
+      texts.push(...collectInspectableTexts(splitShellSegments(wrapped.innerScript), depth + 1));
+    }
+
     if (Array.isArray(seg.subshells)) {
       for (const sub of seg.subshells) {
         const subSegs = splitShellSegments(sub);
-        texts.push(...collectInspectableTexts(subSegs));
+        texts.push(...collectInspectableTexts(subSegs, depth + 1));
+      }
+    }
+
+    const segCmd = getSegmentCmdName(seg);
+    const pipelineCmds = [segCmd];
+    for (let j = idx + 1; j < segments.length; j++) {
+      const nextSeg = segments[j];
+      if (nextSeg.leadingSep !== "|" && nextSeg.leadingSep !== "|&") break;
+      pipelineCmds.push(getSegmentCmdName(nextSeg));
+    }
+    const downstreamCmds = pipelineCmds.slice(1);
+    if (segCmd === "base64" && downstreamCmds.some((c) => SHELL_INTERPRETERS.has(c) || CODE_INTERPRETERS.has(c))) {
+      texts.push("base64 | sh");
+    }
+
+    if (Array.isArray(seg.heredocBodies) && seg.heredocBodies.length > 0) {
+      const hasShellConsumer = pipelineCmds.some((c) => SHELL_INTERPRETERS.has(c));
+      const hasXargsConsumer = pipelineCmds.some((c) => c === "xargs");
+      const hasCodeConsumer = !seg.hasWriteRedirect && pipelineCmds.some((c) => CODE_INTERPRETERS.has(c));
+
+      for (const hdBody of seg.heredocBodies) {
+        if (!hdBody) continue;
+        if (hasShellConsumer) {
+          texts.push(...collectInspectableTexts(splitShellSegments(hdBody), depth + 1));
+        } else if (hasXargsConsumer) {
+          texts.push(hdBody);
+        } else if (hasCodeConsumer && CODE_FILE_ACCESS_REGEX.test(hdBody)) {
+          texts.push(hdBody);
+        }
       }
     }
   }
@@ -1210,7 +1383,30 @@ const RG_GREP_VALUE_FLAGS = new Map([
 
 function hasPcreOnlyPattern(pattern) {
   if (!pattern) return false;
-  return /\\[dD]|\(\?[=!<:#]|\\[pP]\{/.test(pattern);
+  return /\\[dDsSwW]|\(\?[=!<:#]|\\[pP]\{/.test(pattern);
+}
+
+const RG_TYPE_INCLUDE_MAP = {
+  js: ["*.js", "*.mjs", "*.cjs", "*.jsx"],
+  mjs: ["*.mjs"],
+  cjs: ["*.cjs"],
+  ts: ["*.ts", "*.mts", "*.cts", "*.tsx"],
+  py: ["*.py", "*.pyi"],
+  json: ["*.json"],
+  md: ["*.md"],
+  sh: ["*.sh", "*.bash"],
+  yaml: ["*.yml", "*.yaml"],
+  yml: ["*.yml", "*.yaml"],
+  txt: ["*.txt"],
+  css: ["*.css"],
+  html: ["*.html", "*.htm"],
+  rs: ["*.rs"],
+  go: ["*.go"]
+};
+
+function quotePosixGrepFlagVal(val) {
+  if (/^[A-Za-z0-9_.*?,/-]+$/.test(val)) return val;
+  return `'${val.replace(/'/g, "'\\''")}'`;
 }
 
 function rewriteRtkRgSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false } = {}) {
@@ -1223,6 +1419,10 @@ function rewriteRtkRgSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false }
   const patterns = [];
   let hasExtended = false;
   let hasFixed = false;
+  let hasSmartCase = false;
+  let hasIgnoreCase = false;
+  let hasFollow = false;
+  let filesOnly = false;
   let hasExplicitPattern = false;
   let afterDoubleDash = false;
 
@@ -1236,8 +1436,24 @@ function rewriteRtkRgSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false }
     }
 
     if (!afterDoubleDash && val.startsWith("-") && val !== "-") {
+      if (val === "--files") {
+        filesOnly = true;
+        continue;
+      }
+      if (val === "-S" || val === "--smart-case") {
+        hasSmartCase = true;
+        continue;
+      }
+      if (val === "-L" || val === "--follow") {
+        hasFollow = true;
+        continue;
+      }
+      if (val === "--no-heading" || val === "--heading" || val === "-p" || val === "--pretty" || val === "--line-buffered") {
+        continue;
+      }
       if (RG_GREP_ZERO_ARG_FLAGS.has(val)) {
         const mapped = RG_GREP_ZERO_ARG_FLAGS.get(val);
+        if (mapped === "-i") hasIgnoreCase = true;
         if (mapped === "-E") hasExtended = true;
         if (mapped === "-F") hasFixed = true;
         grepFlags.push(mapped);
@@ -1245,7 +1461,7 @@ function rewriteRtkRgSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false }
       }
 
       if (RG_GREP_VALUE_FLAGS.has(val)) {
-        if (i + 1 >= tokens.length) return restAfterRtk; // unsafe malformed flag
+        if (i + 1 >= tokens.length) return restAfterRtk;
         const nextTok = tokens[++i];
         const mapped = RG_GREP_VALUE_FLAGS.get(val);
         if (mapped === "-e") {
@@ -1256,15 +1472,60 @@ function rewriteRtkRgSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false }
         continue;
       }
 
-      // Attached short flags like -in, -ni, -lw (exclude -r which is --replace in rg!)
-      if (/^-[inlcvwxFEHhqso]+$/.test(val)) {
-        if (val.includes("E")) hasExtended = true;
-        if (val.includes("F")) hasFixed = true;
-        grepFlags.push(val);
+      if (val === "-g" || val === "--glob" || val.startsWith("--glob=")) {
+        let globVal;
+        if (val.startsWith("--glob=")) {
+          globVal = val.slice("--glob=".length);
+        } else {
+          if (i + 1 >= tokens.length) return restAfterRtk;
+          globVal = tokens[++i].value;
+        }
+        if (globVal.startsWith("!")) {
+          grepFlags.push(`--exclude=${quotePosixGrepFlagVal(globVal.slice(1))}`);
+        } else {
+          grepFlags.push(`--include=${quotePosixGrepFlagVal(globVal)}`);
+        }
         continue;
       }
 
-      // --flag=value for supported flags
+      if (val === "-t" || val === "--type" || val.startsWith("--type=") || val === "-T" || val === "--type-not" || val.startsWith("--type-not=")) {
+        const isNot = val === "-T" || val.startsWith("--type-not");
+        let typeVal;
+        if (val.includes("=")) {
+          typeVal = val.slice(val.indexOf("=") + 1).toLowerCase();
+        } else {
+          if (i + 1 >= tokens.length) return restAfterRtk;
+          typeVal = tokens[++i].value.toLowerCase();
+        }
+        const exts = RG_TYPE_INCLUDE_MAP[typeVal];
+        if (!exts) return restAfterRtk;
+        for (const ext of exts) {
+          grepFlags.push(`${isNot ? "--exclude" : "--include"}=${ext}`);
+        }
+        continue;
+      }
+
+      // Attached short flags like -in, -ni, -lw, -nS (exclude -r which is --replace in rg!)
+      if (/^-[inlcvwxFEHhqsoSL]+$/.test(val)) {
+        let clean = "-";
+        for (const ch of val.slice(1)) {
+          if (ch === "S") {
+            hasSmartCase = true;
+            continue;
+          }
+          if (ch === "L") {
+            hasFollow = true;
+            continue;
+          }
+          if (ch === "i") hasIgnoreCase = true;
+          if (ch === "E") hasExtended = true;
+          if (ch === "F") hasFixed = true;
+          clean += ch;
+        }
+        if (clean.length > 1) grepFlags.push(clean);
+        continue;
+      }
+
       const eqIdx = val.indexOf("=");
       if (eqIdx !== -1) {
         const flagName = val.slice(0, eqIdx);
@@ -1283,11 +1544,15 @@ function rewriteRtkRgSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false }
         }
       }
 
-      // Any other flag (e.g. -t, --type, -g, --glob, -S, --smart-case, -r/--replace, -u, --files, --json)
       return restAfterRtk;
     }
 
     positionals.push(tok);
+  }
+
+  if (filesOnly) {
+    const findTargets = positionals.map((p) => p.raw).join(" ") || ".";
+    return `${rtkPrefixWord}find ${findTargets}`;
   }
 
   if (!hasExplicitPattern) {
@@ -1295,15 +1560,21 @@ function rewriteRtkRgSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false }
     patterns.push(positionals[0].value);
   }
 
-  if (!hasFixed && patterns.some(hasPcreOnlyPattern)) {
+  const needsPcre = !hasFixed && patterns.some(hasPcreOnlyPattern);
+  if (needsPcre && os.platform() !== "linux") {
     return restAfterRtk;
   }
 
   const outArgs = [];
   if (!inPipeline) {
-    outArgs.push("-r");
+    outArgs.push(hasFollow ? "-R" : "-r");
   }
-  if (!hasFixed && !hasExtended) {
+  if (hasSmartCase && !hasIgnoreCase && !patterns.some((p) => /[A-Z]/.test(p))) {
+    outArgs.push("-i");
+  }
+  if (needsPcre) {
+    outArgs.push("-P");
+  } else if (!hasFixed && !hasExtended) {
     outArgs.push("-E");
   }
   outArgs.push(...grepFlags);
@@ -1322,6 +1593,111 @@ function rewriteRtkRgSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false }
   }
 
   return `${rtkPrefixWord}grep ${outArgs.join(" ")}`;
+}
+
+const GREP_VALUE_FLAGS = new Set([
+  "-e", "--regexp", "-f", "--file", "-m", "--max-count",
+  "-A", "--after-context", "-B", "--before-context", "-C", "--context",
+  "-d", "--directories", "--include", "--exclude", "--exclude-dir", "--color", "-D", "--devices"
+]);
+
+/**
+ * Normalizes `rtk grep` when host `rg` is absent so GNU `grep` receives `-r` (when targeting dirs/omitted)
+ * and `-E` (for alternation/quantifiers like `a|b`) instead of failing with exit 2 ("Is a directory")
+ * or exit 1 (BRE literal `|`).
+ */
+function rewriteRtkGrepSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false } = {}) {
+  const afterGrepMatch = restAfterRtk.match(/^grep(?:\.exe)?\s+([\s\S]+)$/i);
+  if (!afterGrepMatch) return `${rtkPrefixWord}${restAfterRtk}`;
+
+  const tokens = tokenizeShellWordsDetailed(afterGrepMatch[1]);
+  let hasRecursive = false;
+  let hasRegexMode = false;
+  let hasExplicitPattern = false;
+  let afterDoubleDash = false;
+  const positionals = [];
+  const patterns = [];
+
+  for (let i = 0; i < tokens.length; i++) {
+    const val = tokens[i].value;
+    if (!afterDoubleDash && val === "--") {
+      afterDoubleDash = true;
+      continue;
+    }
+    if (!afterDoubleDash && val.startsWith("-") && val !== "-") {
+      if (val === "--recursive" || val === "--dereference-recursive" || val === "--directories" || val.startsWith("--directories=")) {
+        hasRecursive = true;
+      }
+      if (
+        val === "--extended-regexp" ||
+        val === "--fixed-strings" ||
+        val === "--basic-regexp" ||
+        val === "--perl-regexp"
+      ) {
+        hasRegexMode = true;
+      }
+      if (val === "--regexp" || val.startsWith("--regexp=") || val === "--file" || val.startsWith("--file=")) {
+        hasExplicitPattern = true;
+        if (val.startsWith("--regexp=")) patterns.push(val.slice("--regexp=".length));
+      }
+      if (!val.startsWith("--")) {
+        if (/[rR]/.test(val.slice(1))) hasRecursive = true;
+        if (/[EFGP]/.test(val.slice(1))) hasRegexMode = true;
+        if (/[ef]/.test(val.slice(1))) hasExplicitPattern = true;
+        const lastCh = val[val.length - 1];
+        if ((lastCh === "e" || lastCh === "f" || lastCh === "m" || lastCh === "A" || lastCh === "B" || lastCh === "C" || lastCh === "d" || lastCh === "D") && i + 1 < tokens.length) {
+          if (lastCh === "e") patterns.push(tokens[i + 1].value);
+          i++;
+          continue;
+        }
+      } else if (GREP_VALUE_FLAGS.has(val) && i + 1 < tokens.length) {
+        if (val === "--regexp") patterns.push(tokens[i + 1].value);
+        i++;
+      }
+      continue;
+    }
+    positionals.push(tokens[i]);
+  }
+
+  if (!hasExplicitPattern && positionals.length > 0) {
+    patterns.push(positionals[0].value);
+  }
+  if (patterns.length === 0) {
+    return `${rtkPrefixWord}${restAfterRtk}`;
+  }
+
+  const pathPositionals = hasExplicitPattern ? positionals : positionals.slice(1);
+  const needsExplicitDot = !inPipeline && pathPositionals.length === 0;
+  let allExistingRegularFiles = false;
+  if (!inPipeline && pathPositionals.length > 0) {
+    allExistingRegularFiles = pathPositionals.every((p) => {
+      try {
+        return fs.statSync(p.value).isFile();
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  const injectFlags = [];
+  if (!inPipeline && !hasRecursive && !allExistingRegularFiles) {
+    injectFlags.push("-r");
+  }
+  if (!hasRegexMode) {
+    if (os.platform() === "linux" && patterns.some(hasPcreOnlyPattern)) {
+      injectFlags.push("-P");
+    } else {
+      injectFlags.push("-E");
+    }
+  }
+
+  if (injectFlags.length === 0 && !needsExplicitDot) {
+    return `${rtkPrefixWord}${restAfterRtk}`;
+  }
+
+  const flagPrefix = injectFlags.length > 0 ? `${injectFlags.join(" ")} ` : "";
+  const dotSuffix = needsExplicitDot ? " ." : "";
+  return `${rtkPrefixWord}grep ${flagPrefix}${afterGrepMatch[1]}${dotSuffix}`;
 }
 
 function unwrapShellWrapper(segText) {
@@ -1374,6 +1750,15 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
   if ((subcmd === "rg" || subcmd === "rg.exe") && !rgAvailable) {
     let mapped = rewriteRtkRgSegment(rtkWord, rest, { inPipeline });
     if (mapped !== rest && rtkPrefix && rtkPrefix !== "rtk" && /^rtk\s+/i.test(mapped)) {
+      mapped = mapped.replace(/^rtk(?=\s)/i, rtkPrefix);
+    }
+    return `${effEnvPrefix}${mapped}`;
+  }
+
+  // Normalize `rtk grep` when host `rg` is absent so directories & `a|b` alternation work reliably
+  if ((subcmd === "grep" || subcmd === "grep.exe") && !rgAvailable) {
+    let mapped = rewriteRtkGrepSegment(rtkWord, rest, { inPipeline });
+    if (rtkPrefix && rtkPrefix !== "rtk" && /^rtk\s+/i.test(mapped)) {
       mapped = mapped.replace(/^rtk(?=\s)/i, rtkPrefix);
     }
     return `${effEnvPrefix}${mapped}`;
@@ -1587,6 +1972,49 @@ try {
   }
 
   isGovernedTool = true;
+
+  // Dual-hook idempotency deduplication when payload.conversationId is present (coordinator plugin + global hooks.json)
+  if (payload.conversationId) {
+    const callId = String(toolCall.id || payload.toolUseId || payload.tool_use_id || "").trim();
+    const stepIdx = payload.stepIdx !== undefined ? payload.stepIdx : payload.step_index;
+    const inSig = JSON.stringify(args || {});
+    let currentScriptPath = "";
+    try {
+      currentScriptPath = tryRealpath(fileURLToPath(import.meta.url));
+    } catch {}
+    const now = Date.now();
+    const prevState = getSessionState(convId);
+    const recent = Array.isArray(prevState.recentHookCalls) ? prevState.recentHookCalls : [];
+    const matchedCall = recent.find((e) => {
+      if (!e || typeof e.ts !== "number" || (now - e.ts) >= HOOK_DEDUP_TTL_MS) return false;
+      if (callId && e.callId && e.callId === callId) return true;
+      const argMatch = inSig === e.rawSig || inSig === e.outSig;
+      if (!argMatch || e.toolName !== toolName) return false;
+      if (stepIdx !== undefined && stepIdx !== null && e.stepIdx === stepIdx) return true;
+      if (currentScriptPath && e.scriptPath && e.scriptPath !== currentScriptPath && (now - e.ts) < HOOK_SAME_ARG_CROSS_SCRIPT_MS) {
+        return true;
+      }
+      return false;
+    });
+    if (matchedCall && matchedCall.response) {
+      const replay =
+        inSig === matchedCall.outSig &&
+        matchedCall.rawSig !== matchedCall.outSig &&
+        matchedCall.response.decision === "allow"
+          ? { decision: "allow" }
+          : matchedCall.response;
+      process.stdout.write(JSON.stringify(replay) + "\n");
+      process.exit(0);
+    }
+    dedupRecordCtx = {
+      convId,
+      callId,
+      stepIdx: stepIdx !== undefined ? stepIdx : null,
+      toolName,
+      scriptPath: currentScriptPath,
+      rawSig: inSig
+    };
+  }
 
   // =========================================================================
   // 1. run_command: Raw Safety Gates + `rtk hook antigravity` Delegation
@@ -1824,7 +2252,7 @@ try {
     // 2e. Symmetrical Hybrid Slice & Guarded Full-File Policy for `read_file` and `view_file`
     if (toolName === "read_file" || toolName === "view_file") {
       const rgAvailable = Boolean(findExecutableOnPath("rg"));
-      const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rn";
+      const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rnE";
       const discoveryGuidance = `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}', or run 'rtk read ${target || "<file>"}' via run_command instead`;
 
       if (hasByteOffset && !hasSliceParams) {
@@ -1902,7 +2330,7 @@ try {
       const rgAvailable = Boolean(findExecutableOnPath("rg"));
       const cmdHint = rgAvailable
         ? `rtk rg -- "${safePattern}" ${searchTarget}`
-        : `rtk grep -rn "${safePattern}" ${searchTarget}`;
+        : `rtk grep -rnE "${safePattern}" ${searchTarget}`;
       respond({
         decision: "deny",
         reason: `Antigravity Governance: Native grep inspection via 'grep_search' bypasses token optimization. Run '${cmdHint}' via run_command instead.`

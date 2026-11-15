@@ -21,7 +21,7 @@ Agy-Context-Saver and RTK protect session transcript health and LLM attention by
 Unbounded full-file `read_file` calls and unoptimized search tools (`grep_search`, `find_by_name`, `list_dir`) bypass token compression and are guarded:
 
 1. **Tier 1 — Compact Search & Discovery (`rtk grep`, `rtk find`, `rtk ls`)**:
-   - **Prose / Regex / Symbol Discovery**: Use `rtk grep "<pattern>" <path>` via `run_command` to locate exact `[StartLine, EndLine]` coordinates. Always specify an explicit path (e.g., `.` or `src/`) to avoid stdin pipe stalls.
+   - **Prose / Regex / Symbol Discovery**: Use `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate exact `[StartLine, EndLine]` coordinates. Always specify an explicit path (e.g., `.` or `src/`) to avoid stdin pipe stalls.
    - **Directory / File Discovery**:
      - **Windows**: Use `rtk find <path>` or PowerShell `dir` / `Get-ChildItem`.
      - **POSIX / Linux / macOS**: Use `rtk find <path>`, `rtk ls <path>`, or `rtk tree`.
@@ -54,7 +54,7 @@ agy-context transcript read [--id <conv>] [--mode compact|full] [--last-turns N]
 ```
 
 ### 3. `agy-context transcript query`
-Granular query and forensic filtering engine for transcripts with keyword/regex search, auto-dereferencing of truncated payloads, role filtering (`user`, `assistant`, `subagent`, `tool`, `error`, `all`), and compact summaries.
+Granular query and forensic filtering engine for transcripts with keyword/regex search, auto-dereferencing of truncated payloads, role filtering (`user`, `assistant`, `subagent`, `tool`, `generic`, `system`, `error`, `all`; defaults to `all`), and compact summaries.
 ```bash
 agy-context transcript query [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--include-thinking] [--json] [--file <path>]
 ```
