@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -12,6 +12,14 @@ const binDir = path.join(repoRoot, "bin");
 export const RTK_VERSION = "v1.1.0";
 export const MIN_RTK_VERSION = "1.1.0";
 export const MIN_COMPATIBLE_RTK_VERSION = MIN_RTK_VERSION;
+
+export function quotePowerShellSingle(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+export function formatWindowsExpandArchiveCommand(archivePath, destDir) {
+  return `Expand-Archive -LiteralPath ${quotePowerShellSingle(archivePath)} -DestinationPath ${quotePowerShellSingle(destDir)} -Force`;
+}
 
 // Pinned SHA-256 checksums per release asset from https://github.com/rtk-ai/rtk/releases/download/v1.1.0/checksums.txt;
 // ensureRtkInstalled verifies the downloaded archive before extraction and fails closed on any mismatch.
@@ -152,7 +160,11 @@ export async function ensureRtkInstalled(options = {}) {
   } catch (err) {
     // Fallback on Windows if tar fails
     if (os.platform() === "win32") {
-      execSync(`powershell -NoProfile -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${binDir}' -Force"`, { stdio: "pipe" });
+      execFileSync(
+        "powershell",
+        ["-NoProfile", "-Command", formatWindowsExpandArchiveCommand(archivePath, binDir)],
+        { stdio: "pipe", windowsHide: true }
+      );
     } else {
       throw err;
     }

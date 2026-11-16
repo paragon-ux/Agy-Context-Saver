@@ -120,7 +120,14 @@ assert.equal(parsedHookOut.overwrite?.CommandLine, "rtk git status");
 assert.equal(parsedHookOut.overwrite?.WaitMsBeforeAsync, 10000);
 console.log("✓ Installed CLI shim and plugin hooks.json relative execution verified");
 
-// Status on an uninstalled/incomplete profile must exit non-zero
+// Status on an uninstalled/incomplete profile must exit non-zero (both CLI and direct install-register.mjs --status)
+const installScript = path.resolve(__dirname, "../scripts/install-register.mjs");
+const completeDirectStatus = spawnSync(process.execPath, [installScript, "--status"], { encoding: "utf-8" });
+assert.equal(completeDirectStatus.status, 0, "install-register.mjs --status on complete profile must exit 0");
+
+const badRestoreArgs = spawnSync(process.execPath, [cliScript, "restore-backups", "--bogus-flag"], { encoding: "utf-8" });
+assert.notEqual(badRestoreArgs.status, 0, "restore-backups must reject unknown flags");
+
 const emptyProfile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-status-empty-"));
 try {
   const emptyStatus = spawnSync(process.execPath, [cliScript, "status", "--json"], {
@@ -129,6 +136,12 @@ try {
   });
   assert.notEqual(emptyStatus.status, 0, "agy-context status on incomplete profile must exit non-zero");
   assert.equal(JSON.parse(emptyStatus.stdout).isComplete, false);
+
+  const emptyDirectStatus = spawnSync(process.execPath, [installScript, "--status"], {
+    encoding: "utf-8",
+    env: { ...process.env, AGY_TEST_PROFILE_DIR: emptyProfile }
+  });
+  assert.notEqual(emptyDirectStatus.status, 0, "install-register.mjs --status on incomplete profile must exit non-zero (ACS-SVC-001-P3-1)");
 } finally {
   fs.rmSync(emptyProfile, { recursive: true, force: true });
 }

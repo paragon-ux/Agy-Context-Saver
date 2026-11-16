@@ -44,6 +44,7 @@ try {
     runInstall,
     runUninstall,
     detectExistingInstallation,
+    formatWindowsCmdShim,
     pluginDest,
     destHook,
     hooksJsonPath,
@@ -130,6 +131,34 @@ try {
   assert.equal(fs.lstatSync(pluginDest).isSymbolicLink(), false, "forceCopyFallback must replace prior symlink with real directory copy (ACS-SCRIPT-003)");
   assert.ok(fs.existsSync(path.join(pluginDest, "bin", "agy-context.mjs")), "Copied plugin must contain CLI binary");
   assert.ok(fs.existsSync(path.join(pluginDest, "lib", "transcript-core.mjs")), "Copied plugin must contain transcript engine");
+
+  // Re-running normal runInstall() when pluginDest is a stale real directory must refresh/re-link it cleanly (L46)
+  fs.writeFileSync(path.join(pluginDest, "stale-copy-file.txt"), "stale");
+  await runInstall({ silent: true });
+  assert.equal(fs.existsSync(path.join(pluginDest, "stale-copy-file.txt")), false, "runInstall() must refresh stale copied pluginDest rather than leaving old files");
+
+  // Windows .cmd shim avoids parenthesized %errorlevel% cmd parse-time bug and install.ps1 emits BOM-less UTF-8 + chcp 65001 (L46)
+  const cmdShimText = formatWindowsCmdShim(path.join(pluginDest, "bin", "agy-context.mjs"));
+  assert.match(cmdShimText, /if errorlevel 1 goto :fallback/);
+  assert.match(cmdShimText, /:fallback/);
+  assert.doesNotMatch(cmdShimText, /if %errorlevel% equ 0 \(/i);
+  const ps1Text = fs.readFileSync(new URL("../install.ps1", import.meta.url), "utf8");
+  assert.match(ps1Text, /chcp 65001 >nul/);
+  assert.match(ps1Text, /\[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
+  assert.doesNotMatch(ps1Text, /-Encoding ASCII/);
+  if (os.platform() === "win32") {
+    const winShimRoot = path.join(testProfileDir, "win-shim-exec");
+    fs.mkdirSync(winShimRoot, { recursive: true });
+    const exitScript = path.join(winShimRoot, "exit-probe.mjs");
+    fs.writeFileSync(exitScript, "process.exit(Number(process.argv[2] || 0));\n");
+    const winShimPath = path.join(testProfileDir, "agy-context-test.cmd");
+    fs.writeFileSync(winShimPath, formatWindowsCmdShim(exitScript));
+    const { spawnSync } = await import("node:child_process");
+    const okCmd = spawnSync("cmd.exe", ["/d", "/c", winShimPath, "0"], { encoding: "utf8" });
+    assert.equal(okCmd.status, 0, okCmd.stderr || okCmd.stdout);
+    const errCmd = spawnSync("cmd.exe", ["/d", "/c", winShimPath, "7"], { encoding: "utf8" });
+    assert.equal(errCmd.status, 7, `Expected Windows .cmd shim to propagate exit code 7, got ${errCmd.status}`);
+  }
 
   // Seed managed node.cmd & node.cmd.bak, verify uninstall removes managed wrapper and restores backup (ACS-SCRIPT-002)
   const nodeCmdPath = path.join(configDir, "node.cmd");

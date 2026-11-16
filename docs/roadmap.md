@@ -3,7 +3,7 @@
 `Agy-Context-Saver` focuses on three responsibilities for Google Antigravity (`agy`):
 1. **Shell and file output control:** Offloads verbose shell commands and workspace searches to `RTK (>= 1.1.0)` and requires bounded `read_file` line slices (`<= 150` lines, or `1..TotalLines` on files `<= 800` lines and `<= 45 KiB`).
 2. **Lifecycle and state governance:** Enforces Reactive Wakeup backoff on `manage_task` and `schedule`, blocks direct access to `.system_generated/` and `<stateDir>/`, expands unset `WaitMsBeforeAsync` to `10s`, and governs child transcript access via `agy-context transcript access` and `[agy-transcript-access: deny|self-only|allow]`.
-3. **CLI transcript forensics:** Provides `agy-context transcript` (`read`, `query`, `step`, `health`, `list`, `access`) and `agy-context` (`status`, `setup`, `uninstall`, `restore-backups`) with zero MCP tool schema overhead. Multi-agent cohort planning and SHA-256 evidence bundling live in the separate [Agy-Squad](https://paragon-ux.github.io/agy-squad/) repository.
+3. **CLI transcript forensics:** Provides `agy-context transcript` (`read`, `query`, `step`, `health`, `list`, `export`, `access`) and `agy-context` (`status`, `setup`, `uninstall`, `restore-backups`) with zero MCP tool schema overhead. Multi-agent cohort planning and SHA-256 evidence bundling live in the separate [Agy-Squad](https://paragon-ux.github.io/Agy-Squad/) repository.
 
 ### Explicit Non-Goals
 - **Not an issue tracker or review ledger:** Finding-to-disposition tables and review workflows belong in task-specific skills (such as `Agy-Squad`'s `/pr-review` and `/full-review`), not the hook or transcript CLI.
@@ -24,7 +24,7 @@
    - Enforced bounded `read_file` slices (`<= 150` lines, or full-file reads `<= 800` lines and `<= 45 KiB`) paired with `rtk grep`, `rtk find`, and `rtk ls`, while routing step spillovers and completed task logs to `rtk read`.
 2. **CLI-first transcript engine (`bin/agy-context.mjs`, `lib/transcript-core.mjs`):**
    - Retired default MCP registration so idle sessions pay zero tool-schema token overhead.
-   - Shipped `agy-context transcript` subcommands and aliases (`read` + `outline`/`summary`, `query` + `grep`/`search`/`find`/`tools`, `step` with multi-step ranges `N,M`, `N-M`, `N..M` and `--head`/`--tail`/`--full`, `health` + `stats`/`info`, `list` + `ls`, `access` + `policy`) plus `--field` projection.
+   - Shipped `agy-context transcript` subcommands and aliases (`read` + `outline`/`summary`, `query` + `grep`/`search`/`find`/`tools`, `step` with multi-step ranges `N,M`, `N-M`, `N..M` and `--head`/`--tail`/`--full`, `health` + `stats`/`info`, `list` + `ls`, `access` + `policy`) plus `--field` projection, expanded in `v2.0.1` with `list --parent <uuid> --lineage` and sanitized `export --sanitized` (`dump`).
    - Registered the `PreToolUse` hook in both plugin `hooks.json` and global `~/.gemini/config/hooks.json` so `/swarm` workers inherit governance automatically.
 3. **Parent transcript access governance:**
    - Added `agy-context transcript access` (`--status`, `--off`, `--on`, `--self-only`, `--mode`, `--allow`, `--deny`, `--ttl`) and first-line launch directives (`[agy-transcript-access: deny|self-only|allow]`).

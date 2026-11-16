@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver CLI (v2.0.0)
+ * Agy-Context-Saver CLI (v2.0.1)
  *
  * Local-first CLI for streaming transcript inspection, forensic querying,
  * context health diagnostics, and lifecycle management.
@@ -40,9 +40,9 @@ const pkgPath = path.resolve(__dirname, "../package.json");
 function getVersion() {
   try {
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-    return pkg.version || "2.0.0";
+    return pkg.version || "2.0.1";
   } catch {
-    return "2.0.0";
+    return "2.0.1";
   }
 }
 
@@ -59,7 +59,7 @@ Transcript Commands:
   agy-context transcript step   [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--head N] [--tail N] [--full] [--json] [--file <path>]
   agy-context transcript health [--id <conv>] [--json] [--file <path>]
   agy-context transcript list   [--limit N] [--parent <id>] [--lineage] [--json]
-  agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out <path>] [--file <path>] [--json]
+  agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out|--output <path>] [--file <path>] [--json]
   agy-context transcript access [--status | --off | --on | --reset | --self-only | --mode <open|allowlist|self-only|deny> | --allow <id,@roster*...> | --deny <id,@roster*...> | --ttl <sec>] [--json]
   Aliases: grep/search/find -> query | stats/info -> health | tools -> query --roles assistant --field tool_args | outline/summary -> query --summary --include-tools | ls -> list | policy -> access
 
@@ -819,6 +819,17 @@ async function main() {
   }
 
   if (cmd === "restore-backups" || cmd === "--restore-backups") {
+    const { opts, positional } = parseFlags(rest, {
+      booleans: new Set(),
+      values: new Set()
+    });
+    if (opts.help) {
+      printHelp();
+      process.exit(0);
+    }
+    if (positional.length > 0) {
+      throw new Error(`Unexpected arguments for 'restore-backups': ${positional.join(" ")}`);
+    }
     await runRestoreBackups();
     return;
   }

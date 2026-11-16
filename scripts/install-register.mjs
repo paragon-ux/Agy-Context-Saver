@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver Registration & Installation Engine (v2.0.0)
+ * Agy-Context-Saver Registration & Installation Engine (v2.0.1)
  * Zero-delay cross-platform installer with CLI-first shim provisioning,
  * unified hook registration, and legacy MCP retirement/sweep.
  *
@@ -342,6 +342,21 @@ async function sweepLegacyMcpSchemas({ log, warn }) {
   }
 }
 
+export function formatWindowsCmdShim(targetCliPath) {
+  return [
+    "@echo off",
+    "setlocal",
+    "where node >nul 2>nul",
+    "if errorlevel 1 goto :fallback",
+    `node "${targetCliPath}" %*`,
+    "exit /b %errorlevel%",
+    ":fallback",
+    `"${process.execPath}" "${targetCliPath}" %*`,
+    "exit /b %errorlevel%",
+    ""
+  ].join("\r\n");
+}
+
 async function installCliShims({ log }) {
   const sourceCli = path.join(repoRoot, "bin", "agy-context.mjs");
   const pluginCli = path.join(pluginDest, "bin", "agy-context.mjs");
@@ -370,18 +385,7 @@ async function installCliShims({ log }) {
     ""
   ].join("\n");
 
-  const winShimBody = [
-    "@echo off",
-    "setlocal",
-    "where node >nul 2>nul",
-    "if %errorlevel% equ 0 (",
-    `  node "${targetCli}" %*`,
-    "  exit /b %errorlevel%",
-    ")",
-    `"${process.execPath}" "${targetCli}" %*`,
-    "exit /b %errorlevel%",
-    ""
-  ].join("\r\n");
+  const winShimBody = formatWindowsCmdShim(targetCli);
 
   let changed = false;
   for (const name of CLI_SHIM_NAMES) {
@@ -510,8 +514,19 @@ export async function runInstall(options = {}) {
     pluginLst = fs.lstatSync(pluginDest);
   } catch {}
   const pluginExists = fs.existsSync(pluginDest);
+  let pluginPointsElsewhere = false;
+  if (pluginLst && pluginExists && pluginLst.isSymbolicLink()) {
+    try {
+      pluginPointsElsewhere = fs.realpathSync(pluginDest) !== fs.realpathSync(repoRoot);
+    } catch {
+      pluginPointsElsewhere = true;
+    }
+  }
 
-  if (pluginLst && (!pluginExists || isTempOrNpx || options.forceCopyFallback)) {
+  if (
+    pluginLst &&
+    (!pluginExists || isTempOrNpx || options.forceCopyFallback || !pluginLst.isSymbolicLink() || pluginPointsElsewhere)
+  ) {
     await fsPromises.rm(pluginDest, { recursive: true, force: true });
     pluginLst = null;
   }
@@ -859,7 +874,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (isCheck) {
       await runInstall({ checkOnly: true, allowDegraded });
     } else if (isStatus) {
-      runStatus();
+      const st = runStatus();
+      if (!st.isComplete) {
+        process.exitCode = 1;
+      }
     } else if (isUninstall) {
       await runUninstall({ restoreBackups: isRestoreBackups });
     } else if (isRestoreBackups) {

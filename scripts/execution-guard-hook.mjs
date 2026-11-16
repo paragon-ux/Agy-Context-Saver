@@ -2844,13 +2844,11 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
     }
 
     // Inspect on-disk script files executed by shell/code interpreters (when in /tmp, /scratch, non-script extension, or written in restricted child session)
-    if (SHELL_INTERPRETERS.has(segCmd) || CODE_INTERPRETERS.has(segCmd)) {
+    if ((SHELL_INTERPRETERS.has(segCmd) && segCmd !== "eval") || CODE_INTERPRETERS.has(segCmd)) {
       const segTokens = tokenizeShellWords(seg.text || "");
-      for (let tIdx = 1; tIdx < segTokens.length; tIdx++) {
-        let tok = String(segTokens[tIdx] || "").trim();
-        if (!tok || tok.startsWith("-")) continue;
-        if (tok.startsWith("<")) tok = tok.slice(1).trim();
-        if (!tok || isAllowedAgyContextScriptPath(tok)) continue;
+      const inspectScriptToken = (rawTok) => {
+        const tok = String(rawTok || "").trim();
+        if (!tok || isAllowedAgyContextScriptPath(tok)) return;
         try {
           const resolvedFile = resolveHookPath(tok);
           const normFile = resolvedFile.replace(/\\/g, "/");
@@ -2873,6 +2871,144 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
             }
           }
         } catch {}
+      };
+
+      const isNode = segCmd === "node";
+      const isPython = segCmd === "python" || segCmd === "python2" || segCmd === "python3";
+      const isShell = SHELL_INTERPRETERS.has(segCmd);
+      const isPowerShell = segCmd === "pwsh" || segCmd === "powershell";
+      const isRuby = segCmd === "ruby";
+      const isPerl = segCmd === "perl";
+      const isPhp = segCmd === "php";
+
+      let afterDoubleDash = false;
+      let inlineCodeMode = false;
+      let consumedPrimaryScript = false;
+      let expectCodeFileArg = false;
+      let expectSkipValueArg = false;
+      let expectStdinFile = false;
+
+      for (let tIdx = 1; tIdx < segTokens.length; tIdx++) {
+        const tok = String(segTokens[tIdx] || "").trim();
+        if (!tok) continue;
+
+        if (expectStdinFile) {
+          expectStdinFile = false;
+          inspectScriptToken(tok);
+          continue;
+        }
+        if (tok === "<") {
+          expectStdinFile = true;
+          continue;
+        }
+        if (tok.startsWith("<") && !tok.startsWith("<<")) {
+          inspectScriptToken(tok.slice(1));
+          continue;
+        }
+        if (expectCodeFileArg) {
+          expectCodeFileArg = false;
+          inspectScriptToken(tok);
+          continue;
+        }
+        if (expectSkipValueArg) {
+          expectSkipValueArg = false;
+          continue;
+        }
+
+        if (!afterDoubleDash) {
+          if (tok === "--") {
+            afterDoubleDash = true;
+            continue;
+          }
+          if (tok === "-") {
+            consumedPrimaryScript = true;
+            continue;
+          }
+          if (tok.startsWith("-") || (isShell && tok === "+o")) {
+            const lower = tok.toLowerCase();
+            if (isNode) {
+              const eqIdx = tok.indexOf("=");
+              const flag = eqIdx === -1 ? tok : tok.slice(0, eqIdx);
+              const inlineVal = eqIdx === -1 ? null : tok.slice(eqIdx + 1);
+              if (flag === "-r" || flag === "--require" || flag === "--import" || flag === "--loader" || flag === "--experimental-loader") {
+                if (inlineVal !== null) inspectScriptToken(inlineVal);
+                else expectCodeFileArg = true;
+              } else if (flag === "-e" || flag === "--eval" || flag === "-p" || flag === "--print") {
+                inlineCodeMode = true;
+                if (inlineVal === null) expectSkipValueArg = true;
+              } else if (
+                flag === "-C" || flag === "--conditions" || flag === "--input-type" ||
+                flag === "--env-file" || flag === "--env-file-if-exists" || flag === "--watch-path" ||
+                flag === "--cpu-prof-dir" || flag === "--heap-prof-dir" || flag === "--diagnostic-dir" ||
+                flag === "--redirect-warnings" || flag === "--title" || flag === "--max-old-space-size" ||
+                flag === "--heapsnapshot-signal"
+              ) {
+                if (inlineVal === null) expectSkipValueArg = true;
+              }
+            } else if (isPython) {
+              if (tok === "-c" || tok === "-m") {
+                inlineCodeMode = true;
+                expectSkipValueArg = true;
+              } else if (tok.startsWith("-c") || tok.startsWith("-m")) {
+                inlineCodeMode = true;
+              } else if (tok === "-W" || tok === "-X" || tok === "-Q" || tok === "--check-hash-based-pycs") {
+                expectSkipValueArg = true;
+              }
+            } else if (isShell) {
+              if (/^-[a-z]*c$/i.test(tok)) {
+                inlineCodeMode = true;
+                expectSkipValueArg = true;
+              } else if (tok === "-o" || tok === "+o") {
+                expectSkipValueArg = true;
+              }
+            } else if (isPowerShell) {
+              if (lower === "-command" || lower === "-c" || lower === "-encodedcommand" || lower === "-ec" || lower === "-e") {
+                inlineCodeMode = true;
+                expectSkipValueArg = true;
+              } else if (lower === "-file" || lower === "-f") {
+                expectCodeFileArg = true;
+              }
+            } else if (isRuby) {
+              if (tok === "-e") {
+                inlineCodeMode = true;
+                expectSkipValueArg = true;
+              } else if (tok === "-r") {
+                expectCodeFileArg = true;
+              } else if (tok === "-I") {
+                expectSkipValueArg = true;
+              }
+            } else if (isPerl) {
+              if (tok === "-e" || tok === "-E") {
+                inlineCodeMode = true;
+                expectSkipValueArg = true;
+              } else if (tok === "-I" || tok === "-M" || tok === "-m") {
+                expectSkipValueArg = true;
+              }
+            } else if (isPhp) {
+              if (tok === "-r") {
+                inlineCodeMode = true;
+                expectSkipValueArg = true;
+              } else if (tok === "-f") {
+                expectCodeFileArg = true;
+              } else if (tok === "-d" || tok === "-c") {
+                expectSkipValueArg = true;
+              }
+            }
+            continue;
+          }
+        }
+
+        if (inlineCodeMode) {
+          if (!/\.(?:md|markdown|json)$/i.test(tok)) {
+            inspectScriptToken(tok);
+          }
+          continue;
+        }
+
+        if (!consumedPrimaryScript) {
+          consumedPrimaryScript = true;
+          inspectScriptToken(tok);
+        }
       }
     }
 

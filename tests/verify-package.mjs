@@ -12,18 +12,31 @@ const REQUIRED = [
   "LICENSE",
   "install.sh",
   "install.ps1",
+  "assets/architecture-overview.svg",
+  "assets/logo.svg",
   "bin/agy-context.mjs",
   "lib/transcript-core.mjs",
   "scripts/execution-guard-hook.mjs",
   "scripts/install-register.mjs",
   "scripts/provision-rtk.mjs",
+  "scripts/release-preflight.mjs",
   "scripts/state-dir.mjs",
   "rules/AGENTS.md",
   "skills/context-governance/SKILL.md",
-  "docs/index.md",
-  "docs/tools.md",
+  "docs/architecture.md",
   "docs/governance.md",
-  "docs/roadmap.md"
+  "docs/index.md",
+  "docs/installation.md",
+  "docs/INSTALLER-HARDENING.md",
+  "docs/plans/LEDGER.md",
+  "docs/publishing.md",
+  "docs/roadmap.md",
+  "docs/RTK-SUPPORT-MATRIX.md",
+  "docs/tools.md",
+  "docs/assets/architecture-overview.svg",
+  "docs/assets/hook-interception-flow.svg",
+  "docs/assets/roadmap-phases.svg",
+  "docs/assets/transcript-access-governance.svg"
 ];
 
 const RETIRED_DENYLIST = [
@@ -72,7 +85,7 @@ function validate(packages) {
 
 function selfTest() {
   const fixture = (extra) => [{ files: [...REQUIRED, ...extra].map((p) => ({ path: p })) }];
-  assert.equal(validate(fixture(["docs/architecture.md"])), REQUIRED.length + 1);
+  assert.equal(validate(fixture(["docs/extra-guide.md"])), REQUIRED.length + 1);
   for (const bad of [
     "tests/leaked.mjs",
     "benchmarks/private.json",

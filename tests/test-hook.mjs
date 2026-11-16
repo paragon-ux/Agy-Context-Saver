@@ -1375,6 +1375,129 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
       );
     }
 
+    // ACS-RUN-002-P3-1: Trailing .md / .json arguments passed after `node <script.mjs> ...` must not be scanned as code,
+    // while primary scripts, -r/--require preloads, and `< stdin` redirects in /tmp or scratch/ remain guarded.
+    const appDir = path.join(wsDir, "bin");
+    fs.mkdirSync(appDir, { recursive: true });
+    const appScript = path.join(appDir, "verdict-runner.mjs");
+    fs.writeFileSync(appScript, "console.log(process.argv.slice(2));\n", "utf8");
+    const scratchReportMd = path.join(wsDir, "scratch", "agy-squad", "lead", "report.md");
+    const scratchRecordJson = path.join(wsDir, "scratch", "bundle-record.json");
+    fs.mkdirSync(path.dirname(scratchReportMd), { recursive: true });
+    fs.writeFileSync(
+      scratchReportMd,
+      "# Synthesis\nChecked `.system_generated/logs/transcript.jsonl` via `agy-context transcript read --id parent`.\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      scratchRecordJson,
+      JSON.stringify({ notes: "Audited ~/.gemini/config/hooks.json and .system_generated/logs/transcript.jsonl" }),
+      "utf8"
+    );
+
+    // Even when a restricted child wrote scratch/report.md earlier in the session, passing it to `node bin/verdict-runner.mjs` must stay allowed
+    const writeScratchNote = runHook(
+      {
+        conversationId: cliRestricted,
+        cwd: wsDir,
+        transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "write_file",
+          args: {
+            Path: scratchReportMd,
+            Content: "# Synthesis\nInspected .system_generated/logs/transcript.jsonl via agy-context transcript list.\n",
+            Overwrite: true
+          }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(writeScratchNote.decision, "allow");
+
+    for (const allowedNodeCmd of [
+      `node "${appScript}" verdict "${scratchReportMd}"`,
+      `node "${appScript}" bundle "${scratchRecordJson}"`,
+      `node -e "console.log(1)" "${scratchReportMd}"`
+    ]) {
+      const allowedRes = runHook(
+        {
+          conversationId: cliRestricted,
+          cwd: wsDir,
+          transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+          toolCall: { name: "run_command", args: { CommandLine: allowedNodeCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(allowedRes.decision, "allow", `Trailing data arg must NOT be scanned as code: ${allowedNodeCmd}`);
+    }
+
+    // Attack cases MUST still be denied: non-script primary operand, preload -r, scratch primary .mjs, and `< stdin`
+    const evilMdPayload = path.join(wsDir, "scratch", "evil-script.md");
+    const evilMjsPayload = path.join(wsDir, "scratch", "evil-primary.mjs");
+    const evilPreloadTxt = path.join(wsDir, "scratch", "preload.txt");
+    fs.writeFileSync(evilMdPayload, "console.log(fs.readFileSync('.system_generated/logs/transcript.jsonl', 'utf8'))\n");
+    fs.writeFileSync(evilMjsPayload, "import fs from 'node:fs'; fs.readFileSync('.system_generated/logs/transcript.jsonl', 'utf8');\n");
+    fs.writeFileSync(evilPreloadTxt, "fs.readFileSync('.system_generated/logs/transcript.jsonl', 'utf8');\n");
+    for (const deniedNodeCmd of [
+      `node "${evilMdPayload}"`,
+      `node "${evilMjsPayload}" "${scratchReportMd}"`,
+      `node -r "${evilPreloadTxt}" "${appScript}" "${scratchReportMd}"`,
+      `bash < "${evilPreloadTxt}"`
+    ]) {
+      const deniedRes = runHook(
+        {
+          conversationId: cliRestricted,
+          cwd: wsDir,
+          transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+          toolCall: { name: "run_command", args: { CommandLine: deniedNodeCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(deniedRes.decision, "deny", `Real script/preload/stdin payload MUST remain denied: ${deniedNodeCmd}`);
+    }
+
+    // ACS-SVC-001-P3-1: env-cache.json TTL expiry and RTK binary mtime invalidation
+    const cacheProfile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-env-cache-"));
+    try {
+      const cacheShimDir = path.join(cacheProfile, "bin");
+      createRtkShim(cacheShimDir, "1.1.0");
+      const cacheStateDir = os.platform() === "win32"
+        ? path.join(cacheProfile, "AppData", "Local", "agy-context-saver")
+        : path.join(cacheProfile, ".local", "state", "agy-context-saver");
+      const cacheEnv = withEnvPath(cacheShimDir, {
+        ...process.env,
+        AGY_TEST_PROFILE_DIR: cacheProfile,
+        XDG_STATE_HOME: os.platform() === "win32" ? undefined : path.join(cacheProfile, ".local", "state"),
+        LOCALAPPDATA: os.platform() === "win32" ? path.join(cacheProfile, "AppData", "Local") : undefined
+      });
+      const firstCacheRes = runHook({ toolCall: { name: "run_command", args: { CommandLine: "git status" } } }, cacheEnv);
+      assert.equal(firstCacheRes.overwrite?.CommandLine, "rtk git status");
+      const envCachePath = path.join(cacheStateDir, "env-cache.json");
+      assert.ok(fs.existsSync(envCachePath), "Hook must persist env-cache.json");
+      const writtenCache = JSON.parse(fs.readFileSync(envCachePath, "utf8"));
+
+      // Poison resolved=null with fresh ts: hook trusts valid non-expired cache for matching mtime key
+      fs.writeFileSync(envCachePath, JSON.stringify({ key: writtenCache.key, ts: Date.now(), resolved: null }));
+      const freshCachedMiss = runHook({ toolCall: { name: "run_command", args: { CommandLine: "git status" } } }, cacheEnv);
+      assert.equal(freshCachedMiss.overwrite?.CommandLine, undefined, "Fresh env-cache entry must be served while TTL and mtime match");
+
+      // Expire TTL (> 60s): hook must re-probe RTK and rewrite
+      fs.writeFileSync(envCachePath, JSON.stringify({ key: writtenCache.key, ts: Date.now() - 65000, resolved: null }));
+      const expiredCacheRes = runHook({ toolCall: { name: "run_command", args: { CommandLine: "git status" } } }, cacheEnv);
+      assert.equal(expiredCacheRes.overwrite?.CommandLine, "rtk git status", "Expired env-cache.json TTL must invalidate and re-probe RTK");
+
+      // Re-poison with fresh ts, then bump shim binary mtime: key mismatch must invalidate immediately before TTL
+      const refreshedCache = JSON.parse(fs.readFileSync(envCachePath, "utf8"));
+      fs.writeFileSync(envCachePath, JSON.stringify({ key: refreshedCache.key, ts: Date.now(), resolved: null }));
+      const shimFile = path.join(cacheShimDir, os.platform() === "win32" ? "rtk.cmd" : "rtk");
+      const nextTime = new Date(Date.now() + 10000);
+      fs.utimesSync(shimFile, nextTime, nextTime);
+      const mtimeInvalidatedRes = runHook({ toolCall: { name: "run_command", args: { CommandLine: "git status" } } }, cacheEnv);
+      assert.equal(mtimeInvalidatedRes.overwrite?.CommandLine, "rtk git status", "Changed RTK binary mtime must invalidate env-cache.json key immediately");
+    } finally {
+      fs.rmSync(cacheProfile, { recursive: true, force: true });
+    }
+
     console.log("✓ Group H regression checks passed (payload.cwd, 2>/dev/null, antigravity-cli, swarm_view, Step0>16KiB, cross-swarm isolation, query current, Wave 2 regressions)");
   } finally {
     fs.rmSync(wsDir, { recursive: true, force: true });

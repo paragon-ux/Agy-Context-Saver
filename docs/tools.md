@@ -148,7 +148,7 @@ agy-context transcript list --parent 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --line
 
 ## 6. `agy-context transcript export`
 
-- **Usage:** `agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out <path>] [--file <path>] [--json]`
+- **Usage:** `agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out|--output <path>] [--file <path>] [--json]`
 
 Generates an `L6`-safe sanitized Markdown (or `--json`) summary index of executed steps and compact tool calls, omitting raw `.system_generated/` JSONL lines, `thinking` blocks, and large file bodies while redacting embedded media/base64 payloads and token strings. `--sanitized` is required; raw transcript export is prohibited.
 
@@ -159,7 +159,7 @@ Generates an `L6`-safe sanitized Markdown (or `--json`) summary index of execute
 | `--sanitized` | `(none)` | Required | Explicit `L6` opt-in required on all `transcript export` calls. |
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive `step_index` range filter. |
 | `--limit` | `<N>` | `150` (max `500`) | Maximum steps retained per exported session. |
-| `--out` | `<path>` | `(stdout)` | Safely write index to a `.md`, `.json`, or `.txt` path (e.g. `scratch/...`), rejecting `..`, symlinks, and protected state/config paths. |
+| `--out` / `--output` | `<path>` | `(stdout)` | Safely write index to a `.md`, `.json`, or `.txt` path (e.g. `scratch/...`), rejecting `..`, symlinks, and protected state/config paths. |
 | `--file` / `--json` | `<path>` / `(none)` | `(none)` | Explicit single-session `.jsonl` path or JSON output. |
 
 ```bash
@@ -211,6 +211,6 @@ Checking Agy-Context-Saver installation status...
 - CLI Shim (agy-context): INSTALLED (~/.gemini/antigravity/bin)
 - RTK Command Optimizer (>= 1.1.0): INSTALLED (rtk 1.1.0)
 - MCP Cleanup: CLEAN (0 duplicate MCP configs/schemas)
-- Transcript Access Policy: OPEN (default - all sessions permitted)
+- Transcript Access Policy: OPEN (default)
 Overall Status: HEALTHY & ACTIVE
 ```

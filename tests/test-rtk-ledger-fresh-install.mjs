@@ -5,7 +5,12 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setupHermeticTestEnv, withEnvPath } from "./helpers/hermetic-fixture.mjs";
-import { ensureRtkConfigured, getRtkConfigPath, RTK_CHECKSUMS } from "../scripts/provision-rtk.mjs";
+import {
+  ensureRtkConfigured,
+  formatWindowsExpandArchiveCommand,
+  getRtkConfigPath,
+  RTK_CHECKSUMS
+} from "../scripts/provision-rtk.mjs";
 
 console.log("=================================================");
 console.log("RTK >= 1.1.0 Ledger & Fresh Install Verification Suite");
@@ -22,6 +27,11 @@ for (const assetName of [
 ]) {
   assert.match(RTK_CHECKSUMS[assetName] || "", /^[a-f0-9]{64}$/, `Missing or invalid SHA-256 checksum for ${assetName}`);
 }
+const psExpand = formatWindowsExpandArchiveCommand("C:\\Users\\O'Brien [Dev]\\rtk.zip", "C:\\Users\\O'Brien [Dev]\\bin");
+assert.equal(
+  psExpand,
+  "Expand-Archive -LiteralPath 'C:\\Users\\O''Brien [Dev]\\rtk.zip' -DestinationPath 'C:\\Users\\O''Brien [Dev]\\bin' -Force"
+);
 console.log("✓ All 5 RTK v1.1.0 platform release assets have pinned 64-char SHA-256 checksums");
 
 // --- TEST 1: RTK-01 Fresh Installation Standardizes config.toml ---

@@ -8,14 +8,14 @@
 |---|---|---|
 | Host `rtk` on `PATH` (`>= 1.1.0`) | System binary (`rtk hook antigravity`) | **Preferred.** Validated via `rtk --version`; no redundant binary download needed. |
 | Plugin-local `bin/` (`>= 1.1.0`) | Provisioned local binary | Secondary fallback when host `PATH` lacks a compatible binary. |
-| Incompatible (`< 1.1.0`) or missing `rtk` | Fail-closed preflight | Installer aborts cleanly with manual install instructions unless `--allow-degraded` is passed or verified checksums exist for the target platform. |
+| Incompatible (`< 1.1.0`) or missing `rtk` | Fail-closed preflight | Installer aborts cleanly with manual install instructions unless `--allow-degraded` is passed or verified checksums exist for the target platform (`linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`; `win32-arm64` is unsupported for auto-provisioning and requires manual `rtk >= 1.1.0` on `PATH` or `--allow-degraded`). |
 
 RTK release assets: <https://github.com/rtk-ai/rtk/releases/tag/v1.1.0>
 
 ## Enforced provisioning and compatibility policy
 
 1. **Enforced minimum version (`>= 1.1.0`).** `findExistingRtk()` and `isCompatibleRtkVersion()` reject legacy `< 1.1.0` binaries across `PATH` and plugin-local directories because `rtk hook antigravity` native JSON rewriting is required.
-2. **Hook delegation, compatibility guards, and transcript CLI pass-through.** `scripts/execution-guard-hook.mjs` delegates `run_command` rewriting via stdin JSON to `rtk hook antigravity`, normalizes `rg` to `rtk grep` when host `rg` is absent, reverts lossy implicit `wc`/`ls`/`diff` rewrites, and passes `agy-context transcript` subcommands (`read`, `query`, `step`, `health`, `list`, `access` and aliases) through without RTK wrapping while injecting `--id <convId>` via `overwrite.CommandLine` when a `self-only` caller omits `--id` or passes `current`.
+2. **Hook delegation, compatibility guards, and transcript CLI pass-through.** `scripts/execution-guard-hook.mjs` delegates `run_command` rewriting via stdin JSON to `rtk hook antigravity`, normalizes `rg` to `rtk grep` when host `rg` is absent, reverts lossy implicit `wc`/`ls`/`diff` rewrites, and passes `agy-context transcript` subcommands (`read`, `query`, `step`, `health`, `list`, `export`, `access` and aliases) through without RTK wrapping while injecting `--id <convId>` via `overwrite.CommandLine` when a `self-only` caller omits `--id` or passes `current`.
 3. **Fail-closed SHA-256 verification.** `ensureRtkInstalled()` requires pinned `RTK_CHECKSUMS` for the target platform and aborts before extracting unverified archives.
 4. **Fail-closed installer preflight.** `runInstall()` validates configuration syntax and shape (`hooks.json`, `config.json`, `mcp_config.json`) and checks RTK `>= 1.1.0` before mutating user profile configurations or creating shims and links. Provisioning failures abort installation unless `--allow-degraded` is passed.
 5. **Manual installation fallback.** Install `rtk >= 1.1.0` onto `PATH` (via official upstream installer, Cargo, or Homebrew) or pass `--allow-degraded` for hook-only governance without RTK rewriting.
@@ -24,7 +24,7 @@ RTK release assets: <https://github.com/rtk-ai/rtk/releases/tag/v1.1.0>
 
 Run these checks before changing `MIN_RTK_VERSION` or `RTK_VERSION`:
 
-- Run `node scripts/release-preflight.mjs` (`npm run preflight`) and the full 11-suite test matrix (`npm test`).
+- Run `node scripts/release-preflight.mjs` (`npm run preflight`) and the full 12-suite test matrix (`npm test`).
 - Exercise live `rtk >= 1.1.0 hook antigravity` compound commands, `bash -c` wrappers, and `agy-context transcript` pass-through (plus `self-only` `--id <convId>` injection) via `node tests/test-rtk-integration.mjs` and `node tests/test-hook.mjs`.
 - Put a legacy `< 1.1.0` binary on `PATH` and verify `findExistingRtk()` and `execution-guard-hook.mjs` reject it safely.
 - Exercise absent host `rg` and env-prefixed `rg`/`wc` commands in `node tests/test-hook.mjs`.
