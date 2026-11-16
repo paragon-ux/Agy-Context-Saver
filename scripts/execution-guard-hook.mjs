@@ -1729,10 +1729,7 @@ function extractFirstLineDirective(bodyText) {
 }
 
 /**
- * Inspects Steps 0–2 of `<brainDir>/<convId>/.system_generated/logs/transcript.jsonl`
- * to deterministically classify top-level user chats vs. `/swarm` workers vs. subagents,
-/**
- * Inspects initial transcript JSONL steps (up to 12 header lines before execution turns)
+ * Inspects initial transcript JSONL steps (up to 48 header lines before execution turns)
  * to classify caller session lineage (`isTopLevelUserSession`, `isChildSession`, `isSwarmChild`),
  * extract `parentConvId` and `@rosterName`, and parse any first-line `[agy-transcript-access: ...]` directive.
  *
@@ -1752,11 +1749,6 @@ function getCallerLineage(convId) {
     };
   }
 
-  const session = getSessionState(convId);
-  if (session.lineage && session.lineage.transcriptFound) {
-    return session.lineage;
-  }
-
   let targetFile = null;
   for (const bDir of getBrainDirs()) {
     const compactPath = path.join(bDir, convId, ".system_generated", "logs", "transcript.jsonl");
@@ -1768,6 +1760,23 @@ function getCallerLineage(convId) {
     if (fs.existsSync(fullPath)) {
       targetFile = fullPath;
       break;
+    }
+  }
+
+  const session = getSessionState(convId);
+  let targetStat = null;
+  if (targetFile) {
+    try { targetStat = fs.statSync(targetFile); } catch {}
+  }
+  if (session.lineage && session.lineage.transcriptFound && session.lineage.lineageVersion === 2) {
+    if (
+      session.lineage.isSwarmChild ||
+      session.lineage.isTopLevelUserSession ||
+      (targetStat &&
+        targetStat.size === session.lineage.fileSize &&
+        targetStat.mtimeMs === session.lineage.fileMtimeMs)
+    ) {
+      return session.lineage;
     }
   }
 
@@ -1784,11 +1793,11 @@ function getCallerLineage(convId) {
     };
   }
 
-  const MAX_HEADER_LINES = 12;
+  const MAX_HEADER_LINES = 48;
   let birthTimeMs = 0;
   let headStr = "";
   try {
-    const st = fs.statSync(targetFile);
+    const st = targetStat || fs.statSync(targetFile);
     const candidates = [st.birthtimeMs, st.ctimeMs, st.mtimeMs].filter((n) => Number.isFinite(n) && n > 0);
     if (candidates.length > 0) birthTimeMs = Math.min(...candidates);
 
@@ -1884,6 +1893,9 @@ function getCallerLineage(convId) {
   }
 
   const lineage = {
+    lineageVersion: 2,
+    fileSize: targetStat ? targetStat.size : 0,
+    fileMtimeMs: targetStat ? targetStat.mtimeMs : 0,
     transcriptFound: lines.length > 0 && line0Parsed,
     isTopLevelUserSession,
     isChildSession,

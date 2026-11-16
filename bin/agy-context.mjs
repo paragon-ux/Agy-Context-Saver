@@ -158,6 +158,13 @@ function parseFlags(argv, spec) {
   return { opts, positional };
 }
 
+function assertCleanHelp(opts, positional) {
+  const extraKeys = Object.keys(opts).filter((k) => k !== "help");
+  if (extraKeys.length > 0 || positional.length > 0) {
+    throw new Error("Conflicting flags: '--help' cannot be combined with operational flags or arguments.");
+  }
+}
+
 function parseOptionalInt(val, flagName) {
   if (val === undefined) return undefined;
   const num = Number(val);
@@ -300,6 +307,9 @@ function emitError(message, asJson = false, extra = {}) {
 async function handleTranscriptCommand(argv) {
   const sub = argv[0];
   if (!sub || sub === "--help" || sub === "-h" || sub === "help") {
+    if (argv.length > 1) {
+      throw new Error("Conflicting flags: '--help' cannot be combined with operational flags or arguments.");
+    }
     printHelp();
     process.exit(0);
   }
@@ -312,6 +322,7 @@ async function handleTranscriptCommand(argv) {
       values: new Set(["id", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "file"])
     });
     if (opts.help) {
+      assertCleanHelp(opts, positional);
       printHelp();
       process.exit(0);
     }
@@ -389,6 +400,7 @@ async function handleTranscriptCommand(argv) {
       values: new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "last", "tail", "limit", "field", "file"])
     });
     if (opts.help) {
+      assertCleanHelp(opts, positional);
       printHelp();
       process.exit(0);
     }
@@ -465,6 +477,7 @@ async function handleTranscriptCommand(argv) {
       values: new Set(["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "file"])
     });
     if (opts.help) {
+      assertCleanHelp(opts, positional);
       printHelp();
       process.exit(0);
     }
@@ -516,6 +529,7 @@ async function handleTranscriptCommand(argv) {
       values: new Set(["id", "file"])
     });
     if (opts.help) {
+      assertCleanHelp(opts, positional);
       printHelp();
       process.exit(0);
     }
@@ -551,6 +565,7 @@ async function handleTranscriptCommand(argv) {
       values: new Set(["limit", "parent"])
     });
     if (opts.help) {
+      assertCleanHelp(opts, positional);
       printHelp();
       process.exit(0);
     }
@@ -613,6 +628,7 @@ async function handleTranscriptCommand(argv) {
       multiValues: new Set(["id"])
     });
     if (opts.help) {
+      assertCleanHelp(opts, positional);
       printHelp();
       process.exit(0);
     }
@@ -700,6 +716,7 @@ async function handleTranscriptCommand(argv) {
       values: new Set(["mode", "allow", "deny", "ttl"])
     });
     if (opts.help) {
+      assertCleanHelp(opts, positional);
       printHelp();
       process.exit(0);
     }
@@ -755,10 +772,16 @@ async function handleTranscriptCommand(argv) {
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help") {
+    if (argv.length > 1) {
+      throw new Error("Conflicting flags: '--help' cannot be combined with operational flags or arguments.");
+    }
     printHelp();
     process.exit(0);
   }
   if (argv[0] === "--version" || argv[0] === "-v") {
+    if (argv.length > 1) {
+      throw new Error("Conflicting flags: '--version' cannot be combined with operational flags or arguments.");
+    }
     console.log(getVersion());
     process.exit(0);
   }
@@ -777,6 +800,7 @@ async function main() {
       values: new Set()
     });
     if (opts.help) {
+      assertCleanHelp(opts, positional);
       printHelp();
       process.exit(0);
     }
@@ -799,6 +823,7 @@ async function main() {
       values: new Set()
     });
     if (opts.help) {
+      assertCleanHelp(opts, positional);
       printHelp();
       process.exit(0);
     }
@@ -818,6 +843,7 @@ async function main() {
       values: new Set()
     });
     if (opts.help) {
+      assertCleanHelp(opts, positional);
       printHelp();
       process.exit(0);
     }
@@ -836,6 +862,7 @@ async function main() {
       values: new Set()
     });
     if (opts.help) {
+      assertCleanHelp(opts, positional);
       printHelp();
       process.exit(0);
     }

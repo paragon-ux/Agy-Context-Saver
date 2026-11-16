@@ -1408,6 +1408,111 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
       "getCallerLineage must bind Step 1 coordinator sender= (pA, allowlist @audit-*) rather than Step 0 board sibling (ACS-LIVE-SVC-001 / ACS-PR4-ARCH-001)"
     );
 
+    // Pre-v2 stale cached session.lineage + Step 0->Step 1 startup write growth must invalidate cache and bind coordinator
+    const raceWorker = "hermetic-swarm-race-worker";
+    const raceTrPath = path.join(brainH, raceWorker, ".system_generated", "logs", "transcript.jsonl");
+    writeTr(raceWorker, [{
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `[Message] timestamp=2026-11-16T00:00:07Z sender=${pB} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #1`
+    }]);
+    const raceStep0Res = runHook({
+      conversationId: raceWorker,
+      transcriptPath: raceTrPath,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${pA}` } }
+    });
+    assert.equal(raceStep0Res.decision, "deny", "Before Step 1 assignment arrives, pB board fallback denies access");
+    fs.appendFileSync(
+      raceTrPath,
+      JSON.stringify({
+        step_index: 1,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:08Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #2 for @audit-race):\n[agy-transcript-access: allow]\nAudit`
+      }) + "\n"
+    );
+    const raceStep1Res = runHook({
+      conversationId: raceWorker,
+      transcriptPath: raceTrPath,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${pA}` } }
+    });
+    assert.equal(
+      raceStep1Res.decision,
+      "allow",
+      "getCallerLineage must re-inspect when Step 1 Your assignment appends after Step 0 cached !isSwarmChild"
+    );
+
+    // Pre-v2 stale cached session.lineage (missing lineageVersion: 2) must be invalidated on upgrade
+    const staleCacheWorker = "hermetic-stale-cache-worker";
+    const staleCacheTrPath = path.join(brainH, staleCacheWorker, ".system_generated", "logs", "transcript.jsonl");
+    writeTr(staleCacheWorker, [
+      {
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:07Z sender=${pB} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #1`
+      },
+      {
+        step_index: 1,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:08Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #2 for @audit-stale):\n[agy-transcript-access: allow]\nAudit`
+      }
+    ]);
+    const staleSessFile = path.join(stateDir, `agy-session-${staleCacheWorker}.json`);
+    fs.mkdirSync(path.dirname(staleSessFile), { recursive: true });
+    fs.writeFileSync(staleSessFile, JSON.stringify({
+      pollCount: 0,
+      denials: 0,
+      taskIds: [],
+      lastPollTime: 0,
+      lastSeenTime: Date.now(),
+      recentHookCalls: [],
+      lineage: {
+        transcriptFound: true,
+        isTopLevelUserSession: false,
+        isChildSession: true,
+        isSwarmChild: true,
+        parentConvId: pB,
+        rosterName: "audit-stale",
+        launchDirective: "deny",
+        birthTimeMs: 0
+      }
+    }));
+    const upgradedRes = runHook({
+      conversationId: staleCacheWorker,
+      transcriptPath: staleCacheTrPath,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${pA}` } }
+    });
+    assert.equal(upgradedRes.decision, "allow", "Pre-v2 cached session.lineage must be invalidated and re-bound to Step 1 coordinator");
+
+    // >12 leading board notifications before Your assignment (large swarm)
+    const largeSwarmWorker = "hermetic-swarm-large-worker";
+    const largeSwarmTr = path.join(brainH, largeSwarmWorker, ".system_generated", "logs", "transcript.jsonl");
+    const largeLines = [];
+    for (let b = 0; b < 14; b++) {
+      largeLines.push({
+        step_index: b,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:00Z sender=${pB} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #${b + 1}`
+      });
+    }
+    largeLines.push({
+      step_index: 14,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `[Message] timestamp=2026-11-16T00:00:14Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #15 for @audit-large):\n[agy-transcript-access: allow]\nAudit`
+    });
+    writeTr(largeSwarmWorker, largeLines);
+    const largeSwarmHookRes = runHook({
+      conversationId: largeSwarmWorker,
+      transcriptPath: largeSwarmTr,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${pA}` } }
+    });
+    assert.equal(largeSwarmHookRes.decision, "allow", "getCallerLineage must scan past >12 leading board messages to bind Step 14 coordinator");
+
     // ACS-PR4-RUN-001 / ACS-TEST-001 / ACS-TEST-002: `transcript dump` hook routing & negative --out coverage
     const dumpAllowed = runHook(
       {

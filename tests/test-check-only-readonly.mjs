@@ -117,7 +117,10 @@ try {
     ['--bogus'],
     ['--stat'],
     ['bogus-positional'],
-    ['--help', '--check']
+    ['--help', '--check'],
+    ['--uninstall', '--allow-degraded'],
+    ['--status', '--allow-degraded'],
+    ['--restore-backups', '--allow-degraded']
   ]) {
     const res = spawnSync(process.execPath, ['scripts/install-register.mjs', ...badArgs], {
       cwd: isolatedRepo,

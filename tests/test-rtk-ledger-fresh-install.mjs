@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setupHermeticTestEnv, withEnvPath } from "./helpers/hermetic-fixture.mjs";
 import {
+  ensureGitLineEndingConfigured,
   ensureRtkConfigured,
   formatWindowsExpandArchiveCommand,
   getRtkConfigPath,
@@ -49,6 +50,11 @@ ensureRtkConfigured({ silent: true });
 
 const hostGitAfter = fs.existsSync(hostGitConfig) ? fs.readFileSync(hostGitConfig, "utf-8") : null;
 assert.equal(hostGitAfter, hostGitBefore, "Test run must never mutate host ~/.gitconfig");
+
+const isolatedGitConfig = path.join(tempProfile, ".gitconfig");
+ensureGitLineEndingConfigured({ silent: true });
+assert.equal(fs.existsSync(isolatedGitConfig), true, "ensureGitLineEndingConfigured must write isolated .gitconfig via execFileSync");
+assert.match(fs.readFileSync(isolatedGitConfig, "utf-8"), /safecrlf\s*=\s*false/i, "Isolated .gitconfig must set safecrlf = false");
 
 assert.equal(fs.existsSync(configPath), true, `config.toml must be created at ${configPath}`);
 const freshContent = fs.readFileSync(configPath, "utf-8");

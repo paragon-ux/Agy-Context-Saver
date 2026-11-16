@@ -31,24 +31,55 @@ const PACKAGE_VERSION = (() => {
   }
 })();
 
-const homeDir = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
-const geminiConfigDir = path.join(homeDir, ".gemini", "config");
-const pluginsDir = path.join(geminiConfigDir, "plugins");
-const pluginDest = path.join(pluginsDir, "agy-context-saver");
-const scriptsDir = path.join(geminiConfigDir, "scripts");
-const hooksJsonPath = path.join(geminiConfigDir, "hooks.json");
-const hooksBakPath = path.join(geminiConfigDir, "hooks.json.bak");
-const configJsonPath = path.join(geminiConfigDir, "config.json");
-const mcpJsonPath = path.join(geminiConfigDir, "mcp_config.json");
-const mcpBakPath = path.join(geminiConfigDir, "mcp_config.json.bak");
-const antigravityMcpRootDir = path.join(homeDir, ".gemini", "antigravity", "mcp");
-const antigravityMcpDir = path.join(antigravityMcpRootDir, "agy-context-saver");
-const antigravityBinDir = path.join(homeDir, ".gemini", "antigravity", "bin");
+function resolveProfilePaths() {
+  const homeDir = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
+  const geminiConfigDir = path.join(homeDir, ".gemini", "config");
+  const pluginsDir = path.join(geminiConfigDir, "plugins");
+  const pluginDest = path.join(pluginsDir, "agy-context-saver");
+  const scriptsDir = path.join(geminiConfigDir, "scripts");
+  const hooksJsonPath = path.join(geminiConfigDir, "hooks.json");
+  const hooksBakPath = path.join(geminiConfigDir, "hooks.json.bak");
+  const configJsonPath = path.join(geminiConfigDir, "config.json");
+  const mcpJsonPath = path.join(geminiConfigDir, "mcp_config.json");
+  const mcpBakPath = path.join(geminiConfigDir, "mcp_config.json.bak");
+  const antigravityMcpRootDir = path.join(homeDir, ".gemini", "antigravity", "mcp");
+  const antigravityMcpDir = path.join(antigravityMcpRootDir, "agy-context-saver");
+  const antigravityBinDir = path.join(homeDir, ".gemini", "antigravity", "bin");
+  const destHook = path.join(scriptsDir, "execution-guard-hook.mjs");
+  const destHookNormalized = destHook.replace(/\\/g, "/");
+  return {
+    homeDir,
+    geminiConfigDir,
+    pluginsDir,
+    pluginDest,
+    scriptsDir,
+    hooksJsonPath,
+    hooksBakPath,
+    configJsonPath,
+    mcpJsonPath,
+    mcpBakPath,
+    antigravityMcpRootDir,
+    antigravityMcpDir,
+    antigravityBinDir,
+    destHook,
+    destHookNormalized
+  };
+}
+
+const {
+  pluginDest,
+  hooksJsonPath,
+  hooksBakPath,
+  mcpJsonPath,
+  mcpBakPath,
+  antigravityMcpRootDir,
+  antigravityMcpDir,
+  antigravityBinDir,
+  destHook
+} = resolveProfilePaths();
 
 const sourceHook = path.join(repoRoot, "scripts", "execution-guard-hook.mjs");
 const repoHooksJsonPath = path.join(repoRoot, "hooks.json");
-const destHook = path.join(scriptsDir, "execution-guard-hook.mjs");
-const destHookNormalized = destHook.replace(/\\/g, "/");
 
 const HOOK_KEY = "agy-context-saver";
 const LEGACY_HOOK_KEY = "execution-guard";
@@ -81,6 +112,7 @@ function isExecutableFile(filePath) {
 }
 
 function detectCliShims() {
+  const { antigravityBinDir } = resolveProfilePaths();
   const isWin = os.platform() === "win32";
   const expectedFiles = isWin
     ? CLI_SHIM_NAMES.map((name) => `${name}.cmd`)
@@ -94,6 +126,7 @@ function detectCliShims() {
 }
 
 function findLegacyMcpArtifacts() {
+  const { mcpJsonPath, antigravityMcpRootDir } = resolveProfilePaths();
   const legacyMcpKeys = [];
   if (fs.existsSync(mcpJsonPath)) {
     try {
@@ -167,6 +200,12 @@ export async function safeCopyFileIfChanged(sourcePath, targetPath) {
  * Detects whether Agy-Context-Saver is already installed across all Antigravity 2.0 integration points.
  */
 export function detectExistingInstallation() {
+  const {
+    pluginDest,
+    hooksJsonPath,
+    destHook,
+    destHookNormalized
+  } = resolveProfilePaths();
   const pluginExists = fs.existsSync(pluginDest);
   let pluginLst = null;
   try {
@@ -250,10 +289,16 @@ export function detectExistingInstallation() {
   const pluginHookScript = path.join(pluginDest, "scripts", "execution-guard-hook.mjs");
   const scriptExists = fs.existsSync(pluginHookScript);
   const mirroredHookExists = fs.existsSync(destHook);
+  let mirroredHookStale = false;
+  if (mirroredHookExists && fs.existsSync(sourceHook)) {
+    try {
+      mirroredHookStale = !fs.readFileSync(sourceHook).equals(fs.readFileSync(destHook));
+    } catch {}
+  }
   const cliShim = detectCliShims();
   const mcp = findLegacyMcpArtifacts();
   const rtkInfo = findExistingRtk();
-  const hookRegistered = pluginHookRegistered && globalHookRegistered && mirroredHookExists;
+  const hookRegistered = pluginHookRegistered && globalHookRegistered && mirroredHookExists && !mirroredHookStale;
 
   const isInstalled =
     pluginExists ||
@@ -270,6 +315,7 @@ export function detectExistingInstallation() {
     !pluginPointsElsewhere &&
     !pluginVersionMismatch &&
     hookRegistered &&
+    !mirroredHookStale &&
     scriptExists &&
     !legacyHookPresent &&
     cliShim.exists &&
@@ -295,6 +341,7 @@ export function detectExistingInstallation() {
         pluginHookRegistered,
         globalHookRegistered,
         mirroredHookExists,
+        mirroredHookStale,
         legacyHookPresent,
         command: globalHookCommand || pluginHookCommand,
         scriptExists
@@ -334,6 +381,7 @@ export function parseAndValidateJsonConfig(filePath, configName) {
 }
 
 async function stripLegacyMcpRegistrations(parsedMcp, { log, warn }) {
+  const { mcpJsonPath, mcpBakPath } = resolveProfilePaths();
   if (!fs.existsSync(mcpJsonPath) || !parsedMcp?.mcpServers || typeof parsedMcp.mcpServers !== "object") {
     return;
   }
@@ -365,6 +413,7 @@ async function stripLegacyMcpRegistrations(parsedMcp, { log, warn }) {
 }
 
 async function sweepLegacyMcpSchemas({ log, warn }) {
+  const { antigravityMcpRootDir } = resolveProfilePaths();
   if (!fs.existsSync(antigravityMcpRootDir)) {
     return;
   }
@@ -405,6 +454,7 @@ export function formatWindowsCmdShim(targetCliPath) {
 }
 
 async function installCliShims({ log }) {
+  const { pluginDest, antigravityBinDir } = resolveProfilePaths();
   const sourceCli = path.join(repoRoot, "bin", "agy-context.mjs");
   const pluginCli = path.join(pluginDest, "bin", "agy-context.mjs");
 
@@ -456,6 +506,19 @@ async function installCliShims({ log }) {
 }
 
 export async function runInstall(options = {}) {
+  const {
+    geminiConfigDir,
+    pluginsDir,
+    pluginDest,
+    scriptsDir,
+    hooksJsonPath,
+    hooksBakPath,
+    configJsonPath,
+    mcpJsonPath,
+    antigravityBinDir,
+    destHook,
+    destHookNormalized
+  } = resolveProfilePaths();
   const log = options.silent ? () => {} : console.log;
   const warn = options.silent ? () => {} : console.warn;
 
@@ -564,7 +627,12 @@ export async function runInstall(options = {}) {
   let pluginPointsElsewhere = false;
   if (pluginLst && pluginExists && pluginLst.isSymbolicLink()) {
     try {
-      pluginPointsElsewhere = fs.realpathSync(pluginDest) !== fs.realpathSync(repoRoot);
+      const destReal = fs.realpathSync(pluginDest);
+      const repoReal = fs.realpathSync(repoRoot);
+      pluginPointsElsewhere =
+        os.platform() === "win32" || os.platform() === "darwin"
+          ? destReal.toLowerCase() !== repoReal.toLowerCase()
+          : destReal !== repoReal;
     } catch {
       pluginPointsElsewhere = true;
     }
@@ -680,6 +748,15 @@ export async function runInstall(options = {}) {
 }
 
 export async function runUninstall(options = {}) {
+  const {
+    geminiConfigDir,
+    pluginDest,
+    destHook,
+    hooksJsonPath,
+    configJsonPath,
+    mcpJsonPath,
+    antigravityBinDir
+  } = resolveProfilePaths();
   const log = options.silent ? () => {} : console.log;
   const warn = options.silent ? () => {} : console.warn;
   log("Uninstalling Agy-Context-Saver...");
@@ -796,6 +873,7 @@ export async function runUninstall(options = {}) {
 }
 
 export async function runRestoreBackups(options = {}) {
+  const { hooksJsonPath, hooksBakPath, mcpJsonPath, mcpBakPath } = resolveProfilePaths();
   const log = options.silent ? () => {} : console.log;
   const warn = options.silent ? () => {} : console.warn;
   let restoredCount = 0;
@@ -828,6 +906,7 @@ export async function runRestoreBackups(options = {}) {
 }
 
 export function runStatus(options = {}) {
+  const { pluginDest, destHook, antigravityBinDir } = resolveProfilePaths();
   const log = options.silent ? () => {} : console.log;
   const existing = detectExistingInstallation();
   const plug = existing.details.plugin;
@@ -844,9 +923,11 @@ export function runStatus(options = {}) {
   log(`- Native Plugin Link: ${pluginNote}`);
   const hookStatusLabel = existing.details.hook.registered
     ? "ACTIVE (plugin + global hooks.json)"
-    : existing.details.hook.pluginHookRegistered
-      ? "PARTIAL (plugin hooks.json only; global /swarm hook missing)"
-      : "NOT REGISTERED";
+    : existing.details.hook.mirroredHookStale
+      ? `STALE MIRRORED HOOK (${destHook}; re-run agy-context setup)`
+      : existing.details.hook.pluginHookRegistered
+        ? "PARTIAL (plugin hooks.json only; global /swarm hook missing)"
+        : "NOT REGISTERED";
   log(
     `- Execution Governor Hook (${HOOK_KEY}): ${hookStatusLabel}${existing.details.hook.legacyHookPresent ? " (legacy 'execution-guard' in global hooks.json)" : ""}`
   );
@@ -960,6 +1041,10 @@ if (isDirectExecution()) {
   }
   if (isCheck && isStatus) {
     console.error("Error: Conflicting flags: specify either --check or --status, not both.");
+    process.exit(1);
+  }
+  if (allowDegraded && (isUninstall || isStatus || isRestoreBackups)) {
+    console.error("Error: Invalid flag: --allow-degraded is only supported with setup/install or --check.");
     process.exit(1);
   }
 

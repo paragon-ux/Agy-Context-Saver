@@ -1064,13 +1064,37 @@ try {
       const w3Lineage = inspectTranscriptLineageFromFile(path.join(altBrain, liveW3, ".system_generated", "logs", "transcript.jsonl"));
       assert.equal(w3Lineage.parentConvId, liveCoordId, "Step 2 coordinator assignment sender= must override leading board messages");
 
+      // Large-swarm regression (>12 leading board messages before Your assignment)
+      const liveW14 = "live-swarm-w14";
+      const w14Steps = [];
+      for (let b = 0; b < 14; b++) {
+        w14Steps.push({
+          step_index: b,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T10:00:00Z sender=sibling-${b} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #${b + 1}`,
+          created_at: "2026-11-16T10:00:00Z"
+        });
+      }
+      w14Steps.push({
+        step_index: 14,
+        type: "SYSTEM_MESSAGE",
+        source: "SYSTEM",
+        content: `[Message] timestamp=2026-11-16T10:00:14Z sender=${liveCoordId} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #15 for @worker-14):\n[agy-transcript-access: deny]\nWorker 14`,
+        created_at: "2026-11-16T10:00:14Z"
+      });
+      writeConvLines(brainDir, liveW14, w14Steps);
+      const w14Lineage = inspectTranscriptLineageFromFile(path.join(brainDir, liveW14, ".system_generated", "logs", "transcript.jsonl"));
+      assert.equal(w14Lineage.parentConvId, liveCoordId, "Step 14 coordinator assignment must still bind parentConvId (>12 leading board messages)");
+      assert.equal(w14Lineage.launchDirective, "deny");
+
       const prevTestBrain = process.env.AGY_BRAIN_DIR;
       const prevTestProfile = process.env.AGY_TEST_PROFILE_DIR;
       process.env.AGY_TEST_PROFILE_DIR = tempHome;
       delete process.env.AGY_BRAIN_DIR;
       try {
         const listedLive = listTranscriptConversations({ parentId: liveCoordId, includeLineage: true });
-        assert.equal(listedLive.total, 3, "list --parent must find all 3 swarm workers despite leading board notifications (ACS-LIVE-SVC-001)");
+        assert.equal(listedLive.total, 4, "list --parent must find all 4 swarm workers despite leading board notifications (ACS-LIVE-SVC-001)");
 
         // 7. ACS-PR4-SVC-001: Direct ESM listTranscriptConversations() must enforce verifyTranscriptCoreAccess under active policy
         manageTranscriptAccessPolicy({ callerConvId: "owner-list-svc", mode: "self-only" });
@@ -1078,7 +1102,7 @@ try {
         assert.equal(deniedDirectList.isError, true, "Direct listTranscriptConversations() must fail closed without 'list' grant (ACS-PR4-SVC-001)");
         recordTranscriptHookGrant({ callerConvId: "owner-list-svc", subcommand: "list", mode: "open" });
         const allowedDirectList = listTranscriptConversations({ parentId: liveCoordId, includeLineage: true });
-        assert.equal(allowedDirectList.total, 3, "Direct listTranscriptConversations() must succeed once with 'list' grant");
+        assert.equal(allowedDirectList.total, 4, "Direct listTranscriptConversations() must succeed once with 'list' grant");
         const reusedDirectList = listTranscriptConversations({ parentId: liveCoordId, includeLineage: true });
         assert.equal(reusedDirectList.isError, true, "Single-use 'list' grant must not be reusable across direct calls");
         manageTranscriptAccessPolicy({ on: true, _testAuthorizedOwner: "owner-list-svc" });
@@ -1091,10 +1115,10 @@ try {
         );
         assert.equal(dumpCli.status, 0, dumpCli.stderr);
         const dumpParsed = JSON.parse(dumpCli.stdout);
-        assert.equal(dumpParsed.exportedCount, 3, "transcript dump --parent must export all 3 swarm sessions");
+        assert.equal(dumpParsed.exportedCount, 4, "transcript dump --parent must export all 4 swarm sessions");
         assert.equal(fs.existsSync(dumpOut), true);
 
-        // 9. ACS-PR4-RUN-002: exportSanitizedTranscript --json payload obeys maxOutputChars ceiling when clamped
+        // 9. ACS-PR4-RUN-002: exportSanitizedTranscript --json payload obeys maxOutputChars ceiling and keeps text synchronized
         const bigClampConv = "big-json-clamp-conv";
         const bigSteps = [];
         for (let s = 0; s < 120; s++) {
@@ -1120,6 +1144,46 @@ try {
           "Clamped JSON export payload must remain bounded by effectiveCeiling (ACS-PR4-RUN-002)"
         );
         assert.equal(clampedRes.sessions[0].displayedSteps, clampedRes.sessions[0].rows.length);
+        assert.match(
+          clampedRes.text,
+          new RegExp(`Steps Shown: ${clampedRes.sessions[0].rows.length} of 120 \\(truncated\\)`),
+          "Clamped Markdown Steps Shown must match actual retained rows"
+        );
+        assert.match(clampedRes.text, /clamped at safety ceiling/);
+
+        // Medium ceiling where Markdown fits but pretty JSON trims: text must re-sync with clamped=true
+        const medConv = "med-json-clamp-conv";
+        const medSteps = [];
+        for (let s = 0; s < 45; s++) {
+          medSteps.push({
+            step_index: s,
+            type: "PLANNER_RESPONSE",
+            content: `Step ${s} ` + "A".repeat(40),
+            tool_calls: [{ name: "run_command", args: { CommandLine: `echo ${s}` } }],
+            created_at: "2026-11-16T02:00:00Z"
+          });
+        }
+        writeConvLines(brainDir, medConv, medSteps);
+        const medClamped = await exportSanitizedTranscript({
+          conversationIds: [medConv],
+          sanitized: true,
+          limit: 150,
+          maxOutputChars: 8000
+        });
+        assert.equal(medClamped.clamped, true);
+        assert.match(medClamped.text, /clamped at safety ceiling/, "Markdown text must carry clamping notice when JSON ceiling trimmed");
+        assert.match(medClamped.text, new RegExp(`Steps Shown: ${medClamped.sessions[0].rows.length} of 45 \\(truncated\\)`));
+
+        // Top-level and subcommand --help / --version conflict rejection
+        for (const badHelpArgs of [
+          ["--help", "--bogus"],
+          ["--version", "--bogus"],
+          ["transcript", "--help", "--bogus"],
+          ["transcript", "list", "--parent", liveCoordId, "--help"]
+        ]) {
+          const badHelpRes = runCli(badHelpArgs, multiEnv);
+          assert.notEqual(badHelpRes.status, 0, `Expected non-zero exit for conflicting help/version args: ${badHelpArgs.join(" ")}`);
+        }
       } finally {
         if (prevTestBrain !== undefined) process.env.AGY_BRAIN_DIR = prevTestBrain;
         if (prevTestProfile !== undefined) process.env.AGY_TEST_PROFILE_DIR = prevTestProfile;
