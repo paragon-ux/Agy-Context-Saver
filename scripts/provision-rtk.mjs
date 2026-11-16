@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -12,6 +12,14 @@ const binDir = path.join(repoRoot, "bin");
 export const RTK_VERSION = "v1.1.0";
 export const MIN_RTK_VERSION = "1.1.0";
 export const MIN_COMPATIBLE_RTK_VERSION = MIN_RTK_VERSION;
+
+export function quotePowerShellSingle(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+export function formatWindowsExpandArchiveCommand(archivePath, destDir) {
+  return `Expand-Archive -LiteralPath ${quotePowerShellSingle(archivePath)} -DestinationPath ${quotePowerShellSingle(destDir)} -Force`;
+}
 
 // Pinned SHA-256 checksums per release asset from https://github.com/rtk-ai/rtk/releases/download/v1.1.0/checksums.txt;
 // ensureRtkInstalled verifies the downloaded archive before extraction and fails closed on any mismatch.
@@ -54,15 +62,59 @@ export function getRtkPlatformAsset() {
   return null;
 }
 
+function runCmdShimSync(bin, args, platformExec = execFileSync) {
+  if (/["\r\n]/.test(String(bin))) {
+    throw new Error(`Unsafe command path: ${bin}`);
+  }
+  const comspec =
+    process.env.ComSpec ||
+    process.env.COMSPEC ||
+    path.join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", "cmd.exe");
+  const quotedBin = /[\\/\s&|<>^()%!]/.test(bin) ? `"${bin}"` : bin;
+  const quotedArgs = args
+    .map((a) => (/\s|["&|<>^()%!]/.test(String(a)) ? `"${String(a).replace(/"/g, '\\"')}"` : String(a)))
+    .join(" ");
+  const cmdLine = quotedArgs ? `"${quotedBin} ${quotedArgs}"` : `"${quotedBin}"`;
+  return platformExec(comspec, ["/d", "/s", "/c", cmdLine], {
+    encoding: "utf-8",
+    timeout: 5000,
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+    windowsVerbatimArguments: true
+  });
+}
+
+function runRtkVersionSync(bin, { platform = os.platform(), execFileSyncFn = execFileSync } = {}) {
+  const execOpts = {
+    encoding: "utf-8",
+    timeout: 5000,
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true
+  };
+  if (platform === "win32" && /\.(cmd|bat)$/i.test(bin)) {
+    return runCmdShimSync(bin, ["--version"], execFileSyncFn).trim();
+  }
+  try {
+    return execFileSyncFn(bin, ["--version"], execOpts).trim();
+  } catch (err) {
+    if (platform === "win32" && bin === "rtk" && (err?.code === "ENOENT" || err?.code === "EINVAL")) {
+      return runCmdShimSync("rtk", ["--version"], execFileSyncFn).trim();
+    }
+    throw err;
+  }
+}
+
 export function findExistingRtk(options = {}) {
-  const names = os.platform() === "win32" ? ["rtk.exe", "rtk.cmd"] : ["rtk"];
+  const platform = options.platform || os.platform();
+  const execFileSyncFn = options.execFileSync || execFileSync;
+  const names = platform === "win32" ? ["rtk.exe", "rtk.cmd"] : ["rtk"];
   const profileHome = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
   const pluginBinDir = path.join(profileHome, ".gemini", "config", "plugins", "agy-context-saver", "bin");
   const candidateDirs = [binDir, pluginBinDir];
 
   // Check PATH first so a system rtk >= 1.1.0 is preferred over bundled binaries
   try {
-    const out = execSync("rtk --version", { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const out = runRtkVersionSync("rtk", { platform, execFileSyncFn });
     if (isCompatibleRtkVersion(out)) {
       return { path: "rtk", version: out, isLocal: false };
     }
@@ -76,7 +128,7 @@ export function findExistingRtk(options = {}) {
       const localExe = path.join(dir, exeName);
       if (fs.existsSync(localExe)) {
         try {
-          const out = execSync(`"${localExe}" --version`, { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+          const out = runRtkVersionSync(localExe, { platform, execFileSyncFn });
           if (isCompatibleRtkVersion(out)) {
             return { path: localExe, version: out, isLocal: true };
           }
@@ -148,11 +200,15 @@ export async function ensureRtkInstalled(options = {}) {
   log(`✓ Downloaded ${Math.round(buffer.length / 1024)} KB. Extracting archive...`);
   try {
     // Windows 10/11, macOS, and Linux all provide native tar
-    execSync(`tar -xf "${archivePath}" -C "${binDir}"`, { stdio: "pipe" });
+    execFileSync("tar", ["-xf", archivePath, "-C", binDir], { stdio: "pipe" });
   } catch (err) {
     // Fallback on Windows if tar fails
     if (os.platform() === "win32") {
-      execSync(`powershell -NoProfile -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${binDir}' -Force"`, { stdio: "pipe" });
+      execFileSync(
+        "powershell",
+        ["-NoProfile", "-Command", formatWindowsExpandArchiveCommand(archivePath, binDir)],
+        { stdio: "pipe", windowsHide: true }
+      );
     } else {
       throw err;
     }
@@ -238,7 +294,7 @@ export function ensureGitLineEndingConfigured(options = {}) {
     if (process.env.AGY_TEST_PROFILE_DIR && !env.GIT_CONFIG_GLOBAL) {
       env.GIT_CONFIG_GLOBAL = path.join(process.env.AGY_TEST_PROFILE_DIR, ".gitconfig");
     }
-    execSync("git config --global core.safecrlf false", { windowsHide: true, stdio: "ignore", env });
+    execFileSync("git", ["config", "--global", "core.safecrlf", "false"], { windowsHide: true, stdio: "ignore", env });
     log("✓ Standardized git core.safecrlf = false to suppress line-ending warning noise");
   } catch {}
 }

@@ -1,12 +1,12 @@
 [project]
-site_url = "https://paragon-ux.github.io/agy-context-saver/"
+site_url = "https://paragon-ux.github.io/Agy-Context-Saver/"
 site_name = "Agy-Context-Saver Documentation"
 site_description = "CLI-first transcript forensic engine & lifecycle governor built for Google Antigravity"
 site_author = "paragon-ux"
 copyright = "Copyright &copy; 2026 paragon-ux. Released under the MIT License."
 
-repo_url = "https://github.com/paragon-ux/agy-context-saver"
-repo_name = "paragon-ux/agy-context-saver"
+repo_url = "https://github.com/paragon-ux/Agy-Context-Saver"
+repo_name = "paragon-ux/Agy-Context-Saver"
 
 nav = [
   { "Overview" = "index.md" },
@@ -58,7 +58,7 @@ toggle.name = "Switch to system preference"
 
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
-link = "https://github.com/paragon-ux/agy-context-saver"
+link = "https://github.com/paragon-ux/Agy-Context-Saver"
 
 [project.markdown_extensions]
 abbr = {}

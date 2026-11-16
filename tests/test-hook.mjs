@@ -1181,6 +1181,429 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
       "self-only caller passing own --file under antigravity-cli/brain must resolve extractConvId via getBrainDirs (ACS-ARCH-002)"
     );
 
+    // ACS-SVC-002: Hook validation for transcript list --parent/--lineage and transcript export --sanitized
+    const parentListHook = runHook(
+      {
+        conversationId: pA,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript list --parent ${pA} --lineage --json` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(parentListHook.decision, "allow", "Parent must be allowed to run transcript list --parent --lineage");
+
+    const parentExportHook = runHook(
+      {
+        conversationId: pA,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript export --parent ${pA} --sanitized --out scratch/index.md` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(parentExportHook.decision, "allow", "Parent must be allowed to run transcript export --parent --sanitized --out");
+
+    const badOutExportHook = runHook(
+      {
+        conversationId: pA,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript export --id ${pA} --sanitized --out scripts/evil.mjs` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(badOutExportHook.decision, "deny", "export --out writing executable/governance script must be denied");
+
+    const selfExportOwn = runHook(
+      {
+        conversationId: cliRestricted,
+        transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript export --sanitized" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(selfExportOwn.decision, "allow", "self-only caller exporting own transcript must be allowed");
+    assert.match(selfExportOwn.overwrite?.CommandLine || "", new RegExp(`--id ${cliRestricted}`));
+
+    for (const forbiddenSelfExport of [
+      `agy-context transcript export --sanitized --parent ${pA}`,
+      `agy-context transcript export --sanitized --id ${pA}`,
+      `agy-context transcript export --sanitized --id ${pA},${cliRestricted}`,
+      `agy-context transcript export --sanitized --id ${pA} --id ${cliRestricted}`
+    ]) {
+      const deniedSelfExp = runHook(
+        {
+          conversationId: cliRestricted,
+          transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: forbiddenSelfExport }
+          }
+        },
+        cliEnv
+      );
+      assert.equal(deniedSelfExp.decision, "deny", `self-only mode must deny '${forbiddenSelfExport}'`);
+    }
+
+    // Regression: cwd-resolved benchmark --out denial, dual --out/--output bypass denial, --parent current rewrite, and repeated --id current
+    const cwdBenchExport = runHook(
+      {
+        conversationId: pA,
+        cwd: path.join(wsDir, "benchmarks"),
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript export --id ${pA} --sanitized --out eval_data.json` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(cwdBenchExport.decision, "deny", "Relative --out inside payload.cwd=benchmarks must be denied");
+
+    const dualOutExport = runHook(
+      {
+        conversationId: pA,
+        cwd: wsDir,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript export --id ${pA} --sanitized --out scratch/ok.md --output benchmarks/evil.json` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(dualOutExport.decision, "deny", "Conflicting --out safe + --output benchmarks must be denied");
+
+    const parentCurrentList = runHook(
+      {
+        conversationId: pA,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript list --parent current --lineage" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(parentCurrentList.decision, "allow");
+    assert.match(parentCurrentList.overwrite?.CommandLine || "", new RegExp(`--parent ${pA}`));
+
+    const parentCurrentExport = runHook(
+      {
+        conversationId: pA,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript export --parent current --sanitized" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(parentCurrentExport.decision, "allow");
+    assert.match(parentCurrentExport.overwrite?.CommandLine || "", new RegExp(`--parent ${pA}`));
+
+    const repeatCurrentSelf = runHook(
+      {
+        conversationId: cliRestricted,
+        transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript export --sanitized --id current --id current" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(repeatCurrentSelf.decision, "allow");
+    assert.doesNotMatch(repeatCurrentSelf.overwrite?.CommandLine || "", /\bcurrent\b/);
+
+    // Regression: positional comma-separated IDs under allowlist policy bind exact 'multi:' grant key
+    const allowlistExpChild = "cli-allow-exp";
+    const allowlistExpLogs = path.join(cliBrainRoot, allowlistExpChild, ".system_generated", "logs");
+    fs.mkdirSync(allowlistExpLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(allowlistExpLogs, "transcript.jsonl"),
+      JSON.stringify({
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:06Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: allow]\nAudit`
+      }) + "\n"
+    );
+    const multiPosHook = runHook(
+      {
+        conversationId: allowlistExpChild,
+        transcriptPath: path.join(allowlistExpLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript export ${pA},${cliRestricted} --sanitized` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(multiPosHook.decision, "allow");
+    const cliStateDir = os.platform() === "win32"
+      ? path.join(cliProfile, "AppData", "Local", "agy-context-saver")
+      : path.join(cliProfile, ".local", "state", "agy-context-saver");
+    const grantsDir = path.join(cliStateDir, "grants");
+    const grantFiles = fs.readdirSync(grantsDir).filter((f) => f.startsWith("grant-"));
+    const latestGrant = grantFiles
+      .map((f) => JSON.parse(fs.readFileSync(path.join(grantsDir, f), "utf8")))
+      .find((g) => g.callerConvId === allowlistExpChild && g.subcommand === "export");
+    const expectedMultiKey = `multi:${[pA, cliRestricted].sort().join(",")}`;
+    assert.equal(latestGrant?.targetConvId, expectedMultiKey, "Positional comma-separated export must bind sorted multi: grant key");
+
+    // ACS-LIVE-SVC-001 & ACS-PR4-ARCH-001: Step 0 `[swarm] new board message` (sender=sibling) must not override Step 1 `Your assignment` (sender=coordinator)
+    const { inspectTranscriptLineageFromFile } = await import("../lib/transcript-core.mjs");
+    const liveBoardWorker = "cli-swarm-board-worker";
+    const liveBoardWorkerLogs = path.join(cliBrainRoot, liveBoardWorker, ".system_generated", "logs");
+    fs.mkdirSync(liveBoardWorkerLogs, { recursive: true });
+    const liveBoardTrPath = path.join(liveBoardWorkerLogs, "transcript_full.jsonl");
+    fs.writeFileSync(
+      liveBoardTrPath,
+      [
+        {
+          step_index: 0,
+          source: "SYSTEM",
+          type: "SYSTEM_MESSAGE",
+          content: `[Message] timestamp=2026-11-16T00:00:07Z sender=${cliRestricted} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #1`
+        },
+        {
+          step_index: 1,
+          source: "SYSTEM",
+          type: "SYSTEM_MESSAGE",
+          content: `[Message] timestamp=2026-11-16T00:00:08Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #2 for @audit-live):\n[agy-transcript-access: allow]\nAudit`
+        }
+      ]
+        .map((x) => JSON.stringify(x))
+        .join("\n") + "\n"
+    );
+    const sharedCoreLineage = inspectTranscriptLineageFromFile(liveBoardTrPath);
+    assert.equal(sharedCoreLineage.parentConvId, pA);
+    assert.equal(sharedCoreLineage.rosterName, "audit-live");
+    assert.equal(sharedCoreLineage.launchDirective, "allow");
+    const hookBoardWorkerRes = runHook(
+      {
+        conversationId: liveBoardWorker,
+        transcriptPath: liveBoardTrPath,
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript read --id ${pA}` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(
+      hookBoardWorkerRes.decision,
+      "allow",
+      "getCallerLineage must bind Step 1 coordinator sender= (pA, allowlist @audit-*) rather than Step 0 board sibling (ACS-LIVE-SVC-001 / ACS-PR4-ARCH-001)"
+    );
+
+    // Pre-v2 stale cached session.lineage + Step 0->Step 1 startup write growth must invalidate cache and bind coordinator
+    const raceWorker = "hermetic-swarm-race-worker";
+    const raceTrPath = path.join(brainH, raceWorker, ".system_generated", "logs", "transcript.jsonl");
+    writeTr(raceWorker, [{
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `[Message] timestamp=2026-11-16T00:00:07Z sender=${pB} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #1`
+    }]);
+    const raceStep0Res = runHook({
+      conversationId: raceWorker,
+      transcriptPath: raceTrPath,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${pA}` } }
+    });
+    assert.equal(raceStep0Res.decision, "deny", "Before Step 1 assignment arrives, pB board fallback denies access");
+    fs.appendFileSync(
+      raceTrPath,
+      JSON.stringify({
+        step_index: 1,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:08Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #2 for @audit-race):\n[agy-transcript-access: allow]\nAudit`
+      }) + "\n"
+    );
+    const raceStep1Res = runHook({
+      conversationId: raceWorker,
+      transcriptPath: raceTrPath,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${pA}` } }
+    });
+    assert.equal(
+      raceStep1Res.decision,
+      "allow",
+      "getCallerLineage must re-inspect when Step 1 Your assignment appends after Step 0 cached !isSwarmChild"
+    );
+
+    // Pre-v2 stale cached session.lineage (missing lineageVersion: 2) must be invalidated on upgrade
+    const staleCacheWorker = "hermetic-stale-cache-worker";
+    const staleCacheTrPath = path.join(brainH, staleCacheWorker, ".system_generated", "logs", "transcript.jsonl");
+    writeTr(staleCacheWorker, [
+      {
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:07Z sender=${pB} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #1`
+      },
+      {
+        step_index: 1,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:08Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #2 for @audit-stale):\n[agy-transcript-access: allow]\nAudit`
+      }
+    ]);
+    const staleSessFile = path.join(stateDir, `agy-session-${staleCacheWorker}.json`);
+    fs.mkdirSync(path.dirname(staleSessFile), { recursive: true });
+    fs.writeFileSync(staleSessFile, JSON.stringify({
+      pollCount: 0,
+      denials: 0,
+      taskIds: [],
+      lastPollTime: 0,
+      lastSeenTime: Date.now(),
+      recentHookCalls: [],
+      lineage: {
+        transcriptFound: true,
+        isTopLevelUserSession: false,
+        isChildSession: true,
+        isSwarmChild: true,
+        parentConvId: pB,
+        rosterName: "audit-stale",
+        launchDirective: "deny",
+        birthTimeMs: 0
+      }
+    }));
+    const upgradedRes = runHook({
+      conversationId: staleCacheWorker,
+      transcriptPath: staleCacheTrPath,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${pA}` } }
+    });
+    assert.equal(upgradedRes.decision, "allow", "Pre-v2 cached session.lineage must be invalidated and re-bound to Step 1 coordinator");
+
+    // Concatenated SYSTEM_MESSAGE in single JSONL step still binds Your assignment sender= (`ACS-R2-ARCH-001`)
+    const concatWorker = "hermetic-concat-worker";
+    const concatTrPath = path.join(brainH, concatWorker, ".system_generated", "logs", "transcript.jsonl");
+    writeTr(concatWorker, [
+      {
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:07Z sender=${pB} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #1\n[Message] timestamp=2026-11-16T00:00:08Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #2 for @audit-concat):\n[agy-transcript-access: allow]\nAudit`
+      }
+    ]);
+    const concatRes = runHook({
+      conversationId: concatWorker,
+      transcriptPath: concatTrPath,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${pA}` } }
+    });
+    assert.equal(concatRes.decision, "allow", "Concatenated SYSTEM_MESSAGE must bind Your assignment to its local sender=");
+
+    // >12 leading board notifications before Your assignment (large swarm)
+    const largeSwarmWorker = "hermetic-swarm-large-worker";
+    const largeSwarmTr = path.join(brainH, largeSwarmWorker, ".system_generated", "logs", "transcript.jsonl");
+    const largeLines = [];
+    for (let b = 0; b < 14; b++) {
+      largeLines.push({
+        step_index: b,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:00Z sender=${pB} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #${b + 1}`
+      });
+    }
+    largeLines.push({
+      step_index: 14,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `[Message] timestamp=2026-11-16T00:00:14Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #15 for @audit-large):\n[agy-transcript-access: allow]\nAudit`
+    });
+    writeTr(largeSwarmWorker, largeLines);
+    const largeSwarmHookRes = runHook({
+      conversationId: largeSwarmWorker,
+      transcriptPath: largeSwarmTr,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${pA}` } }
+    });
+    assert.equal(largeSwarmHookRes.decision, "allow", "getCallerLineage must scan past >12 leading board messages to bind Step 14 coordinator");
+
+    // ACS-PR4-RUN-001 / ACS-TEST-001 / ACS-TEST-002: `transcript dump` hook routing & negative --out coverage
+    const dumpAllowed = runHook(
+      {
+        conversationId: pA,
+        cwd: wsDir,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript dump --parent current --sanitized --out scratch/dump-index.md" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(dumpAllowed.decision, "allow", "transcript dump --parent current --sanitized --out scratch/... must be allowed");
+    assert.match(dumpAllowed.overwrite?.CommandLine || "", new RegExp(`--parent ${pA}`));
+
+    const cliRestrictedDump = "cli-restricted-dump";
+    const cliRestrictedDumpLogs = path.join(cliBrainRoot, cliRestrictedDump, ".system_generated", "logs");
+    fs.mkdirSync(cliRestrictedDumpLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(cliRestrictedDumpLogs, "transcript.jsonl"),
+      JSON.stringify({
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:09Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: self-only]\nSelf-only dump`
+      }) + "\n"
+    );
+
+    const selfDumpOwn = runHook(
+      {
+        conversationId: cliRestrictedDump,
+        transcriptPath: path.join(cliRestrictedDumpLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript dump --sanitized" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(selfDumpOwn.decision, "allow", "self-only caller running transcript dump on own session must be allowed");
+    assert.match(selfDumpOwn.overwrite?.CommandLine || "", new RegExp(`--id ${cliRestrictedDump}`));
+
+    for (const badDumpCmd of [
+      `agy-context transcript dump --id ${pA} --sanitized --out "${path.join(cliStateDir, "leak.md")}"`,
+      `agy-context transcript dump --id ${pA} --sanitized --out "${path.join(cliProfile, ".gemini", "config", "hooks.json.md")}"`,
+      `agy-context transcript dump --id ${pA} --sanitized --out ../outside.md`
+    ]) {
+      const deniedDumpOut = runHook(
+        {
+          conversationId: pA,
+          cwd: wsDir,
+          transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+          toolCall: { name: "run_command", args: { CommandLine: badDumpCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(deniedDumpOut.decision, "deny", `Protected/traversal --out must be denied: ${badDumpCmd}`);
+    }
+
+    const deniedSelfDumpCross = runHook(
+      {
+        conversationId: cliRestrictedDump,
+        transcriptPath: path.join(cliRestrictedDumpLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript dump --sanitized --id ${pA}` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(deniedSelfDumpCross.decision, "deny", "self-only mode must deny cross-session transcript dump");
+
     const pollBreakerConv = "swarm-poll-breaker";
     for (let attempt = 1; attempt <= 5; attempt++) {
       const schedRes = runHook({
@@ -1192,6 +1615,183 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
         attempt < 5 ? "deny" : "force_ask",
         `Swarm schedule polling attempt #${attempt} must trigger ${attempt < 5 ? "deny" : "force_ask circuit breaker"}`
       );
+    }
+
+    // ACS-RUN-002-P3-1: Trailing .md / .json arguments passed after `node <script.mjs> ...` must not be scanned as code,
+    // while primary scripts, -r/--require preloads, and `< stdin` redirects in /tmp or scratch/ remain guarded.
+    const appDir = path.join(wsDir, "bin");
+    fs.mkdirSync(appDir, { recursive: true });
+    const appScript = path.join(appDir, "verdict-runner.mjs");
+    fs.writeFileSync(appScript, "console.log(process.argv.slice(2));\n", "utf8");
+    const scratchReportMd = path.join(wsDir, "scratch", "agy-squad", "lead", "report.md");
+    const scratchRecordJson = path.join(wsDir, "scratch", "bundle-record.json");
+    fs.mkdirSync(path.dirname(scratchReportMd), { recursive: true });
+    fs.writeFileSync(
+      scratchReportMd,
+      "# Synthesis\nChecked `.system_generated/logs/transcript.jsonl` via `agy-context transcript read --id parent`.\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      scratchRecordJson,
+      JSON.stringify({ notes: "Audited ~/.gemini/config/hooks.json and .system_generated/logs/transcript.jsonl" }),
+      "utf8"
+    );
+
+    // Even when a restricted child wrote scratch/report.md earlier in the session, passing it to `node bin/verdict-runner.mjs` must stay allowed
+    const writeScratchNote = runHook(
+      {
+        conversationId: cliRestricted,
+        cwd: wsDir,
+        transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "write_file",
+          args: {
+            Path: scratchReportMd,
+            Content: "# Synthesis\nInspected .system_generated/logs/transcript.jsonl via agy-context transcript list.\n",
+            Overwrite: true
+          }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(writeScratchNote.decision, "allow");
+
+    for (const allowedNodeCmd of [
+      `node "${appScript}" verdict "${scratchReportMd}"`,
+      `node "${appScript}" bundle "${scratchRecordJson}"`,
+      `node --dns-result-order verbatim "${appScript}" verdict "${scratchReportMd}"`,
+      `node -e "console.log(1)" "${scratchReportMd}"`
+    ]) {
+      const allowedRes = runHook(
+        {
+          conversationId: cliRestricted,
+          cwd: wsDir,
+          transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+          toolCall: { name: "run_command", args: { CommandLine: allowedNodeCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(allowedRes.decision, "allow", `Trailing data arg must NOT be scanned as code: ${allowedNodeCmd}`);
+    }
+
+    // Attack cases MUST still be denied: non-script primary operand, preload -r, scratch primary .mjs, and `< stdin`
+    const evilMdPayload = path.join(wsDir, "scratch", "evil-script.md");
+    const evilMjsPayload = path.join(wsDir, "scratch", "evil-primary.mjs");
+    const evilPreloadTxt = path.join(wsDir, "scratch", "preload.txt");
+    fs.writeFileSync(evilMdPayload, "console.log(fs.readFileSync('.system_generated/logs/transcript.jsonl', 'utf8'))\n");
+    fs.writeFileSync(evilMjsPayload, "import fs from 'node:fs'; fs.readFileSync('.system_generated/logs/transcript.jsonl', 'utf8');\n");
+    fs.writeFileSync(evilPreloadTxt, "fs.readFileSync('.system_generated/logs/transcript.jsonl', 'utf8');\n");
+    for (const deniedNodeCmd of [
+      `node "${evilMdPayload}"`,
+      `node "${evilMjsPayload}" "${scratchReportMd}"`,
+      `node --dns-result-order verbatim "${evilMjsPayload}"`,
+      `node --dns-result-order verbatim "${evilMdPayload}"`,
+      `node --experimental-config-file "${scratchRecordJson}" "${evilMjsPayload}"`,
+      `node --experimental-config-file "${scratchRecordJson}" "${evilMdPayload}"`,
+      `pwsh -ExecutionPolicy Bypass "${evilMjsPayload}"`,
+      `node -r "${evilPreloadTxt}" "${appScript}" "${scratchReportMd}"`,
+      `bash < "${evilPreloadTxt}"`
+    ]) {
+      const deniedRes = runHook(
+        {
+          conversationId: cliRestricted,
+          cwd: wsDir,
+          transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+          toolCall: { name: "run_command", args: { CommandLine: deniedNodeCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(deniedRes.decision, "deny", `Real script/preload/stdin payload MUST remain denied: ${deniedNodeCmd}`);
+    }
+
+    // ACS-SVC-001-P3-1: env-cache.json TTL expiry and RTK binary mtime invalidation
+    const cacheProfile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-env-cache-"));
+    try {
+      const cacheShimDir = path.join(cacheProfile, "bin");
+      createRtkShim(cacheShimDir, "1.1.0");
+      const cacheStateDir = os.platform() === "win32"
+        ? path.join(cacheProfile, "AppData", "Local", "agy-context-saver")
+        : path.join(cacheProfile, ".local", "state", "agy-context-saver");
+      const cacheEnv = withEnvPath(cacheShimDir, {
+        ...process.env,
+        AGY_TEST_PROFILE_DIR: cacheProfile,
+        XDG_STATE_HOME: os.platform() === "win32" ? undefined : path.join(cacheProfile, ".local", "state"),
+        LOCALAPPDATA: os.platform() === "win32" ? path.join(cacheProfile, "AppData", "Local") : undefined
+      });
+      const firstCacheRes = runHook({ toolCall: { name: "run_command", args: { CommandLine: "git status" } } }, cacheEnv);
+      assert.equal(firstCacheRes.overwrite?.CommandLine, "rtk git status");
+      const envCachePath = path.join(cacheStateDir, "env-cache.json");
+      assert.ok(fs.existsSync(envCachePath), "Hook must persist env-cache.json");
+      const writtenCache = JSON.parse(fs.readFileSync(envCachePath, "utf8"));
+
+      // Poison resolved=null with fresh ts: hook trusts valid non-expired cache for matching mtime key
+      fs.writeFileSync(envCachePath, JSON.stringify({ key: writtenCache.key, ts: Date.now(), resolved: null }));
+      const freshCachedMiss = runHook({ toolCall: { name: "run_command", args: { CommandLine: "git status" } } }, cacheEnv);
+      assert.equal(freshCachedMiss.overwrite?.CommandLine, undefined, "Fresh env-cache entry must be served while TTL and mtime match");
+
+      // Expire TTL (> 60s): hook must re-probe RTK and rewrite
+      fs.writeFileSync(envCachePath, JSON.stringify({ key: writtenCache.key, ts: Date.now() - 65000, resolved: null }));
+      const expiredCacheRes = runHook({ toolCall: { name: "run_command", args: { CommandLine: "git status" } } }, cacheEnv);
+      assert.equal(expiredCacheRes.overwrite?.CommandLine, "rtk git status", "Expired env-cache.json TTL must invalidate and re-probe RTK");
+
+      // Re-poison with fresh ts, then bump shim binary mtime: key mismatch must invalidate immediately before TTL
+      const refreshedCache = JSON.parse(fs.readFileSync(envCachePath, "utf8"));
+      fs.writeFileSync(envCachePath, JSON.stringify({ key: refreshedCache.key, ts: Date.now(), resolved: null }));
+      const shimFile = path.join(cacheShimDir, os.platform() === "win32" ? "rtk.cmd" : "rtk");
+      const nextTime = new Date(Date.now() + 10000);
+      fs.utimesSync(shimFile, nextTime, nextTime);
+      const mtimeInvalidatedRes = runHook({ toolCall: { name: "run_command", args: { CommandLine: "git status" } } }, cacheEnv);
+      assert.equal(mtimeInvalidatedRes.overwrite?.CommandLine, "rtk git status", "Changed RTK binary mtime must invalidate env-cache.json key immediately");
+    } finally {
+      fs.rmSync(cacheProfile, { recursive: true, force: true });
+    }
+
+    // Blocking CI watch loop guard (gh pr checks --watch / gh run watch)
+    for (const blockedWatchCmd of [
+      "gh pr checks 4 --repo paragon-ux/Agy-Context-Saver --watch --interval 15",
+      "gh pr checks 7 -R paragon-ux/Agy-Squad -w",
+      "gh pr checks 7 -wi 15",
+      "gh pr checks 4 --watch=true",
+      "rtk gh pr checks 4 --watch",
+      "env GH_HOST=github.com gh pr checks 4 -w",
+      "gh run watch 43948962826 -R paragon-ux/Agy-Context-Saver",
+      "bash -c 'gh run watch 43948962826'",
+      "bash <<\"EOF\"\ngh run watch 43948962826\nEOF",
+      "cat <<'EOF' | sh\ngh pr checks 4 -w\nEOF",
+      "echo $(gh pr checks 4 -w)"
+    ]) {
+      const watchDeny = runHook(
+        {
+          conversationId: "ci-watch-deny",
+          cwd: wsDir,
+          toolCall: { name: "run_command", args: { CommandLine: blockedWatchCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(watchDeny.decision, "deny", `Blocking CI watch loop must be denied: ${blockedWatchCmd}`);
+      assert.match(watchDeny.reason, /Blocking CI watch loop/i);
+    }
+
+    for (const allowedGhCmd of [
+      "gh pr checks 4 -R paragon-ux/workflow-repo",
+      "gh pr checks 4 -Rmywork/repo",
+      "gh pr checks 4 --repo paragon-ux/Agy-Context-Saver --watch=false",
+      "gh pr checks --watch --help",
+      "gh run list -R paragon-ux/Agy-Context-Saver -L 5",
+      "gh run watch --help",
+      "cat > notes.md <<'EOF'\ngh run watch 43948962826\nEOF",
+      "git commit -m \"block gh pr checks --watch and gh run watch\"",
+      "rtk grep \"gh run watch\" scripts/"
+    ]) {
+      const watchAllow = runHook(
+        {
+          conversationId: "ci-watch-allow",
+          cwd: wsDir,
+          toolCall: { name: "run_command", args: { CommandLine: allowedGhCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(watchAllow.decision, "allow", `Non-blocking gh/text command must stay allowed: ${allowedGhCmd}`);
     }
 
     console.log("✓ Group H regression checks passed (payload.cwd, 2>/dev/null, antigravity-cli, swarm_view, Step0>16KiB, cross-swarm isolation, query current, Wave 2 regressions)");

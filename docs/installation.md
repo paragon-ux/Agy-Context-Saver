@@ -39,8 +39,8 @@ If you have cloned the repository locally:
 
 ```bash
 # Clone the repository
-git clone https://github.com/paragon-ux/agy-context-saver.git
-cd agy-context-saver
+git clone https://github.com/paragon-ux/Agy-Context-Saver.git
+cd Agy-Context-Saver
 
 # Run registration
 npm run setup

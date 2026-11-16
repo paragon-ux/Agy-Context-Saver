@@ -13,10 +13,14 @@ import {
   getStepDetail,
   checkContextHealth,
   getRequiredBackoffSeconds,
+  listTranscriptConversations,
+  exportSanitizedTranscript,
+  inspectTranscriptLineageFromFile,
   manageTranscriptAccessPolicy,
   recordTranscriptHookGrant,
   consumeTranscriptAccessGrant
 } from "../lib/transcript-core.mjs";
+import { getStateDir } from "../scripts/state-dir.mjs";
 import { createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -693,6 +697,497 @@ try {
       const subReadB = runCli(["transcript", "read", "--id", manyToolsConv, "--last-turns", "1"], { ...multiEnv, GEMINI_CONVERSATION_ID: "concurrent-b" });
       assert.equal(subReadA.status, 0, `concurrent-a grant should remain intact: ${subReadA.stderr}`);
       assert.equal(subReadB.status, 0, `concurrent-b grant should remain intact: ${subReadB.stderr}`);
+
+      // ACS-SVC-002: Reset owner-cli lock cleanly and verify transcript list --parent/--lineage + transcript export --sanitized
+      manageTranscriptAccessPolicy({ on: true, _testAuthorizedOwner: "owner-cli" });
+      const parentUuid = "parent-cohort-uuid";
+      const swarmChildA = "swarm-child-alpha";
+      const swarmChildB = "swarm-child-beta";
+      const subChildC = "subagent-child-gamma";
+      const unrelatedChild = "other-parent-child";
+
+      const writeConvLines = (rootDir, convId, lines) => {
+        const logDir = path.join(rootDir, convId, ".system_generated", "logs");
+        fs.mkdirSync(logDir, { recursive: true });
+        fs.writeFileSync(path.join(logDir, "transcript.jsonl"), lines.map((o) => JSON.stringify(o)).join("\n") + "\n");
+      };
+
+      writeConvLines(brainDir, parentUuid, [
+        { step_index: 0, type: "USER_INPUT", content: "Coordinate storage review.", created_at: "2026-11-16T01:00:00Z" }
+      ]);
+      writeConvLines(brainDir, swarmChildA, [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T01:00:01Z sender=${parentUuid} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message: Your assignment (recorded on the board as #1 for @storage-wal):\nReview WAL.`,
+          created_at: "2026-11-16T01:00:01Z"
+        },
+        {
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          thinking: "SECRET_INTERNAL_THINKING_DO_NOT_LEAK",
+          content: "Checked WAL with Bearer supersecret_token_123456 and data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA",
+          tool_calls: [{ name: "run_command", args: { CommandLine: "npm test", Content: "HUGE_UNEXPORTED_FILE_BODY" } }],
+          created_at: "2026-11-16T01:00:02Z"
+        }
+      ]);
+      writeConvLines(altBrain, swarmChildB, [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T01:00:03Z sender=${parentUuid} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message: Your assignment (recorded on the board as #2 for @storage-index):\nReview index.`,
+          created_at: "2026-11-16T01:00:03Z"
+        },
+        {
+          step_index: 1,
+          type: "GENERIC",
+          status: "ERROR",
+          content: "Command exited with code 1.\nENOENT: missing fixture",
+          created_at: "2026-11-16T01:00:04Z"
+        }
+      ]);
+      writeConvLines(brainDir, subChildC, [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T01:00:05Z sender=${parentUuid} priority=MESSAGE_PRIORITY_HIGH content=Inspect docs.`,
+          created_at: "2026-11-16T01:00:05Z"
+        }
+      ]);
+      writeConvLines(brainDir, unrelatedChild, [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T01:00:06Z sender=completely-different-parent priority=MESSAGE_PRIORITY_HIGH content=Other task.`,
+          created_at: "2026-11-16T01:00:06Z"
+        }
+      ]);
+
+      // 1. transcript list --parent & --lineage across multi-product brain roots
+      const lineageList = runCli(["transcript", "list", "--parent", parentUuid, "--lineage", "--json"], multiEnv);
+      assert.equal(lineageList.status, 0, lineageList.stderr);
+      const lineageJson = JSON.parse(lineageList.stdout);
+      assert.equal(lineageJson.total, 3, "Must match exact 3 children of parentUuid across brain roots");
+      assert.equal(lineageJson.parentFilter, parentUuid);
+      const byConv = new Map(lineageJson.conversations.map((c) => [c.conversationId, c]));
+      assert.equal(byConv.get(swarmChildA).rosterName, "storage-wal");
+      assert.equal(byConv.get(swarmChildA).sessionKind, "swarm");
+      assert.equal(byConv.get(swarmChildA).stepCount, 2);
+      assert.equal(byConv.get(swarmChildB).rosterName, "storage-index");
+      assert.equal(byConv.get(swarmChildB).brainRoot, "antigravity-cli");
+      assert.equal(byConv.get(subChildC).sessionKind, "subagent");
+      assert.equal(byConv.has(unrelatedChild), false);
+
+      const lineageText = runCli(["transcript", "list", "--parent", parentUuid, "--lineage"], multiEnv);
+      assert.equal(lineageText.status, 0, lineageText.stderr);
+      assert.match(lineageText.stdout, /roster: @storage-wal/);
+      assert.match(lineageText.stdout, /steps: 2/);
+
+      // 2. transcript export requires --sanitized (fail closed if omitted)
+      const unsanitizedExport = runCli(["transcript", "export", "--id", swarmChildA], multiEnv);
+      assert.notEqual(unsanitizedExport.status, 0, "export without --sanitized must fail closed");
+      assert.match(unsanitizedExport.stderr, /--sanitized/);
+
+      // 2b. Redaction before 36-char tool truncation, L6 non-priority body key omission, --start/--end, malformed lines, and empty transcript
+      const secretEdgeConv = "secret-edge-conv";
+      writeConvLines(brainDir, secretEdgeConv, [
+        {
+          step_index: 0,
+          type: "USER_INPUT",
+          content: "Inspect data:application/octet-stream;base64,SGVsbG8= and token",
+          created_at: "2026-11-16T01:01:00Z"
+        },
+        {
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          content: "Running secret checks",
+          tool_calls: [
+            { name: "run_command", args: { CommandLine: "curl -u user -H 'X-Key: sk-1234567890abcdef123456'" } },
+            { name: "custom_write", args: { Content: "RAW_BODY_ONLY_MUST_NOT_LEAK" } }
+          ],
+          created_at: "2026-11-16T01:01:01Z"
+        },
+        {
+          step_index: 2,
+          type: "PLANNER_RESPONSE",
+          content: "Final step",
+          created_at: "2026-11-16T01:01:02Z"
+        }
+      ]);
+      // Append a malformed JSONL line to verify streaming resilience
+      fs.appendFileSync(path.join(brainDir, secretEdgeConv, ".system_generated", "logs", "transcript.jsonl"), "{broken_json_line\n");
+      const secretExport = runCli(
+        ["transcript", "export", "--id", secretEdgeConv, "--sanitized", "--start", "0", "--end", "1"],
+        multiEnv
+      );
+      assert.equal(secretExport.status, 0, secretExport.stderr);
+      assert.equal(secretExport.stdout.includes("1234567890abcdef"), false, "API key prefix must be redacted before 36-char tool truncation");
+      assert.equal(secretExport.stdout.includes("RAW_BODY_ONLY_MUST_NOT_LEAK"), false, "Non-priority Content arg must be omitted");
+      assert.equal(secretExport.stdout.includes("SGVsbG8="), false, "Non-image data URI base64 must be stripped");
+      assert.match(secretExport.stdout, /Steps Shown: 2 of 2/);
+      assert.equal(secretExport.stdout.includes("Final step"), false, "--end 1 must exclude step 2");
+
+      // Invalid --start/--end and empty --parent must fail closed
+      const badRangeExport = runCli(
+        ["transcript", "export", "--id", secretEdgeConv, "--sanitized", "--start", "5", "--end", "2"],
+        multiEnv
+      );
+      assert.notEqual(badRangeExport.status, 0, "--start > --end must fail closed");
+      const emptyParentList = runCli(["transcript", "list", "--parent", ""], multiEnv);
+      assert.notEqual(emptyParentList.status, 0, "Empty --parent must fail closed");
+
+      // Empty transcript file exports cleanly with "(no matching steps)"
+      const emptyConv = "empty-export-conv";
+      const emptyLogs = path.join(brainDir, emptyConv, ".system_generated", "logs");
+      fs.mkdirSync(emptyLogs, { recursive: true });
+      fs.writeFileSync(path.join(emptyLogs, "transcript.jsonl"), "");
+      const emptyExp = runCli(["transcript", "export", "--id", emptyConv, "--sanitized"], multiEnv);
+      assert.equal(emptyExp.status, 0, emptyExp.stderr);
+      assert.match(emptyExp.stdout, /\(no matching steps\)/);
+
+      // Symlinked conversation directory in brain root must not be listed
+      const outsideBrainDir = path.join(tempHome, "outside-brain-conv");
+      const outsideLogs = path.join(outsideBrainDir, ".system_generated", "logs");
+      fs.mkdirSync(outsideLogs, { recursive: true });
+      fs.writeFileSync(path.join(outsideLogs, "transcript.jsonl"), JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "outside" }) + "\n");
+      let createdBrainSym = false;
+      try {
+        fs.symlinkSync(outsideBrainDir, path.join(brainDir, "symlinked-outside-conv"));
+        createdBrainSym = true;
+      } catch {}
+      if (createdBrainSym) {
+        const listWithSym = runCli(["transcript", "list", "--limit", "50", "--json"], multiEnv);
+        assert.equal(listWithSym.status, 0, listWithSym.stderr);
+        const listedIds = JSON.parse(listWithSym.stdout).conversations.map((c) => c.conversationId);
+        assert.equal(listedIds.includes("symlinked-outside-conv"), false, "list must exclude symlinked conversation dirs");
+      }
+
+      // 3. transcript export --parent <parentUuid> --sanitized --out <path> produces L6-safe index
+      const scratchOut = path.join(tempHome, "scratch-export", "transcript-index.md");
+      const parentExportCli = runCli(
+        ["transcript", "export", "--parent", parentUuid, "--sanitized", "--out", scratchOut],
+        multiEnv
+      );
+      assert.equal(parentExportCli.status, 0, parentExportCli.stderr);
+      assert.ok(fs.existsSync(scratchOut), "export --out must create sanitized index file");
+      const exportedMd = fs.readFileSync(scratchOut, "utf8");
+      assert.match(exportedMd, /# Sanitized Transcript Index/);
+      assert.match(exportedMd, /@storage-wal/);
+      assert.match(exportedMd, /@storage-index/);
+      assert.match(exportedMd, /run_command\(CommandLine="npm test"\)/);
+      assert.match(exportedMd, /Bearer \[REDACTED\]/);
+      assert.match(exportedMd, /\[Embedded Media\/Binary Omitted\]/);
+      assert.equal(exportedMd.includes("SECRET_INTERNAL_THINKING_DO_NOT_LEAK"), false, "Sanitized export must omit thinking blocks");
+      assert.equal(exportedMd.includes("HUGE_UNEXPORTED_FILE_BODY"), false, "Sanitized export must omit raw Content payloads");
+      assert.equal(exportedMd.includes("supersecret_token_123456"), false, "Sanitized export must redact bearer tokens");
+
+      // 4. --out protection rejects .system_generated, stateDir, ~/.gemini/config, benchmarks, symlink-to-benchmarks, dangling symlinks, and .. traversal
+      const sysGenOut = path.join(brainDir, swarmChildA, ".system_generated", "leak.md");
+      const blockedOutCli = runCli(
+        ["transcript", "export", "--id", swarmChildA, "--sanitized", "--out", sysGenOut],
+        multiEnv
+      );
+      assert.notEqual(blockedOutCli.status, 0, "export --out into .system_generated must fail closed");
+
+      const stateLeakOut = path.join(getStateDir(), "leak.md");
+      const blockedStateOut = runCli(
+        ["transcript", "export", "--id", swarmChildA, "--sanitized", "--out", stateLeakOut],
+        multiEnv
+      );
+      assert.notEqual(blockedStateOut.status, 0, "export --out into stateDir must fail closed (ACS-TEST-002)");
+
+      const geminiCfgOut = path.join(tempHome, ".gemini", "config", "hooks.json.md");
+      const blockedCfgOut = runCli(
+        ["transcript", "export", "--id", swarmChildA, "--sanitized", "--out", geminiCfgOut],
+        multiEnv
+      );
+      assert.notEqual(blockedCfgOut.status, 0, "export --out into ~/.gemini/config must fail closed (ACS-TEST-002)");
+
+      const blockedRelDotDot = runCli(
+        ["transcript", "export", "--id", swarmChildA, "--sanitized", "--out", "../outside.md"],
+        multiEnv
+      );
+      assert.notEqual(blockedRelDotDot.status, 0, "export --out with '..' traversal must fail closed (ACS-TEST-002)");
+
+      const danglingSymOut = path.join(tempHome, "dangling-out.md");
+      let danglingSymCreated = false;
+      try {
+        fs.symlinkSync(path.join(tempHome, "does-not-exist-target.md"), danglingSymOut);
+        danglingSymCreated = true;
+      } catch {}
+      if (danglingSymCreated) {
+        const blockedDangling = runCli(
+          ["transcript", "export", "--id", swarmChildA, "--sanitized", "--out", danglingSymOut],
+          multiEnv
+        );
+        assert.notEqual(blockedDangling.status, 0, "export --out targeting a dangling symlink must fail closed (ACS-PR4-RUN-003)");
+      }
+
+      const benchOut = path.join(tempHome, "benchmarks", "leak.json");
+      const blockedBenchOut = runCli(
+        ["transcript", "export", "--id", swarmChildA, "--sanitized", "--out", benchOut],
+        multiEnv
+      );
+      assert.notEqual(blockedBenchOut.status, 0, "export --out into benchmarks/ must fail closed");
+
+      fs.mkdirSync(path.join(tempHome, "benchmarks"), { recursive: true });
+      let createdBenchSym = false;
+      const benchSymLink = path.join(tempHome, "scratch-bench-link");
+      try {
+        fs.symlinkSync(path.join(tempHome, "benchmarks"), benchSymLink);
+        createdBenchSym = true;
+      } catch {}
+      if (createdBenchSym) {
+        const blockedSymBench = runCli(
+          ["transcript", "export", "--id", swarmChildA, "--sanitized", "--out", path.join(benchSymLink, "sub", "leak.md")],
+          multiEnv
+        );
+        assert.notEqual(blockedSymBench.status, 0, "export --out through symlink into benchmarks/ must fail closed");
+      }
+
+      // Positional comma-separated multi-id export under active policy binds sorted multi: grant key
+      manageTranscriptAccessPolicy({ callerConvId: "owner-exp", mode: "self-only" });
+      recordTranscriptHookGrant({
+        callerConvId: "owner-exp",
+        subcommand: "export",
+        targetConvId: `multi:${[swarmChildA, swarmChildB].sort().join(",")}`,
+        mode: "open"
+      });
+      const multiPosCli = runCli(
+        ["transcript", "export", `${swarmChildB},${swarmChildA}`, "--sanitized", "--json"],
+        { ...multiEnv, GEMINI_CONVERSATION_ID: "owner-exp" }
+      );
+      assert.equal(multiPosCli.status, 0, multiPosCli.stderr);
+      assert.equal(JSON.parse(multiPosCli.stdout).exportedCount, 2);
+      manageTranscriptAccessPolicy({ on: true, _testAuthorizedOwner: "owner-exp" });
+
+      // 5. Under active policy restriction, export --parent / --id require matching PreToolUse grant (L39)
+      manageTranscriptAccessPolicy({ callerConvId: "owner-exp", mode: "self-only" });
+      const blockedExportNoGrant = runCli(["transcript", "export", "--parent", parentUuid, "--sanitized"], multiEnv);
+      assert.notEqual(blockedExportNoGrant.status, 0, "export without PreToolUse grant must fail closed under policy");
+
+      recordTranscriptHookGrant({
+        callerConvId: "owner-exp",
+        subcommand: "export",
+        targetConvId: `parent:${parentUuid}`,
+        mode: "open"
+      });
+      const grantedParentExport = runCli(
+        ["transcript", "export", "--parent", parentUuid, "--sanitized", "--json"],
+        { ...multiEnv, GEMINI_CONVERSATION_ID: "owner-exp" }
+      );
+      assert.equal(grantedParentExport.status, 0, grantedParentExport.stderr);
+      assert.equal(JSON.parse(grantedParentExport.stdout).exportedCount, 3);
+
+      // Single-use grant consumed: immediate second call must fail closed
+      const secondParentExport = runCli(
+        ["transcript", "export", "--parent", parentUuid, "--sanitized"],
+        { ...multiEnv, GEMINI_CONVERSATION_ID: "owner-exp" }
+      );
+      assert.notEqual(secondParentExport.status, 0, "Reusing consumed export grant must fail closed (L39)");
+
+      // self-only grant rejects cross-session and parent exports
+      recordTranscriptHookGrant({
+        callerConvId: swarmChildA,
+        subcommand: "export",
+        targetConvId: swarmChildA,
+        mode: "self-only"
+      });
+      const selfCrossExport = runCli(
+        ["transcript", "export", "--id", swarmChildB, "--sanitized"],
+        { ...multiEnv, GEMINI_CONVERSATION_ID: swarmChildA }
+      );
+      assert.notEqual(selfCrossExport.status, 0, "self-only export grant must reject cross-session --id");
+      manageTranscriptAccessPolicy({ on: true, _testAuthorizedOwner: "owner-exp" });
+
+      // 6. ACS-LIVE-SVC-001: Step 0..2 leading `[swarm] new board message` notifications must NOT shadow Step 1/2 `Your assignment` coordinator sender=
+      const liveCoordId = "live-coord-uuid-001";
+      const liveW1 = "live-swarm-w1";
+      const liveW2 = "live-swarm-w2";
+      const liveW3 = "live-swarm-w3";
+      writeConvLines(brainDir, liveW1, [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-16T10:00:00Z sender=${liveCoordId} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #1 for @acs-lead):\n[agy-transcript-access: allow]\nLead\n</SYSTEM_MESSAGE>`,
+          created_at: "2026-11-16T10:00:00Z"
+        }
+      ]);
+      writeConvLines(brainDir, liveW2, [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T10:00:01Z sender=${liveW1} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #1`,
+          created_at: "2026-11-16T10:00:01Z"
+        },
+        {
+          step_index: 1,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T10:00:02Z sender=${liveCoordId} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #2 for @acs-runtime):\n[agy-transcript-access: deny]\nRuntime`,
+          created_at: "2026-11-16T10:00:02Z"
+        }
+      ]);
+      writeConvLines(altBrain, liveW3, [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T10:00:03Z sender=${liveW1} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #1`,
+          created_at: "2026-11-16T10:00:03Z"
+        },
+        {
+          step_index: 1,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T10:00:04Z sender=${liveW2} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #2`,
+          created_at: "2026-11-16T10:00:04Z"
+        },
+        {
+          step_index: 2,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T10:00:05Z sender=${liveCoordId} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #3 for @acs-docs):\n[agy-transcript-access: deny]\nDocs`,
+          created_at: "2026-11-16T10:00:05Z"
+        }
+      ]);
+      const w2Lineage = inspectTranscriptLineageFromFile(path.join(brainDir, liveW2, ".system_generated", "logs", "transcript.jsonl"));
+      assert.equal(w2Lineage.parentConvId, liveCoordId, "Step 1 coordinator assignment sender= must override Step 0 board notification sender=");
+      assert.equal(w2Lineage.rosterName, "acs-runtime");
+      assert.equal(w2Lineage.launchDirective, "deny");
+      const w3Lineage = inspectTranscriptLineageFromFile(path.join(altBrain, liveW3, ".system_generated", "logs", "transcript.jsonl"));
+      assert.equal(w3Lineage.parentConvId, liveCoordId, "Step 2 coordinator assignment sender= must override leading board messages");
+
+      // Large-swarm regression (>12 leading board messages before Your assignment)
+      const liveW14 = "live-swarm-w14";
+      const w14Steps = [];
+      for (let b = 0; b < 14; b++) {
+        w14Steps.push({
+          step_index: b,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T10:00:00Z sender=sibling-${b} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #${b + 1}`,
+          created_at: "2026-11-16T10:00:00Z"
+        });
+      }
+      w14Steps.push({
+        step_index: 14,
+        type: "SYSTEM_MESSAGE",
+        source: "SYSTEM",
+        content: `[Message] timestamp=2026-11-16T10:00:14Z sender=${liveCoordId} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #15 for @worker-14):\n[agy-transcript-access: deny]\nWorker 14`,
+        created_at: "2026-11-16T10:00:14Z"
+      });
+      writeConvLines(brainDir, liveW14, w14Steps);
+      const w14Lineage = inspectTranscriptLineageFromFile(path.join(brainDir, liveW14, ".system_generated", "logs", "transcript.jsonl"));
+      assert.equal(w14Lineage.parentConvId, liveCoordId, "Step 14 coordinator assignment must still bind parentConvId (>12 leading board messages)");
+      assert.equal(w14Lineage.launchDirective, "deny");
+
+      const prevTestBrain = process.env.AGY_BRAIN_DIR;
+      const prevTestProfile = process.env.AGY_TEST_PROFILE_DIR;
+      process.env.AGY_TEST_PROFILE_DIR = tempHome;
+      delete process.env.AGY_BRAIN_DIR;
+      try {
+        const listedLive = listTranscriptConversations({ parentId: liveCoordId, includeLineage: true });
+        assert.equal(listedLive.total, 4, "list --parent must find all 4 swarm workers despite leading board notifications (ACS-LIVE-SVC-001)");
+
+        // 7. ACS-PR4-SVC-001: Direct ESM listTranscriptConversations() must enforce verifyTranscriptCoreAccess under active policy
+        manageTranscriptAccessPolicy({ callerConvId: "owner-list-svc", mode: "self-only" });
+        const deniedDirectList = listTranscriptConversations({ parentId: liveCoordId, includeLineage: true });
+        assert.equal(deniedDirectList.isError, true, "Direct listTranscriptConversations() must fail closed without 'list' grant (ACS-PR4-SVC-001)");
+        recordTranscriptHookGrant({ callerConvId: "owner-list-svc", subcommand: "list", mode: "open" });
+        const allowedDirectList = listTranscriptConversations({ parentId: liveCoordId, includeLineage: true });
+        assert.equal(allowedDirectList.total, 4, "Direct listTranscriptConversations() must succeed once with 'list' grant");
+        const reusedDirectList = listTranscriptConversations({ parentId: liveCoordId, includeLineage: true });
+        assert.equal(reusedDirectList.isError, true, "Single-use 'list' grant must not be reusable across direct calls");
+        manageTranscriptAccessPolicy({ on: true, _testAuthorizedOwner: "owner-list-svc" });
+
+        // 8. ACS-PR4-RUN-001 / ACS-TEST-001: `transcript dump` alias parity
+        const dumpOut = path.join(tempHome, "scratch-export", "dump-index.json");
+        const dumpCli = runCli(
+          ["transcript", "dump", "--parent", liveCoordId, "--sanitized", "--out", dumpOut, "--json"],
+          multiEnv
+        );
+        assert.equal(dumpCli.status, 0, dumpCli.stderr);
+        const dumpParsed = JSON.parse(dumpCli.stdout);
+        assert.equal(dumpParsed.exportedCount, 4, "transcript dump --parent must export all 4 swarm sessions");
+        assert.equal(fs.existsSync(dumpOut), true);
+
+        // 9. ACS-PR4-RUN-002: exportSanitizedTranscript --json payload obeys maxOutputChars ceiling and keeps text synchronized
+        const bigClampConv = "big-json-clamp-conv";
+        const bigSteps = [];
+        for (let s = 0; s < 120; s++) {
+          bigSteps.push({
+            step_index: s,
+            type: "PLANNER_RESPONSE",
+            content: `Step ${s} payload ` + "Z".repeat(90),
+            tool_calls: [{ name: "run_command", args: { CommandLine: `echo step-${s}-command-args-check` } }],
+            created_at: "2026-11-16T02:00:00Z"
+          });
+        }
+        writeConvLines(brainDir, bigClampConv, bigSteps);
+        const clampedRes = await exportSanitizedTranscript({
+          conversationIds: [bigClampConv],
+          sanitized: true,
+          limit: 150,
+          maxOutputChars: 4000
+        });
+        assert.equal(clampedRes.clamped, true, "Large export under 4000-char ceiling must set clamped=true");
+        const { text: _dropText, ...clampedJsonPayload } = clampedRes;
+        assert.ok(
+          JSON.stringify(clampedJsonPayload, null, 2).length <= 4000,
+          "Clamped JSON export payload must remain bounded by effectiveCeiling (ACS-PR4-RUN-002)"
+        );
+        assert.equal(clampedRes.sessions[0].displayedSteps, clampedRes.sessions[0].rows.length);
+        assert.match(
+          clampedRes.text,
+          new RegExp(`Steps Shown: ${clampedRes.sessions[0].rows.length} of 120 \\(truncated\\)`),
+          "Clamped Markdown Steps Shown must match actual retained rows"
+        );
+        assert.match(clampedRes.text, /clamped at safety ceiling/);
+
+        // Medium ceiling where Markdown fits but pretty JSON trims: text must re-sync with clamped=true
+        const medConv = "med-json-clamp-conv";
+        const medSteps = [];
+        for (let s = 0; s < 45; s++) {
+          medSteps.push({
+            step_index: s,
+            type: "PLANNER_RESPONSE",
+            content: `Step ${s} ` + "A".repeat(40),
+            tool_calls: [{ name: "run_command", args: { CommandLine: `echo ${s}` } }],
+            created_at: "2026-11-16T02:00:00Z"
+          });
+        }
+        writeConvLines(brainDir, medConv, medSteps);
+        const medClamped = await exportSanitizedTranscript({
+          conversationIds: [medConv],
+          sanitized: true,
+          limit: 150,
+          maxOutputChars: 8000
+        });
+        assert.equal(medClamped.clamped, true);
+        assert.match(medClamped.text, /clamped at safety ceiling/, "Markdown text must carry clamping notice when JSON ceiling trimmed");
+        assert.match(medClamped.text, new RegExp(`Steps Shown: ${medClamped.sessions[0].rows.length} of 45 \\(truncated\\)`));
+
+        // Top-level and subcommand --help / --version conflict rejection
+        for (const badHelpArgs of [
+          ["--help", "--bogus"],
+          ["--version", "--bogus"],
+          ["transcript", "--help", "--bogus"],
+          ["transcript", "list", "--parent", liveCoordId, "--help"]
+        ]) {
+          const badHelpRes = runCli(badHelpArgs, multiEnv);
+          assert.notEqual(badHelpRes.status, 0, `Expected non-zero exit for conflicting help/version args: ${badHelpArgs.join(" ")}`);
+        }
+      } finally {
+        if (prevTestBrain !== undefined) process.env.AGY_BRAIN_DIR = prevTestBrain;
+        if (prevTestProfile !== undefined) process.env.AGY_TEST_PROFILE_DIR = prevTestProfile;
+      }
     } finally {
       if (prevBrainEnv !== undefined) process.env.AGY_BRAIN_DIR = prevBrainEnv;
     }

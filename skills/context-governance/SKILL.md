@@ -45,14 +45,14 @@ Checks turn counts, step counts, raw transcript size, RTK status, and busy-polli
 agy-context transcript health [<id>] [--id <conv>] [--json] [--file <path>]
 ```
 
-### 2. `agy-context transcript read` (aliases: `outline`, `summary`)
-Streams recent conversation turns in Markdown, or prints a 1-line-per-step outline when `--outline` (or `outline` / `summary`) is used.
+### 2. `agy-context transcript read`
+Streams recent conversation turns in Markdown, or delegates to `query --summary --include-tools` when `--outline` is passed.
 ```bash
 agy-context transcript read [<id>] [--id <conv>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--outline] [--include-thinking] [--json] [--file <path>]
 ```
 
-### 3. `agy-context transcript query` (aliases: `grep`, `search`, `find`, `tools`)
-Searches transcripts by regex or substring with automatic dereferencing of truncated fields, role filtering (`user`, `assistant`, `subagent`, `tool`, `generic`, `system`, `error`, `all`), and `--full-args` / `--field` projection. The `tools` alias defaults to `--roles assistant --field tool_args --include-tools`.
+### 3. `agy-context transcript query` (aliases: `grep`, `search`, `find`, `tools`, `outline`, `summary`)
+Searches transcripts by regex or substring with automatic dereferencing of truncated fields, role filtering (`user`, `assistant`, `subagent`, `tool`, `generic`, `system`, `error`, `all`), and `--full-args` / `--field` projection. The `tools` alias defaults to `--roles assistant --field tool_args --include-tools`, and `outline` / `summary` map to `query --summary --include-tools`.
 - **Multi-step forensic workflow**:
   1. `agy-context transcript outline [<conv>] --start 0 --end 100` (1-line-per-step index with `[ERROR]` and `[tools: ...]` tags)
   2. `agy-context transcript tools [<conv>] --start 0 --end 100` (all untruncated tool call arguments in one call)
@@ -68,12 +68,18 @@ agy-context transcript step [<N|N,M|N-M|N..M>] [<id>] [--id <conv>] (--step <N|N
 ```
 
 ### 5. `agy-context transcript list` (alias: `ls`)
-Lists recent conversations across Antigravity's brain roots (`~/.gemini/antigravity/brain`, `~/.gemini/antigravity-cli/brain`, `~/.gemini/antigravity-ide/brain`) sorted by modification time.
+Lists recent conversations across Antigravity's brain roots (`~/.gemini/antigravity/brain`, `~/.gemini/antigravity-cli/brain`, `~/.gemini/antigravity-ide/brain`) sorted by modification time, with optional `--parent <uuid>` filtering and `--lineage` metadata.
 ```bash
-agy-context transcript list [--limit N] [--json]
+agy-context transcript list [--limit N] [--parent <uuid>] [--lineage] [--json]
 ```
 
-### 6. `agy-context transcript access` (alias: `policy`)
+### 6. `agy-context transcript export` (alias: `dump`)
+Exports an `L6`-safe sanitized conversation transcript summary (`--sanitized` is required to redact tool payload bodies and secrets for safe sharing or restricted child review), optionally scoped by step range or written via `--out`/`--output <path>`.
+```bash
+agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out|--output <path>] [--file <path>] [--json]
+```
+
+### 7. `agy-context transcript access` (alias: `policy`)
 Controls parent transcript access policies for child subagents and `/swarm` workers.
 ```bash
 agy-context transcript access [status|off|on|reset|self-only] [--status | --off (--deny-children) | --on (--reset) | --self-only | --mode <open|allowlist|self-only|deny> | --allow <id,@roster*...> | --deny <id,@roster*...> | --ttl <sec>] [--json]
@@ -82,7 +88,7 @@ agy-context transcript access [status|off|on|reset|self-only] [--status | --off 
 - **5-tier precedence**: `1. Policy Owner` -> `2. Explicit CLI --deny` -> `3. Explicit CLI --allow` (supports `@roster*` prefix globs such as `@audit-squad*`) -> `4. First-Line Launch Directive` -> `5. Cohort Default Mode`.
 - **Stale-lock protection**: Policies (`policies[ownerId]`) expire after a 1-hour default TTL, Step 0 `USER_INPUT` top-level user sessions bypass child locks automatically, Step 0/1 `sender=<parentConvId>` binds child agents to their parent policy, and `agy-context status` displays the active `Transcript Access Policy`.
 
-### 7. `agy-context status` & `agy-context setup`
+### 8. `agy-context status`, `setup` & `uninstall [--restore-backups]`
 Audits or synchronizes the plugin link, `PreToolUse` hook, CLI shims, RTK (`>= 1.1.0`), and `Transcript Access Policy`.
 ```bash
 agy-context status [--json]
@@ -96,6 +102,7 @@ agy-context uninstall [--restore-backups]
 
 1. **Layer 1 (Reactive lifecycle and backoff)**:
    - Do not busy-wait on `manage_task(Action='status')` or short polling timers; end the turn and wait for Reactive Wakeup (`<SYSTEM_MESSAGE>`).
+   - Do not run blocking CI watch loops (`gh pr checks --watch`, `gh run watch`) inside `run_command`; use one-shot snapshots (`gh pr checks`, `gh run list`) instead.
    - Status checks follow exponential backoff: $\min(600, \text{round}(30 \times 2.5^{\text{pollCount}-1}))$. 5 cumulative denials trigger the `force_ask` circuit breaker.
    - For background shell tasks $>15\text{s}$, schedule `schedule(DurationSeconds=45, TimerCondition="task-X")` and output a Pre-Yield Status Card. Never pair `swarm_wait` or subagents with a one-shot `schedule` timer.
 2. **Layer 2 (Shell rewriting, file slices, and transcript access)**:

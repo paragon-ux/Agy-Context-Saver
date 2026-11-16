@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.0.0)
+ * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.0.1)
  *
  * Closed Execution Topology & Governance Invariants:
  * 1. RTK Transparent Command Optimization:
@@ -19,7 +19,7 @@
  *    - Quote/heredoc-aware shell parser (`splitShellSegments`) protects `.system_generated/`
  *      without false-blocking heredoc prose, `echo`/`printf`, or literal search patterns.
  *    - Allows strictly single unchained `rtk read <spillover|completed task log>` and
- *      `agy-context transcript (read|query|step|health) ...` within `<brainDir>`.
+ *      `agy-context transcript (read|query|step|health|list|export|access) ...` within `<brainDir>`.
  * 4. Closed Lifecycle Governance (LH-03, LH-04, LH-05, LH-06):
  *    - Session-wide ledger with proportional backoff and 5-denial `force_ask` circuit breaker.
  * 5. Benchmark & Evaluator Mutation Protection (LH-09):
@@ -1244,11 +1244,69 @@ function wasFileWrittenInSession(convId = "global", targetPath) {
 }
 
 function isPathInsideDir(candidatePath, baseDir) {
-  const norm = (p) => (os.platform() === "win32" ? p.toLowerCase() : p);
+  const norm = (p) => (os.platform() === "win32" || os.platform() === "darwin" ? p.toLowerCase() : p);
   const resolvedCandidate = norm(tryRealpath(resolveHookPath(candidatePath)));
   const resolvedBase = norm(tryRealpath(path.resolve(baseDir)));
   const prefix = resolvedBase.endsWith(path.sep) ? resolvedBase : resolvedBase + path.sep;
   return resolvedCandidate.startsWith(prefix);
+}
+
+function resolveWithExistingAncestor(targetPath) {
+  const absTarget = resolveHookPath(targetPath);
+  if (!absTarget) return "";
+  if (fs.existsSync(absTarget)) {
+    try { return fs.realpathSync(absTarget); } catch { return absTarget; }
+  }
+  const missingTail = [];
+  let probe = absTarget;
+  while (probe && !fs.existsSync(probe)) {
+    const parent = path.dirname(probe);
+    if (parent === probe) break;
+    missingTail.unshift(path.basename(probe));
+    probe = parent;
+  }
+  let baseReal = probe;
+  if (fs.existsSync(probe)) {
+    try { baseReal = fs.realpathSync(probe); } catch {}
+  }
+  return missingTail.length > 0 ? path.join(baseReal, ...missingTail) : baseReal;
+}
+
+function isProtectedExportOutPathInHook(outPath, resolvedOut) {
+  const normCase = (p) => (os.platform() === "win32" || os.platform() === "darwin" ? p.toLowerCase() : p);
+  const isInsideCaseAware = (target, root) => {
+    const rel = path.relative(normCase(root), normCase(target));
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  };
+
+  if (/(?:^|[\\/])\.git(?:[\\/]|$)/i.test(outPath) || /(?:^|[\\/])\.git(?:[\\/]|$)/i.test(resolvedOut)) {
+    return true;
+  }
+  try {
+    const lst = fs.lstatSync(resolvedOut);
+    if (lst.isSymbolicLink() || !lst.isFile()) {
+      return true;
+    }
+  } catch {}
+
+  const realTarget = resolveWithExistingAncestor(resolvedOut);
+  if (
+    isProtectedInternalState(realTarget) ||
+    isProtectedBenchmarkPath(realTarget) ||
+    /(?:^|[\\/])\.git(?:[\\/]|$)/i.test(realTarget)
+  ) {
+    return true;
+  }
+
+  const profileHome = getProfileHomeDir();
+  const protectedRoots = [
+    getStateDir(),
+    path.join(profileHome, ".gemini", "config"),
+    path.join(profileHome, ".gemini", "antigravity", "bin"),
+    path.join(profileHome, ".gemini", "antigravity", "mcp")
+  ].map((p) => resolveWithExistingAncestor(p));
+
+  return protectedRoots.some((pr) => pr && isInsideCaseAware(realTarget, pr));
 }
 
 function isPathInsideAnyBrainDir(candidatePath, selfConvId = null) {
@@ -1277,6 +1335,8 @@ const TRANSCRIPT_READ_SUBCOMMANDS = new Set([
   "health",
   "list",
   "ls",
+  "export",
+  "dump",
   "grep",
   "search",
   "find",
@@ -1669,9 +1729,11 @@ function extractFirstLineDirective(bodyText) {
 }
 
 /**
- * Inspects Steps 0–2 of `<brainDir>/<convId>/.system_generated/logs/transcript.jsonl`
- * to deterministically classify top-level user chats vs. `/swarm` workers vs. subagents,
+ * Inspects initial transcript JSONL steps (up to 48 header lines before execution turns)
+ * to classify caller session lineage (`isTopLevelUserSession`, `isChildSession`, `isSwarmChild`),
  * extract `parentConvId` and `@rosterName`, and parse any first-line `[agy-transcript-access: ...]` directive.
+ *
+ * SYNC-MIRROR: Must match `inspectTranscriptLineageFromFile()` in `lib/transcript-core.mjs`.
  */
 function getCallerLineage(convId) {
   if (!convId || convId === "global") {
@@ -1685,11 +1747,6 @@ function getCallerLineage(convId) {
       launchDirective: null,
       birthTimeMs: 0
     };
-  }
-
-  const session = getSessionState(convId);
-  if (session.lineage && session.lineage.transcriptFound) {
-    return session.lineage;
   }
 
   let targetFile = null;
@@ -1706,6 +1763,23 @@ function getCallerLineage(convId) {
     }
   }
 
+  const session = getSessionState(convId);
+  let targetStat = null;
+  if (targetFile) {
+    try { targetStat = fs.statSync(targetFile); } catch {}
+  }
+  if (session.lineage && session.lineage.transcriptFound && session.lineage.lineageVersion === 2) {
+    if (
+      session.lineage.isSwarmChild ||
+      session.lineage.isTopLevelUserSession ||
+      (targetStat &&
+        targetStat.size === session.lineage.fileSize &&
+        targetStat.mtimeMs === session.lineage.fileMtimeMs)
+    ) {
+      return session.lineage;
+    }
+  }
+
   if (!targetFile) {
     return {
       transcriptFound: false,
@@ -1719,10 +1793,11 @@ function getCallerLineage(convId) {
     };
   }
 
-  let birthTimeMs = Date.now();
+  const MAX_HEADER_LINES = 48;
+  let birthTimeMs = 0;
   let headStr = "";
   try {
-    const st = fs.statSync(targetFile);
+    const st = targetStat || fs.statSync(targetFile);
     const candidates = [st.birthtimeMs, st.ctimeMs, st.mtimeMs].filter((n) => Number.isFinite(n) && n > 0);
     if (candidates.length > 0) birthTimeMs = Math.min(...candidates);
 
@@ -1744,7 +1819,7 @@ function getCallerLineage(convId) {
         for (let b = 0; b < bytesRead; b++) {
           if (slice[b] === 10) newlineCount++;
         }
-        if (newlineCount >= 4) break;
+        if (newlineCount >= MAX_HEADER_LINES) break;
       }
       headStr = Buffer.concat(chunks).toString("utf-8");
     } finally {
@@ -1756,11 +1831,12 @@ function getCallerLineage(convId) {
   let isChildSession = false;
   let isSwarmChild = false;
   let parentConvId = null;
+  let boardFallbackSender = null;
   let rosterName = null;
   let launchDirective = null;
   let line0Parsed = false;
 
-  const lines = headStr.split(/\r?\n/).filter((l) => l.trim()).slice(0, 4);
+  const lines = headStr.split(/\r?\n/).filter((l) => l.trim()).slice(0, MAX_HEADER_LINES);
   for (let i = 0; i < lines.length; i++) {
     let item = null;
     try {
@@ -1778,9 +1854,14 @@ function getCallerLineage(convId) {
 
     if (item?.type === "SYSTEM_MESSAGE" || item?.source === "SYSTEM") {
       const senderMatch = content.match(/\[Message\][^\n]*\bsender=([a-zA-Z0-9_-]{4,})\b/);
+      const isBoardNotification = content.includes("content=[swarm] new board message");
       if (senderMatch) {
         isChildSession = true;
-        if (!parentConvId) parentConvId = senderMatch[1];
+        if (isBoardNotification) {
+          if (!boardFallbackSender) boardFallbackSender = senderMatch[1];
+        } else if (!parentConvId) {
+          parentConvId = senderMatch[1];
+        }
       }
 
       const swarmAssignMatch = content.match(
@@ -1789,23 +1870,38 @@ function getCallerLineage(convId) {
       if (swarmAssignMatch) {
         isChildSession = true;
         isSwarmChild = true;
+        const assignPrefix = content.slice(0, swarmAssignMatch.index);
+        const assignSenders = [...assignPrefix.matchAll(/\[Message\][^\n]*\bsender=([a-zA-Z0-9_-]{4,})\b/g)];
+        if (assignSenders.length > 0) {
+          parentConvId = assignSenders[assignSenders.length - 1][1];
+        } else if (senderMatch) {
+          parentConvId = senderMatch[1];
+        }
         rosterName = swarmAssignMatch[1];
         const dir = extractFirstLineDirective(swarmAssignMatch[2]);
         if (dir) launchDirective = dir;
         break;
       }
 
-      if (senderMatch && i === 0 && !content.includes("content=[swarm] new board message")) {
+      if (senderMatch && i === 0 && !isBoardNotification) {
         const msgBodyMatch = content.match(/\bpriority=MESSAGE_PRIORITY_[A-Z_]+\s+content=([\s\S]*)$/);
         if (msgBodyMatch) {
           const dir = extractFirstLineDirective(msgBodyMatch[1]);
           if (dir) launchDirective = dir;
         }
       }
+    } else if (i > 0) {
+      break;
     }
+  }
+  if (!parentConvId && boardFallbackSender) {
+    parentConvId = boardFallbackSender;
   }
 
   const lineage = {
+    lineageVersion: 2,
+    fileSize: targetStat ? targetStat.size : 0,
+    fileMtimeMs: targetStat ? targetStat.mtimeMs : 0,
     transcriptFound: lines.length > 0 && line0Parsed,
     isTopLevelUserSession,
     isChildSession,
@@ -2098,6 +2194,8 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     "file"
   ]);
   const HEALTH_VALUE_FLAGS = new Set(["id", "file"]);
+  const LIST_VALUE_FLAGS = new Set(["limit", "parent"]);
+  const EXPORT_VALUE_FLAGS = new Set(["id", "parent", "start", "end", "limit", "out", "output", "file"]);
 
   let valueFlags = READ_VALUE_FLAGS;
   if (subcommand === "query" || subcommand === "grep" || subcommand === "search" || subcommand === "find" || subcommand === "tools") {
@@ -2106,9 +2204,15 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     valueFlags = STEP_VALUE_FLAGS;
   } else if (subcommand === "health" || subcommand === "stats" || subcommand === "info") {
     valueFlags = HEALTH_VALUE_FLAGS;
+  } else if (subcommand === "list" || subcommand === "ls") {
+    valueFlags = LIST_VALUE_FLAGS;
+  } else if (subcommand === "export" || subcommand === "dump") {
+    valueFlags = EXPORT_VALUE_FLAGS;
   }
 
   const opts = {};
+  const idValues = [];
+  const outPaths = [];
   const positionals = [];
   for (let i = 0; i < restTokens.length; i++) {
     const tok = restTokens[i];
@@ -2121,10 +2225,21 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     const key = eqIdx === -1 ? tok.slice(2) : tok.slice(2, eqIdx);
     const inlineVal = eqIdx === -1 ? null : tok.slice(eqIdx + 1);
     if (valueFlags.has(key)) {
-      if (inlineVal !== null) {
-        opts[key] = inlineVal;
-      } else if (i + 1 < restTokens.length) {
-        opts[key] = restTokens[++i];
+      let val = inlineVal;
+      if (val === null && i + 1 < restTokens.length) {
+        val = restTokens[++i];
+      }
+      if (val !== null) {
+        if (key === "id") {
+          for (const part of String(val).split(",").map((s) => s.trim()).filter(Boolean)) {
+            idValues.push(part);
+          }
+        }
+        if (key === "out" || key === "output") {
+          const trimmedOut = String(val).trim();
+          if (trimmedOut) outPaths.push(trimmedOut);
+        }
+        opts[key] = val;
       }
     }
   }
@@ -2135,14 +2250,18 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
       opts.query = posCopy.shift();
     }
     if (opts.id === undefined && posCopy.length >= 1) {
-      opts.id = posCopy.shift();
+      const pId = posCopy.shift();
+      opts.id = pId;
+      idValues.push(pId);
     }
   } else if (subcommand === "step") {
     if (opts.step === undefined && posCopy.length >= 1) {
       opts.step = posCopy.shift();
     }
     if (opts.id === undefined && posCopy.length >= 1) {
-      opts.id = posCopy.shift();
+      const pId = posCopy.shift();
+      opts.id = pId;
+      idValues.push(pId);
     }
   } else if (
     subcommand === "read" ||
@@ -2150,10 +2269,20 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     subcommand === "summary" ||
     subcommand === "health" ||
     subcommand === "stats" ||
-    subcommand === "info"
+    subcommand === "info" ||
+    subcommand === "export" ||
+    subcommand === "dump"
   ) {
     if (opts.id === undefined && posCopy.length >= 1) {
-      opts.id = posCopy.shift();
+      const pId = posCopy.shift();
+      opts.id = pId;
+      if (subcommand === "export" || subcommand === "dump") {
+        for (const part of String(pId).split(",").map((s) => s.trim()).filter(Boolean)) {
+          idValues.push(part);
+        }
+      } else {
+        idValues.push(pId);
+      }
     }
   }
 
@@ -2163,8 +2292,13 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     };
   }
 
+  const uniqueIds = Array.from(new Set(idValues.map((s) => String(s).trim()).filter(Boolean)));
   return {
-    targetId: opts.id ? String(opts.id).trim() : null,
+    targetId: (subcommand === "export" || subcommand === "dump") && uniqueIds.length === 1 ? uniqueIds[0] : (opts.id ? String(opts.id).trim() : null),
+    targetIds: uniqueIds,
+    targetParent: opts.parent !== undefined ? String(opts.parent).trim() : null,
+    outPath: outPaths.length > 0 ? outPaths[outPaths.length - 1] : null,
+    outPaths,
     explicitFile: opts.file ? String(opts.file).trim() : null
   };
 }
@@ -2228,7 +2362,7 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     return {
       matched: true,
       allowed: false,
-      reason: `Antigravity Execution Governance: Unknown 'agy-context transcript' subcommand '${subcommand}'. Expected read, query, step, health, list, or access.`
+      reason: `Antigravity Execution Governance: Unknown 'agy-context transcript' subcommand '${subcommand}'. Expected read, query, step, health, list, export, or access.`
     };
   }
 
@@ -2354,8 +2488,34 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       };
     }
 
+    const isExportSub = subcommand === "export" || subcommand === "dump";
+    const isListSub = subcommand === "list" || subcommand === "ls";
+
+    if (isExportSub && Array.isArray(targetInfo.outPaths) && targetInfo.outPaths.length > 0) {
+      for (const outPath of targetInfo.outPaths) {
+        const resolvedOut = resolveHookPath(outPath);
+        if (
+          hasDotDotTraversal(outPath) ||
+          isProtectedInternalState(outPath) ||
+          isProtectedInternalState(resolvedOut) ||
+          isProtectedBenchmarkPath(outPath) ||
+          isProtectedBenchmarkPath(resolvedOut) ||
+          hasGovernanceMutationInText(`> ${outPath}`, convId) ||
+          hasGovernanceMutationInText(`> ${resolvedOut}`, convId) ||
+          isProtectedExportOutPathInHook(outPath, resolvedOut) ||
+          !/\.(?:md|json|txt)$/i.test(outPath)
+        ) {
+          return {
+            matched: true,
+            allowed: false,
+            reason: `Antigravity Execution Governance: '--out' path '${outPath}' in 'agy-context transcript ${subcommand}' must be a safe .md/.json/.txt artifact outside protected internal state, governance, and benchmark directories.`
+          };
+        }
+      }
+    }
+
     if (accessEval.mode === "self-only") {
-      if (subcommand === "list" || subcommand === "ls") {
+      if (isListSub) {
         return {
           matched: true,
           allowed: false,
@@ -2367,6 +2527,43 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
             callerConvId: convId,
             rosterName: accessEval.rosterName,
             detail: "'list'/'ls' across sessions is disabled in self-only mode."
+          })
+        };
+      }
+
+      if (isExportSub && targetInfo.targetParent) {
+        return {
+          matched: true,
+          allowed: false,
+          isAccessDenial: true,
+          reason: buildTranscriptAccessDenial({
+            subcommand,
+            mode: "self-only",
+            source: accessEval.source,
+            callerConvId: convId,
+            rosterName: accessEval.rosterName,
+            detail: "'--parent' across sessions is disabled in self-only mode."
+          })
+        };
+      }
+
+      if (
+        isExportSub &&
+        Array.isArray(targetInfo.targetIds) &&
+        (targetInfo.targetIds.length > 1 ||
+          targetInfo.targetIds.some((id) => id.toLowerCase() !== "current" && id !== convId))
+      ) {
+        return {
+          matched: true,
+          allowed: false,
+          isAccessDenial: true,
+          reason: buildTranscriptAccessDenial({
+            subcommand,
+            mode: "self-only",
+            source: accessEval.source,
+            callerConvId: convId,
+            rosterName: accessEval.rosterName,
+            detail: "Cross-session or multi-session transcript export is disabled in self-only mode."
           })
         };
       }
@@ -2426,6 +2623,26 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     }
 
     let resolvedTargetConvId = targetInfo.targetId || null;
+    let injectParentId = null;
+    if (
+      (isExportSub || isListSub) &&
+      targetInfo.targetParent &&
+      targetInfo.targetParent.toLowerCase() === "current" &&
+      convId &&
+      convId !== "global"
+    ) {
+      injectParentId = convId;
+    }
+    if (isExportSub) {
+      if (targetInfo.targetParent) {
+        const resolvedP = injectParentId || targetInfo.targetParent;
+        resolvedTargetConvId = `parent:${resolvedP}`;
+      } else if (Array.isArray(targetInfo.targetIds) && targetInfo.targetIds.length > 1) {
+        resolvedTargetConvId = `multi:${[...targetInfo.targetIds].sort().join(",")}`;
+      } else if (Array.isArray(targetInfo.targetIds) && targetInfo.targetIds.length === 1) {
+        resolvedTargetConvId = targetInfo.targetIds[0];
+      }
+    }
     if (targetInfo.explicitFile) {
       const matchedBrainDir = isPathInsideAnyBrainDir(targetInfo.explicitFile);
       if (accessEval.ownerId && !accessEval.isOwner && !matchedBrainDir) {
@@ -2463,7 +2680,8 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       subcommand,
       mode: "open",
       needsReadGrant: true,
-      targetConvId: resolvedTargetConvId
+      targetConvId: resolvedTargetConvId,
+      injectParentId
     };
   }
 
@@ -2682,6 +2900,122 @@ function isRestrictedLifecycleInvocation(segments, depth = 0) {
   return false;
 }
 
+const GH_VALUE_FLAGS = new Set([
+  "-R",
+  "--repo",
+  "-i",
+  "--interval",
+  "-q",
+  "--jq",
+  "-t",
+  "--template",
+  "-H",
+  "--hostname"
+]);
+
+function findBlockingWatchLoop(segments, depth = 0) {
+  if (depth > 4) return null;
+  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+    const seg = segments[segIdx];
+    const pipelineCmds = [getSegmentCmdName(seg)];
+    for (let j = segIdx + 1; j < segments.length; j++) {
+      const nextSeg = segments[j];
+      if (nextSeg.leadingSep !== "|" && nextSeg.leadingSep !== "|&") break;
+      pipelineCmds.push(getSegmentCmdName(nextSeg));
+    }
+
+    const { body } = splitEnvPrefix(seg.text || "");
+    const tokens = tokenizeShellWords(body || seg.text || "");
+    let idx = 0;
+    while (idx < tokens.length) {
+      const norm = normalizeCmdName(tokens[idx]);
+      if (norm === "rtk" || norm === "command" || norm === "exec" || norm === "nohup") {
+        idx++;
+        continue;
+      }
+      if (norm === "sudo") {
+        idx++;
+        while (idx < tokens.length && tokens[idx].startsWith("-")) {
+          if (tokens[idx] === "-u" || tokens[idx] === "-g" || tokens[idx] === "-h" || tokens[idx] === "-p" || tokens[idx] === "-C") {
+            idx += 2;
+          } else {
+            idx++;
+          }
+        }
+        continue;
+      }
+      break;
+    }
+
+    if (idx < tokens.length && normalizeCmdName(tokens[idx]) === "gh") {
+      const rest = tokens.slice(idx + 1);
+      const positionals = [];
+      let hasHelpFlag = false;
+      let hasWatchFlag = false;
+      let afterDoubleDash = false;
+      for (let i = 0; i < rest.length; i++) {
+        const tok = String(rest[i] || "");
+        if (!afterDoubleDash && tok === "--") {
+          afterDoubleDash = true;
+          continue;
+        }
+        if (!afterDoubleDash && tok.startsWith("-") && tok !== "-") {
+          if (tok === "--help" || tok === "-h") {
+            hasHelpFlag = true;
+            break;
+          }
+          const isShortValueAttached = /^-[RiqHt].+/.test(tok);
+          if (
+            tok === "--watch" ||
+            /^--watch=(?:true|1|yes)$/i.test(tok) ||
+            (!isShortValueAttached && /^-[a-zA-Z]*w[a-zA-Z]*$/.test(tok))
+          ) {
+            hasWatchFlag = true;
+            continue;
+          }
+          if (GH_VALUE_FLAGS.has(tok) && i + 1 < rest.length) {
+            i++;
+          }
+          continue;
+        }
+        positionals.push(tok.toLowerCase());
+      }
+      if (!hasHelpFlag) {
+        if (positionals[0] === "pr" && positionals[1] === "checks" && hasWatchFlag) {
+          return { command: "gh pr checks --watch" };
+        }
+        if (positionals[0] === "run" && positionals[1] === "watch") {
+          return { command: "gh run watch" };
+        }
+      }
+    }
+
+    const wrapped = extractWrappedScriptInfo(seg.text);
+    if (wrapped && wrapped.innerScript) {
+      const nested = findBlockingWatchLoop(splitShellSegments(wrapped.innerScript), depth + 1);
+      if (nested) return nested;
+    }
+    if (Array.isArray(seg.subshells)) {
+      for (const sub of seg.subshells) {
+        const nested = findBlockingWatchLoop(splitShellSegments(sub), depth + 1);
+        if (nested) return nested;
+      }
+    }
+    if (
+      Array.isArray(seg.heredocBodies) &&
+      seg.heredocBodies.length > 0 &&
+      pipelineCmds.some((c) => SHELL_INTERPRETERS.has(c))
+    ) {
+      for (const hdBody of seg.heredocBodies) {
+        if (!hdBody) continue;
+        const nested = findBlockingWatchLoop(splitShellSegments(hdBody), depth + 1);
+        if (nested) return nested;
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Recursively collects inspectable command texts (main segment, unquoted forms,
  * bash/sh/eval inner scripts, nested subshells, and interpreter/xargs heredoc bodies).
@@ -2726,16 +3060,18 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
     }
 
     // Inspect on-disk script files executed by shell/code interpreters (when in /tmp, /scratch, non-script extension, or written in restricted child session)
-    if (SHELL_INTERPRETERS.has(segCmd) || CODE_INTERPRETERS.has(segCmd)) {
+    if ((SHELL_INTERPRETERS.has(segCmd) && segCmd !== "eval") || CODE_INTERPRETERS.has(segCmd)) {
       const segTokens = tokenizeShellWords(seg.text || "");
-      for (let tIdx = 1; tIdx < segTokens.length; tIdx++) {
-        let tok = String(segTokens[tIdx] || "").trim();
-        if (!tok || tok.startsWith("-")) continue;
-        if (tok.startsWith("<")) tok = tok.slice(1).trim();
-        if (!tok || isAllowedAgyContextScriptPath(tok)) continue;
+      const inspectScriptToken = (rawTok) => {
+        const tok = String(rawTok || "").trim();
+        if (!tok) return false;
+        if (isAllowedAgyContextScriptPath(tok)) return true;
         try {
           const resolvedFile = resolveHookPath(tok);
           const normFile = resolvedFile.replace(/\\/g, "/");
+          if (!fs.existsSync(resolvedFile)) return false;
+          const st = fs.statSync(resolvedFile);
+          if (!st.isFile()) return false;
           const trackedNorm = normalizeSessionTrackedPath(resolvedFile);
           const isTmpOrScratchFile =
             normFile.startsWith("/tmp/") ||
@@ -2747,14 +3083,186 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
             isRestrictedChild &&
             (pendingWrittenSet.has(trackedNorm) || wasFileWrittenInSession(convId, resolvedFile));
           if (isTmpOrScratchFile || isNonScriptExt || isChildMutatedScript) {
-            if (fs.existsSync(resolvedFile)) {
-              const st = fs.statSync(resolvedFile);
-              if (st.isFile() && st.size > 0 && st.size <= 131072) {
-                texts.push(fs.readFileSync(resolvedFile, "utf-8"));
-              }
+            if (st.size > 0 && st.size <= 131072) {
+              texts.push(fs.readFileSync(resolvedFile, "utf-8"));
             }
           }
-        } catch {}
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      const isDocOrJsonArg = (t) => /\.(?:md|markdown|json)$/i.test(t);
+
+      const isNode = segCmd === "node";
+      const isPython = segCmd === "python" || segCmd === "python2" || segCmd === "python3";
+      const isShell = SHELL_INTERPRETERS.has(segCmd);
+      const isPowerShell = segCmd === "pwsh" || segCmd === "powershell";
+      const isRuby = segCmd === "ruby";
+      const isPerl = segCmd === "perl";
+      const isPhp = segCmd === "php";
+
+      let afterDoubleDash = false;
+      let inlineCodeMode = false;
+      let consumedPrimaryScript = false;
+      let expectCodeFileArg = false;
+      let expectSkipValueArg = false;
+      let expectStdinFile = false;
+
+      for (let tIdx = 1; tIdx < segTokens.length; tIdx++) {
+        const tok = String(segTokens[tIdx] || "").trim();
+        if (!tok) continue;
+
+        if (expectStdinFile) {
+          expectStdinFile = false;
+          inspectScriptToken(tok);
+          continue;
+        }
+        if (tok === "<") {
+          expectStdinFile = true;
+          continue;
+        }
+        if (tok.startsWith("<") && !tok.startsWith("<<")) {
+          inspectScriptToken(tok.slice(1));
+          continue;
+        }
+        if (expectCodeFileArg) {
+          expectCodeFileArg = false;
+          inspectScriptToken(tok);
+          continue;
+        }
+        if (expectSkipValueArg) {
+          expectSkipValueArg = false;
+          continue;
+        }
+
+        if (!afterDoubleDash) {
+          if (tok === "--") {
+            afterDoubleDash = true;
+            continue;
+          }
+          if (tok === "-") {
+            consumedPrimaryScript = true;
+            continue;
+          }
+          if (tok.startsWith("-") || (isShell && tok === "+o")) {
+            const lower = tok.toLowerCase();
+            if (isNode) {
+              const eqIdx = tok.indexOf("=");
+              const flag = eqIdx === -1 ? tok : tok.slice(0, eqIdx);
+              const inlineVal = eqIdx === -1 ? null : tok.slice(eqIdx + 1);
+              if (flag === "-r" || flag === "--require" || flag === "--import" || flag === "--loader" || flag === "--experimental-loader") {
+                if (inlineVal !== null) inspectScriptToken(inlineVal);
+                else expectCodeFileArg = true;
+              } else if (flag === "-e" || flag === "--eval" || flag === "-p" || flag === "--print") {
+                inlineCodeMode = true;
+                if (inlineVal === null) expectSkipValueArg = true;
+              } else if (
+                flag === "-C" || flag === "--conditions" || flag === "--input-type" ||
+                flag === "--env-file" || flag === "--env-file-if-exists" || flag === "--watch-path" ||
+                flag === "--watch-kill-signal" || flag === "--cpu-prof-dir" || flag === "--cpu-prof-interval" ||
+                flag === "--cpu-prof-name" || flag === "--heap-prof-dir" || flag === "--heap-prof-interval" ||
+                flag === "--heap-prof-name" || flag === "--diagnostic-dir" || flag === "--redirect-warnings" ||
+                flag === "--title" || flag === "--max-old-space-size" || flag === "--max-semi-space-size" ||
+                flag === "--max-http-header-size" || flag === "--heapsnapshot-signal" ||
+                flag === "--heapsnapshot-near-heap-limit" || flag === "--dns-result-order" ||
+                flag === "--disable-proto" || flag === "--disable-warning" || flag === "--icu-data-dir" ||
+                flag === "--openssl-config" || flag === "--build-snapshot-config" ||
+                flag === "--experimental-config-file" || flag === "--experimental-sea-config" ||
+                flag === "--unhandled-rejections" || flag === "--use-largepages" || flag === "--v8-pool-size" ||
+                flag === "--trace-event-categories" || flag === "--trace-event-file-pattern" ||
+                flag === "--allow-fs-read" || flag === "--allow-fs-write" || flag === "--inspect" ||
+                flag === "--inspect-brk" || flag === "--inspect-port" || flag === "--inspect-wait" ||
+                flag === "--test-name-pattern" || flag === "--test-reporter" ||
+                flag === "--test-reporter-destination" || flag === "--test-shard" ||
+                flag === "--test-concurrency" || flag === "--test-timeout" || flag === "--report-dir" ||
+                flag === "--report-directory" || flag === "--report-filename" || flag === "--report-signal" ||
+                flag === "--secure-heap" || flag === "--secure-heap-min" || flag === "--tls-cipher-list"
+              ) {
+                if (inlineVal === null) expectSkipValueArg = true;
+              }
+            } else if (isPython) {
+              if (tok === "-c" || tok === "-m") {
+                inlineCodeMode = true;
+                expectSkipValueArg = true;
+              } else if (tok.startsWith("-c") || tok.startsWith("-m")) {
+                inlineCodeMode = true;
+              } else if (tok === "-W" || tok === "-X" || tok === "-Q" || tok === "--check-hash-based-pycs") {
+                expectSkipValueArg = true;
+              }
+            } else if (isShell) {
+              if (/^-[a-z]*c$/i.test(tok)) {
+                inlineCodeMode = true;
+                expectSkipValueArg = true;
+              } else if (tok === "-o" || tok === "+o") {
+                expectSkipValueArg = true;
+              }
+            } else if (isPowerShell) {
+              if (lower === "-command" || lower === "-c" || lower === "-encodedcommand" || lower === "-ec" || lower === "-e") {
+                inlineCodeMode = true;
+                expectSkipValueArg = true;
+              } else if (lower === "-file" || lower === "-f") {
+                expectCodeFileArg = true;
+              } else if (
+                lower === "-executionpolicy" || lower === "-ep" || lower === "-windowstyle" || lower === "-w" ||
+                lower === "-workingdirectory" || lower === "-wd" || lower === "-outputformat" || lower === "-of" ||
+                lower === "-inputformat" || lower === "-if" || lower === "-settingsfile" ||
+                lower === "-configurationname" || lower === "-custompipename" || lower === "-version" || lower === "-v"
+              ) {
+                expectSkipValueArg = true;
+              }
+            } else if (isRuby) {
+              if (tok === "-e") {
+                inlineCodeMode = true;
+                expectSkipValueArg = true;
+              } else if (tok === "-r") {
+                expectCodeFileArg = true;
+              } else if (
+                tok === "-I" || tok === "-C" || tok === "-E" || tok === "-F" || tok === "-K" ||
+                tok === "--encoding" || tok === "--external-encoding" || tok === "--internal-encoding"
+              ) {
+                expectSkipValueArg = true;
+              }
+            } else if (isPerl) {
+              if (tok === "-e" || tok === "-E") {
+                inlineCodeMode = true;
+                expectSkipValueArg = true;
+              } else if (tok === "-I" || tok === "-M" || tok === "-m") {
+                expectSkipValueArg = true;
+              }
+            } else if (isPhp) {
+              if (tok === "-r") {
+                inlineCodeMode = true;
+                expectSkipValueArg = true;
+              } else if (tok === "-f") {
+                expectCodeFileArg = true;
+              } else if (tok === "-d" || tok === "-c") {
+                expectSkipValueArg = true;
+              }
+            }
+            continue;
+          }
+        }
+
+        if (inlineCodeMode) {
+          if (!isDocOrJsonArg(tok)) {
+            inspectScriptToken(tok);
+          }
+          continue;
+        }
+
+        if (consumedPrimaryScript) {
+          if (!isDocOrJsonArg(tok)) {
+            inspectScriptToken(tok);
+          }
+          continue;
+        }
+
+        const isExistingRegularFile = inspectScriptToken(tok);
+        if (isExistingRegularFile && !isDocOrJsonArg(tok)) {
+          consumedPrimaryScript = true;
+        }
       }
     }
 
@@ -3694,6 +4202,17 @@ try {
       }
     }
 
+    const blockingWatch = findBlockingWatchLoop(segments);
+    if (blockingWatch) {
+      respond({
+        decision: "deny",
+        reason:
+          `Antigravity Execution Governance: Blocking CI watch loop ('${blockingWatch.command}') stalls agents indefinitely when remote runners queue.\n` +
+          "- Run a single non-blocking snapshot ('gh pr checks' or 'gh run list') instead.\n" +
+          "- If waiting on remote CI, end your turn or use a backoff-compliant 'schedule' timer (>= 60s) rather than blocking inside run_command."
+      });
+    }
+
     // Check agy-context transcript CLI exemption & parent-scoped access governance
     const agyTranscriptCheck = checkAgyContextTranscriptCommand(segments, convId);
     if (agyTranscriptCheck.matched && !agyTranscriptCheck.allowed) {
@@ -3807,7 +4326,7 @@ try {
     // In self-only mode, deterministically inject --id <convId> when --id and --file were omitted (or --id current / positional current)
     if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectSelfId) {
       if (/--id(?:=|\s+)["']?current["']?\b/i.test(effectiveCmd)) {
-        effectiveCmd = effectiveCmd.replace(/--id(?:=|\s+)["']?current["']?\b/i, `--id ${agyTranscriptCheck.injectSelfId}`);
+        effectiveCmd = effectiveCmd.replace(/--id(?:=|\s+)["']?current["']?\b/gi, `--id ${agyTranscriptCheck.injectSelfId}`);
       } else if (agyTranscriptCheck.targetWasCurrentPlaceholder) {
         const updatedCmd = effectiveCmd.replace(
           /(^|\s)(["']?)current\2(?=(?:\s|$)(?!.*\s["']?current["']?(?:\s|$)))/i,
@@ -3817,6 +4336,9 @@ try {
       } else {
         effectiveCmd = `${effectiveCmd.trim()} --id ${agyTranscriptCheck.injectSelfId}`;
       }
+    }
+    if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectParentId) {
+      effectiveCmd = effectiveCmd.replace(/--parent(?:=|\s+)["']?current["']?\b/gi, `--parent ${agyTranscriptCheck.injectParentId}`);
     }
 
     const isRtkRead = isRtkReadCommand(effectiveCmd);

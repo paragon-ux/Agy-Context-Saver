@@ -9,20 +9,26 @@ on:
       - "zensical.toml"
       - "README.md"
       - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "zensical.toml"
+      - "README.md"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: "pages"
+  group: "pages-${{ github.ref }}"
   cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      pages_enabled: ${{ steps.pages.outputs.enabled }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -33,17 +39,32 @@ jobs:
           python-version: "3.11"
 
       - name: Install Zensical
-        run: pip install zensical
+        run: pip install "zensical==0.0.74"
 
       - name: Build documentation
         run: zensical build
 
+      - name: Check GitHub Pages status
+        id: pages
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          has_pages="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.has_pages' 2>/dev/null || echo false)"
+          echo "enabled=${has_pages}" >> "$GITHUB_OUTPUT"
+
       - name: Upload Pages artifact
+        if: steps.pages.outputs.enabled == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy:
+    if: needs.build.outputs.pages_enabled == 'true'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

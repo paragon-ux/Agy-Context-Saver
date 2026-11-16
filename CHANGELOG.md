@@ -5,6 +5,17 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Lineage Listing & Sanitized Transcript Export (`bin/agy-context.mjs`, `lib/transcript-core.mjs`, `scripts/execution-guard-hook.mjs`)**: Added `agy-context transcript list --parent <uuid|current> --lineage` and fail-closed `agy-context transcript export --sanitized` (`dump` alias, `--parent`, `--id`, `--start`/`--end`, `--limit`, `--out`/`--output`, `--json`) with secret/media redaction, `parent:<uuid>` / `multi:<id1,id2,...>` hook capability grants, `--json` ceiling clamping, and symlink/protected-root `--out` guards (`L45`).
+- **Package Manifest Verification (`tests/verify-package.mjs`, `.github/workflows/docs.yml`)**: Expanded `tests/verify-package.mjs` `REQUIRED` manifest checks to all 33 published files and integrated it into `npm test` (suite 12); pinned `zensical==0.0.74` and added `pull_request` + `pages_enabled` deploy gating (`L50`).
+
+### Fixed
+- **Live `/swarm` Parent Lineage Binding (`lib/transcript-core.mjs`, `scripts/execution-guard-hook.mjs`)**: Fixed `inspectTranscriptLineageFromFile()` and `getCallerLineage()` so leading `[swarm] new board message` notifications on Step 0..47 no longer lock `parentConvId` onto sibling senders before `Your assignment (recorded on the board as #N for @worker)` arrives with the coordinator's `sender=` (`ACS-LIVE-SVC-001`), invalidated stale pre-v2 / Step-0 partial `session.lineage` caches on transcript growth, and aligned `birthTimeMs` initialization.
+- **Library-Level `list` Grant Enforcement, `export` Clamping Parity & Strict CLI/Installer Validation (`lib/transcript-core.mjs`, `bin/agy-context.mjs`, `scripts/install-register.mjs`, `scripts/provision-rtk.mjs`)**: Enforced `verifyTranscriptCoreAccess({ subcommand: "list" })` directly inside exported `listTranscriptConversations()` (`ACS-PR4-SVC-001`), synchronized `exportSanitizedTranscript` Markdown `Steps Shown` and ceiling clamping with `--json` payload clamping (`ACS-PR4-RUN-002`), wired strict `parseFlags` and `--help`/`--version` conflict checks across `bin/agy-context.mjs`, added strict argument validation and dynamic `AGY_TEST_PROFILE_DIR` resolution on `scripts/install-register.mjs`, added `chcp 65001 >nul` to `formatWindowsCmdShim` (`L46`), switched `scripts/provision-rtk.mjs` to `execFileSync` with `cmd.exe /d /s /c` fallback for Windows `rtk.cmd` shims (`ACS-R2-SCRIPT-001`), and surfaced redirected, version-mismatched, and stale mirrored hook states (`mirroredHookStale`) across `--status` and `--check`.
+- **Hook Positional Parsing, Blocking CI Watch Guard, `env-cache.json` Invalidation & Doc/URL Casing Parity**: Hardened `collectInspectableTexts` and `env-cache.json` TTL/mtime invalidation (`L50`), denied blocking `gh pr checks --watch` and `gh run watch` polling loops (including bundled `-w` vs attached short value flags and shell heredocs) in `scripts/execution-guard-hook.mjs`, normalized `https://paragon-ux.github.io/Agy-Context-Saver/` and `github.com/paragon-ux/Agy-Context-Saver` URL casing (`L48`), and aligned `rules/AGENTS.md`, `skills/context-governance/SKILL.md`, `README.md`, `SECURITY.md`, and `docs/*` with CLI behavior.
+
 ## [2.0.1] - 2026-11-15
 
 ### Added

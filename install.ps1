@@ -65,6 +65,7 @@ if (-not $IsReadOnly -and -not $IsRestoreOnly) {
     # 3. Create managed node.cmd wrapper in ~/.gemini/config (delegates non-governor calls to real node.exe)
     $NodeCmdLines = @(
         '@echo off',
+        'chcp 65001 >nul',
         'REM agy-context-saver-managed',
         'if /i "%~nx1"=="execution-guard-hook.mjs" goto :hook',
         'if /i "%~nx1"=="execution-guard.mjs" goto :hook',
@@ -74,8 +75,8 @@ if (-not $IsReadOnly -and -not $IsRestoreOnly) {
         "`"$NodeExe`" `"$DestHook`" %*",
         'exit /b %errorlevel%'
     )
-    $NodeCmdContent = $NodeCmdLines -join "`r`n"
-    Set-Content -Path $NodeCmdPath -Value $NodeCmdContent -Encoding ASCII
+    $NodeCmdContent = ($NodeCmdLines -join "`r`n") + "`r`n"
+    [System.IO.File]::WriteAllText($NodeCmdPath, $NodeCmdContent, [System.Text.UTF8Encoding]::new($false))
     Write-Host "[OK] Node wrapper installed to: $NodeCmdPath" -ForegroundColor Green
 }
 

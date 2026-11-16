@@ -16,8 +16,8 @@
 ### Agy-Context-Saver (`v2.0.x`)
 - Enforces Reactive Wakeup backoff on `manage_task` and `schedule`, backed by a 5-strike `force_ask` circuit breaker.
 - Bounds workspace `read_file` slices (`<= 150` lines, or explicit `1..TotalLines` reads on files `<= 800` lines and `<= 45 KiB`).
-- Protects `.system_generated/` and the state directory (`getStateDir()`, `~/.local/state/agy-context-saver`).
-- Streams Markdown transcript turns, regex queries, and step ranges via `agy-context transcript` (`read`, `query`, `step`, `health`, `list`, `access`).
+- Protects `.system_generated/` and the state directory (`getStateDir()`, `~/.local/state/agy-context-saver` on POSIX or `%LOCALAPPDATA%\agy-context-saver` on Windows).
+- Streams Markdown transcript turns, regex queries, lineage lists, sanitized exports, and step ranges via `agy-context transcript` (`read`, `query`, `step`, `health`, `list`, `export`, `access`).
 - Governs child subagent and `/swarm` worker transcript access via CLI policies, first-line launch directives, and 10-second single-use capability grants.
 - Guards benchmark and evaluation files against unapproved edits (`edit_file`, `write_file`, and shell writes).
 
@@ -35,7 +35,7 @@ The `PreToolUse` hook intercepts `run_command`. After running internal state, tr
 ### 2. 3-Tier Workspace File Inspection
 To prevent multi-thousand-line file dumps while keeping exact 1-indexed line numbers for `edit_file` and `write_file`:
 1. **Tier 1 (Search and discovery):** `rtk grep`, `rtk find`, and `rtk ls` locate target files and `[StartLine, EndLine]` ranges.
-2. **Tier 2 (Bounded `read_file` slices):** `read_file` calls pass `StartLine` and `EndLine` (`1-150` lines, or `1..TotalLines` when a file is `<= 800` lines and `<= 45 KiB`). Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `.gemini/config/`) pass through Safe Harbor without slice bounds.
+2. **Tier 2 (Bounded `read_file` slices):** `read_file` calls pass `StartLine` and `EndLine` (`1-150` lines, or `1..TotalLines` when a file is `<= 800` lines and `<= 45 KiB`). Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass through Safe Harbor without slice bounds.
 3. **Tier 3 (Spillovers and task logs):** Step output spillovers (`.system_generated/steps/<step>/output.txt`) allow bounded `read_file` (`<= 150` lines) or single unchained `rtk read <path>` calls. Completed background task logs (`tasks/<taskId>.log`) allow single unchained `rtk read` calls once the task has finished.
 
 ### 3. Internal State, State Directory & Script Scanning

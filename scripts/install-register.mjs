@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver Registration & Installation Engine (v2.0.0)
+ * Agy-Context-Saver Registration & Installation Engine (v2.0.1)
  * Zero-delay cross-platform installer with CLI-first shim provisioning,
  * unified hook registration, and legacy MCP retirement/sweep.
  *
@@ -31,24 +31,55 @@ const PACKAGE_VERSION = (() => {
   }
 })();
 
-const homeDir = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
-const geminiConfigDir = path.join(homeDir, ".gemini", "config");
-const pluginsDir = path.join(geminiConfigDir, "plugins");
-const pluginDest = path.join(pluginsDir, "agy-context-saver");
-const scriptsDir = path.join(geminiConfigDir, "scripts");
-const hooksJsonPath = path.join(geminiConfigDir, "hooks.json");
-const hooksBakPath = path.join(geminiConfigDir, "hooks.json.bak");
-const configJsonPath = path.join(geminiConfigDir, "config.json");
-const mcpJsonPath = path.join(geminiConfigDir, "mcp_config.json");
-const mcpBakPath = path.join(geminiConfigDir, "mcp_config.json.bak");
-const antigravityMcpRootDir = path.join(homeDir, ".gemini", "antigravity", "mcp");
-const antigravityMcpDir = path.join(antigravityMcpRootDir, "agy-context-saver");
-const antigravityBinDir = path.join(homeDir, ".gemini", "antigravity", "bin");
+function resolveProfilePaths() {
+  const homeDir = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
+  const geminiConfigDir = path.join(homeDir, ".gemini", "config");
+  const pluginsDir = path.join(geminiConfigDir, "plugins");
+  const pluginDest = path.join(pluginsDir, "agy-context-saver");
+  const scriptsDir = path.join(geminiConfigDir, "scripts");
+  const hooksJsonPath = path.join(geminiConfigDir, "hooks.json");
+  const hooksBakPath = path.join(geminiConfigDir, "hooks.json.bak");
+  const configJsonPath = path.join(geminiConfigDir, "config.json");
+  const mcpJsonPath = path.join(geminiConfigDir, "mcp_config.json");
+  const mcpBakPath = path.join(geminiConfigDir, "mcp_config.json.bak");
+  const antigravityMcpRootDir = path.join(homeDir, ".gemini", "antigravity", "mcp");
+  const antigravityMcpDir = path.join(antigravityMcpRootDir, "agy-context-saver");
+  const antigravityBinDir = path.join(homeDir, ".gemini", "antigravity", "bin");
+  const destHook = path.join(scriptsDir, "execution-guard-hook.mjs");
+  const destHookNormalized = destHook.replace(/\\/g, "/");
+  return {
+    homeDir,
+    geminiConfigDir,
+    pluginsDir,
+    pluginDest,
+    scriptsDir,
+    hooksJsonPath,
+    hooksBakPath,
+    configJsonPath,
+    mcpJsonPath,
+    mcpBakPath,
+    antigravityMcpRootDir,
+    antigravityMcpDir,
+    antigravityBinDir,
+    destHook,
+    destHookNormalized
+  };
+}
+
+const {
+  pluginDest,
+  hooksJsonPath,
+  hooksBakPath,
+  mcpJsonPath,
+  mcpBakPath,
+  antigravityMcpRootDir,
+  antigravityMcpDir,
+  antigravityBinDir,
+  destHook
+} = resolveProfilePaths();
 
 const sourceHook = path.join(repoRoot, "scripts", "execution-guard-hook.mjs");
 const repoHooksJsonPath = path.join(repoRoot, "hooks.json");
-const destHook = path.join(scriptsDir, "execution-guard-hook.mjs");
-const destHookNormalized = destHook.replace(/\\/g, "/");
 
 const HOOK_KEY = "agy-context-saver";
 const LEGACY_HOOK_KEY = "execution-guard";
@@ -81,6 +112,7 @@ function isExecutableFile(filePath) {
 }
 
 function detectCliShims() {
+  const { antigravityBinDir } = resolveProfilePaths();
   const isWin = os.platform() === "win32";
   const expectedFiles = isWin
     ? CLI_SHIM_NAMES.map((name) => `${name}.cmd`)
@@ -94,6 +126,7 @@ function detectCliShims() {
 }
 
 function findLegacyMcpArtifacts() {
+  const { mcpJsonPath, antigravityMcpRootDir } = resolveProfilePaths();
   const legacyMcpKeys = [];
   if (fs.existsSync(mcpJsonPath)) {
     try {
@@ -167,15 +200,57 @@ export async function safeCopyFileIfChanged(sourcePath, targetPath) {
  * Detects whether Agy-Context-Saver is already installed across all Antigravity 2.0 integration points.
  */
 export function detectExistingInstallation() {
+  const {
+    pluginDest,
+    hooksJsonPath,
+    destHook,
+    destHookNormalized
+  } = resolveProfilePaths();
   const pluginExists = fs.existsSync(pluginDest);
+  let pluginLst = null;
+  try {
+    pluginLst = fs.lstatSync(pluginDest);
+  } catch {}
+  const pluginIsSymlink = Boolean(pluginLst && pluginLst.isSymbolicLink());
   let pluginTarget = null;
+  let pluginPointsElsewhere = false;
+  let pluginInstalledVersion = null;
+  const isLocalCheckout =
+    fs.existsSync(path.join(repoRoot, ".git")) &&
+    !repoRoot.includes("_npx") &&
+    !repoRoot.includes("npm-cache") &&
+    !repoRoot.includes("node_modules");
+
   if (pluginExists) {
-    try {
-      pluginTarget = fs.readlinkSync(pluginDest);
-    } catch {
+    if (pluginIsSymlink) {
+      try {
+        pluginTarget = fs.readlinkSync(pluginDest);
+      } catch {
+        pluginTarget = "symlink";
+      }
+      if (isLocalCheckout) {
+        try {
+          const destReal = fs.realpathSync(pluginDest);
+          const repoReal = fs.realpathSync(repoRoot);
+          pluginPointsElsewhere =
+            os.platform() === "win32" || os.platform() === "darwin"
+              ? destReal.toLowerCase() !== repoReal.toLowerCase()
+              : destReal !== repoReal;
+        } catch {
+          pluginPointsElsewhere = true;
+        }
+      }
+    } else {
       pluginTarget = "direct folder or junction";
     }
+    try {
+      const installedPkg = JSON.parse(fs.readFileSync(path.join(pluginDest, "package.json"), "utf8"));
+      if (typeof installedPkg?.version === "string" && installedPkg.version.trim()) {
+        pluginInstalledVersion = installedPkg.version.trim();
+      }
+    } catch {}
   }
+  const pluginVersionMismatch = Boolean(pluginInstalledVersion && pluginInstalledVersion !== PACKAGE_VERSION);
 
   let pluginHookRegistered = false;
   let pluginHookCommand = null;
@@ -214,10 +289,16 @@ export function detectExistingInstallation() {
   const pluginHookScript = path.join(pluginDest, "scripts", "execution-guard-hook.mjs");
   const scriptExists = fs.existsSync(pluginHookScript);
   const mirroredHookExists = fs.existsSync(destHook);
+  let mirroredHookStale = false;
+  if (mirroredHookExists && fs.existsSync(sourceHook)) {
+    try {
+      mirroredHookStale = !fs.readFileSync(sourceHook).equals(fs.readFileSync(destHook));
+    } catch {}
+  }
   const cliShim = detectCliShims();
   const mcp = findLegacyMcpArtifacts();
   const rtkInfo = findExistingRtk();
-  const hookRegistered = pluginHookRegistered && globalHookRegistered && mirroredHookExists;
+  const hookRegistered = pluginHookRegistered && globalHookRegistered && mirroredHookExists && !mirroredHookStale;
 
   const isInstalled =
     pluginExists ||
@@ -231,7 +312,10 @@ export function detectExistingInstallation() {
 
   const isComplete =
     pluginExists &&
+    !pluginPointsElsewhere &&
+    !pluginVersionMismatch &&
     hookRegistered &&
+    !mirroredHookStale &&
     scriptExists &&
     !legacyHookPresent &&
     cliShim.exists &&
@@ -242,13 +326,22 @@ export function detectExistingInstallation() {
     isInstalled,
     isComplete,
     details: {
-      plugin: { exists: pluginExists, target: pluginTarget },
+      plugin: {
+        exists: pluginExists,
+        target: pluginTarget,
+        isSymlink: pluginIsSymlink,
+        isCopyFallback: pluginExists && !pluginIsSymlink,
+        pointsElsewhere: pluginPointsElsewhere,
+        version: pluginInstalledVersion,
+        versionMismatch: pluginVersionMismatch
+      },
       hook: {
         key: HOOK_KEY,
         registered: hookRegistered,
         pluginHookRegistered,
         globalHookRegistered,
         mirroredHookExists,
+        mirroredHookStale,
         legacyHookPresent,
         command: globalHookCommand || pluginHookCommand,
         scriptExists
@@ -288,6 +381,7 @@ export function parseAndValidateJsonConfig(filePath, configName) {
 }
 
 async function stripLegacyMcpRegistrations(parsedMcp, { log, warn }) {
+  const { mcpJsonPath, mcpBakPath } = resolveProfilePaths();
   if (!fs.existsSync(mcpJsonPath) || !parsedMcp?.mcpServers || typeof parsedMcp.mcpServers !== "object") {
     return;
   }
@@ -319,6 +413,7 @@ async function stripLegacyMcpRegistrations(parsedMcp, { log, warn }) {
 }
 
 async function sweepLegacyMcpSchemas({ log, warn }) {
+  const { antigravityMcpRootDir } = resolveProfilePaths();
   if (!fs.existsSync(antigravityMcpRootDir)) {
     return;
   }
@@ -342,7 +437,24 @@ async function sweepLegacyMcpSchemas({ log, warn }) {
   }
 }
 
+export function formatWindowsCmdShim(targetCliPath) {
+  return [
+    "@echo off",
+    "chcp 65001 >nul",
+    "setlocal",
+    "where node >nul 2>nul",
+    "if errorlevel 1 goto :fallback",
+    `node "${targetCliPath}" %*`,
+    "exit /b %errorlevel%",
+    ":fallback",
+    `"${process.execPath}" "${targetCliPath}" %*`,
+    "exit /b %errorlevel%",
+    ""
+  ].join("\r\n");
+}
+
 async function installCliShims({ log }) {
+  const { pluginDest, antigravityBinDir } = resolveProfilePaths();
   const sourceCli = path.join(repoRoot, "bin", "agy-context.mjs");
   const pluginCli = path.join(pluginDest, "bin", "agy-context.mjs");
 
@@ -355,8 +467,8 @@ async function installCliShims({ log }) {
   }
 
   const targetCli = fs.existsSync(pluginCli) ? pluginCli : sourceCli;
-  const targetCliNormalized = targetCli.replace(/\\/g, "/");
-  const execPathNormalized = process.execPath.replace(/\\/g, "/");
+  const targetCliNormalized = targetCli.replace(/\\/g, "/").replace(/(["\\$`])/g, "\\$1");
+  const execPathNormalized = process.execPath.replace(/\\/g, "/").replace(/(["\\$`])/g, "\\$1");
 
   await fsPromises.mkdir(antigravityBinDir, { recursive: true });
 
@@ -370,18 +482,7 @@ async function installCliShims({ log }) {
     ""
   ].join("\n");
 
-  const winShimBody = [
-    "@echo off",
-    "setlocal",
-    "where node >nul 2>nul",
-    "if %errorlevel% equ 0 (",
-    `  node "${targetCli}" %*`,
-    "  exit /b %errorlevel%",
-    ")",
-    `"${process.execPath}" "${targetCli}" %*`,
-    "exit /b %errorlevel%",
-    ""
-  ].join("\r\n");
+  const winShimBody = formatWindowsCmdShim(targetCli);
 
   let changed = false;
   for (const name of CLI_SHIM_NAMES) {
@@ -405,6 +506,19 @@ async function installCliShims({ log }) {
 }
 
 export async function runInstall(options = {}) {
+  const {
+    geminiConfigDir,
+    pluginsDir,
+    pluginDest,
+    scriptsDir,
+    hooksJsonPath,
+    hooksBakPath,
+    configJsonPath,
+    mcpJsonPath,
+    antigravityBinDir,
+    destHook,
+    destHookNormalized
+  } = resolveProfilePaths();
   const log = options.silent ? () => {} : console.log;
   const warn = options.silent ? () => {} : console.warn;
 
@@ -427,7 +541,11 @@ export async function runInstall(options = {}) {
       if (existing.details.hook.registered) {
         log(`   [OK] Governor Hook (${HOOK_KEY}): Active via plugin + global hooks.json`);
       } else if (existing.details.hook.pluginHookRegistered) {
-        log(`   [WARN] Global hooks.json entry missing/stale for /swarm workers (run setup to synchronize)`);
+        log(
+          existing.details.hook.mirroredHookStale
+            ? `   [WARN] Global hooks.json mirrored hook copy is stale (run setup to synchronize)`
+            : `   [WARN] Global hooks.json entry missing/stale for /swarm workers (run setup to synchronize)`
+        );
       }
       if (existing.details.hook.legacyHookPresent) {
         log(`   [WARN] Global hooks.json has legacy 'execution-guard' entry (run setup to clean up)`);
@@ -510,8 +628,24 @@ export async function runInstall(options = {}) {
     pluginLst = fs.lstatSync(pluginDest);
   } catch {}
   const pluginExists = fs.existsSync(pluginDest);
+  let pluginPointsElsewhere = false;
+  if (pluginLst && pluginExists && pluginLst.isSymbolicLink()) {
+    try {
+      const destReal = fs.realpathSync(pluginDest);
+      const repoReal = fs.realpathSync(repoRoot);
+      pluginPointsElsewhere =
+        os.platform() === "win32" || os.platform() === "darwin"
+          ? destReal.toLowerCase() !== repoReal.toLowerCase()
+          : destReal !== repoReal;
+    } catch {
+      pluginPointsElsewhere = true;
+    }
+  }
 
-  if (pluginLst && (!pluginExists || isTempOrNpx || options.forceCopyFallback)) {
+  if (
+    pluginLst &&
+    (!pluginExists || isTempOrNpx || options.forceCopyFallback || !pluginLst.isSymbolicLink() || pluginPointsElsewhere)
+  ) {
     await fsPromises.rm(pluginDest, { recursive: true, force: true });
     pluginLst = null;
   }
@@ -618,6 +752,15 @@ export async function runInstall(options = {}) {
 }
 
 export async function runUninstall(options = {}) {
+  const {
+    geminiConfigDir,
+    pluginDest,
+    destHook,
+    hooksJsonPath,
+    configJsonPath,
+    mcpJsonPath,
+    antigravityBinDir
+  } = resolveProfilePaths();
   const log = options.silent ? () => {} : console.log;
   const warn = options.silent ? () => {} : console.warn;
   log("Uninstalling Agy-Context-Saver...");
@@ -734,6 +877,7 @@ export async function runUninstall(options = {}) {
 }
 
 export async function runRestoreBackups(options = {}) {
+  const { hooksJsonPath, hooksBakPath, mcpJsonPath, mcpBakPath } = resolveProfilePaths();
   const log = options.silent ? () => {} : console.log;
   const warn = options.silent ? () => {} : console.warn;
   let restoredCount = 0;
@@ -766,15 +910,28 @@ export async function runRestoreBackups(options = {}) {
 }
 
 export function runStatus(options = {}) {
+  const { pluginDest, destHook, antigravityBinDir } = resolveProfilePaths();
   const log = options.silent ? () => {} : console.log;
   const existing = detectExistingInstallation();
+  const plug = existing.details.plugin;
+  const pluginNote = !plug.exists
+    ? "NOT LINKED"
+    : plug.pointsElsewhere
+      ? `REDIRECTED (${pluginDest} -> ${plug.target}; re-run agy-context setup)`
+      : plug.versionMismatch
+        ? `STALE VERSION (${plug.version} != ${PACKAGE_VERSION} at ${pluginDest}; re-run agy-context setup)`
+        : plug.isCopyFallback
+          ? `ACTIVE COPY (${pluginDest})`
+          : `ACTIVE (${pluginDest})`;
   log("Checking Agy-Context-Saver installation status...\n");
-  log(`- Native Plugin Link: ${existing.details.plugin.exists ? "ACTIVE (" + pluginDest + ")" : "NOT LINKED"}`);
+  log(`- Native Plugin Link: ${pluginNote}`);
   const hookStatusLabel = existing.details.hook.registered
     ? "ACTIVE (plugin + global hooks.json)"
-    : existing.details.hook.pluginHookRegistered
-      ? "PARTIAL (plugin hooks.json only; global /swarm hook missing)"
-      : "NOT REGISTERED";
+    : existing.details.hook.mirroredHookStale
+      ? `STALE MIRRORED HOOK (${destHook}; re-run agy-context setup)`
+      : existing.details.hook.pluginHookRegistered
+        ? "PARTIAL (plugin hooks.json only; global /swarm hook missing)"
+        : "NOT REGISTERED";
   log(
     `- Execution Governor Hook (${HOOK_KEY}): ${hookStatusLabel}${existing.details.hook.legacyHookPresent ? " (legacy 'execution-guard' in global hooks.json)" : ""}`
   );
@@ -828,9 +985,41 @@ Commands & Options:
 `);
 }
 
+function isDirectExecution() {
+  if (!process.argv[1]) return false;
+  const tryRealpath = (p) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const resolvedArg = tryRealpath(path.resolve(process.argv[1]));
+  const resolvedSelf = tryRealpath(fileURLToPath(import.meta.url));
+  if (resolvedArg === resolvedSelf) return true;
+  if (os.platform() === "win32" || os.platform() === "darwin") {
+    return resolvedArg.toLowerCase() === resolvedSelf.toLowerCase();
+  }
+  return false;
+}
+
 // Auto-run if executed directly as script
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isDirectExecution()) {
   const args = process.argv.slice(2);
+  const knownFlags = new Set(["--help", "-h", "--uninstall", "--status", "--check", "-c", "--restore-backups", "--allow-degraded"]);
+  const knownPositionals = new Set(["help", "uninstall", "status", "restore-backups"]);
+  for (const arg of args) {
+    if (arg.startsWith("-")) {
+      if (!knownFlags.has(arg)) {
+        console.error(`Error: Unknown option '${arg}'. Run 'node scripts/install-register.mjs --help' for usage.`);
+        process.exit(1);
+      }
+    } else if (!knownPositionals.has(arg)) {
+      console.error(`Error: Unknown argument '${arg}'. Run 'node scripts/install-register.mjs --help' for usage.`);
+      process.exit(1);
+    }
+  }
+
   const isHelp = args.includes("--help") || args.includes("-h") || args.includes("help");
   const isUninstall = args.includes("--uninstall") || args.includes("uninstall");
   const isStatus = args.includes("--status") || args.includes("status");
@@ -839,6 +1028,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const allowDegraded = args.includes("--allow-degraded");
 
   if (isHelp) {
+    if (isUninstall || isStatus || isCheck || isRestoreBackups || allowDegraded) {
+      console.error("Error: Conflicting flags: --help cannot be combined with operational flags.");
+      process.exit(1);
+    }
     printCliHelp();
     process.exit(0);
   }
@@ -854,12 +1047,19 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.error("Error: Conflicting flags: specify either --check or --status, not both.");
     process.exit(1);
   }
+  if (allowDegraded && (isUninstall || isStatus || isRestoreBackups)) {
+    console.error("Error: Invalid flag: --allow-degraded is only supported with setup/install or --check.");
+    process.exit(1);
+  }
 
   try {
     if (isCheck) {
       await runInstall({ checkOnly: true, allowDegraded });
     } else if (isStatus) {
-      runStatus();
+      const st = runStatus();
+      if (!st.isComplete) {
+        process.exitCode = 1;
+      }
     } else if (isUninstall) {
       await runUninstall({ restoreBackups: isRestoreBackups });
     } else if (isRestoreBackups) {
