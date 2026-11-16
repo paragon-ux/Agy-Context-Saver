@@ -234,7 +234,11 @@ export function ensureRtkConfigured(options = {}) {
 export function ensureGitLineEndingConfigured(options = {}) {
   const log = options.silent ? () => {} : console.log;
   try {
-    execSync("git config --global core.safecrlf false", { windowsHide: true, stdio: "ignore" });
+    const env = { ...process.env };
+    if (process.env.AGY_TEST_PROFILE_DIR && !env.GIT_CONFIG_GLOBAL) {
+      env.GIT_CONFIG_GLOBAL = path.join(process.env.AGY_TEST_PROFILE_DIR, ".gitconfig");
+    }
+    execSync("git config --global core.safecrlf false", { windowsHide: true, stdio: "ignore", env });
     log("✓ Standardized git core.safecrlf = false to suppress line-ending warning noise");
   } catch {}
 }

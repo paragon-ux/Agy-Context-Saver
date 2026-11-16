@@ -1,6 +1,6 @@
 # CLI & Hook Reference
 
-`Agy-Context-Saver` (`v2.0.0`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs`), paired with **RTK (`>= 1.1.0`)**.
+`Agy-Context-Saver` (`v2.0.1`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs`), paired with **RTK (`>= 1.1.0`)**.
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
@@ -17,7 +17,7 @@ Unbounded `read_file` calls on workspace files are blocked by the `PreToolUse` h
 | **Tier 2: `read_file` (full-file read)** | Files $\le 800$ lines and $\le 45\text{ KiB}$ | Pass explicit `StartLine: 1, EndLine: <TotalLines>`; partial slices of `151-800` lines are denied |
 | **Tier 3: Spillovers & task logs** | `.system_generated/steps/<step>/output.txt` & completed `tasks/<taskId>.log` | Bounded `read_file` ($\le 150\text{L}$) on step spillovers or single unchained `rtk read <path>` |
 
-Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `.gemini/config/`) pass through Safe Harbor without slice bounds.
+Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass through Safe Harbor without slice bounds.
 
 ---
 
@@ -31,7 +31,7 @@ Streams `transcript.jsonl` to report step counts, user turns, tool call counts, 
 | Flag / Argument | Value | Required | Description |
 | :--- | :---: | :---: | :--- |
 | `[<id>]` / `--id` | `<uuid>` | No* | Conversation UUID as positional arg or `--id`. (*Required when `>= 2` active `/swarm` sessions ran in the last 5 minutes.) |
-| `--file` | `<path>` | No | Explicit path to `transcript.jsonl` (disabled under `self-only` mode). |
+| `--file` | `<path>` | No | Explicit path to `transcript.jsonl` inside Antigravity's brain roots (`antigravity`, `antigravity-cli`, `antigravity-ide`; disabled under `self-only` mode outside caller's session). |
 | `--json` | `(none)` | No | Output JSON instead of Markdown. |
 
 ```bash
@@ -82,7 +82,7 @@ agy-context transcript outline 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --limit 50
 Searches conversation transcripts by regex or substring, hydrating truncated fields from `transcript_full.jsonl` automatically in `auto` mode.
 
 - `grep`, `search`, `find`: enable `--include-tools` by default so matches inside tool names and arguments are returned.
-- `tools`: defaults to `--roles assistant --field tool_args --include-tools --start 0 --end 999999` to list tool calls and arguments across a step range.
+- `tools`: defaults to `--roles assistant --field tool_args --include-tools --start 0 --end 999999 --limit 500` to list tool calls and arguments across a step range.
 
 | Flag / Argument | Value | Default | Description |
 | :--- | :---: | :---: | :--- |
@@ -92,7 +92,7 @@ Searches conversation transcripts by regex or substring, hydrating truncated fie
 | `--mode` | `auto \| compact \| full` | `auto` | `auto` scans `transcript.jsonl` and hydrates `truncated_fields` from `transcript_full.jsonl` when matched. |
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive `step_index` bounds. |
 | `--last-turns` | `<N>` | `(none)` | Restrict search to the last `N` turns (aliases: `--last`, `--tail`). |
-| `--limit` | `<N>` | `5` (`30` w/ `--summary`) | Maximum matching steps to return. |
+| `--limit` | `<N>` | `5` (`30` w/ `--summary`, up to `500` on explicit range/`tools`) | Maximum matching steps to return. |
 | `--summary` / `--outline` | `(none)` | `false` | Print 1-line timeline bullets with `[ERROR]` and `[tools: ...]` tags. |
 | `--include-tools` | `(none)` | `false` (`true` on `grep`/`search`/`find`/`tools`) | Search and display tool call names and arguments. |
 | `--full-args` | `(none)` | `false` | Print full tool call arguments without inline truncation. |
@@ -121,7 +121,7 @@ Extracts untruncated fields from `transcript_full.jsonl` for a single step, a co
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive step range bounds when `--step` is omitted. |
 | `--field` | `<spec>` | `all` | Target field: `content`, `thinking`, `tool_calls`, `tool_args`, `tool_args:<Key>`, or `all`. |
 | `--head` / `--tail` | `<N>` | `(none)` | Return only the first or last `N` lines of rendered output (aliases: `--head-lines`, `--tail-lines`). |
-| `--full` | `(none)` | `false` | Emit full untruncated step output without field clipping. |
+| `--full` | `(none)` | `false` | Accepted for CLI ergonomics (`step` already emits untruncated fields from `transcript_full.jsonl` unless `--head`/`--tail` is set). |
 | `--file` / `--json` | `<path>` / `(none)` | `(none)` | Explicit `.jsonl` file path or JSON output. |
 
 ```bash
@@ -137,7 +137,7 @@ agy-context transcript step --step 42 --full
 - **Alias:** `ls`
 - **Usage:** `agy-context transcript list [--limit <N>] [--json]`
 
-Lists recent conversation directories in `~/.gemini/antigravity/brain` containing a `.system_generated/logs/transcript.jsonl` file, sorted newest-first by modification time (`mtime`). Disabled when the caller is restricted by a `self-only` or `deny` parent access policy.
+Lists recent conversation directories across Antigravity brain roots (`~/.gemini/antigravity/brain`, `~/.gemini/antigravity-cli/brain`, `~/.gemini/antigravity-ide/brain`) containing a `.system_generated/logs/transcript.jsonl` file, sorted newest-first by modification time (`mtime`). Disabled when the caller is restricted by a `self-only` or `deny` parent access policy.
 
 ```bash
 agy-context transcript ls --limit 5
@@ -161,7 +161,7 @@ Manages parent transcript access policies for child subagents (`define_subagent`
 | `--mode` | `open \| allowlist \| self-only \| deny` | `open` | Set explicit cohort default mode. |
 | `--allow` | `<id,@roster*...>` | `(none)` | Comma-separated allowed conversation IDs or `@roster*` prefix globs (switches `open` to `allowlist`). |
 | `--deny` | `<id,@roster*...>` | `(none)` | Comma-separated denied conversation IDs or `@roster*` prefix globs. |
-| `--ttl` | `<sec>` | `3600` (1h) | Policy expiration time in seconds. |
+| `--ttl` | `<sec>` | `3600` (1h) | Policy expiration time in seconds (must be a positive integer). |
 | `--json` | `(none)` | `false` | Output JSON. |
 
 See [Lifecycle Governance](governance.md#parent-transcript-access-control) for first-line launch directives (`[agy-transcript-access: deny|self-only|allow]`) and the 5-tier precedence rules.
@@ -187,7 +187,7 @@ Checking Agy-Context-Saver installation status...
 - Execution Governor Hook (agy-context-saver): ACTIVE (plugin + global hooks.json)
 - CLI Shim (agy-context): INSTALLED (~/.gemini/antigravity/bin)
 - RTK Command Optimizer (>= 1.1.0): INSTALLED (rtk 1.1.0)
-- Transcript Access Policy: OPEN (default - all sessions permitted)
 - MCP Cleanup: CLEAN (0 duplicate MCP configs/schemas)
+- Transcript Access Policy: OPEN (default - all sessions permitted)
 Overall Status: HEALTHY & ACTIVE
 ```

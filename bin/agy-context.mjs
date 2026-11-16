@@ -16,6 +16,7 @@ import {
   getStepDetail,
   checkContextHealth,
   getBrainDir,
+  getBrainDirs,
   manageTranscriptAccessPolicy,
   verifyTranscriptCoreAccess,
   consumeTranscriptAccessGrant
@@ -277,6 +278,7 @@ async function handleTranscriptCommand(argv) {
       if (!opts.roles) opts.roles = "assistant";
       if (!opts.field) opts.field = "tool_args";
       opts["include-tools"] = true;
+      if (opts.limit === undefined) opts.limit = "500";
       if (opts.start === undefined && opts.last === undefined && opts["last-turns"] === undefined && opts.tail === undefined) {
         opts.start = "0";
         if (opts.end === undefined) opts.end = "999999";
@@ -435,32 +437,41 @@ async function handleTranscriptCommand(argv) {
     if (!accessCheck.allowed) {
       emitError(accessCheck.error, Boolean(opts.json));
     }
-    const brainDir = getBrainDir();
-    const limit = opts.limit !== undefined ? Math.max(1, Number(opts.limit) || 10) : 10;
-    const entries = [];
-    if (brainDir && fs.existsSync(brainDir)) {
-      for (const name of fs.readdirSync(brainDir)) {
-        const convDir = path.join(brainDir, name);
+    const brainDirs = getBrainDirs();
+    const parsedLimit = parseOptionalInt(opts.limit, "limit");
+    if (parsedLimit !== undefined && parsedLimit <= 0) {
+      throw new Error(`Flag '--limit' must be a positive integer (received: '${opts.limit}').`);
+    }
+    const limit = parsedLimit ?? 10;
+    const byId = new Map();
+    for (const dir of brainDirs) {
+      if (!dir || !fs.existsSync(dir)) continue;
+      for (const name of fs.readdirSync(dir)) {
+        const convDir = path.join(dir, name);
         const transcriptFile = path.join(convDir, ".system_generated", "logs", "transcript.jsonl");
         if (fs.existsSync(transcriptFile)) {
           try {
             const stat = fs.statSync(transcriptFile);
-            entries.push({
-              conversationId: name,
-              updatedAt: stat.mtime.toISOString(),
-              mtimeMs: stat.mtimeMs,
-              bytes: stat.size
-            });
+            const prev = byId.get(name);
+            if (!prev || stat.mtimeMs > prev.mtimeMs) {
+              byId.set(name, {
+                conversationId: name,
+                updatedAt: stat.mtime.toISOString(),
+                mtimeMs: stat.mtimeMs,
+                bytes: stat.size
+              });
+            }
           } catch {}
         }
       }
-      entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
     }
+    const entries = Array.from(byId.values()).sort((a, b) => b.mtimeMs - a.mtimeMs);
     const sliced = entries.slice(0, limit).map(({ mtimeMs, ...restItem }) => restItem);
+    const dirLabel = brainDirs.length === 1 ? brainDirs[0] : brainDirs.join(", ");
     if (opts.json) {
       console.log(JSON.stringify({ total: entries.length, conversations: sliced }, null, 2));
     } else {
-      const lines = [`Recent Conversations (${sliced.length} of ${entries.length} in ${brainDir}):`];
+      const lines = [`Recent Conversations (${sliced.length} of ${entries.length} in ${dirLabel}):`];
       for (const item of sliced) {
         lines.push(`- ${item.conversationId} | updated: ${item.updatedAt} | ${(item.bytes / 1024).toFixed(1)} KB`);
       }
@@ -561,6 +572,9 @@ async function main() {
     const status = runStatus({ silent: Boolean(opts.json) });
     if (opts.json) {
       console.log(JSON.stringify(status, null, 2));
+    }
+    if (!status.isComplete) {
+      process.exitCode = 1;
     }
     return;
   }

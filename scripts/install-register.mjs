@@ -505,7 +505,18 @@ export async function runInstall(options = {}) {
     return ![".git", "node_modules", ".venv", "scratch", "site"].includes(topSegment);
   };
 
-  if (!fs.existsSync(pluginDest)) {
+  let pluginLst = null;
+  try {
+    pluginLst = fs.lstatSync(pluginDest);
+  } catch {}
+  const pluginExists = fs.existsSync(pluginDest);
+
+  if (pluginLst && (!pluginExists || isTempOrNpx || options.forceCopyFallback)) {
+    await fsPromises.rm(pluginDest, { recursive: true, force: true });
+    pluginLst = null;
+  }
+
+  if (!pluginLst) {
     if (isTempOrNpx || options.forceCopyFallback) {
       await fsPromises.cp(repoRoot, pluginDest, { recursive: true, filter: copyFilter });
       log(`[OK] Native Antigravity Plugin installed to: ${pluginDest}`);
@@ -520,11 +531,6 @@ export async function runInstall(options = {}) {
       }
     }
   } else {
-    if (isTempOrNpx || options.forceCopyFallback) {
-      try {
-        await fsPromises.cp(repoRoot, pluginDest, { recursive: true, filter: copyFilter });
-      } catch {}
-    }
     log(`[OK] Native Antigravity Plugin verified: ${pluginDest}`);
   }
 
@@ -682,6 +688,26 @@ export async function runUninstall(options = {}) {
           warn(`[WARN] Could not remove CLI shim ${shimPath}: ${err.message}`);
         }
       }
+    }
+  }
+
+  // 6b. Remove managed Windows node.cmd wrapper (created by install.ps1) and restore backup if present
+  const nodeCmdPath = path.join(geminiConfigDir, "node.cmd");
+  const nodeCmdBakPath = path.join(geminiConfigDir, "node.cmd.bak");
+  if (fs.existsSync(nodeCmdPath)) {
+    try {
+      const content = fs.readFileSync(nodeCmdPath, "utf-8");
+      if (content.includes("agy-context-saver-managed")) {
+        await fsPromises.unlink(nodeCmdPath);
+        if (fs.existsSync(nodeCmdBakPath)) {
+          await fsPromises.rename(nodeCmdBakPath, nodeCmdPath);
+          log(`[OK] Restored previous node.cmd from backup: ${nodeCmdBakPath}`);
+        } else {
+          log(`[OK] Removed managed node.cmd wrapper: ${nodeCmdPath}`);
+        }
+      }
+    } catch (err) {
+      warn(`[WARN] Could not clean managed node.cmd: ${err.message}`);
     }
   }
 

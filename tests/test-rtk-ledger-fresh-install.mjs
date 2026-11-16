@@ -28,11 +28,17 @@ console.log("✓ All 5 RTK v1.1.0 platform release assets have pinned 64-char SH
 console.log("--- 1. RTK-01: Fresh Install Config Standardization ---");
 const tempProfile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-rtk-fresh-test-"));
 process.env.AGY_TEST_PROFILE_DIR = tempProfile;
+delete process.env.GIT_CONFIG_GLOBAL;
+const hostGitConfig = path.join(os.homedir(), ".gitconfig");
+const hostGitBefore = fs.existsSync(hostGitConfig) ? fs.readFileSync(hostGitConfig, "utf-8") : null;
 
 const configPath = getRtkConfigPath();
 assert.equal(fs.existsSync(configPath), false, "Fresh profile must not have config.toml initially");
 
 ensureRtkConfigured({ silent: true });
+
+const hostGitAfter = fs.existsSync(hostGitConfig) ? fs.readFileSync(hostGitConfig, "utf-8") : null;
+assert.equal(hostGitAfter, hostGitBefore, "Test run must never mutate host ~/.gitconfig");
 
 assert.equal(fs.existsSync(configPath), true, `config.toml must be created at ${configPath}`);
 const freshContent = fs.readFileSync(configPath, "utf-8");

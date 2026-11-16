@@ -7,13 +7,15 @@ import { fileURLToPath } from "node:url";
 import {
   CircularRingBuffer,
   cleanMessageContent,
+  extractConvId,
   readTranscript,
   queryTranscript,
   getStepDetail,
   checkContextHealth,
   getRequiredBackoffSeconds,
   manageTranscriptAccessPolicy,
-  recordTranscriptHookGrant
+  recordTranscriptHookGrant,
+  consumeTranscriptAccessGrant
 } from "../lib/transcript-core.mjs";
 import { createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
 
@@ -506,7 +508,7 @@ try {
     const blockedSpoofHealth = await checkContextHealth({ transcriptPath: spoofedExternalFile });
     assert.equal(blockedSpoofHealth.isError, true, "checkContextHealth with external transcriptPath must fail under active restriction (Defect 1A)");
 
-    //6. Parent resets policy back to OPEN
+    // 6. Parent resets policy back to OPEN
     recordTranscriptHookGrant({ callerConvId: "parent-owner", subcommand: "access", mode: "open", isMutation: true });
     const unlockRes = runCli(["transcript", "access", "--on", "--json"]);
     assert.equal(unlockRes.status, 0, "Authorized parent transcript access --on must succeed");
@@ -514,7 +516,188 @@ try {
     assert.equal(unlockJson.mode, "open");
     assert.equal(unlockJson.active, false);
 
-    console.log("✓ Parent policy CLI, runtime hook-grant verification, self-only core containment, and anti-spoofing verified");
+    // 7. Concurrent atomic grants (ACS-ARCH-001) + terminal operator exemption
+    recordTranscriptHookGrant({ callerConvId: "parent-owner", subcommand: "access", mode: "open", isMutation: true });
+    manageTranscriptAccessPolicy({ callerConvId: "parent-owner", mode: "deny" });
+    try {
+      recordTranscriptHookGrant({ callerConvId: "allowlisted-worker", subcommand: "read", targetConvId: convTarget, mode: "open" });
+      recordTranscriptHookGrant({ callerConvId: "allowlisted-worker", subcommand: "query", targetConvId: "conv-rich-forensic", mode: "open" });
+      const [gRead, gQuery] = await Promise.all([
+        readTranscript({ conversationId: convTarget, lastTurns: 1 }),
+        queryTranscript({ conversationId: "conv-rich-forensic", query: "npm", includeToolCalls: true })
+      ]);
+      assert.ok(!gRead.isError, "Concurrent atomic grant #1 (read) must succeed");
+      assert.ok(!gQuery.isError, "Concurrent atomic grant #2 (query) must succeed");
+
+      // External/unrelated session must NOT be locked out merely by another session's launch-directive session file (ACS-ARCH-001)
+      recordTranscriptHookGrant({ callerConvId: "parent-owner", subcommand: "access", mode: "open", isMutation: true });
+      manageTranscriptAccessPolicy({ callerConvId: "parent-owner", mode: "open" });
+      const { getStateDir } = await import("../scripts/state-dir.mjs");
+      const launchSessionFile = path.join(getStateDir(), "agy-session-launch-child-iso.json");
+      fs.writeFileSync(launchSessionFile, JSON.stringify({ pollCount: 0, denials: 0, lineage: { launchDirective: "deny" } }));
+      try {
+        const externalSessionRead = await readTranscript({ conversationId: convTarget, lastTurns: 1 });
+        assert.ok(!externalSessionRead.isError, "Launch-directive lock on another session must not block unrelated callers (ACS-ARCH-001)");
+      } finally {
+        try { fs.unlinkSync(launchSessionFile); } catch {}
+      }
+    } finally {
+      recordTranscriptHookGrant({ callerConvId: "parent-owner", subcommand: "access", mode: "open", isMutation: true });
+      manageTranscriptAccessPolicy({ callerConvId: "parent-owner", mode: "open" });
+    }
+
+    // 8. ACS-RUN-008/009/010 & ACS-ARCH-002 regressions
+    const manyToolsConv = "conv-many-tools";
+    const manyLogs = path.join(brainDir, manyToolsConv, ".system_generated", "logs");
+    fs.mkdirSync(manyLogs, { recursive: true });
+    const manyLines = [
+      JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "Turn 0 user prompt", created_at: "2026-11-16T00:00:00Z" }),
+      JSON.stringify({ step_index: 1, type: "PLANNER_RESPONSE", content: "Turn 0 reply", created_at: "2026-11-16T00:00:01Z" })
+    ];
+    for (let s = 2; s < 562; s++) {
+      manyLines.push(JSON.stringify({
+        step_index: s,
+        type: "PLANNER_RESPONSE",
+        tool_calls: [{ name: s === 561 ? "schedule" : "run_command", args: s === 561 ? { DurationSeconds: 10, Prompt: "Check swarm status" } : { CommandLine: `echo step-${s}` } }],
+        created_at: "2026-11-16T00:00:02Z"
+      }));
+    }
+    fs.writeFileSync(path.join(manyLogs, "transcript.jsonl"), manyLines.join("\n") + "\n");
+
+    const toolsCli = runCli(["transcript", "tools", "--id", manyToolsConv]);
+    assert.equal(toolsCli.status, 0, toolsCli.stderr);
+    const shownMatch = toolsCli.stdout.match(/Matched Steps:\s+(\d+)\s+\(showing\s+(\d+)\)/);
+    assert.ok(shownMatch && Number(shownMatch[2]) > 50, `tools must exceed old 50-item ceiling (got: ${shownMatch?.[0]})`);
+    assert.match(toolsCli.stdout, /24 KB safety ceiling|Truncated:/i);
+
+    const limitTruncCli = runCli(["transcript", "query", "--id", manyToolsConv, "--roles", "assistant", "--summary", "--limit", "75"]);
+    assert.equal(limitTruncCli.status, 0, limitTruncCli.stderr);
+    assert.match(limitTruncCli.stdout, /Matched Steps:\s+561\s+\(showing 75\b/);
+    assert.match(limitTruncCli.stdout, /Truncated: showing last 75 of 561 matching steps/);
+
+    const turnConv = "conv-single-turn-anchor";
+    const turnLogs = path.join(brainDir, turnConv, ".system_generated", "logs");
+    fs.mkdirSync(turnLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(turnLogs, "transcript.jsonl"),
+      [
+        JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "Turn 0 user prompt", created_at: "2026-11-16T00:00:00Z" }),
+        JSON.stringify({ step_index: 1, type: "PLANNER_RESPONSE", content: "Step 1 work", created_at: "2026-11-16T00:00:01Z" }),
+        JSON.stringify({ step_index: 2, type: "PLANNER_RESPONSE", content: "Step 2 work", created_at: "2026-11-16T00:00:02Z" }),
+        JSON.stringify({ step_index: 3, type: "PLANNER_RESPONSE", content: "Step 3 work", created_at: "2026-11-16T00:00:03Z" })
+      ].join("\n") + "\n"
+    );
+    const lastTurnRead = await readTranscript({ conversationId: turnConv, lastTurns: 1 });
+    assert.ok(!lastTurnRead.isError);
+    assert.match(lastTurnRead.text, /Turn 0 user prompt/, "read --last-turns 1 must anchor to latest USER_INPUT even with multiple PLANNER_RESPONSE steps (ACS-RUN-009)");
+
+    const lastTurnQuery = await queryTranscript({
+      conversationId: turnConv,
+      lastTurns: 1,
+      query: "Step 1 work"
+    });
+    assert.ok(!lastTurnQuery.isError);
+    assert.equal(
+      lastTurnQuery.matchedCount,
+      1,
+      "query --last-turns 1 must anchor on USER_INPUT (with literal prefilter not skipping USER_INPUT) matching readTranscript (ACS-RUN-009)"
+    );
+    const lastTurnQueryEmpty = await queryTranscript({
+      conversationId: turnConv,
+      lastTurns: 1
+    });
+    assert.ok(!lastTurnQueryEmpty.isError);
+    assert.equal(
+      lastTurnQueryEmpty.matchedCount,
+      4,
+      "query --last-turns 1 without literal filter must include USER_INPUT and all 3 PLANNER_RESPONSE steps (ACS-RUN-009)"
+    );
+
+    const healthSched = await checkContextHealth({ conversationId: manyToolsConv });
+    assert.ok(!healthSched.isError);
+    assert.equal(healthSched.metrics.pollingViolations, 1, "checkContextHealth must count swarm poll schedule() events cleanly (ACS-RUN-009)");
+
+    const badTtl = runCli(["transcript", "access", "--off", "--ttl", "0"]);
+    assert.notEqual(badTtl.status, 0, "--ttl 0 must be rejected (ACS-RUN-010)");
+    const badListLimit = runCli(["transcript", "list", "--limit", "abc"]);
+    assert.notEqual(badListLimit.status, 0, "list --limit abc must be rejected (ACS-RUN-010)");
+
+    // Multi-product brain discovery without AGY_BRAIN_DIR override
+    const altBrain = path.join(tempHome, ".gemini", "antigravity-cli", "brain");
+    const altConv = "cli-product-conv";
+    fs.mkdirSync(path.join(altBrain, altConv, ".system_generated", "logs"), { recursive: true });
+    fs.writeFileSync(
+      path.join(altBrain, altConv, ".system_generated", "logs", "transcript.jsonl"),
+      JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "CLI product prompt", created_at: "2026-11-16T00:01:00Z" }) + "\n"
+    );
+    const multiEnv = { ...testEnv };
+    delete multiEnv.AGY_BRAIN_DIR;
+    const multiList = runCli(["transcript", "list", "--limit", "50", "--json"], multiEnv);
+    assert.equal(multiList.status, 0, multiList.stderr);
+    const listIds = JSON.parse(multiList.stdout).conversations.map((c) => c.conversationId);
+    assert.ok(listIds.includes(altConv), "transcript list must aggregate antigravity-cli/brain (ACS-ARCH-002)");
+
+    const prevBrainEnv = process.env.AGY_BRAIN_DIR;
+    delete process.env.AGY_BRAIN_DIR;
+    try {
+      const cliTrFile = path.join(altBrain, altConv, ".system_generated", "logs", "transcript.jsonl");
+      assert.equal(
+        extractConvId(cliTrFile, { strictBrainContainment: true }),
+        altConv,
+        "extractConvId({ strictBrainContainment: true }) must recognize ~/.gemini/antigravity-cli/brain paths (ACS-ARCH-002)"
+      );
+      assert.equal(
+        extractConvId(path.join(tempHome, "outside", altConv, "transcript.jsonl"), { strictBrainContainment: true }),
+        null,
+        "extractConvId({ strictBrainContainment: true }) must return null outside brain roots"
+      );
+
+      // Self-only caller on antigravity-cli/brain using --file must succeed via hook grant + extractConvId
+      manageTranscriptAccessPolicy({ callerConvId: "owner-cli", mode: "self-only" });
+      recordTranscriptHookGrant({ callerConvId: altConv, subcommand: "read", targetConvId: altConv, mode: "self-only" });
+      const prevEnvConv = process.env.GEMINI_CONVERSATION_ID;
+      process.env.GEMINI_CONVERSATION_ID = altConv;
+      try {
+        const selfCliRes = await readTranscript({ filePath: cliTrFile });
+        assert.ok(!selfCliRes.isError, `self-only read --file on antigravity-cli/brain failed: ${selfCliRes.error}`);
+        assert.match(selfCliRes.text, /CLI product prompt/);
+      } finally {
+        if (prevEnvConv !== undefined) process.env.GEMINI_CONVERSATION_ID = prevEnvConv;
+        else delete process.env.GEMINI_CONVERSATION_ID;
+      }
+
+      // Concurrent grant isolation across separate processes when GEMINI_CONVERSATION_ID is unset
+      const grantA = { callerConvId: "concurrent-a", subcommand: "read", targetConvId: turnConv, mode: "open" };
+      const grantB = { callerConvId: "concurrent-b", subcommand: "read", targetConvId: manyToolsConv, mode: "open" };
+      const spawnCore = (code, extraEnv = {}) =>
+        spawnSync(process.execPath, ["--input-type=module", "-e", code], {
+          cwd: path.resolve(__dirname, ".."),
+          encoding: "utf-8",
+          env: { ...multiEnv, ...extraEnv }
+        });
+      const recA = spawnCore(`import { recordTranscriptHookGrant } from "./lib/transcript-core.mjs"; recordTranscriptHookGrant(${JSON.stringify(grantA)});`);
+      const recB = spawnCore(`import { recordTranscriptHookGrant } from "./lib/transcript-core.mjs"; recordTranscriptHookGrant(${JSON.stringify(grantB)});`);
+      assert.equal(recA.status, 0, recA.stderr);
+      assert.equal(recB.status, 0, recB.stderr);
+
+      const noEnvConsumeEnv = { ...multiEnv };
+      delete noEnvConsumeEnv.GEMINI_CONVERSATION_ID;
+      const consumeWithTwo = spawnCore(`import { consumeTranscriptAccessGrant } from "./lib/transcript-core.mjs"; consumeTranscriptAccessGrant();`, noEnvConsumeEnv);
+      assert.equal(consumeWithTwo.status, 0, consumeWithTwo.stderr);
+
+      const afterPartialConsume = runCli(["transcript", "health", "--id", turnConv], noEnvConsumeEnv);
+      assert.equal(afterPartialConsume.status, 1, "mismatched health without health grant must fail rather than stealing concurrent read grants");
+
+      // Verify per-caller reads succeed using their own GEMINI_CONVERSATION_ID in separate processes
+      const subReadA = runCli(["transcript", "read", "--id", turnConv, "--last-turns", "1"], { ...multiEnv, GEMINI_CONVERSATION_ID: "concurrent-a" });
+      const subReadB = runCli(["transcript", "read", "--id", manyToolsConv, "--last-turns", "1"], { ...multiEnv, GEMINI_CONVERSATION_ID: "concurrent-b" });
+      assert.equal(subReadA.status, 0, `concurrent-a grant should remain intact: ${subReadA.stderr}`);
+      assert.equal(subReadB.status, 0, `concurrent-b grant should remain intact: ${subReadB.stderr}`);
+    } finally {
+      if (prevBrainEnv !== undefined) process.env.AGY_BRAIN_DIR = prevBrainEnv;
+    }
+
+    console.log("✓ Parent policy CLI, runtime hook-grant verification, atomic concurrent grants, and ACS-RUN-008..010 + Wave 2 regressions verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

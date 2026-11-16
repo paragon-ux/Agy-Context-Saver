@@ -959,6 +959,248 @@ console.log("\n--- Group E: Task Polling Backoff, Watchdog & Benchmark Mutation 
   console.log("✓ 5-Tier Precedence, @roster* globs, self-only rewriting, Stale-Lock immunity, and all 6 Red-Team bypass vectors verified");
 }
 
+// ============================================================================
+// GROUP H: Hardening Regressions (ACS-RUN-001..006, ACS-ARCH-002)
+// ============================================================================
+console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation & Edge Cases ---");
+{
+  resetState();
+  const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-hook-cwd-"));
+  const cliProfile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-cli-profile-"));
+  try {
+    // ACS-RUN-001: Relative Path resolved against payload.cwd for full-file audit
+    fs.writeFileSync(path.join(wsDir, "small.js"), "line1\nline2\nline3\nline4\n", "utf-8");
+    const relCwdAudit = runHook({
+      cwd: wsDir,
+      toolCall: { name: "read_file", args: { Path: "small.js", StartLine: 1, EndLine: 4 } }
+    });
+    assert.equal(relCwdAudit.decision, "allow", "Relative read_file audit 1..TotalLines must resolve against payload.cwd");
+
+    // ACS-RUN-002: 2>/dev/null on plugin script command must NOT false-trigger governance mutation guard
+    const pluginDiagCmd = runHook({
+      toolCall: {
+        name: "run_command",
+        args: { CommandLine: "node ~/.gemini/config/plugins/agy-context-saver/scripts/diagnose.mjs 2>/dev/null" }
+      }
+    });
+    assert.equal(pluginDiagCmd.decision, "allow", "Plugin command with 2>/dev/null must be allowed");
+    const nestedRedirAttack = runHook({
+      toolCall: {
+        name: "run_command",
+        args: { CommandLine: 'bash -c "echo pwn > ~/.gemini/config/hooks.json"' }
+      }
+    });
+    assert.equal(nestedRedirAttack.decision, "deny", "Nested bash -c redirect into hooks.json must still be DENIED");
+
+    // ACS-ARCH-002 + ACS-RUN-006: Multi-product antigravity-cli brain root & swarm_view/ narrator safety
+    const cliBrainRoot = path.join(cliProfile, ".gemini", "antigravity-cli", "brain");
+    const cliConv = "cli-conv-1";
+    const cliLogs = path.join(cliBrainRoot, cliConv, ".system_generated", "logs");
+    fs.mkdirSync(cliLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(cliLogs, "transcript.jsonl"),
+      JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "CLI root session" }) + "\n"
+    );
+    const cliEnv = { ...process.env, AGY_TEST_PROFILE_DIR: cliProfile };
+    delete cliEnv.AGY_BRAIN_DIR;
+    const cliFileRead = runHook(
+      {
+        conversationId: cliConv,
+        transcriptPath: path.join(cliLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript read --file "${path.join(cliLogs, "transcript.jsonl")}"` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(cliFileRead.decision, "allow", "--file inside ~/.gemini/antigravity-cli/brain must be allowed");
+
+    const swarmViewWrite = runHook({
+      toolCall: {
+        name: "run_command",
+        args: { CommandLine: "cp /tmp/out.json /home/user/.gemini/antigravity/brain/conv-1/swarm_view/board.tmp" }
+      }
+    });
+    assert.equal(swarmViewWrite.decision, "allow", "Narrator writes inside swarm_view/ must be allowed (ACS-RUN-006)");
+
+    // ACS-RUN-003: Step 0 > 16 KiB must still extract parentConvId, rosterName & launchDirective
+    const brainH = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain");
+    const writeTr = (id, steps) => {
+      const dir = path.join(brainH, id, ".system_generated", "logs");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "transcript.jsonl"), steps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+    };
+    const pA = "parent-swarm-a";
+    const pB = "parent-swarm-b";
+    const bigChildA = "big-step0-child-a";
+    const subL1 = "subagent-l1-a";
+    const grandL2 = "leaf-l2-under-l1";
+    const auditB = "audit-b-isolated";
+
+    writeTr(pA, [{ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "Swarm A" }]);
+    writeTr(pB, [{ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "Swarm B" }]);
+    writeTr(bigChildA, [{
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-16T00:00:00Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=${"X".repeat(22000)}\nYour assignment (recorded on the board as #1 for @big-worker):\n[agy-transcript-access: deny]\nDo work\n</SYSTEM_MESSAGE>`
+    }]);
+    writeTr(subL1, [{
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `[Message] timestamp=2026-11-16T00:00:01Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=Lead task`
+    }]);
+    writeTr(grandL2, [{
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `[Message] timestamp=2026-11-16T00:00:02Z sender=${subL1} priority=MESSAGE_PRIORITY_HIGH content=Leaf task under L1`
+    }]);
+    writeTr(auditB, [{
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `[Message] timestamp=2026-11-16T00:00:03Z sender=${pB} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #1 for @audit-swarmB):\nAudit B`
+    }]);
+
+    assert.equal(
+      runHook({ conversationId: bigChildA, toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } } }).decision,
+      "deny",
+      "Child with >20 KiB Step 0 before trailing assignment & [agy-transcript-access: deny] must still be locked (ACS-RUN-003)"
+    );
+
+    // ACS-RUN-004: Cross-swarm @roster* isolation + 2-hop ancestor lock inheritance
+    runHook({ conversationId: pA, toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --allow @audit-*" } } });
+    spawnSync(process.execPath, [path.resolve(repoRoot, "bin/agy-context.mjs"), "transcript", "access", "--allow", "@audit-*"], { encoding: "utf-8", env: process.env });
+    runHook({ conversationId: pB, toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --off" } } });
+    spawnSync(process.execPath, [path.resolve(repoRoot, "bin/agy-context.mjs"), "transcript", "access", "--off"], { encoding: "utf-8", env: process.env });
+
+    assert.equal(
+      runHook({ conversationId: auditB, toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${pB}` } } }).decision,
+      "deny",
+      "Unrelated Swarm B @audit-swarmB must NOT inherit Swarm A's --allow @audit-* policy (ACS-RUN-004)"
+    );
+    assert.equal(
+      runHook({ conversationId: grandL2, toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${pA}` } } }).decision,
+      "deny",
+      "2-hop grandchild under parentA must inherit parentA's restrict policy (ACS-RUN-004)"
+    );
+
+    // ACS-RUN-005: `query current` in self-only mode keeps query term 'current' and appends --id <self>
+    const selfChildH = "self-child-query-current";
+    writeTr(selfChildH, [{
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `[Message] timestamp=2026-11-16T00:00:04Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: self-only]\nTask`
+    }]);
+    const selfQueryCurrent = runHook({
+      conversationId: selfChildH,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript query current" } }
+    });
+    assert.equal(selfQueryCurrent.decision, "allow");
+    assert.equal(
+      selfQueryCurrent.overwrite?.CommandLine,
+      `agy-context transcript query current --id ${selfChildH}`,
+      "query current must keep 'current' as pattern and append --id <self> (ACS-RUN-005)"
+    );
+
+    // Wave 2 regressions: restricted child read current --json, unmodified repo tests, git diff scripts/install-register.mjs, lifecycle script deny, antigravity-cli self-only, swarm-poll circuit breaker
+    const selfReadCurrentJson = runHook({
+      conversationId: selfChildH,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript read current --json" } }
+    });
+    assert.equal(selfReadCurrentJson.decision, "allow");
+    assert.equal(
+      selfReadCurrentJson.overwrite?.CommandLine,
+      `agy-context transcript read --id ${selfChildH} --json`,
+      "read current --json under self-only must rewrite positional current before trailing flags (ACS-RUN-005)"
+    );
+
+    const restrictedGitDiffInstall = runHook({
+      conversationId: bigChildA,
+      cwd: repoRoot,
+      toolCall: { name: "run_command", args: { CommandLine: "git diff -- scripts/install-register.mjs" } }
+    });
+    assert.equal(
+      restrictedGitDiffInstall.decision,
+      "allow",
+      "Restricted child running git diff on scripts/install-register.mjs must be allowed (no false install-verb or bare basename block)"
+    );
+
+    const restrictedRunRepoTest = runHook({
+      conversationId: bigChildA,
+      cwd: repoRoot,
+      toolCall: { name: "run_command", args: { CommandLine: `node "${path.resolve(repoRoot, "tests/test-hook.mjs")}"` } }
+    });
+    assert.equal(
+      restrictedRunRepoTest.decision,
+      "allow",
+      "Restricted child executing unmodified repo test suite must be allowed"
+    );
+
+    const restrictedRunInstall = runHook({
+      conversationId: bigChildA,
+      cwd: repoRoot,
+      toolCall: { name: "run_command", args: { CommandLine: `node "${path.resolve(repoRoot, "scripts/install-register.mjs")}" --check` } }
+    });
+    assert.equal(
+      restrictedRunInstall.decision,
+      "deny",
+      "Restricted child executing Agy-Context-Saver scripts/install-register.mjs must still be denied"
+    );
+
+    const cliRestricted = "cli-self-child";
+    const cliRestrictedLogs = path.join(cliBrainRoot, cliRestricted, ".system_generated", "logs");
+    fs.mkdirSync(cliRestrictedLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(cliRestrictedLogs, "transcript.jsonl"),
+      JSON.stringify({
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:05Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: self-only]\nCLI task`
+      }) + "\n"
+    );
+    const cliSelfFileRead = runHook(
+      {
+        conversationId: cliRestricted,
+        transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript read --file "${path.join(cliRestrictedLogs, "transcript.jsonl")}"` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(
+      cliSelfFileRead.decision,
+      "allow",
+      "self-only caller passing own --file under antigravity-cli/brain must resolve extractConvId via getBrainDirs (ACS-ARCH-002)"
+    );
+
+    const pollBreakerConv = "swarm-poll-breaker";
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const schedRes = runHook({
+        conversationId: pollBreakerConv,
+        toolCall: { name: "schedule", args: { DurationSeconds: 45, Prompt: "Poll swarm board status" } }
+      });
+      assert.equal(
+        schedRes.decision,
+        attempt < 5 ? "deny" : "force_ask",
+        `Swarm schedule polling attempt #${attempt} must trigger ${attempt < 5 ? "deny" : "force_ask circuit breaker"}`
+      );
+    }
+
+    console.log("✓ Group H regression checks passed (payload.cwd, 2>/dev/null, antigravity-cli, swarm_view, Step0>16KiB, cross-swarm isolation, query current, Wave 2 regressions)");
+  } finally {
+    fs.rmSync(wsDir, { recursive: true, force: true });
+    fs.rmSync(cliProfile, { recursive: true, force: true });
+  }
+}
+
 hermetic.cleanup();
 console.log("\n=================================================");
 console.log("ALL 2.0 PRETOOLUSE HOOK GOVERNANCE TESTS PASSED!");

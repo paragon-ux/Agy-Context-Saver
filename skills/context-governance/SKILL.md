@@ -12,7 +12,7 @@ description: >-
 ## Architectural Boundary
 
 - **RTK (`>= 1.1.0`)**: Rewrites shell commands (`rtk hook antigravity`), compresses command output, and provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`, `rtk read`, `rtk err`, `rtk summary`).
-- **Agy-Context-Saver (`v2.0.0`)**: Enforces Reactive Wakeup backoff, bounds `read_file` slices, protects `.system_generated/` and the state directory, and exposes `agy-context transcript`.
+- **Agy-Context-Saver (`v2.0.1`)**: Enforces Reactive Wakeup backoff, bounds `read_file` slices, protects `.system_generated/` and the state directory, and exposes `agy-context transcript`.
 
 ---
 
@@ -31,7 +31,7 @@ Unbounded full-file `read_file` calls on workspace files are blocked by the `Pre
    - `rtk err <cmd>`: Runs a command and prints only errors and warnings.
    - `rtk summary <cmd>`: Runs a command and prints a 2-line summary.
 
-*Safe harbor*: Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `.gemini/config/`) may be read via `read_file` without slice bounds, and `.system_generated/steps/<n>/output.txt` supports bounded `read_file` ($\le 150$ lines).
+*Safe harbor*: Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) may be read via `read_file` without slice bounds, and `.system_generated/steps/<n>/output.txt` supports bounded `read_file` ($\le 150$ lines).
 
 ---
 
@@ -68,7 +68,7 @@ agy-context transcript step [<N|N,M|N-M|N..M>] [<id>] [--id <conv>] (--step <N|N
 ```
 
 ### 5. `agy-context transcript list` (alias: `ls`)
-Lists recent conversations in the Antigravity brain directory sorted by modification time.
+Lists recent conversations across Antigravity's brain roots (`~/.gemini/antigravity/brain`, `~/.gemini/antigravity-cli/brain`, `~/.gemini/antigravity-ide/brain`) sorted by modification time.
 ```bash
 agy-context transcript list [--limit N] [--json]
 ```
