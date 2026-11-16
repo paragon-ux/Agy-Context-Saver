@@ -61,7 +61,7 @@ Transcript Commands:
   agy-context transcript list   [--limit N] [--parent <id>] [--lineage] [--json]
   agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out|--output <path>] [--file <path>] [--json]
   agy-context transcript access [--status | --off | --on | --reset | --self-only | --mode <open|allowlist|self-only|deny> | --allow <id,@roster*...> | --deny <id,@roster*...> | --ttl <sec>] [--json]
-  Aliases: grep/search/find -> query | stats/info -> health | tools -> query --roles assistant --field tool_args | outline/summary -> query --summary --include-tools | ls -> list | policy -> access
+  Aliases: grep/search/find -> query | stats/info -> health | tools -> query --roles assistant --field tool_args | outline/summary -> query --summary --include-tools | ls -> list | dump -> export | policy -> access
 
 Lifecycle Commands:
   agy-context status            [--json]
@@ -186,7 +186,7 @@ function validateExplicitFileFlag(fileArg) {
 }
 
 function isInsideDirCaseAware(targetPath, baseDir) {
-  const norm = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
+  const norm = (p) => (process.platform === "win32" || process.platform === "darwin" ? p.toLowerCase() : p);
   const rel = path.relative(norm(baseDir), norm(targetPath));
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }

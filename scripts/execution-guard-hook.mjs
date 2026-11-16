@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.0.0)
+ * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.0.1)
  *
  * Closed Execution Topology & Governance Invariants:
  * 1. RTK Transparent Command Optimization:
@@ -19,7 +19,7 @@
  *    - Quote/heredoc-aware shell parser (`splitShellSegments`) protects `.system_generated/`
  *      without false-blocking heredoc prose, `echo`/`printf`, or literal search patterns.
  *    - Allows strictly single unchained `rtk read <spillover|completed task log>` and
- *      `agy-context transcript (read|query|step|health) ...` within `<brainDir>`.
+ *      `agy-context transcript (read|query|step|health|list|export|access) ...` within `<brainDir>`.
  * 4. Closed Lifecycle Governance (LH-03, LH-04, LH-05, LH-06):
  *    - Session-wide ledger with proportional backoff and 5-denial `force_ask` circuit breaker.
  * 5. Benchmark & Evaluator Mutation Protection (LH-09):
@@ -2848,10 +2848,14 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
       const segTokens = tokenizeShellWords(seg.text || "");
       const inspectScriptToken = (rawTok) => {
         const tok = String(rawTok || "").trim();
-        if (!tok || isAllowedAgyContextScriptPath(tok)) return;
+        if (!tok) return false;
+        if (isAllowedAgyContextScriptPath(tok)) return true;
         try {
           const resolvedFile = resolveHookPath(tok);
           const normFile = resolvedFile.replace(/\\/g, "/");
+          if (!fs.existsSync(resolvedFile)) return false;
+          const st = fs.statSync(resolvedFile);
+          if (!st.isFile()) return false;
           const trackedNorm = normalizeSessionTrackedPath(resolvedFile);
           const isTmpOrScratchFile =
             normFile.startsWith("/tmp/") ||
@@ -2863,15 +2867,17 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
             isRestrictedChild &&
             (pendingWrittenSet.has(trackedNorm) || wasFileWrittenInSession(convId, resolvedFile));
           if (isTmpOrScratchFile || isNonScriptExt || isChildMutatedScript) {
-            if (fs.existsSync(resolvedFile)) {
-              const st = fs.statSync(resolvedFile);
-              if (st.isFile() && st.size > 0 && st.size <= 131072) {
-                texts.push(fs.readFileSync(resolvedFile, "utf-8"));
-              }
+            if (st.size > 0 && st.size <= 131072) {
+              texts.push(fs.readFileSync(resolvedFile, "utf-8"));
             }
           }
-        } catch {}
+          return true;
+        } catch {
+          return false;
+        }
       };
+
+      const isDocOrJsonArg = (t) => /\.(?:md|markdown|json)$/i.test(t);
 
       const isNode = segCmd === "node";
       const isPython = segCmd === "python" || segCmd === "python2" || segCmd === "python3";
@@ -2939,9 +2945,24 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
               } else if (
                 flag === "-C" || flag === "--conditions" || flag === "--input-type" ||
                 flag === "--env-file" || flag === "--env-file-if-exists" || flag === "--watch-path" ||
-                flag === "--cpu-prof-dir" || flag === "--heap-prof-dir" || flag === "--diagnostic-dir" ||
-                flag === "--redirect-warnings" || flag === "--title" || flag === "--max-old-space-size" ||
-                flag === "--heapsnapshot-signal"
+                flag === "--watch-kill-signal" || flag === "--cpu-prof-dir" || flag === "--cpu-prof-interval" ||
+                flag === "--cpu-prof-name" || flag === "--heap-prof-dir" || flag === "--heap-prof-interval" ||
+                flag === "--heap-prof-name" || flag === "--diagnostic-dir" || flag === "--redirect-warnings" ||
+                flag === "--title" || flag === "--max-old-space-size" || flag === "--max-semi-space-size" ||
+                flag === "--max-http-header-size" || flag === "--heapsnapshot-signal" ||
+                flag === "--heapsnapshot-near-heap-limit" || flag === "--dns-result-order" ||
+                flag === "--disable-proto" || flag === "--disable-warning" || flag === "--icu-data-dir" ||
+                flag === "--openssl-config" || flag === "--build-snapshot-config" ||
+                flag === "--experimental-config-file" || flag === "--experimental-sea-config" ||
+                flag === "--unhandled-rejections" || flag === "--use-largepages" || flag === "--v8-pool-size" ||
+                flag === "--trace-event-categories" || flag === "--trace-event-file-pattern" ||
+                flag === "--allow-fs-read" || flag === "--allow-fs-write" || flag === "--inspect" ||
+                flag === "--inspect-brk" || flag === "--inspect-port" || flag === "--inspect-wait" ||
+                flag === "--test-name-pattern" || flag === "--test-reporter" ||
+                flag === "--test-reporter-destination" || flag === "--test-shard" ||
+                flag === "--test-concurrency" || flag === "--test-timeout" || flag === "--report-dir" ||
+                flag === "--report-directory" || flag === "--report-filename" || flag === "--report-signal" ||
+                flag === "--secure-heap" || flag === "--secure-heap-min" || flag === "--tls-cipher-list"
               ) {
                 if (inlineVal === null) expectSkipValueArg = true;
               }
@@ -2967,6 +2988,13 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
                 expectSkipValueArg = true;
               } else if (lower === "-file" || lower === "-f") {
                 expectCodeFileArg = true;
+              } else if (
+                lower === "-executionpolicy" || lower === "-ep" || lower === "-windowstyle" || lower === "-w" ||
+                lower === "-workingdirectory" || lower === "-wd" || lower === "-outputformat" || lower === "-of" ||
+                lower === "-inputformat" || lower === "-if" || lower === "-settingsfile" ||
+                lower === "-configurationname" || lower === "-custompipename" || lower === "-version" || lower === "-v"
+              ) {
+                expectSkipValueArg = true;
               }
             } else if (isRuby) {
               if (tok === "-e") {
@@ -2974,7 +3002,10 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
                 expectSkipValueArg = true;
               } else if (tok === "-r") {
                 expectCodeFileArg = true;
-              } else if (tok === "-I") {
+              } else if (
+                tok === "-I" || tok === "-C" || tok === "-E" || tok === "-F" || tok === "-K" ||
+                tok === "--encoding" || tok === "--external-encoding" || tok === "--internal-encoding"
+              ) {
                 expectSkipValueArg = true;
               }
             } else if (isPerl) {
@@ -2999,15 +3030,22 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
         }
 
         if (inlineCodeMode) {
-          if (!/\.(?:md|markdown|json)$/i.test(tok)) {
+          if (!isDocOrJsonArg(tok)) {
             inspectScriptToken(tok);
           }
           continue;
         }
 
-        if (!consumedPrimaryScript) {
+        if (consumedPrimaryScript) {
+          if (!isDocOrJsonArg(tok)) {
+            inspectScriptToken(tok);
+          }
+          continue;
+        }
+
+        const isExistingRegularFile = inspectScriptToken(tok);
+        if (isExistingRegularFile && !isDocOrJsonArg(tok)) {
           consumedPrimaryScript = true;
-          inspectScriptToken(tok);
         }
       }
     }

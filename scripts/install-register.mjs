@@ -370,8 +370,8 @@ async function installCliShims({ log }) {
   }
 
   const targetCli = fs.existsSync(pluginCli) ? pluginCli : sourceCli;
-  const targetCliNormalized = targetCli.replace(/\\/g, "/");
-  const execPathNormalized = process.execPath.replace(/\\/g, "/");
+  const targetCliNormalized = targetCli.replace(/\\/g, "/").replace(/(["\\$`])/g, "\\$1");
+  const execPathNormalized = process.execPath.replace(/\\/g, "/").replace(/(["\\$`])/g, "\\$1");
 
   await fsPromises.mkdir(antigravityBinDir, { recursive: true });
 

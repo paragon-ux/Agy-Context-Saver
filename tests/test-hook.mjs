@@ -1417,6 +1417,7 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
     for (const allowedNodeCmd of [
       `node "${appScript}" verdict "${scratchReportMd}"`,
       `node "${appScript}" bundle "${scratchRecordJson}"`,
+      `node --dns-result-order verbatim "${appScript}" verdict "${scratchReportMd}"`,
       `node -e "console.log(1)" "${scratchReportMd}"`
     ]) {
       const allowedRes = runHook(
@@ -1441,6 +1442,11 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
     for (const deniedNodeCmd of [
       `node "${evilMdPayload}"`,
       `node "${evilMjsPayload}" "${scratchReportMd}"`,
+      `node --dns-result-order verbatim "${evilMjsPayload}"`,
+      `node --dns-result-order verbatim "${evilMdPayload}"`,
+      `node --experimental-config-file "${scratchRecordJson}" "${evilMjsPayload}"`,
+      `node --experimental-config-file "${scratchRecordJson}" "${evilMdPayload}"`,
+      `pwsh -ExecutionPolicy Bypass "${evilMjsPayload}"`,
       `node -r "${evilPreloadTxt}" "${appScript}" "${scratchReportMd}"`,
       `bash < "${evilPreloadTxt}"`
     ]) {
