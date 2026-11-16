@@ -693,6 +693,166 @@ try {
       const subReadB = runCli(["transcript", "read", "--id", manyToolsConv, "--last-turns", "1"], { ...multiEnv, GEMINI_CONVERSATION_ID: "concurrent-b" });
       assert.equal(subReadA.status, 0, `concurrent-a grant should remain intact: ${subReadA.stderr}`);
       assert.equal(subReadB.status, 0, `concurrent-b grant should remain intact: ${subReadB.stderr}`);
+
+      // ACS-SVC-002: Reset owner-cli lock cleanly and verify transcript list --parent/--lineage + transcript export --sanitized
+      manageTranscriptAccessPolicy({ on: true, _testAuthorizedOwner: "owner-cli" });
+      const parentUuid = "parent-cohort-uuid";
+      const swarmChildA = "swarm-child-alpha";
+      const swarmChildB = "swarm-child-beta";
+      const subChildC = "subagent-child-gamma";
+      const unrelatedChild = "other-parent-child";
+
+      const writeConvLines = (rootDir, convId, lines) => {
+        const logDir = path.join(rootDir, convId, ".system_generated", "logs");
+        fs.mkdirSync(logDir, { recursive: true });
+        fs.writeFileSync(path.join(logDir, "transcript.jsonl"), lines.map((o) => JSON.stringify(o)).join("\n") + "\n");
+      };
+
+      writeConvLines(brainDir, parentUuid, [
+        { step_index: 0, type: "USER_INPUT", content: "Coordinate storage review.", created_at: "2026-11-16T01:00:00Z" }
+      ]);
+      writeConvLines(brainDir, swarmChildA, [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T01:00:01Z sender=${parentUuid} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message: Your assignment (recorded on the board as #1 for @storage-wal):\nReview WAL.`,
+          created_at: "2026-11-16T01:00:01Z"
+        },
+        {
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          thinking: "SECRET_INTERNAL_THINKING_DO_NOT_LEAK",
+          content: "Checked WAL with Bearer supersecret_token_123456 and data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA",
+          tool_calls: [{ name: "run_command", args: { CommandLine: "npm test", Content: "HUGE_UNEXPORTED_FILE_BODY" } }],
+          created_at: "2026-11-16T01:00:02Z"
+        }
+      ]);
+      writeConvLines(altBrain, swarmChildB, [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T01:00:03Z sender=${parentUuid} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message: Your assignment (recorded on the board as #2 for @storage-index):\nReview index.`,
+          created_at: "2026-11-16T01:00:03Z"
+        },
+        {
+          step_index: 1,
+          type: "GENERIC",
+          status: "ERROR",
+          content: "Command exited with code 1.\nENOENT: missing fixture",
+          created_at: "2026-11-16T01:00:04Z"
+        }
+      ]);
+      writeConvLines(brainDir, subChildC, [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T01:00:05Z sender=${parentUuid} priority=MESSAGE_PRIORITY_HIGH content=Inspect docs.`,
+          created_at: "2026-11-16T01:00:05Z"
+        }
+      ]);
+      writeConvLines(brainDir, unrelatedChild, [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          content: `[Message] timestamp=2026-11-16T01:00:06Z sender=completely-different-parent priority=MESSAGE_PRIORITY_HIGH content=Other task.`,
+          created_at: "2026-11-16T01:00:06Z"
+        }
+      ]);
+
+      // 1. transcript list --parent & --lineage across multi-product brain roots
+      const lineageList = runCli(["transcript", "list", "--parent", parentUuid, "--lineage", "--json"], multiEnv);
+      assert.equal(lineageList.status, 0, lineageList.stderr);
+      const lineageJson = JSON.parse(lineageList.stdout);
+      assert.equal(lineageJson.total, 3, "Must match exact 3 children of parentUuid across brain roots");
+      assert.equal(lineageJson.parentFilter, parentUuid);
+      const byConv = new Map(lineageJson.conversations.map((c) => [c.conversationId, c]));
+      assert.equal(byConv.get(swarmChildA).rosterName, "storage-wal");
+      assert.equal(byConv.get(swarmChildA).sessionKind, "swarm");
+      assert.equal(byConv.get(swarmChildA).stepCount, 2);
+      assert.equal(byConv.get(swarmChildB).rosterName, "storage-index");
+      assert.equal(byConv.get(swarmChildB).brainRoot, "antigravity-cli");
+      assert.equal(byConv.get(subChildC).sessionKind, "subagent");
+      assert.equal(byConv.has(unrelatedChild), false);
+
+      const lineageText = runCli(["transcript", "list", "--parent", parentUuid, "--lineage"], multiEnv);
+      assert.equal(lineageText.status, 0, lineageText.stderr);
+      assert.match(lineageText.stdout, /roster: @storage-wal/);
+      assert.match(lineageText.stdout, /steps: 2/);
+
+      // 2. transcript export requires --sanitized (fail closed if omitted)
+      const unsanitizedExport = runCli(["transcript", "export", "--id", swarmChildA], multiEnv);
+      assert.notEqual(unsanitizedExport.status, 0, "export without --sanitized must fail closed");
+      assert.match(unsanitizedExport.stderr, /--sanitized/);
+
+      // 3. transcript export --parent <parentUuid> --sanitized --out <path> produces L6-safe index
+      const scratchOut = path.join(tempHome, "scratch-export", "transcript-index.md");
+      const parentExportCli = runCli(
+        ["transcript", "export", "--parent", parentUuid, "--sanitized", "--out", scratchOut],
+        multiEnv
+      );
+      assert.equal(parentExportCli.status, 0, parentExportCli.stderr);
+      assert.ok(fs.existsSync(scratchOut), "export --out must create sanitized index file");
+      const exportedMd = fs.readFileSync(scratchOut, "utf8");
+      assert.match(exportedMd, /# Sanitized Transcript Index/);
+      assert.match(exportedMd, /@storage-wal/);
+      assert.match(exportedMd, /@storage-index/);
+      assert.match(exportedMd, /run_command\(CommandLine="npm test"\)/);
+      assert.match(exportedMd, /Bearer \[REDACTED\]/);
+      assert.match(exportedMd, /\[Embedded Media\/Binary Omitted\]/);
+      assert.equal(exportedMd.includes("SECRET_INTERNAL_THINKING_DO_NOT_LEAK"), false, "Sanitized export must omit thinking blocks");
+      assert.equal(exportedMd.includes("HUGE_UNEXPORTED_FILE_BODY"), false, "Sanitized export must omit raw Content payloads");
+      assert.equal(exportedMd.includes("supersecret_token_123456"), false, "Sanitized export must redact bearer tokens");
+
+      // 4. --out protection rejects .system_generated, stateDir, and .. traversal
+      const sysGenOut = path.join(brainDir, swarmChildA, ".system_generated", "leak.md");
+      const blockedOutCli = runCli(
+        ["transcript", "export", "--id", swarmChildA, "--sanitized", "--out", sysGenOut],
+        multiEnv
+      );
+      assert.notEqual(blockedOutCli.status, 0, "export --out into .system_generated must fail closed");
+
+      // 5. Under active policy restriction, export --parent / --id require matching PreToolUse grant (L39)
+      manageTranscriptAccessPolicy({ callerConvId: "owner-exp", mode: "self-only" });
+      const blockedExportNoGrant = runCli(["transcript", "export", "--parent", parentUuid, "--sanitized"], multiEnv);
+      assert.notEqual(blockedExportNoGrant.status, 0, "export without PreToolUse grant must fail closed under policy");
+
+      recordTranscriptHookGrant({
+        callerConvId: "owner-exp",
+        subcommand: "export",
+        targetConvId: `parent:${parentUuid}`,
+        mode: "open"
+      });
+      const grantedParentExport = runCli(
+        ["transcript", "export", "--parent", parentUuid, "--sanitized", "--json"],
+        { ...multiEnv, GEMINI_CONVERSATION_ID: "owner-exp" }
+      );
+      assert.equal(grantedParentExport.status, 0, grantedParentExport.stderr);
+      assert.equal(JSON.parse(grantedParentExport.stdout).exportedCount, 3);
+
+      // Single-use grant consumed: immediate second call must fail closed
+      const secondParentExport = runCli(
+        ["transcript", "export", "--parent", parentUuid, "--sanitized"],
+        { ...multiEnv, GEMINI_CONVERSATION_ID: "owner-exp" }
+      );
+      assert.notEqual(secondParentExport.status, 0, "Reusing consumed export grant must fail closed (L39)");
+
+      // self-only grant rejects cross-session and parent exports
+      recordTranscriptHookGrant({
+        callerConvId: swarmChildA,
+        subcommand: "export",
+        targetConvId: swarmChildA,
+        mode: "self-only"
+      });
+      const selfCrossExport = runCli(
+        ["transcript", "export", "--id", swarmChildB, "--sanitized"],
+        { ...multiEnv, GEMINI_CONVERSATION_ID: swarmChildA }
+      );
+      assert.notEqual(selfCrossExport.status, 0, "self-only export grant must reject cross-session --id");
+      manageTranscriptAccessPolicy({ on: true, _testAuthorizedOwner: "owner-exp" });
     } finally {
       if (prevBrainEnv !== undefined) process.env.AGY_BRAIN_DIR = prevBrainEnv;
     }

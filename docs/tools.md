@@ -135,17 +135,40 @@ agy-context transcript step --step 42 --full
 ## 5. `agy-context transcript list`
 
 - **Alias:** `ls`
-- **Usage:** `agy-context transcript list [--limit <N>] [--json]`
+- **Usage:** `agy-context transcript list [--limit <N>] [--parent <id>] [--lineage] [--json]`
 
-Lists recent conversation directories across Antigravity brain roots (`~/.gemini/antigravity/brain`, `~/.gemini/antigravity-cli/brain`, `~/.gemini/antigravity-ide/brain`) containing a `.system_generated/logs/transcript.jsonl` file, sorted newest-first by modification time (`mtime`). Disabled when the caller is restricted by a `self-only` or `deny` parent access policy.
+Lists recent conversation directories across Antigravity brain roots (`~/.gemini/antigravity/brain`, `~/.gemini/antigravity-cli/brain`, `~/.gemini/antigravity-ide/brain`) containing a `.system_generated/logs/transcript.jsonl` (or `transcript_full.jsonl`) file, sorted newest-first by modification time (`mtime`). Pass `--lineage` to display `sessionKind`, `stepCount`, `parentConvId`, and `@rosterName`, or `--parent <id>` to filter strictly to children of a parent session. Disabled when the caller is restricted by a `self-only` or `deny` parent access policy.
 
 ```bash
 agy-context transcript ls --limit 5
+agy-context transcript list --parent 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --lineage --json
 ```
 
 ---
 
-## 6. `agy-context transcript access`
+## 6. `agy-context transcript export`
+
+- **Usage:** `agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out <path>] [--file <path>] [--json]`
+
+Generates an `L6`-safe sanitized Markdown (or `--json`) summary index of executed steps and compact tool calls, omitting raw `.system_generated/` JSONL lines, `thinking` blocks, and large file bodies while redacting embedded media/base64 payloads and token strings. `--sanitized` is required; raw transcript export is prohibited.
+
+| Flag / Argument | Value | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `[<id>]` / `--id` | `<uuid[,uuid...]>` | Active / auto | One or more conversation UUIDs (positional, comma-separated, or repeatable `--id`). |
+| `--parent` | `<uuid \| current>` | `(none)` | Export sanitized summary tables for all child sessions belonging to `<uuid>`. |
+| `--sanitized` | `(none)` | Required | Explicit `L6` opt-in required on all `transcript export` calls. |
+| `--start` / `--end` | `<N>` | `(none)` | Inclusive `step_index` range filter. |
+| `--limit` | `<N>` | `150` (max `500`) | Maximum steps retained per exported session. |
+| `--out` | `<path>` | `(stdout)` | Safely write index to a `.md`, `.json`, or `.txt` path (e.g. `scratch/...`), rejecting `..`, symlinks, and protected state/config paths. |
+| `--file` / `--json` | `<path>` / `(none)` | `(none)` | Explicit single-session `.jsonl` path or JSON output. |
+
+```bash
+agy-context transcript export --parent 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --sanitized --out scratch/agy-squad/transcript-index.md
+```
+
+---
+
+## 7. `agy-context transcript access`
 
 - **Alias:** `policy`
 - **Usage:** `agy-context transcript access [status|off|on|reset|self-only] [options]`
@@ -168,7 +191,7 @@ See [Lifecycle Governance](governance.md#parent-transcript-access-control) for f
 
 ---
 
-## 7. `agy-context status`, `setup`, `uninstall` & `restore-backups`
+## 8. `agy-context status`, `setup`, `uninstall` & `restore-backups`
 
 Audits, synchronizes, or removes the plugin link, `PreToolUse` hook, CLI shims, RTK configuration, and stale MCP entries:
 

@@ -17,10 +17,14 @@ import {
   checkContextHealth,
   getBrainDir,
   getBrainDirs,
+  getProfileHomeDir,
+  listTranscriptConversations,
+  exportSanitizedTranscript,
   manageTranscriptAccessPolicy,
   verifyTranscriptCoreAccess,
   consumeTranscriptAccessGrant
 } from "../lib/transcript-core.mjs";
+import { getStateDir } from "../scripts/state-dir.mjs";
 import {
   runInstall,
   runUninstall,
@@ -53,7 +57,8 @@ Transcript Commands:
   agy-context transcript query  [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--json] [--file <path>]
   agy-context transcript step   [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--head N] [--tail N] [--full] [--json] [--file <path>]
   agy-context transcript health [--id <conv>] [--json] [--file <path>]
-  agy-context transcript list   [--limit N] [--json]
+  agy-context transcript list   [--limit N] [--parent <id>] [--lineage] [--json]
+  agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out <path>] [--file <path>] [--json]
   agy-context transcript access [--status | --off | --on | --reset | --self-only | --mode <open|allowlist|self-only|deny> | --allow <id,@roster*...> | --deny <id,@roster*...> | --ttl <sec>] [--json]
   Aliases: grep/search/find -> query | stats/info -> health | tools -> query --roles assistant --field tool_args | outline/summary -> query --summary --include-tools | ls -> list | policy -> access
 
@@ -122,6 +127,19 @@ function parseFlags(argv, spec) {
       continue;
     }
 
+    if (spec.multiValues && spec.multiValues.has(key)) {
+      let val = inlineVal;
+      if (val === null) {
+        if (i + 1 >= argv.length) {
+          throw new Error(`Missing value for flag '--${key}'.`);
+        }
+        val = argv[++i];
+      }
+      if (!Array.isArray(opts[key])) opts[key] = [];
+      opts[key].push(val);
+      continue;
+    }
+
     if (spec.values.has(key)) {
       let val = inlineVal;
       if (val === null) {
@@ -164,6 +182,70 @@ function validateExplicitFileFlag(fileArg) {
     throw new Error(`Invalid --file '${resolved}': target is not a regular file.`);
   }
   return real;
+}
+
+function isInsideDirCaseAware(targetPath, baseDir) {
+  const norm = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
+  const rel = path.relative(norm(baseDir), norm(targetPath));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function validateSafeExportOutPath(outArg) {
+  if (outArg === undefined) return undefined;
+  const trimmed = String(outArg).trim();
+  if (!trimmed || trimmed.includes("\0")) {
+    throw new Error(`Invalid --out path '${outArg}'.`);
+  }
+  const segments = trimmed.split(/[\\/]/);
+  if (segments.includes("..")) {
+    throw new Error(`Invalid --out path '${outArg}': '..' traversal is prohibited.`);
+  }
+  if (!/\.(?:md|json|txt)$/i.test(trimmed)) {
+    throw new Error(`Invalid --out path '${outArg}': must end with .md, .json, or .txt.`);
+  }
+  const abs = path.resolve(trimmed);
+  if (/[\\/]\.system_generated(?:[\\/]|$)/i.test(abs) || /[\\/]\.git(?:[\\/]|$)/i.test(abs)) {
+    throw new Error(`Refusing '--out' inside protected internal directory: '${abs}'.`);
+  }
+
+  const protectedRoots = [
+    getStateDir(),
+    path.join(getProfileHomeDir(), ".gemini", "config")
+  ].map((p) => {
+    try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+  });
+
+  if (fs.existsSync(abs)) {
+    const lst = fs.lstatSync(abs);
+    if (lst.isSymbolicLink() || !lst.isFile()) {
+      throw new Error(`Invalid --out path '${abs}': refusing symlink or non-regular file.`);
+    }
+    const realTarget = fs.realpathSync(abs);
+    for (const pr of protectedRoots) {
+      if (isInsideDirCaseAware(realTarget, pr)) {
+        throw new Error(`Refusing '--out' inside protected governance/state directory: '${realTarget}'.`);
+      }
+    }
+  } else {
+    let probe = path.dirname(abs);
+    while (probe && !fs.existsSync(probe)) {
+      const parent = path.dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
+    }
+    if (fs.existsSync(probe)) {
+      const realProbe = fs.realpathSync(probe);
+      if (/[\\/]\.system_generated(?:[\\/]|$)/i.test(realProbe) || /[\\/]\.git(?:[\\/]|$)/i.test(realProbe)) {
+        throw new Error(`Refusing '--out' inside protected internal directory: '${realProbe}'.`);
+      }
+      for (const pr of protectedRoots) {
+        if (isInsideDirCaseAware(realProbe, pr)) {
+          throw new Error(`Refusing '--out' inside protected governance/state directory: '${realProbe}'.`);
+        }
+      }
+    }
+  }
+  return abs;
 }
 
 function emitError(message, asJson = false, extra = {}) {
@@ -425,57 +507,129 @@ async function handleTranscriptCommand(argv) {
   }
 
   if (sub === "list" || sub === "ls") {
-    const { opts } = parseFlags(rest, {
-      booleans: new Set(["json"]),
-      values: new Set(["limit"])
+    const { opts, positional } = parseFlags(rest, {
+      booleans: new Set(["json", "lineage"]),
+      values: new Set(["limit", "parent"])
     });
     if (opts.help) {
       printHelp();
       process.exit(0);
     }
+    if (positional.length > 0) {
+      throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
+    }
     const accessCheck = verifyTranscriptCoreAccess({ subcommand: sub });
     if (!accessCheck.allowed) {
       emitError(accessCheck.error, Boolean(opts.json));
     }
-    const brainDirs = getBrainDirs();
     const parsedLimit = parseOptionalInt(opts.limit, "limit");
     if (parsedLimit !== undefined && parsedLimit <= 0) {
       throw new Error(`Flag '--limit' must be a positive integer (received: '${opts.limit}').`);
     }
-    const limit = parsedLimit ?? 10;
-    const byId = new Map();
-    for (const dir of brainDirs) {
-      if (!dir || !fs.existsSync(dir)) continue;
-      for (const name of fs.readdirSync(dir)) {
-        const convDir = path.join(dir, name);
-        const transcriptFile = path.join(convDir, ".system_generated", "logs", "transcript.jsonl");
-        if (fs.existsSync(transcriptFile)) {
-          try {
-            const stat = fs.statSync(transcriptFile);
-            const prev = byId.get(name);
-            if (!prev || stat.mtimeMs > prev.mtimeMs) {
-              byId.set(name, {
-                conversationId: name,
-                updatedAt: stat.mtime.toISOString(),
-                mtimeMs: stat.mtimeMs,
-                bytes: stat.size
-              });
-            }
-          } catch {}
+    const limit = parsedLimit ?? (opts.parent !== undefined ? 50 : 10);
+    const listed = listTranscriptConversations({
+      limit,
+      parentId: opts.parent,
+      includeLineage: Boolean(opts.lineage)
+    });
+    const dirLabel = listed.brainDirs.length === 1 ? listed.brainDirs[0] : listed.brainDirs.join(", ");
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          {
+            total: listed.total,
+            ...(listed.parentFilter ? { parentFilter: listed.parentFilter } : {}),
+            ...(listed.includeLineage ? { includeLineage: true } : {}),
+            conversations: listed.conversations
+          },
+          null,
+          2
+        )
+      );
+    } else {
+      const parentLabel = listed.parentFilter ? ` [parent: ${listed.parentFilter}]` : "";
+      const lines = [`Recent Conversations (${listed.conversations.length} of ${listed.total} in ${dirLabel})${parentLabel}:`];
+      for (const item of listed.conversations) {
+        if (listed.includeLineage) {
+          const rosterStr = item.rosterName ? `@${item.rosterName}` : "none";
+          const parentStr = item.parentConvId || "none";
+          lines.push(
+            `- ${item.conversationId} | kind: ${item.sessionKind} | steps: ${item.stepCount} | parent: ${parentStr} | roster: ${rosterStr} | updated: ${item.updatedAt} | ${(item.bytes / 1024).toFixed(1)} KB`
+          );
+        } else {
+          lines.push(`- ${item.conversationId} | updated: ${item.updatedAt} | ${(item.bytes / 1024).toFixed(1)} KB`);
         }
       }
-    }
-    const entries = Array.from(byId.values()).sort((a, b) => b.mtimeMs - a.mtimeMs);
-    const sliced = entries.slice(0, limit).map(({ mtimeMs, ...restItem }) => restItem);
-    const dirLabel = brainDirs.length === 1 ? brainDirs[0] : brainDirs.join(", ");
-    if (opts.json) {
-      console.log(JSON.stringify({ total: entries.length, conversations: sliced }, null, 2));
-    } else {
-      const lines = [`Recent Conversations (${sliced.length} of ${entries.length} in ${dirLabel}):`];
-      for (const item of sliced) {
-        lines.push(`- ${item.conversationId} | updated: ${item.updatedAt} | ${(item.bytes / 1024).toFixed(1)} KB`);
-      }
       console.log(lines.join("\n"));
+    }
+    return;
+  }
+
+  if (sub === "export") {
+    const { opts, positional } = parseFlags(rest, {
+      booleans: new Set(["sanitized", "json"]),
+      values: new Set(["parent", "start", "end", "limit", "out", "output", "file"]),
+      multiValues: new Set(["id"])
+    });
+    if (opts.help) {
+      printHelp();
+      process.exit(0);
+    }
+    if ((!opts.id || opts.id.length === 0) && !opts.parent && !opts.file && positional.length >= 1) {
+      opts.id = [positional.shift()];
+    }
+    if (positional.length > 0) {
+      throw new Error(`Unexpected positional arguments for 'transcript export': ${positional.join(" ")}`);
+    }
+    if (opts.out !== undefined && opts.output !== undefined && opts.out !== opts.output) {
+      throw new Error("Conflicting '--out' and '--output' values provided.");
+    }
+    const rawOut = opts.out !== undefined ? opts.out : opts.output;
+    const safeOutPath = validateSafeExportOutPath(rawOut);
+    const explicitFile = validateExplicitFileFlag(opts.file);
+    const startStep = parseOptionalInt(opts.start, "start");
+    const endStep = parseOptionalInt(opts.end, "end");
+    const limit = parseOptionalInt(opts.limit, "limit");
+    if (limit !== undefined && limit <= 0) {
+      throw new Error(`Flag '--limit' must be a positive integer (received: '${opts.limit}').`);
+    }
+
+    const res = await exportSanitizedTranscript({
+      conversationIds: opts.id || [],
+      parentId: opts.parent,
+      filePath: explicitFile,
+      sanitized: Boolean(opts.sanitized),
+      startStep,
+      endStep,
+      limit,
+      maxOutputChars: safeOutPath ? 64000 : undefined,
+      allowExternalPaths: false
+    });
+
+    if (res.isError) {
+      emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
+    }
+
+    if (safeOutPath) {
+      fs.mkdirSync(path.dirname(safeOutPath), { recursive: true });
+      const { text, ...payload } = res;
+      const fileContent = opts.json ? JSON.stringify(payload, null, 2) + "\n" : text + "\n";
+      const tmpOut = `${safeOutPath}.${process.pid}.${Date.now()}.tmp`;
+      fs.writeFileSync(tmpOut, fileContent, "utf8");
+      fs.renameSync(tmpOut, safeOutPath);
+      if (opts.json) {
+        console.log(JSON.stringify({ ...payload, outputPath: safeOutPath }, null, 2));
+      } else {
+        console.log(`[OK] Exported sanitized L6 transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}`);
+      }
+      return;
+    }
+
+    if (opts.json) {
+      const { text, ...payload } = res;
+      console.log(JSON.stringify(payload, null, 2));
+    } else {
+      console.log(res.text);
     }
     return;
   }
@@ -535,7 +689,7 @@ async function handleTranscriptCommand(argv) {
     return;
   }
 
-  throw new Error(`Unknown transcript subcommand '${sub}'. Expected read, query, step, health, list, or access.`);
+  throw new Error(`Unknown transcript subcommand '${sub}'. Expected read, query, step, health, list, export, or access.`);
 }
 
 async function main() {

@@ -1277,6 +1277,7 @@ const TRANSCRIPT_READ_SUBCOMMANDS = new Set([
   "health",
   "list",
   "ls",
+  "export",
   "grep",
   "search",
   "find",
@@ -2098,6 +2099,8 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     "file"
   ]);
   const HEALTH_VALUE_FLAGS = new Set(["id", "file"]);
+  const LIST_VALUE_FLAGS = new Set(["limit", "parent"]);
+  const EXPORT_VALUE_FLAGS = new Set(["id", "parent", "start", "end", "limit", "out", "output", "file"]);
 
   let valueFlags = READ_VALUE_FLAGS;
   if (subcommand === "query" || subcommand === "grep" || subcommand === "search" || subcommand === "find" || subcommand === "tools") {
@@ -2106,9 +2109,14 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     valueFlags = STEP_VALUE_FLAGS;
   } else if (subcommand === "health" || subcommand === "stats" || subcommand === "info") {
     valueFlags = HEALTH_VALUE_FLAGS;
+  } else if (subcommand === "list" || subcommand === "ls") {
+    valueFlags = LIST_VALUE_FLAGS;
+  } else if (subcommand === "export") {
+    valueFlags = EXPORT_VALUE_FLAGS;
   }
 
   const opts = {};
+  const idValues = [];
   const positionals = [];
   for (let i = 0; i < restTokens.length; i++) {
     const tok = restTokens[i];
@@ -2121,10 +2129,17 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     const key = eqIdx === -1 ? tok.slice(2) : tok.slice(2, eqIdx);
     const inlineVal = eqIdx === -1 ? null : tok.slice(eqIdx + 1);
     if (valueFlags.has(key)) {
-      if (inlineVal !== null) {
-        opts[key] = inlineVal;
-      } else if (i + 1 < restTokens.length) {
-        opts[key] = restTokens[++i];
+      let val = inlineVal;
+      if (val === null && i + 1 < restTokens.length) {
+        val = restTokens[++i];
+      }
+      if (val !== null) {
+        if (key === "id") {
+          for (const part of String(val).split(",").map((s) => s.trim()).filter(Boolean)) {
+            idValues.push(part);
+          }
+        }
+        opts[key] = val;
       }
     }
   }
@@ -2135,14 +2150,18 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
       opts.query = posCopy.shift();
     }
     if (opts.id === undefined && posCopy.length >= 1) {
-      opts.id = posCopy.shift();
+      const pId = posCopy.shift();
+      opts.id = pId;
+      idValues.push(pId);
     }
   } else if (subcommand === "step") {
     if (opts.step === undefined && posCopy.length >= 1) {
       opts.step = posCopy.shift();
     }
     if (opts.id === undefined && posCopy.length >= 1) {
-      opts.id = posCopy.shift();
+      const pId = posCopy.shift();
+      opts.id = pId;
+      idValues.push(pId);
     }
   } else if (
     subcommand === "read" ||
@@ -2150,10 +2169,13 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     subcommand === "summary" ||
     subcommand === "health" ||
     subcommand === "stats" ||
-    subcommand === "info"
+    subcommand === "info" ||
+    subcommand === "export"
   ) {
     if (opts.id === undefined && posCopy.length >= 1) {
-      opts.id = posCopy.shift();
+      const pId = posCopy.shift();
+      opts.id = pId;
+      idValues.push(pId);
     }
   }
 
@@ -2163,8 +2185,12 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     };
   }
 
+  const uniqueIds = Array.from(new Set(idValues.map((s) => String(s).trim()).filter(Boolean)));
   return {
     targetId: opts.id ? String(opts.id).trim() : null,
+    targetIds: uniqueIds,
+    targetParent: opts.parent ? String(opts.parent).trim() : null,
+    outPath: (opts.out || opts.output) ? String(opts.out || opts.output).trim() : null,
     explicitFile: opts.file ? String(opts.file).trim() : null
   };
 }
@@ -2228,7 +2254,7 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     return {
       matched: true,
       allowed: false,
-      reason: `Antigravity Execution Governance: Unknown 'agy-context transcript' subcommand '${subcommand}'. Expected read, query, step, health, list, or access.`
+      reason: `Antigravity Execution Governance: Unknown 'agy-context transcript' subcommand '${subcommand}'. Expected read, query, step, health, list, export, or access.`
     };
   }
 
@@ -2354,6 +2380,23 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       };
     }
 
+    if (subcommand === "export" && targetInfo.outPath) {
+      const outPath = targetInfo.outPath;
+      if (
+        hasDotDotTraversal(outPath) ||
+        isProtectedInternalState(outPath) ||
+        isProtectedBenchmarkPath(outPath) ||
+        hasGovernanceMutationInText(`> ${outPath}`, convId) ||
+        !/\.(?:md|json|txt)$/i.test(outPath)
+      ) {
+        return {
+          matched: true,
+          allowed: false,
+          reason: `Antigravity Execution Governance: '--out' path '${outPath}' in 'agy-context transcript export' must be a safe .md/.json/.txt artifact outside protected internal state, governance, and benchmark directories.`
+        };
+      }
+    }
+
     if (accessEval.mode === "self-only") {
       if (subcommand === "list" || subcommand === "ls") {
         return {
@@ -2367,6 +2410,43 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
             callerConvId: convId,
             rosterName: accessEval.rosterName,
             detail: "'list'/'ls' across sessions is disabled in self-only mode."
+          })
+        };
+      }
+
+      if (subcommand === "export" && targetInfo.targetParent) {
+        return {
+          matched: true,
+          allowed: false,
+          isAccessDenial: true,
+          reason: buildTranscriptAccessDenial({
+            subcommand,
+            mode: "self-only",
+            source: accessEval.source,
+            callerConvId: convId,
+            rosterName: accessEval.rosterName,
+            detail: "'--parent' across sessions is disabled in self-only mode."
+          })
+        };
+      }
+
+      if (
+        subcommand === "export" &&
+        Array.isArray(targetInfo.targetIds) &&
+        (targetInfo.targetIds.length > 1 ||
+          targetInfo.targetIds.some((id) => id.toLowerCase() !== "current" && id !== convId))
+      ) {
+        return {
+          matched: true,
+          allowed: false,
+          isAccessDenial: true,
+          reason: buildTranscriptAccessDenial({
+            subcommand,
+            mode: "self-only",
+            source: accessEval.source,
+            callerConvId: convId,
+            rosterName: accessEval.rosterName,
+            detail: "Cross-session or multi-session transcript export is disabled in self-only mode."
           })
         };
       }
@@ -2426,6 +2506,19 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     }
 
     let resolvedTargetConvId = targetInfo.targetId || null;
+    if (subcommand === "export") {
+      if (targetInfo.targetParent) {
+        const resolvedP =
+          targetInfo.targetParent.toLowerCase() === "current" && convId && convId !== "global"
+            ? convId
+            : targetInfo.targetParent;
+        resolvedTargetConvId = `parent:${resolvedP}`;
+      } else if (Array.isArray(targetInfo.targetIds) && targetInfo.targetIds.length > 1) {
+        resolvedTargetConvId = `multi:${[...targetInfo.targetIds].sort().join(",")}`;
+      } else if (Array.isArray(targetInfo.targetIds) && targetInfo.targetIds.length === 1) {
+        resolvedTargetConvId = targetInfo.targetIds[0];
+      }
+    }
     if (targetInfo.explicitFile) {
       const matchedBrainDir = isPathInsideAnyBrainDir(targetInfo.explicitFile);
       if (accessEval.ownerId && !accessEval.isOwner && !matchedBrainDir) {

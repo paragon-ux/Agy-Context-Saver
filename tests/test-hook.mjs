@@ -1181,6 +1181,80 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
       "self-only caller passing own --file under antigravity-cli/brain must resolve extractConvId via getBrainDirs (ACS-ARCH-002)"
     );
 
+    // ACS-SVC-002: Hook validation for transcript list --parent/--lineage and transcript export --sanitized
+    const parentListHook = runHook(
+      {
+        conversationId: pA,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript list --parent ${pA} --lineage --json` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(parentListHook.decision, "allow", "Parent must be allowed to run transcript list --parent --lineage");
+
+    const parentExportHook = runHook(
+      {
+        conversationId: pA,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript export --parent ${pA} --sanitized --out scratch/index.md` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(parentExportHook.decision, "allow", "Parent must be allowed to run transcript export --parent --sanitized --out");
+
+    const badOutExportHook = runHook(
+      {
+        conversationId: pA,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript export --id ${pA} --sanitized --out scripts/evil.mjs` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(badOutExportHook.decision, "deny", "export --out writing executable/governance script must be denied");
+
+    const selfExportOwn = runHook(
+      {
+        conversationId: cliRestricted,
+        transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript export --sanitized" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(selfExportOwn.decision, "allow", "self-only caller exporting own transcript must be allowed");
+    assert.match(selfExportOwn.overwrite?.CommandLine || "", new RegExp(`--id ${cliRestricted}`));
+
+    for (const forbiddenSelfExport of [
+      `agy-context transcript export --sanitized --parent ${pA}`,
+      `agy-context transcript export --sanitized --id ${pA}`,
+      `agy-context transcript export --sanitized --id ${pA},${cliRestricted}`,
+      `agy-context transcript export --sanitized --id ${pA} --id ${cliRestricted}`
+    ]) {
+      const deniedSelfExp = runHook(
+        {
+          conversationId: cliRestricted,
+          transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: forbiddenSelfExport }
+          }
+        },
+        cliEnv
+      );
+      assert.equal(deniedSelfExp.decision, "deny", `self-only mode must deny '${forbiddenSelfExport}'`);
+    }
+
     const pollBreakerConv = "swarm-poll-breaker";
     for (let attempt = 1; attempt <= 5; attempt++) {
       const schedRes = runHook({
