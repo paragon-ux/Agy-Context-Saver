@@ -148,6 +148,11 @@ try {
   assert.match(ps1Text, /chcp 65001 >nul/);
   assert.match(ps1Text, /\[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
   assert.doesNotMatch(ps1Text, /-Encoding ASCII/);
+  // ACS-BOOST-SCRIPT-001: install.ps1 checks $env:ProgramFiles and ${env:ProgramFiles(x86)} and fails closed via Write-Error + exit 1 when node is missing
+  assert.match(ps1Text, /\$env:ProgramFiles[\s\S]*nodejs\\node\.exe/);
+  assert.match(ps1Text, /\$\{env:ProgramFiles\(x86\)\}[\s\S]*nodejs\\node\.exe/);
+  assert.match(ps1Text, /Write-Error[\s\S]*exit 1/);
+  assert.doesNotMatch(ps1Text, /\$NodeExe\s*=\s*"node"/);
   if (os.platform() !== "win32") {
     // ACS-TEST-003: POSIX shim escaping with `$` and spaces in AGY_TEST_PROFILE_DIR
     const { spawnSync } = await import("node:child_process");
@@ -207,6 +212,20 @@ try {
   assert.equal(fs.existsSync(nodeCmdBakPath), false, "node.cmd.bak should be moved rather than left orphaned");
   const restoredHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
   assert.ok(restoredHooks["foreign-preservation-hook"], "Backup restore must restore prior hooks.json");
+
+  // Broken symlink at pluginDest must also be cleanly unlinked by runUninstall
+  let brokenAcsSymCreated = false;
+  try {
+    fs.mkdirSync(path.dirname(pluginDest), { recursive: true });
+    fs.symlinkSync(path.join(testProfileDir, "missing-acs-target"), pluginDest, os.platform() === "win32" ? "junction" : "dir");
+    brokenAcsSymCreated = true;
+  } catch (err) {
+    if (err?.code !== "EPERM") throw err;
+  }
+  if (brokenAcsSymCreated) {
+    await runUninstall({ silent: true });
+    assert.throws(() => fs.lstatSync(pluginDest), { code: "ENOENT" }, "runUninstall must remove broken pluginDest symlink");
+  }
   console.log("✓ Copy fallback, symlink-to-copy upgrade, node.cmd cleanup, and backup restoration verified");
 } finally {
   try {

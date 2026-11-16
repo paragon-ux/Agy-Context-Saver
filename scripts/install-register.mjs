@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver Registration & Installation Engine (v2.0.1)
+ * Agy-Context-Saver Registration & Installation Engine (v2.0.2)
  * Zero-delay cross-platform installer with CLI-first shim provisioning,
  * unified hook registration, and legacy MCP retirement/sweep.
  *
@@ -9,7 +9,7 @@
  * - Detects native plugin link, hook registration (agy-context-saver), CLI shims, RTK (>= 1.1.0), and MCP cleanup
  * - Re-verifies and updates without redundant disk churn
  * - Retires legacy MCP registration in mcp_config.json and sweeps agy-context-saver* schema dirs (ACS-HOOK-11)
- * - Supports silent mode and CLI flags: install, install --check, uninstall, status, --restore-backups
+ * - Supports silent mode and CLI flags: --check, uninstall, status, --restore-backups, --allow-degraded
  */
 
 import fs from "node:fs";
@@ -25,9 +25,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const PACKAGE_VERSION = (() => {
   try {
-    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.0.1";
+    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.0.2";
   } catch {
-    return "2.0.1";
+    return "2.0.2";
   }
 })();
 
@@ -765,10 +765,18 @@ export async function runUninstall(options = {}) {
   const warn = options.silent ? () => {} : console.warn;
   log("Uninstalling Agy-Context-Saver...");
 
-  // 1. Remove plugin link
-  if (fs.existsSync(pluginDest)) {
+  // 1. Remove plugin link (including broken symlinks)
+  let pluginStat = null;
+  try {
+    pluginStat = fs.lstatSync(pluginDest);
+  } catch {}
+  if (pluginStat) {
     try {
-      await fsPromises.rm(pluginDest, { recursive: true, force: true });
+      if (pluginStat.isSymbolicLink()) {
+        await fsPromises.unlink(pluginDest);
+      } else {
+        await fsPromises.rm(pluginDest, { recursive: true, force: true });
+      }
       log(`[OK] Removed plugin link: ${pluginDest}`);
     } catch (err) {
       warn(`[WARN] Could not remove plugin link: ${err.message}`);

@@ -162,8 +162,9 @@ try {
   assert.equal(staleParsed.details.plugin.isCopyFallback, true);
   assert.equal(staleParsed.details.plugin.versionMismatch, true);
 
-  // Stale mirrored hook script mismatch must also fail status check
-  fs.writeFileSync(stalePkgPath, JSON.stringify({ ...stalePkg, version: staleParsed.details.plugin.version || "2.0.1" }, null, 2));
+  // Stale mirrored hook script mismatch must also fail status check independently of version mismatch
+  const repoPkgVersion = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../package.json"), "utf8")).version;
+  fs.writeFileSync(stalePkgPath, JSON.stringify({ ...stalePkg, version: repoPkgVersion }, null, 2));
   const staleMirroredHookPath = path.join(staleCopyProfile, ".gemini", "config", "scripts", "execution-guard-hook.mjs");
   fs.appendFileSync(staleMirroredHookPath, "\n// stale-hook-marker\n");
   const staleHookStatus = spawnSync(process.execPath, [cliScript, "status", "--json"], {
@@ -172,6 +173,7 @@ try {
   });
   assert.notEqual(staleHookStatus.status, 0, "Stale mirrored hook script must fail status check");
   const staleHookParsed = JSON.parse(staleHookStatus.stdout);
+  assert.equal(staleHookParsed.details.plugin.versionMismatch, false);
   assert.equal(staleHookParsed.details.hook.mirroredHookStale, true);
   assert.equal(staleHookParsed.isComplete, false);
 } finally {

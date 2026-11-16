@@ -11,12 +11,21 @@ $NodeCmdBakPath = [System.IO.Path]::Combine($GeminiConfigDir, "node.cmd.bak")
 
 # Dynamic Node executable resolution
 $NodeCmdObj = Get-Command node -ErrorAction SilentlyContinue
-if ($NodeCmdObj -and $NodeCmdObj.Source) {
-    $NodeExe = $NodeCmdObj.Source
+$NodeExe = if ($NodeCmdObj -and $NodeCmdObj.Source) {
+    $NodeCmdObj.Source
+} elseif ($env:ProgramFiles -and (Test-Path (Join-Path $env:ProgramFiles "nodejs\node.exe"))) {
+    Join-Path $env:ProgramFiles "nodejs\node.exe"
 } elseif (Test-Path "C:\Program Files\nodejs\node.exe") {
-    $NodeExe = "C:\Program Files\nodejs\node.exe"
+    "C:\Program Files\nodejs\node.exe"
+} elseif (${env:ProgramFiles(x86)} -and (Test-Path (Join-Path ${env:ProgramFiles(x86)} "nodejs\node.exe"))) {
+    Join-Path ${env:ProgramFiles(x86)} "nodejs\node.exe"
 } else {
-    $NodeExe = "node"
+    $null
+}
+
+if (-not $NodeExe) {
+    Write-Error "Node.js (>= 22.0.0) is required but 'node' was not found on PATH or in standard Program Files install locations."
+    exit 1
 }
 
 # 1. Run cross-platform registration engine FIRST (validates config & provisions RTK before any wrapper write)

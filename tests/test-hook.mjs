@@ -1770,6 +1770,8 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
       );
       assert.equal(watchDeny.decision, "deny", `Blocking CI watch loop must be denied: ${blockedWatchCmd}`);
       assert.match(watchDeny.reason, /Blocking CI watch loop/i);
+      assert.doesNotMatch(watchDeny.reason, />= 60s/);
+      assert.match(watchDeny.reason, /Math\.max\(30,\s*requiredBackoffSec\)[\s\S]*30s[\s\S]*75s/);
     }
 
     for (const allowedGhCmd of [

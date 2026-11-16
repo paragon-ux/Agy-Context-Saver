@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.0.1)
+ * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.0.2)
  *
  * Closed Execution Topology & Governance Invariants:
  * 1. RTK Transparent Command Optimization:
@@ -4209,7 +4209,7 @@ try {
         reason:
           `Antigravity Execution Governance: Blocking CI watch loop ('${blockingWatch.command}') stalls agents indefinitely when remote runners queue.\n` +
           "- Run a single non-blocking snapshot ('gh pr checks' or 'gh run list') instead.\n" +
-          "- If waiting on remote CI, end your turn or use a backoff-compliant 'schedule' timer (>= 60s) rather than blocking inside run_command."
+          "- If waiting on remote CI, end your turn or use a backoff-compliant 'schedule' timer (DurationSeconds >= Math.max(30, requiredBackoffSec): >= 30s initially, then 75s/188s/469s/600s) rather than blocking inside run_command."
       });
     }
 

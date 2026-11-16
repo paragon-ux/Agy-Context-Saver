@@ -1,6 +1,6 @@
 # CLI & Hook Reference
 
-`Agy-Context-Saver` (`v2.0.1`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs`), paired with **RTK (`>= 1.1.0`)**.
+`Agy-Context-Saver` (`v2.0.2`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs`), paired with **RTK (`>= 1.1.0`)**.
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 

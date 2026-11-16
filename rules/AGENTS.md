@@ -2,7 +2,7 @@
 
 ## Architectural Boundary
 - **RTK (`>= 1.1.0`)**: Rewrites shell commands via `rtk hook antigravity`, compresses command output, and provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`, `rtk read`, `rtk err`, `rtk summary`).
-- **Agy-Context-Saver (`v2.0.1`)**: Governs background task polling and Reactive Wakeup, bounds `read_file` slices, protects `.system_generated/` and the state directory, and provides transcript inspection and access control via `agy-context transcript`.
+- **Agy-Context-Saver (`v2.0.2`)**: Governs background task polling and Reactive Wakeup, bounds `read_file` slices, protects `.system_generated/` and the state directory, and provides transcript inspection and access control via `agy-context transcript`.
 
 ---
 
