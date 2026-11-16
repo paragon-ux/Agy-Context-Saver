@@ -1106,7 +1106,95 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
       `agy-context transcript query current --id ${selfChildH}`,
       "query current must keep 'current' as pattern and append --id <self> (ACS-RUN-005)"
     );
-    console.log("✓ Group H regression checks passed (payload.cwd, 2>/dev/null, antigravity-cli, swarm_view, Step0>16KiB, cross-swarm isolation, query current)");
+
+    // Wave 2 regressions: restricted child read current --json, unmodified repo tests, git diff scripts/install-register.mjs, lifecycle script deny, antigravity-cli self-only, swarm-poll circuit breaker
+    const selfReadCurrentJson = runHook({
+      conversationId: selfChildH,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript read current --json" } }
+    });
+    assert.equal(selfReadCurrentJson.decision, "allow");
+    assert.equal(
+      selfReadCurrentJson.overwrite?.CommandLine,
+      `agy-context transcript read --id ${selfChildH} --json`,
+      "read current --json under self-only must rewrite positional current before trailing flags (ACS-RUN-005)"
+    );
+
+    const restrictedGitDiffInstall = runHook({
+      conversationId: bigChildA,
+      cwd: repoRoot,
+      toolCall: { name: "run_command", args: { CommandLine: "git diff -- scripts/install-register.mjs" } }
+    });
+    assert.equal(
+      restrictedGitDiffInstall.decision,
+      "allow",
+      "Restricted child running git diff on scripts/install-register.mjs must be allowed (no false install-verb or bare basename block)"
+    );
+
+    const restrictedRunRepoTest = runHook({
+      conversationId: bigChildA,
+      cwd: repoRoot,
+      toolCall: { name: "run_command", args: { CommandLine: `node "${path.resolve(repoRoot, "tests/test-hook.mjs")}"` } }
+    });
+    assert.equal(
+      restrictedRunRepoTest.decision,
+      "allow",
+      "Restricted child executing unmodified repo test suite must be allowed"
+    );
+
+    const restrictedRunInstall = runHook({
+      conversationId: bigChildA,
+      cwd: repoRoot,
+      toolCall: { name: "run_command", args: { CommandLine: `node "${path.resolve(repoRoot, "scripts/install-register.mjs")}" --check` } }
+    });
+    assert.equal(
+      restrictedRunInstall.decision,
+      "deny",
+      "Restricted child executing Agy-Context-Saver scripts/install-register.mjs must still be denied"
+    );
+
+    const cliRestricted = "cli-self-child";
+    const cliRestrictedLogs = path.join(cliBrainRoot, cliRestricted, ".system_generated", "logs");
+    fs.mkdirSync(cliRestrictedLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(cliRestrictedLogs, "transcript.jsonl"),
+      JSON.stringify({
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:05Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: self-only]\nCLI task`
+      }) + "\n"
+    );
+    const cliSelfFileRead = runHook(
+      {
+        conversationId: cliRestricted,
+        transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript read --file "${path.join(cliRestrictedLogs, "transcript.jsonl")}"` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(
+      cliSelfFileRead.decision,
+      "allow",
+      "self-only caller passing own --file under antigravity-cli/brain must resolve extractConvId via getBrainDirs (ACS-ARCH-002)"
+    );
+
+    const pollBreakerConv = "swarm-poll-breaker";
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const schedRes = runHook({
+        conversationId: pollBreakerConv,
+        toolCall: { name: "schedule", args: { DurationSeconds: 45, Prompt: "Poll swarm board status" } }
+      });
+      assert.equal(
+        schedRes.decision,
+        attempt < 5 ? "deny" : "force_ask",
+        `Swarm schedule polling attempt #${attempt} must trigger ${attempt < 5 ? "deny" : "force_ask circuit breaker"}`
+      );
+    }
+
+    console.log("✓ Group H regression checks passed (payload.cwd, 2>/dev/null, antigravity-cli, swarm_view, Step0>16KiB, cross-swarm isolation, query current, Wave 2 regressions)");
   } finally {
     fs.rmSync(wsDir, { recursive: true, force: true });
     fs.rmSync(cliProfile, { recursive: true, force: true });

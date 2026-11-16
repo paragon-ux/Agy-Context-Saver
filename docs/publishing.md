@@ -12,6 +12,7 @@ The `"files"` list in `package.json` defines the published npm package contents:
 "files": [
   "assets",
   "bin/agy-context.mjs",
+  "docs",
   "lib",
   "scripts",
   "rules",
@@ -28,7 +29,7 @@ The `"files"` list in `package.json` defines the published npm package contents:
 
 Excluded from the npm tarball:
 - `tests/` (unit, integration, and lifecycle test suites)
-- `docs/` and `zensical.toml` (published to GitHub Pages)
+- `zensical.toml` (docs site generator configuration)
 - Local `.gitignore`d binaries (such as `bin/rtk`), temporary files, and scratch directories
 
 ---
@@ -61,11 +62,11 @@ Runs all 11 test suites in isolated temporary profiles:
 10. Malformed config preservation fail-closed check (`tests/test-malformed-config-preservation.mjs`)
 11. RTK ledger fresh-install verification (`tests/test-rtk-ledger-fresh-install.mjs`)
 
-### Stage 3: Tarball dry-run check
+### Stage 3: Tarball & package manifest verification
 ```bash
-npm pack --dry-run
+npm run verify:package
 ```
-Confirms that only the whitelisted CLI, library, hook, rule, skill, and asset files are included in the tarball.
+Runs `node tests/verify-package.mjs --self-test` and validates `npm pack --dry-run --json` against the whitelisted files in `package.json` (`33` files).
 
 ### Stage 4: Documentation build
 ```bash

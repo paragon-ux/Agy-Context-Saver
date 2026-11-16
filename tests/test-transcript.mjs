@@ -7,13 +7,15 @@ import { fileURLToPath } from "node:url";
 import {
   CircularRingBuffer,
   cleanMessageContent,
+  extractConvId,
   readTranscript,
   queryTranscript,
   getStepDetail,
   checkContextHealth,
   getRequiredBackoffSeconds,
   manageTranscriptAccessPolicy,
-  recordTranscriptHookGrant
+  recordTranscriptHookGrant,
+  consumeTranscriptAccessGrant
 } from "../lib/transcript-core.mjs";
 import { createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
 
@@ -589,6 +591,28 @@ try {
     assert.ok(!lastTurnRead.isError);
     assert.match(lastTurnRead.text, /Turn 0 user prompt/, "read --last-turns 1 must anchor to latest USER_INPUT even with multiple PLANNER_RESPONSE steps (ACS-RUN-009)");
 
+    const lastTurnQuery = await queryTranscript({
+      conversationId: turnConv,
+      lastTurns: 1,
+      query: "Step 1 work"
+    });
+    assert.ok(!lastTurnQuery.isError);
+    assert.equal(
+      lastTurnQuery.matchedCount,
+      1,
+      "query --last-turns 1 must anchor on USER_INPUT (with literal prefilter not skipping USER_INPUT) matching readTranscript (ACS-RUN-009)"
+    );
+    const lastTurnQueryEmpty = await queryTranscript({
+      conversationId: turnConv,
+      lastTurns: 1
+    });
+    assert.ok(!lastTurnQueryEmpty.isError);
+    assert.equal(
+      lastTurnQueryEmpty.matchedCount,
+      4,
+      "query --last-turns 1 without literal filter must include USER_INPUT and all 3 PLANNER_RESPONSE steps (ACS-RUN-009)"
+    );
+
     const healthSched = await checkContextHealth({ conversationId: manyToolsConv });
     assert.ok(!healthSched.isError);
     assert.equal(healthSched.metrics.pollingViolations, 1, "checkContextHealth must count swarm poll schedule() events cleanly (ACS-RUN-009)");
@@ -613,7 +637,67 @@ try {
     const listIds = JSON.parse(multiList.stdout).conversations.map((c) => c.conversationId);
     assert.ok(listIds.includes(altConv), "transcript list must aggregate antigravity-cli/brain (ACS-ARCH-002)");
 
-    console.log("✓ Parent policy CLI, runtime hook-grant verification, atomic concurrent grants, and ACS-RUN-008..010 verified");
+    const prevBrainEnv = process.env.AGY_BRAIN_DIR;
+    delete process.env.AGY_BRAIN_DIR;
+    try {
+      const cliTrFile = path.join(altBrain, altConv, ".system_generated", "logs", "transcript.jsonl");
+      assert.equal(
+        extractConvId(cliTrFile, { strictBrainContainment: true }),
+        altConv,
+        "extractConvId({ strictBrainContainment: true }) must recognize ~/.gemini/antigravity-cli/brain paths (ACS-ARCH-002)"
+      );
+      assert.equal(
+        extractConvId(path.join(tempHome, "outside", altConv, "transcript.jsonl"), { strictBrainContainment: true }),
+        null,
+        "extractConvId({ strictBrainContainment: true }) must return null outside brain roots"
+      );
+
+      // Self-only caller on antigravity-cli/brain using --file must succeed via hook grant + extractConvId
+      manageTranscriptAccessPolicy({ callerConvId: "owner-cli", mode: "self-only" });
+      recordTranscriptHookGrant({ callerConvId: altConv, subcommand: "read", targetConvId: altConv, mode: "self-only" });
+      const prevEnvConv = process.env.GEMINI_CONVERSATION_ID;
+      process.env.GEMINI_CONVERSATION_ID = altConv;
+      try {
+        const selfCliRes = await readTranscript({ filePath: cliTrFile });
+        assert.ok(!selfCliRes.isError, `self-only read --file on antigravity-cli/brain failed: ${selfCliRes.error}`);
+        assert.match(selfCliRes.text, /CLI product prompt/);
+      } finally {
+        if (prevEnvConv !== undefined) process.env.GEMINI_CONVERSATION_ID = prevEnvConv;
+        else delete process.env.GEMINI_CONVERSATION_ID;
+      }
+
+      // Concurrent grant isolation across separate processes when GEMINI_CONVERSATION_ID is unset
+      const grantA = { callerConvId: "concurrent-a", subcommand: "read", targetConvId: turnConv, mode: "open" };
+      const grantB = { callerConvId: "concurrent-b", subcommand: "read", targetConvId: manyToolsConv, mode: "open" };
+      const spawnCore = (code, extraEnv = {}) =>
+        spawnSync(process.execPath, ["--input-type=module", "-e", code], {
+          cwd: path.resolve(__dirname, ".."),
+          encoding: "utf-8",
+          env: { ...multiEnv, ...extraEnv }
+        });
+      const recA = spawnCore(`import { recordTranscriptHookGrant } from "./lib/transcript-core.mjs"; recordTranscriptHookGrant(${JSON.stringify(grantA)});`);
+      const recB = spawnCore(`import { recordTranscriptHookGrant } from "./lib/transcript-core.mjs"; recordTranscriptHookGrant(${JSON.stringify(grantB)});`);
+      assert.equal(recA.status, 0, recA.stderr);
+      assert.equal(recB.status, 0, recB.stderr);
+
+      const noEnvConsumeEnv = { ...multiEnv };
+      delete noEnvConsumeEnv.GEMINI_CONVERSATION_ID;
+      const consumeWithTwo = spawnCore(`import { consumeTranscriptAccessGrant } from "./lib/transcript-core.mjs"; consumeTranscriptAccessGrant();`, noEnvConsumeEnv);
+      assert.equal(consumeWithTwo.status, 0, consumeWithTwo.stderr);
+
+      const afterPartialConsume = runCli(["transcript", "health", "--id", turnConv], noEnvConsumeEnv);
+      assert.equal(afterPartialConsume.status, 1, "mismatched health without health grant must fail rather than stealing concurrent read grants");
+
+      // Verify per-caller reads succeed using their own GEMINI_CONVERSATION_ID in separate processes
+      const subReadA = runCli(["transcript", "read", "--id", turnConv, "--last-turns", "1"], { ...multiEnv, GEMINI_CONVERSATION_ID: "concurrent-a" });
+      const subReadB = runCli(["transcript", "read", "--id", manyToolsConv, "--last-turns", "1"], { ...multiEnv, GEMINI_CONVERSATION_ID: "concurrent-b" });
+      assert.equal(subReadA.status, 0, `concurrent-a grant should remain intact: ${subReadA.stderr}`);
+      assert.equal(subReadB.status, 0, `concurrent-b grant should remain intact: ${subReadB.stderr}`);
+    } finally {
+      if (prevBrainEnv !== undefined) process.env.AGY_BRAIN_DIR = prevBrainEnv;
+    }
+
+    console.log("✓ Parent policy CLI, runtime hook-grant verification, atomic concurrent grants, and ACS-RUN-008..010 + Wave 2 regressions verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

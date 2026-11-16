@@ -1215,6 +1215,34 @@ function tryRealpath(p) {
   }
 }
 
+function normalizeSessionTrackedPath(targetPath) {
+  if (!targetPath || typeof targetPath !== "string") return "";
+  try {
+    const resolved = tryRealpath(resolveHookPath(targetPath));
+    const norm = resolved.replace(/\\/g, "/");
+    return os.platform() === "win32" ? norm.toLowerCase() : norm;
+  } catch {
+    return "";
+  }
+}
+
+function recordSessionWrittenFile(convId = "global", targetPath) {
+  const norm = normalizeSessionTrackedPath(targetPath);
+  if (!norm) return;
+  const session = getSessionState(convId);
+  const existing = Array.isArray(session.writtenFiles) ? session.writtenFiles : [];
+  if (existing.includes(norm)) return;
+  session.writtenFiles = existing.slice(-199).concat([norm]);
+  saveSessionState(convId, session, { updatePollTime: false });
+}
+
+function wasFileWrittenInSession(convId = "global", targetPath) {
+  const norm = normalizeSessionTrackedPath(targetPath);
+  if (!norm) return false;
+  const session = getSessionState(convId);
+  return Array.isArray(session.writtenFiles) && session.writtenFiles.includes(norm);
+}
+
 function isPathInsideDir(candidatePath, baseDir) {
   const norm = (p) => (os.platform() === "win32" ? p.toLowerCase() : p);
   const resolvedCandidate = norm(tryRealpath(resolveHookPath(candidatePath)));
@@ -2574,6 +2602,86 @@ function getSegmentCmdName(seg) {
   return tokens.length > 0 ? normalizeCmdName(tokens[0]) : "";
 }
 
+function collectSegmentWrittenTargets(segments, depth = 0, out = new Set()) {
+  if (depth > 4) return out;
+  for (const seg of segments) {
+    const tokens = tokenizeShellWordsDetailed(seg.text || "");
+    if (seg.hasWriteRedirect) {
+      for (const redir of extractRedirectTargets(tokens)) {
+        const norm = normalizeSessionTrackedPath(redir);
+        if (norm) out.add(norm);
+      }
+    }
+    const segCmd = getSegmentCmdName(seg);
+    const nonFlagArgs = tokenizeShellWords(seg.text || "").slice(1).filter((t) => t && !t.startsWith("-"));
+    if ((segCmd === "cp" || segCmd === "mv" || segCmd === "ln" || segCmd === "install") && nonFlagArgs.length >= 2) {
+      const dst = normalizeSessionTrackedPath(nonFlagArgs[nonFlagArgs.length - 1]);
+      if (dst) out.add(dst);
+    } else if (segCmd === "tee") {
+      for (const target of nonFlagArgs) {
+        const norm = normalizeSessionTrackedPath(target);
+        if (norm) out.add(norm);
+      }
+    } else if (segCmd === "dd") {
+      for (const tok of tokenizeShellWords(seg.text || "")) {
+        if (tok.startsWith("of=")) {
+          const norm = normalizeSessionTrackedPath(tok.slice(3));
+          if (norm) out.add(norm);
+        }
+      }
+    }
+    const wrapped = extractWrappedScriptInfo(seg.text);
+    if (wrapped && wrapped.innerScript) {
+      collectSegmentWrittenTargets(splitShellSegments(wrapped.innerScript), depth + 1, out);
+    }
+    if (Array.isArray(seg.subshells)) {
+      for (const sub of seg.subshells) {
+        collectSegmentWrittenTargets(splitShellSegments(sub), depth + 1, out);
+      }
+    }
+  }
+  return out;
+}
+
+function isRestrictedLifecycleInvocation(segments, depth = 0) {
+  if (depth > 4) return false;
+  for (const seg of segments) {
+    const rawSeg = String(seg.text || "");
+    if (
+      /\bagy-context(?:-saver)?(?:\.m?js)?\s+(?:--?(?:setup|install|uninstall|restore-backups)|setup|install|uninstall|restore-backups)\b/i.test(
+        rawSeg
+      ) ||
+      /\bnpm\s+(?:--prefix\s+\S+\s+)?run\s+(?:setup|uninstall)\b/i.test(rawSeg)
+    ) {
+      return true;
+    }
+    const segCmd = getSegmentCmdName(seg);
+    if (SHELL_INTERPRETERS.has(segCmd) || CODE_INTERPRETERS.has(segCmd) || segCmd === "npx" || segCmd === "bun") {
+      const segTokens = tokenizeShellWords(rawSeg);
+      for (let i = 1; i < segTokens.length; i++) {
+        const tok = String(segTokens[i] || "").trim().replace(/\\/g, "/");
+        if (!tok || tok.startsWith("-")) continue;
+        if (/(?:^|\/)install-register\.mjs$/i.test(tok)) {
+          const resolvedNorm = normalizeSessionTrackedPath(tok);
+          if (!/\/agy-squad\/scripts\/install-register\.mjs$/i.test(resolvedNorm) && !/\/agy-squad\/scripts\/install-register\.mjs$/i.test(tok)) {
+            return true;
+          }
+        }
+      }
+    }
+    const wrapped = extractWrappedScriptInfo(seg.text);
+    if (wrapped && wrapped.innerScript && isRestrictedLifecycleInvocation(splitShellSegments(wrapped.innerScript), depth + 1)) {
+      return true;
+    }
+    if (Array.isArray(seg.subshells)) {
+      for (const sub of seg.subshells) {
+        if (isRestrictedLifecycleInvocation(splitShellSegments(sub), depth + 1)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * Recursively collects inspectable command texts (main segment, unquoted forms,
  * bash/sh/eval inner scripts, nested subshells, and interpreter/xargs heredoc bodies).
@@ -2583,6 +2691,8 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
   if (depth > 4) return [];
   const texts = [];
   const isRestrictedChild = Boolean(options.isRestrictedChild);
+  const convId = options.convId || "global";
+  const pendingWrittenSet = options.pendingWrittenSet || new Set();
   const osTmpNorm = os.tmpdir().replace(/\\/g, "/");
 
   for (let idx = 0; idx < segments.length; idx++) {
@@ -2615,7 +2725,7 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
       texts.push("base64 | sh");
     }
 
-    // Inspect on-disk script files executed by shell/code interpreters (when in /tmp, /scratch, non-script extension, or restricted child)
+    // Inspect on-disk script files executed by shell/code interpreters (when in /tmp, /scratch, non-script extension, or written in restricted child session)
     if (SHELL_INTERPRETERS.has(segCmd) || CODE_INTERPRETERS.has(segCmd)) {
       const segTokens = tokenizeShellWords(seg.text || "");
       for (let tIdx = 1; tIdx < segTokens.length; tIdx++) {
@@ -2626,13 +2736,17 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
         try {
           const resolvedFile = resolveHookPath(tok);
           const normFile = resolvedFile.replace(/\\/g, "/");
+          const trackedNorm = normalizeSessionTrackedPath(resolvedFile);
           const isTmpOrScratchFile =
             normFile.startsWith("/tmp/") ||
             normFile.startsWith("/var/tmp/") ||
             normFile.startsWith(osTmpNorm + "/") ||
             normFile.includes("/scratch/");
           const isNonScriptExt = !isExecutableScriptPath(normFile);
-          if (isTmpOrScratchFile || isNonScriptExt || isRestrictedChild) {
+          const isChildMutatedScript =
+            isRestrictedChild &&
+            (pendingWrittenSet.has(trackedNorm) || wasFileWrittenInSession(convId, resolvedFile));
+          if (isTmpOrScratchFile || isNonScriptExt || isChildMutatedScript) {
             if (fs.existsSync(resolvedFile)) {
               const st = fs.statSync(resolvedFile);
               if (st.isFile() && st.size > 0 && st.size <= 131072) {
@@ -3352,10 +3466,15 @@ function isProtectedGovernanceFileMutation(targetPath, convId = "global") {
 function hasGovernanceMutationInText(text, convId = "global") {
   if (!text || typeof text !== "string") return false;
   const norm = text.replace(/\\/g, "/");
-  const hasMutationVerb =
-    /(?:^|[^\w-])(?:rm|del|remove-item|mv|cp|tee|truncate|shred|install|sed|perl|chmod|chown|ln|dd|patch|writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rmSync|rmdir|rmdirSync|rename|renameSync|truncateSync|chmodSync|copyFile|copyFileSync|WriteAllText|Delete|Remove|os\.remove|os\.unlink|shutil\.(?:copy|move|rmtree))\b|\bPath\([^\n)]*\)\.(?:write_text|write_bytes|unlink)\b/i.test(
+  const hasShellMutationVerb =
+    /(?:^|[\s;|&(`'"])(?:rm|del|remove-item|mv|cp|tee|truncate|shred|install|sed|perl|chmod|chown|ln|dd|patch)(?=$|[\s;|&)`'"])/i.test(
       norm
     );
+  const hasCodeMutationVerb =
+    /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rmSync|rmdir|rmdirSync|rename|renameSync|truncateSync|chmodSync|copyFile|copyFileSync|WriteAllText)\s*\(|\bos\.(?:remove|unlink)\s*\(|\bshutil\.(?:copy|move|rmtree)\s*\(|\bPath\([^\n)]*\)\.(?:write_text|write_bytes|unlink)\s*\(/i.test(
+      norm
+    );
+  const hasMutationVerb = hasShellMutationVerb || hasCodeMutationVerb;
   let hasGovernanceRedirect = false;
   if (norm.includes(">")) {
     for (const seg of splitShellSegments(text)) {
@@ -3598,10 +3717,13 @@ try {
     // Raw-command internal state checks (skipping heredoc bodies, echo/printf text, and grep patterns)
     let isSpillover = false;
     let taskMatch = null;
+    const pendingWrittenSet = collectSegmentWrittenTargets(segments);
     if (!agyTranscriptCheck.allowed) {
       const callerAccess = evaluateCallerTranscriptAccess(convId);
       const inspectableTexts = collectInspectableTexts(segments, 0, {
-        isRestrictedChild: callerAccess.isRestrictedChild
+        isRestrictedChild: callerAccess.isRestrictedChild,
+        convId,
+        pendingWrittenSet
       });
       const inspectableCombined = inspectableTexts.join("\n");
       const singleTokens = segments.length === 1 ? tokenizeShellWords(segments[0].text) : [];
@@ -3619,12 +3741,7 @@ try {
       }
 
       // Block restricted child sessions from running setup/install/uninstall/restore-backups lifecycle commands
-      if (
-        /\bagy-context(?:-saver)?(?:\.m?js)?\s+(?:--?(?:setup|install|uninstall|restore-backups)|setup|install|uninstall|restore-backups)\b|\bnpm\s+run\s+(?:setup|uninstall)\b|\binstall-register\.mjs\b/i.test(
-          inspectableCombined
-        ) &&
-        callerAccess.isRestrictedChild
-      ) {
+      if (callerAccess.isRestrictedChild && isRestrictedLifecycleInvocation(segments)) {
         respond({
           decision: "deny",
           reason:
@@ -3691,8 +3808,12 @@ try {
     if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectSelfId) {
       if (/--id(?:=|\s+)["']?current["']?\b/i.test(effectiveCmd)) {
         effectiveCmd = effectiveCmd.replace(/--id(?:=|\s+)["']?current["']?\b/i, `--id ${agyTranscriptCheck.injectSelfId}`);
-      } else if (agyTranscriptCheck.targetWasCurrentPlaceholder && /\s+["']?current["']?\s*$/i.test(effectiveCmd)) {
-        effectiveCmd = effectiveCmd.replace(/\s+["']?current["']?\s*$/i, ` --id ${agyTranscriptCheck.injectSelfId}`);
+      } else if (agyTranscriptCheck.targetWasCurrentPlaceholder) {
+        const updatedCmd = effectiveCmd.replace(
+          /(^|\s)(["']?)current\2(?=(?:\s|$)(?!.*\s["']?current["']?(?:\s|$)))/i,
+          `$1--id ${agyTranscriptCheck.injectSelfId}`
+        );
+        effectiveCmd = updatedCmd !== effectiveCmd ? updatedCmd : `${effectiveCmd.trim()} --id ${agyTranscriptCheck.injectSelfId}`;
       } else {
         effectiveCmd = `${effectiveCmd.trim()} --id ${agyTranscriptCheck.injectSelfId}`;
       }
@@ -3749,6 +3870,12 @@ try {
     }
     if (!isDaemon && waitMs === undefined) {
       overwrite.WaitMsBeforeAsync = targetMaxWait;
+    }
+
+    if (pendingWrittenSet.size > 0) {
+      for (const writtenPath of pendingWrittenSet) {
+        recordSessionWrittenFile(convId, writtenPath);
+      }
     }
 
     if (Object.keys(overwrite).length > 0) {
@@ -4016,6 +4143,12 @@ try {
       const session = getSessionState(convId);
       session.denials++;
       saveSessionState(convId, session);
+      if (session.denials >= 5) {
+        respond({
+          decision: "force_ask",
+          reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: swarm/subagent schedule polling attempted ${session.denials} times. Use 'swarm_wait' for '/swarm' or stop calling tools for subagents. User confirmation required to proceed.`
+        });
+      }
       respond({
         decision: "deny",
         reason:
@@ -4117,6 +4250,9 @@ try {
         decision: "force_ask",
         reason: `[BENCHMARK MUTATION DETECTED] Mutation of protected evaluator/benchmark artifact '${targetFile}' requires explicit user confirmation to prevent benchmark contamination.`
       });
+    }
+    if (targetFile && (callerAccess.isRestrictedChild || isExecutableScriptPath(targetFile) || isTmpOrScratch)) {
+      recordSessionWrittenFile(convId, targetFile);
     }
     respond({ decision: "allow" });
   }

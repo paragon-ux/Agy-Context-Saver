@@ -1,6 +1,6 @@
 # CLI & Hook Reference
 
-`Agy-Context-Saver` (`v2.0.0`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs`), paired with **RTK (`>= 1.1.0`)**.
+`Agy-Context-Saver` (`v2.0.1`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs`), paired with **RTK (`>= 1.1.0`)**.
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
@@ -17,7 +17,7 @@ Unbounded `read_file` calls on workspace files are blocked by the `PreToolUse` h
 | **Tier 2: `read_file` (full-file read)** | Files $\le 800$ lines and $\le 45\text{ KiB}$ | Pass explicit `StartLine: 1, EndLine: <TotalLines>`; partial slices of `151-800` lines are denied |
 | **Tier 3: Spillovers & task logs** | `.system_generated/steps/<step>/output.txt` & completed `tasks/<taskId>.log` | Bounded `read_file` ($\le 150\text{L}$) on step spillovers or single unchained `rtk read <path>` |
 
-Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `.gemini/config/`) pass through Safe Harbor without slice bounds.
+Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass through Safe Harbor without slice bounds.
 
 ---
 
@@ -121,7 +121,7 @@ Extracts untruncated fields from `transcript_full.jsonl` for a single step, a co
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive step range bounds when `--step` is omitted. |
 | `--field` | `<spec>` | `all` | Target field: `content`, `thinking`, `tool_calls`, `tool_args`, `tool_args:<Key>`, or `all`. |
 | `--head` / `--tail` | `<N>` | `(none)` | Return only the first or last `N` lines of rendered output (aliases: `--head-lines`, `--tail-lines`). |
-| `--full` | `(none)` | `false` | Emit full untruncated step output without field clipping. |
+| `--full` | `(none)` | `false` | Accepted for CLI ergonomics (`step` already emits untruncated fields from `transcript_full.jsonl` unless `--head`/`--tail` is set). |
 | `--file` / `--json` | `<path>` / `(none)` | `(none)` | Explicit `.jsonl` file path or JSON output. |
 
 ```bash
@@ -187,7 +187,7 @@ Checking Agy-Context-Saver installation status...
 - Execution Governor Hook (agy-context-saver): ACTIVE (plugin + global hooks.json)
 - CLI Shim (agy-context): INSTALLED (~/.gemini/antigravity/bin)
 - RTK Command Optimizer (>= 1.1.0): INSTALLED (rtk 1.1.0)
-- Transcript Access Policy: OPEN (default - all sessions permitted)
 - MCP Cleanup: CLEAN (0 duplicate MCP configs/schemas)
+- Transcript Access Policy: OPEN (default - all sessions permitted)
 Overall Status: HEALTHY & ACTIVE
 ```
