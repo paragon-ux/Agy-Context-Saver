@@ -8,6 +8,7 @@
 
 ## Layer 1: Background Tasks & Proportional Backoff
 - **No busy-polling**: Do not call `manage_task(Action='status')` in loops or schedule short timers to poll running background tasks. Background tasks resume the agent automatically via **Reactive Wakeup** (`<SYSTEM_MESSAGE>`).
+- **No blocking CLI watch loops**: Never run blocking CI poll watches (`gh pr checks --watch`, `gh run watch`) inside `run_command`; run one-shot snapshots (`gh pr checks`, `gh run list`) instead.
 - **Proportional backoff**: Diagnostic status checks follow an exponential cooldown curve:
   $\text{Cooldown} = \min(600, \text{round}(30 \times 2.5^{\text{pollCount} - 1})) \quad [0\text{s} \to 30\text{s} \to 75\text{s} \to 188\text{s} \to 469\text{s} \to 600\text{s}]$
   - Check #1 (immediate upon launch): permitted ($0\text{s}$).

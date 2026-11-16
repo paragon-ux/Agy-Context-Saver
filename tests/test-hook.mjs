@@ -1728,6 +1728,50 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
       fs.rmSync(cacheProfile, { recursive: true, force: true });
     }
 
+    // Blocking CI watch loop guard (gh pr checks --watch / gh run watch)
+    for (const blockedWatchCmd of [
+      "gh pr checks 4 --repo paragon-ux/Agy-Context-Saver --watch --interval 15",
+      "gh pr checks 7 -R paragon-ux/Agy-Squad -w",
+      "gh pr checks 7 -wi 15",
+      "gh pr checks 4 --watch=true",
+      "rtk gh pr checks 4 --watch",
+      "env GH_HOST=github.com gh pr checks 4 -w",
+      "gh run watch 43948962826 -R paragon-ux/Agy-Context-Saver",
+      "bash -c 'gh run watch 43948962826'",
+      "echo $(gh pr checks 4 -w)"
+    ]) {
+      const watchDeny = runHook(
+        {
+          conversationId: "ci-watch-deny",
+          cwd: wsDir,
+          toolCall: { name: "run_command", args: { CommandLine: blockedWatchCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(watchDeny.decision, "deny", `Blocking CI watch loop must be denied: ${blockedWatchCmd}`);
+      assert.match(watchDeny.reason, /Blocking CI watch loop/i);
+    }
+
+    for (const allowedGhCmd of [
+      "gh pr checks 4 -R paragon-ux/workflow-repo",
+      "gh pr checks 4 --repo paragon-ux/Agy-Context-Saver --watch=false",
+      "gh pr checks --watch --help",
+      "gh run list -R paragon-ux/Agy-Context-Saver -L 5",
+      "gh run watch --help",
+      "git commit -m \"block gh pr checks --watch and gh run watch\"",
+      "rtk grep \"gh run watch\" scripts/"
+    ]) {
+      const watchAllow = runHook(
+        {
+          conversationId: "ci-watch-allow",
+          cwd: wsDir,
+          toolCall: { name: "run_command", args: { CommandLine: allowedGhCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(watchAllow.decision, "allow", `Non-blocking gh/text command must stay allowed: ${allowedGhCmd}`);
+    }
+
     console.log("✓ Group H regression checks passed (payload.cwd, 2>/dev/null, antigravity-cli, swarm_view, Step0>16KiB, cross-swarm isolation, query current, Wave 2 regressions)");
   } finally {
     fs.rmSync(wsDir, { recursive: true, force: true });

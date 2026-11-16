@@ -102,6 +102,7 @@ agy-context uninstall [--restore-backups]
 
 1. **Layer 1 (Reactive lifecycle and backoff)**:
    - Do not busy-wait on `manage_task(Action='status')` or short polling timers; end the turn and wait for Reactive Wakeup (`<SYSTEM_MESSAGE>`).
+   - Do not run blocking CI watch loops (`gh pr checks --watch`, `gh run watch`) inside `run_command`; use one-shot snapshots (`gh pr checks`, `gh run list`) instead.
    - Status checks follow exponential backoff: $\min(600, \text{round}(30 \times 2.5^{\text{pollCount}-1}))$. 5 cumulative denials trigger the `force_ask` circuit breaker.
    - For background shell tasks $>15\text{s}$, schedule `schedule(DurationSeconds=45, TimerCondition="task-X")` and output a Pre-Yield Status Card. Never pair `swarm_wait` or subagents with a one-shot `schedule` timer.
 2. **Layer 2 (Shell rewriting, file slices, and transcript access)**:

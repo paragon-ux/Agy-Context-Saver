@@ -2894,6 +2894,98 @@ function isRestrictedLifecycleInvocation(segments, depth = 0) {
   return false;
 }
 
+const GH_VALUE_FLAGS = new Set([
+  "-R",
+  "--repo",
+  "-i",
+  "--interval",
+  "-q",
+  "--jq",
+  "-t",
+  "--template",
+  "-H",
+  "--hostname"
+]);
+
+function findBlockingWatchLoop(segments, depth = 0) {
+  if (depth > 4) return null;
+  for (const seg of segments) {
+    const { body } = splitEnvPrefix(seg.text || "");
+    const tokens = tokenizeShellWords(body || seg.text || "");
+    let idx = 0;
+    while (idx < tokens.length) {
+      const norm = normalizeCmdName(tokens[idx]);
+      if (norm === "rtk" || norm === "command" || norm === "exec" || norm === "nohup") {
+        idx++;
+        continue;
+      }
+      if (norm === "sudo") {
+        idx++;
+        while (idx < tokens.length && tokens[idx].startsWith("-")) {
+          if (tokens[idx] === "-u" || tokens[idx] === "-g" || tokens[idx] === "-h" || tokens[idx] === "-p" || tokens[idx] === "-C") {
+            idx += 2;
+          } else {
+            idx++;
+          }
+        }
+        continue;
+      }
+      break;
+    }
+
+    if (idx < tokens.length && normalizeCmdName(tokens[idx]) === "gh") {
+      const rest = tokens.slice(idx + 1);
+      const positionals = [];
+      let hasHelpFlag = false;
+      let hasWatchFlag = false;
+      let afterDoubleDash = false;
+      for (let i = 0; i < rest.length; i++) {
+        const tok = String(rest[i] || "");
+        if (!afterDoubleDash && tok === "--") {
+          afterDoubleDash = true;
+          continue;
+        }
+        if (!afterDoubleDash && tok.startsWith("-") && tok !== "-") {
+          if (tok === "--help" || tok === "-h") {
+            hasHelpFlag = true;
+            break;
+          }
+          if (tok === "--watch" || /^--watch=(?:true|1|yes)$/i.test(tok) || /^-[a-zA-Z]*w[a-zA-Z]*$/.test(tok)) {
+            hasWatchFlag = true;
+            continue;
+          }
+          if (GH_VALUE_FLAGS.has(tok) && i + 1 < rest.length) {
+            i++;
+          }
+          continue;
+        }
+        positionals.push(tok.toLowerCase());
+      }
+      if (!hasHelpFlag) {
+        if (positionals[0] === "pr" && positionals[1] === "checks" && hasWatchFlag) {
+          return { command: "gh pr checks --watch" };
+        }
+        if (positionals[0] === "run" && positionals[1] === "watch") {
+          return { command: "gh run watch" };
+        }
+      }
+    }
+
+    const wrapped = extractWrappedScriptInfo(seg.text);
+    if (wrapped && wrapped.innerScript) {
+      const nested = findBlockingWatchLoop(splitShellSegments(wrapped.innerScript), depth + 1);
+      if (nested) return nested;
+    }
+    if (Array.isArray(seg.subshells)) {
+      for (const sub of seg.subshells) {
+        const nested = findBlockingWatchLoop(splitShellSegments(sub), depth + 1);
+        if (nested) return nested;
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Recursively collects inspectable command texts (main segment, unquoted forms,
  * bash/sh/eval inner scripts, nested subshells, and interpreter/xargs heredoc bodies).
@@ -4078,6 +4170,17 @@ try {
           }
         }
       }
+    }
+
+    const blockingWatch = findBlockingWatchLoop(segments);
+    if (blockingWatch) {
+      respond({
+        decision: "deny",
+        reason:
+          `Antigravity Execution Governance: Blocking CI watch loop ('${blockingWatch.command}') stalls agents indefinitely when remote runners queue.\n` +
+          "- Run a single non-blocking snapshot ('gh pr checks' or 'gh run list') instead.\n" +
+          "- If waiting on remote CI, end your turn or use a backoff-compliant 'schedule' timer (>= 60s) rather than blocking inside run_command."
+      });
     }
 
     // Check agy-context transcript CLI exemption & parent-scoped access governance
