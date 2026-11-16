@@ -1487,6 +1487,24 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
     });
     assert.equal(upgradedRes.decision, "allow", "Pre-v2 cached session.lineage must be invalidated and re-bound to Step 1 coordinator");
 
+    // Concatenated SYSTEM_MESSAGE in single JSONL step still binds Your assignment sender= (`ACS-R2-ARCH-001`)
+    const concatWorker = "hermetic-concat-worker";
+    const concatTrPath = path.join(brainH, concatWorker, ".system_generated", "logs", "transcript.jsonl");
+    writeTr(concatWorker, [
+      {
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:07Z sender=${pB} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #1\n[Message] timestamp=2026-11-16T00:00:08Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #2 for @audit-concat):\n[agy-transcript-access: allow]\nAudit`
+      }
+    ]);
+    const concatRes = runHook({
+      conversationId: concatWorker,
+      transcriptPath: concatTrPath,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${pA}` } }
+    });
+    assert.equal(concatRes.decision, "allow", "Concatenated SYSTEM_MESSAGE must bind Your assignment to its local sender=");
+
     // >12 leading board notifications before Your assignment (large swarm)
     const largeSwarmWorker = "hermetic-swarm-large-worker";
     const largeSwarmTr = path.join(brainH, largeSwarmWorker, ".system_generated", "logs", "transcript.jsonl");
@@ -1738,6 +1756,8 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
       "env GH_HOST=github.com gh pr checks 4 -w",
       "gh run watch 43948962826 -R paragon-ux/Agy-Context-Saver",
       "bash -c 'gh run watch 43948962826'",
+      "bash <<\"EOF\"\ngh run watch 43948962826\nEOF",
+      "cat <<'EOF' | sh\ngh pr checks 4 -w\nEOF",
       "echo $(gh pr checks 4 -w)"
     ]) {
       const watchDeny = runHook(
@@ -1754,10 +1774,12 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
 
     for (const allowedGhCmd of [
       "gh pr checks 4 -R paragon-ux/workflow-repo",
+      "gh pr checks 4 -Rmywork/repo",
       "gh pr checks 4 --repo paragon-ux/Agy-Context-Saver --watch=false",
       "gh pr checks --watch --help",
       "gh run list -R paragon-ux/Agy-Context-Saver -L 5",
       "gh run watch --help",
+      "cat > notes.md <<'EOF'\ngh run watch 43948962826\nEOF",
       "git commit -m \"block gh pr checks --watch and gh run watch\"",
       "rtk grep \"gh run watch\" scripts/"
     ]) {

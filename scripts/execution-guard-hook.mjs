@@ -1870,7 +1870,13 @@ function getCallerLineage(convId) {
       if (swarmAssignMatch) {
         isChildSession = true;
         isSwarmChild = true;
-        if (senderMatch) parentConvId = senderMatch[1];
+        const assignPrefix = content.slice(0, swarmAssignMatch.index);
+        const assignSenders = [...assignPrefix.matchAll(/\[Message\][^\n]*\bsender=([a-zA-Z0-9_-]{4,})\b/g)];
+        if (assignSenders.length > 0) {
+          parentConvId = assignSenders[assignSenders.length - 1][1];
+        } else if (senderMatch) {
+          parentConvId = senderMatch[1];
+        }
         rosterName = swarmAssignMatch[1];
         const dir = extractFirstLineDirective(swarmAssignMatch[2]);
         if (dir) launchDirective = dir;
@@ -2909,7 +2915,15 @@ const GH_VALUE_FLAGS = new Set([
 
 function findBlockingWatchLoop(segments, depth = 0) {
   if (depth > 4) return null;
-  for (const seg of segments) {
+  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+    const seg = segments[segIdx];
+    const pipelineCmds = [getSegmentCmdName(seg)];
+    for (let j = segIdx + 1; j < segments.length; j++) {
+      const nextSeg = segments[j];
+      if (nextSeg.leadingSep !== "|" && nextSeg.leadingSep !== "|&") break;
+      pipelineCmds.push(getSegmentCmdName(nextSeg));
+    }
+
     const { body } = splitEnvPrefix(seg.text || "");
     const tokens = tokenizeShellWords(body || seg.text || "");
     let idx = 0;
@@ -2950,7 +2964,12 @@ function findBlockingWatchLoop(segments, depth = 0) {
             hasHelpFlag = true;
             break;
           }
-          if (tok === "--watch" || /^--watch=(?:true|1|yes)$/i.test(tok) || /^-[a-zA-Z]*w[a-zA-Z]*$/.test(tok)) {
+          const isShortValueAttached = /^-[RiqHt].+/.test(tok);
+          if (
+            tok === "--watch" ||
+            /^--watch=(?:true|1|yes)$/i.test(tok) ||
+            (!isShortValueAttached && /^-[a-zA-Z]*w[a-zA-Z]*$/.test(tok))
+          ) {
             hasWatchFlag = true;
             continue;
           }
@@ -2979,6 +2998,17 @@ function findBlockingWatchLoop(segments, depth = 0) {
     if (Array.isArray(seg.subshells)) {
       for (const sub of seg.subshells) {
         const nested = findBlockingWatchLoop(splitShellSegments(sub), depth + 1);
+        if (nested) return nested;
+      }
+    }
+    if (
+      Array.isArray(seg.heredocBodies) &&
+      seg.heredocBodies.length > 0 &&
+      pipelineCmds.some((c) => SHELL_INTERPRETERS.has(c))
+    ) {
+      for (const hdBody of seg.heredocBodies) {
+        if (!hdBody) continue;
+        const nested = findBlockingWatchLoop(splitShellSegments(hdBody), depth + 1);
         if (nested) return nested;
       }
     }

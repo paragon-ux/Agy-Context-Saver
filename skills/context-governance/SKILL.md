@@ -88,7 +88,7 @@ agy-context transcript access [status|off|on|reset|self-only] [--status | --off 
 - **5-tier precedence**: `1. Policy Owner` -> `2. Explicit CLI --deny` -> `3. Explicit CLI --allow` (supports `@roster*` prefix globs such as `@audit-squad*`) -> `4. First-Line Launch Directive` -> `5. Cohort Default Mode`.
 - **Stale-lock protection**: Policies (`policies[ownerId]`) expire after a 1-hour default TTL, Step 0 `USER_INPUT` top-level user sessions bypass child locks automatically, Step 0/1 `sender=<parentConvId>` binds child agents to their parent policy, and `agy-context status` displays the active `Transcript Access Policy`.
 
-### 8. `agy-context status` & `agy-context setup`
+### 8. `agy-context status`, `setup` & `uninstall [--restore-backups]`
 Audits or synchronizes the plugin link, `PreToolUse` hook, CLI shims, RTK (`>= 1.1.0`), and `Transcript Access Policy`.
 ```bash
 agy-context status [--json]

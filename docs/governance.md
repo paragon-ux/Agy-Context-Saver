@@ -25,6 +25,7 @@ $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5
 | **Check 6+** | **600s** | Prolonged process | **Denied**; trips `force_ask` circuit breaker |
 
 - **Immediate operations:** `manage_task(Action='kill')` and `manage_task(Action='send_input')` are always allowed immediately (`0s` cooldown, zero penalties).
+- **Blocking CI watch loops denied:** `gh pr checks --watch` / `-w` and `gh run watch` inside `run_command` are denied because CI runner queues can hang indefinitely; run one-shot snapshots (`gh pr checks`, `gh run list`) paired with exponential backoff instead.
 - **Watchdog timers:** Any `schedule` task watchdog timer must set `DurationSeconds >= Math.max(30, requiredBackoffSeconds)` and pair with a Pre-Yield Status Card. One-shot `schedule` timers polling a `/swarm` or subagent are denied (`swarm_wait` sleeps at zero token cost).
 - **5-strike circuit breaker:** At 5 cumulative denials across polling, internal state, or transcript access checks, the hook returns `force_ask` to pause execution and prompt the user.
 - **Task log lifecycle gating:**

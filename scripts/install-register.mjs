@@ -541,7 +541,11 @@ export async function runInstall(options = {}) {
       if (existing.details.hook.registered) {
         log(`   [OK] Governor Hook (${HOOK_KEY}): Active via plugin + global hooks.json`);
       } else if (existing.details.hook.pluginHookRegistered) {
-        log(`   [WARN] Global hooks.json entry missing/stale for /swarm workers (run setup to synchronize)`);
+        log(
+          existing.details.hook.mirroredHookStale
+            ? `   [WARN] Global hooks.json mirrored hook copy is stale (run setup to synchronize)`
+            : `   [WARN] Global hooks.json entry missing/stale for /swarm workers (run setup to synchronize)`
+        );
       }
       if (existing.details.hook.legacyHookPresent) {
         log(`   [WARN] Global hooks.json has legacy 'execution-guard' entry (run setup to clean up)`);

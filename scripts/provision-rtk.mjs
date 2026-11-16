@@ -62,15 +62,59 @@ export function getRtkPlatformAsset() {
   return null;
 }
 
+function runCmdShimSync(bin, args, platformExec = execFileSync) {
+  if (/["\r\n]/.test(String(bin))) {
+    throw new Error(`Unsafe command path: ${bin}`);
+  }
+  const comspec =
+    process.env.ComSpec ||
+    process.env.COMSPEC ||
+    path.join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", "cmd.exe");
+  const quotedBin = /[\\/\s&|<>^()%!]/.test(bin) ? `"${bin}"` : bin;
+  const quotedArgs = args
+    .map((a) => (/\s|["&|<>^()%!]/.test(String(a)) ? `"${String(a).replace(/"/g, '\\"')}"` : String(a)))
+    .join(" ");
+  const cmdLine = quotedArgs ? `"${quotedBin} ${quotedArgs}"` : `"${quotedBin}"`;
+  return platformExec(comspec, ["/d", "/s", "/c", cmdLine], {
+    encoding: "utf-8",
+    timeout: 5000,
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+    windowsVerbatimArguments: true
+  });
+}
+
+function runRtkVersionSync(bin, { platform = os.platform(), execFileSyncFn = execFileSync } = {}) {
+  const execOpts = {
+    encoding: "utf-8",
+    timeout: 5000,
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true
+  };
+  if (platform === "win32" && /\.(cmd|bat)$/i.test(bin)) {
+    return runCmdShimSync(bin, ["--version"], execFileSyncFn).trim();
+  }
+  try {
+    return execFileSyncFn(bin, ["--version"], execOpts).trim();
+  } catch (err) {
+    if (platform === "win32" && bin === "rtk" && (err?.code === "ENOENT" || err?.code === "EINVAL")) {
+      return runCmdShimSync("rtk", ["--version"], execFileSyncFn).trim();
+    }
+    throw err;
+  }
+}
+
 export function findExistingRtk(options = {}) {
-  const names = os.platform() === "win32" ? ["rtk.exe", "rtk.cmd"] : ["rtk"];
+  const platform = options.platform || os.platform();
+  const execFileSyncFn = options.execFileSync || execFileSync;
+  const names = platform === "win32" ? ["rtk.exe", "rtk.cmd"] : ["rtk"];
   const profileHome = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
   const pluginBinDir = path.join(profileHome, ".gemini", "config", "plugins", "agy-context-saver", "bin");
   const candidateDirs = [binDir, pluginBinDir];
 
   // Check PATH first so a system rtk >= 1.1.0 is preferred over bundled binaries
   try {
-    const out = execFileSync("rtk", ["--version"], { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const out = runRtkVersionSync("rtk", { platform, execFileSyncFn });
     if (isCompatibleRtkVersion(out)) {
       return { path: "rtk", version: out, isLocal: false };
     }
@@ -84,7 +128,7 @@ export function findExistingRtk(options = {}) {
       const localExe = path.join(dir, exeName);
       if (fs.existsSync(localExe)) {
         try {
-          const out = execFileSync(localExe, ["--version"], { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+          const out = runRtkVersionSync(localExe, { platform, execFileSyncFn });
           if (isCompatibleRtkVersion(out)) {
             return { path: localExe, version: out, isLocal: true };
           }
