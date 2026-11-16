@@ -7,6 +7,7 @@
  * context health diagnostics, and lifecycle management.
  */
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -190,6 +191,25 @@ function isInsideDirCaseAware(targetPath, baseDir) {
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
+function isProtectedBenchmarkOutPath(targetPath) {
+  if (!targetPath || typeof targetPath !== "string") return false;
+  const normalized = targetPath.replace(/\\/g, "/");
+  return (
+    /(?:^|\/)(?:benchmarks?|evaluators?|evaluation|scoring|ground_truth|prompt_templates)(?:\/|$)/i.test(normalized) ||
+    /(?:^|\/)(?:eval_[^/]+\.(?:py|json|toml)|bench_[^/]+\.(?:py|json|toml))$/i.test(normalized)
+  );
+}
+
+function isProtectedInternalOutPath(targetPath) {
+  if (!targetPath || typeof targetPath !== "string") return false;
+  const normalized = targetPath.replace(/\\/g, "/");
+  return (
+    /(?:^|\/)\.system_generated(?:\/|$)/i.test(normalized) ||
+    /(?:^|\/)\.git(?:\/|$)/i.test(normalized) ||
+    isProtectedBenchmarkOutPath(normalized)
+  );
+}
+
 function validateSafeExportOutPath(outArg) {
   if (outArg === undefined) return undefined;
   const trimmed = String(outArg).trim();
@@ -204,13 +224,16 @@ function validateSafeExportOutPath(outArg) {
     throw new Error(`Invalid --out path '${outArg}': must end with .md, .json, or .txt.`);
   }
   const abs = path.resolve(trimmed);
-  if (/[\\/]\.system_generated(?:[\\/]|$)/i.test(abs) || /[\\/]\.git(?:[\\/]|$)/i.test(abs)) {
-    throw new Error(`Refusing '--out' inside protected internal directory: '${abs}'.`);
+  if (isProtectedInternalOutPath(abs)) {
+    throw new Error(`Refusing '--out' inside protected internal or benchmark directory: '${abs}'.`);
   }
 
+  const profileHome = getProfileHomeDir();
   const protectedRoots = [
     getStateDir(),
-    path.join(getProfileHomeDir(), ".gemini", "config")
+    path.join(profileHome, ".gemini", "config"),
+    path.join(profileHome, ".gemini", "antigravity", "bin"),
+    path.join(profileHome, ".gemini", "antigravity", "mcp")
   ].map((p) => {
     try { return fs.realpathSync(p); } catch { return path.resolve(p); }
   });
@@ -221,6 +244,9 @@ function validateSafeExportOutPath(outArg) {
       throw new Error(`Invalid --out path '${abs}': refusing symlink or non-regular file.`);
     }
     const realTarget = fs.realpathSync(abs);
+    if (isProtectedInternalOutPath(realTarget)) {
+      throw new Error(`Refusing '--out' inside protected internal or benchmark directory: '${realTarget}'.`);
+    }
     for (const pr of protectedRoots) {
       if (isInsideDirCaseAware(realTarget, pr)) {
         throw new Error(`Refusing '--out' inside protected governance/state directory: '${realTarget}'.`);
@@ -235,8 +261,8 @@ function validateSafeExportOutPath(outArg) {
     }
     if (fs.existsSync(probe)) {
       const realProbe = fs.realpathSync(probe);
-      if (/[\\/]\.system_generated(?:[\\/]|$)/i.test(realProbe) || /[\\/]\.git(?:[\\/]|$)/i.test(realProbe)) {
-        throw new Error(`Refusing '--out' inside protected internal directory: '${realProbe}'.`);
+      if (isProtectedInternalOutPath(realProbe)) {
+        throw new Error(`Refusing '--out' inside protected internal or benchmark directory: '${realProbe}'.`);
       }
       for (const pr of protectedRoots) {
         if (isInsideDirCaseAware(realProbe, pr)) {
@@ -518,6 +544,9 @@ async function handleTranscriptCommand(argv) {
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
     }
+    if (opts.parent !== undefined && !String(opts.parent).trim()) {
+      throw new Error("Flag '--parent' must be a non-empty conversation ID or 'current'.");
+    }
     const accessCheck = verifyTranscriptCoreAccess({ subcommand: sub });
     if (!accessCheck.allowed) {
       emitError(accessCheck.error, Boolean(opts.json));
@@ -581,6 +610,9 @@ async function handleTranscriptCommand(argv) {
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript export': ${positional.join(" ")}`);
     }
+    if (opts.parent !== undefined && !String(opts.parent).trim()) {
+      throw new Error("Flag '--parent' must be a non-empty conversation ID or 'current'.");
+    }
     if (opts.out !== undefined && opts.output !== undefined && opts.out !== opts.output) {
       throw new Error("Conflicting '--out' and '--output' values provided.");
     }
@@ -589,6 +621,15 @@ async function handleTranscriptCommand(argv) {
     const explicitFile = validateExplicitFileFlag(opts.file);
     const startStep = parseOptionalInt(opts.start, "start");
     const endStep = parseOptionalInt(opts.end, "end");
+    if (startStep !== undefined && startStep < 0) {
+      throw new Error(`Flag '--start' must be a non-negative integer (received: '${opts.start}').`);
+    }
+    if (endStep !== undefined && endStep < 0) {
+      throw new Error(`Flag '--end' must be a non-negative integer (received: '${opts.end}').`);
+    }
+    if (startStep !== undefined && endStep !== undefined && endStep < startStep) {
+      throw new Error(`Invalid step range '--start ${startStep} --end ${endStep}': '--end' must be >= '--start'.`);
+    }
     const limit = parseOptionalInt(opts.limit, "limit");
     if (limit !== undefined && limit <= 0) {
       throw new Error(`Flag '--limit' must be a positive integer (received: '${opts.limit}').`);
@@ -611,12 +652,19 @@ async function handleTranscriptCommand(argv) {
     }
 
     if (safeOutPath) {
+      validateSafeExportOutPath(rawOut);
       fs.mkdirSync(path.dirname(safeOutPath), { recursive: true });
+      validateSafeExportOutPath(rawOut);
       const { text, ...payload } = res;
       const fileContent = opts.json ? JSON.stringify(payload, null, 2) + "\n" : text + "\n";
-      const tmpOut = `${safeOutPath}.${process.pid}.${Date.now()}.tmp`;
-      fs.writeFileSync(tmpOut, fileContent, "utf8");
-      fs.renameSync(tmpOut, safeOutPath);
+      const tmpOut = `${safeOutPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      try {
+        fs.writeFileSync(tmpOut, fileContent, { encoding: "utf8", flag: "wx" });
+        fs.renameSync(tmpOut, safeOutPath);
+      } catch (err) {
+        try { fs.unlinkSync(tmpOut); } catch {}
+        throw err;
+      }
       if (opts.json) {
         console.log(JSON.stringify({ ...payload, outputPath: safeOutPath }, null, 2));
       } else {

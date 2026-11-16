@@ -1255,6 +1255,113 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
       assert.equal(deniedSelfExp.decision, "deny", `self-only mode must deny '${forbiddenSelfExport}'`);
     }
 
+    // Regression: cwd-resolved benchmark --out denial, dual --out/--output bypass denial, --parent current rewrite, and repeated --id current
+    const cwdBenchExport = runHook(
+      {
+        conversationId: pA,
+        cwd: path.join(wsDir, "benchmarks"),
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript export --id ${pA} --sanitized --out eval_data.json` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(cwdBenchExport.decision, "deny", "Relative --out inside payload.cwd=benchmarks must be denied");
+
+    const dualOutExport = runHook(
+      {
+        conversationId: pA,
+        cwd: wsDir,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript export --id ${pA} --sanitized --out scratch/ok.md --output benchmarks/evil.json` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(dualOutExport.decision, "deny", "Conflicting --out safe + --output benchmarks must be denied");
+
+    const parentCurrentList = runHook(
+      {
+        conversationId: pA,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript list --parent current --lineage" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(parentCurrentList.decision, "allow");
+    assert.match(parentCurrentList.overwrite?.CommandLine || "", new RegExp(`--parent ${pA}`));
+
+    const parentCurrentExport = runHook(
+      {
+        conversationId: pA,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript export --parent current --sanitized" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(parentCurrentExport.decision, "allow");
+    assert.match(parentCurrentExport.overwrite?.CommandLine || "", new RegExp(`--parent ${pA}`));
+
+    const repeatCurrentSelf = runHook(
+      {
+        conversationId: cliRestricted,
+        transcriptPath: path.join(cliRestrictedLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript export --sanitized --id current --id current" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(repeatCurrentSelf.decision, "allow");
+    assert.doesNotMatch(repeatCurrentSelf.overwrite?.CommandLine || "", /\bcurrent\b/);
+
+    // Regression: positional comma-separated IDs under allowlist policy bind exact 'multi:' grant key
+    const allowlistExpChild = "cli-allow-exp";
+    const allowlistExpLogs = path.join(cliBrainRoot, allowlistExpChild, ".system_generated", "logs");
+    fs.mkdirSync(allowlistExpLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(allowlistExpLogs, "transcript.jsonl"),
+      JSON.stringify({
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:06Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: allow]\nAudit`
+      }) + "\n"
+    );
+    const multiPosHook = runHook(
+      {
+        conversationId: allowlistExpChild,
+        transcriptPath: path.join(allowlistExpLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript export ${pA},${cliRestricted} --sanitized` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(multiPosHook.decision, "allow");
+    const cliStateDir = os.platform() === "win32"
+      ? path.join(cliProfile, "AppData", "Local", "agy-context-saver")
+      : path.join(cliProfile, ".local", "state", "agy-context-saver");
+    const grantsDir = path.join(cliStateDir, "grants");
+    const grantFiles = fs.readdirSync(grantsDir).filter((f) => f.startsWith("grant-"));
+    const latestGrant = grantFiles
+      .map((f) => JSON.parse(fs.readFileSync(path.join(grantsDir, f), "utf8")))
+      .find((g) => g.callerConvId === allowlistExpChild && g.subcommand === "export");
+    const expectedMultiKey = `multi:${[pA, cliRestricted].sort().join(",")}`;
+    assert.equal(latestGrant?.targetConvId, expectedMultiKey, "Positional comma-separated export must bind sorted multi: grant key");
+
     const pollBreakerConv = "swarm-poll-breaker";
     for (let attempt = 1; attempt <= 5; attempt++) {
       const schedRes = runHook({

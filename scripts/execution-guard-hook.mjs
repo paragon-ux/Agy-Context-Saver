@@ -2117,6 +2117,7 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
 
   const opts = {};
   const idValues = [];
+  const outPaths = [];
   const positionals = [];
   for (let i = 0; i < restTokens.length; i++) {
     const tok = restTokens[i];
@@ -2138,6 +2139,10 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
           for (const part of String(val).split(",").map((s) => s.trim()).filter(Boolean)) {
             idValues.push(part);
           }
+        }
+        if (key === "out" || key === "output") {
+          const trimmedOut = String(val).trim();
+          if (trimmedOut) outPaths.push(trimmedOut);
         }
         opts[key] = val;
       }
@@ -2175,7 +2180,13 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     if (opts.id === undefined && posCopy.length >= 1) {
       const pId = posCopy.shift();
       opts.id = pId;
-      idValues.push(pId);
+      if (subcommand === "export") {
+        for (const part of String(pId).split(",").map((s) => s.trim()).filter(Boolean)) {
+          idValues.push(part);
+        }
+      } else {
+        idValues.push(pId);
+      }
     }
   }
 
@@ -2187,10 +2198,11 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
 
   const uniqueIds = Array.from(new Set(idValues.map((s) => String(s).trim()).filter(Boolean)));
   return {
-    targetId: opts.id ? String(opts.id).trim() : null,
+    targetId: subcommand === "export" && uniqueIds.length === 1 ? uniqueIds[0] : (opts.id ? String(opts.id).trim() : null),
     targetIds: uniqueIds,
-    targetParent: opts.parent ? String(opts.parent).trim() : null,
-    outPath: (opts.out || opts.output) ? String(opts.out || opts.output).trim() : null,
+    targetParent: opts.parent !== undefined ? String(opts.parent).trim() : null,
+    outPath: outPaths.length > 0 ? outPaths[outPaths.length - 1] : null,
+    outPaths,
     explicitFile: opts.file ? String(opts.file).trim() : null
   };
 }
@@ -2380,20 +2392,25 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       };
     }
 
-    if (subcommand === "export" && targetInfo.outPath) {
-      const outPath = targetInfo.outPath;
-      if (
-        hasDotDotTraversal(outPath) ||
-        isProtectedInternalState(outPath) ||
-        isProtectedBenchmarkPath(outPath) ||
-        hasGovernanceMutationInText(`> ${outPath}`, convId) ||
-        !/\.(?:md|json|txt)$/i.test(outPath)
-      ) {
-        return {
-          matched: true,
-          allowed: false,
-          reason: `Antigravity Execution Governance: '--out' path '${outPath}' in 'agy-context transcript export' must be a safe .md/.json/.txt artifact outside protected internal state, governance, and benchmark directories.`
-        };
+    if (subcommand === "export" && Array.isArray(targetInfo.outPaths) && targetInfo.outPaths.length > 0) {
+      for (const outPath of targetInfo.outPaths) {
+        const resolvedOut = resolveHookPath(outPath);
+        if (
+          hasDotDotTraversal(outPath) ||
+          isProtectedInternalState(outPath) ||
+          isProtectedInternalState(resolvedOut) ||
+          isProtectedBenchmarkPath(outPath) ||
+          isProtectedBenchmarkPath(resolvedOut) ||
+          hasGovernanceMutationInText(`> ${outPath}`, convId) ||
+          hasGovernanceMutationInText(`> ${resolvedOut}`, convId) ||
+          !/\.(?:md|json|txt)$/i.test(outPath)
+        ) {
+          return {
+            matched: true,
+            allowed: false,
+            reason: `Antigravity Execution Governance: '--out' path '${outPath}' in 'agy-context transcript export' must be a safe .md/.json/.txt artifact outside protected internal state, governance, and benchmark directories.`
+          };
+        }
       }
     }
 
@@ -2506,12 +2523,19 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     }
 
     let resolvedTargetConvId = targetInfo.targetId || null;
+    let injectParentId = null;
+    if (
+      (subcommand === "export" || subcommand === "list" || subcommand === "ls") &&
+      targetInfo.targetParent &&
+      targetInfo.targetParent.toLowerCase() === "current" &&
+      convId &&
+      convId !== "global"
+    ) {
+      injectParentId = convId;
+    }
     if (subcommand === "export") {
       if (targetInfo.targetParent) {
-        const resolvedP =
-          targetInfo.targetParent.toLowerCase() === "current" && convId && convId !== "global"
-            ? convId
-            : targetInfo.targetParent;
+        const resolvedP = injectParentId || targetInfo.targetParent;
         resolvedTargetConvId = `parent:${resolvedP}`;
       } else if (Array.isArray(targetInfo.targetIds) && targetInfo.targetIds.length > 1) {
         resolvedTargetConvId = `multi:${[...targetInfo.targetIds].sort().join(",")}`;
@@ -2556,7 +2580,8 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       subcommand,
       mode: "open",
       needsReadGrant: true,
-      targetConvId: resolvedTargetConvId
+      targetConvId: resolvedTargetConvId,
+      injectParentId
     };
   }
 
@@ -3900,7 +3925,7 @@ try {
     // In self-only mode, deterministically inject --id <convId> when --id and --file were omitted (or --id current / positional current)
     if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectSelfId) {
       if (/--id(?:=|\s+)["']?current["']?\b/i.test(effectiveCmd)) {
-        effectiveCmd = effectiveCmd.replace(/--id(?:=|\s+)["']?current["']?\b/i, `--id ${agyTranscriptCheck.injectSelfId}`);
+        effectiveCmd = effectiveCmd.replace(/--id(?:=|\s+)["']?current["']?\b/gi, `--id ${agyTranscriptCheck.injectSelfId}`);
       } else if (agyTranscriptCheck.targetWasCurrentPlaceholder) {
         const updatedCmd = effectiveCmd.replace(
           /(^|\s)(["']?)current\2(?=(?:\s|$)(?!.*\s["']?current["']?(?:\s|$)))/i,
@@ -3910,6 +3935,9 @@ try {
       } else {
         effectiveCmd = `${effectiveCmd.trim()} --id ${agyTranscriptCheck.injectSelfId}`;
       }
+    }
+    if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectParentId) {
+      effectiveCmd = effectiveCmd.replace(/--parent(?:=|\s+)["']?current["']?\b/gi, `--parent ${agyTranscriptCheck.injectParentId}`);
     }
 
     const isRtkRead = isRtkReadCommand(effectiveCmd);

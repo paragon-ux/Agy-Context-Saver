@@ -64,14 +64,20 @@ try {
   assert.match(wrapperOut.overwrite?.CommandLine || "", /rtk git status && rtk read package\.json/);
   console.log(`✓ Shell wrapper rewritten cleanly -> '${wrapperOut.overwrite?.CommandLine}'`);
 
-  // 3. Real `rtk hook antigravity` never mutates `agy-context transcript` invocations
-  const agyCmd = runHook(
-    { toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript health --id 1234", WaitMsBeforeAsync: 5000 } } },
-    testEnv
-  );
-  assert.equal(agyCmd.decision, "allow");
-  assert.equal(agyCmd.overwrite?.CommandLine, undefined, "agy-context transcript must pass through unrewritten");
-  console.log("✓ 'agy-context transcript' passes through unrewritten and unblocked");
+  // 3. Real `rtk hook antigravity` never mutates `agy-context transcript` invocations (including list --parent/--lineage and export --sanitized)
+  for (const cmd of [
+    "agy-context transcript health --id 1234",
+    "agy-context transcript list --parent 1234 --lineage --json",
+    "agy-context transcript export --parent 1234 --sanitized --out scratch/index.md"
+  ]) {
+    const agyCmd = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } },
+      testEnv
+    );
+    assert.equal(agyCmd.decision, "allow", `Expected allow for '${cmd}'`);
+    assert.equal(agyCmd.overwrite?.CommandLine, undefined, `'${cmd}' must pass through unrewritten by rtk`);
+  }
+  console.log("✓ 'agy-context transcript' (health, list --parent/--lineage, export --sanitized) passes through rtk unrewritten");
 
   // 4. Absent host `rg` check (strip host rg from PATH, keeping RTK dir)
   let rtkExeDir = path.join(tempDir, "shim-bin");

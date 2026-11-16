@@ -788,6 +788,80 @@ try {
       assert.notEqual(unsanitizedExport.status, 0, "export without --sanitized must fail closed");
       assert.match(unsanitizedExport.stderr, /--sanitized/);
 
+      // 2b. Redaction before 36-char tool truncation, L6 non-priority body key omission, --start/--end, malformed lines, and empty transcript
+      const secretEdgeConv = "secret-edge-conv";
+      writeConvLines(brainDir, secretEdgeConv, [
+        {
+          step_index: 0,
+          type: "USER_INPUT",
+          content: "Inspect data:application/octet-stream;base64,SGVsbG8= and token",
+          created_at: "2026-11-16T01:01:00Z"
+        },
+        {
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          content: "Running secret checks",
+          tool_calls: [
+            { name: "run_command", args: { CommandLine: "curl -u user -H 'X-Key: sk-1234567890abcdef123456'" } },
+            { name: "custom_write", args: { Content: "RAW_BODY_ONLY_MUST_NOT_LEAK" } }
+          ],
+          created_at: "2026-11-16T01:01:01Z"
+        },
+        {
+          step_index: 2,
+          type: "PLANNER_RESPONSE",
+          content: "Final step",
+          created_at: "2026-11-16T01:01:02Z"
+        }
+      ]);
+      // Append a malformed JSONL line to verify streaming resilience
+      fs.appendFileSync(path.join(brainDir, secretEdgeConv, ".system_generated", "logs", "transcript.jsonl"), "{broken_json_line\n");
+      const secretExport = runCli(
+        ["transcript", "export", "--id", secretEdgeConv, "--sanitized", "--start", "0", "--end", "1"],
+        multiEnv
+      );
+      assert.equal(secretExport.status, 0, secretExport.stderr);
+      assert.equal(secretExport.stdout.includes("1234567890abcdef"), false, "API key prefix must be redacted before 36-char tool truncation");
+      assert.equal(secretExport.stdout.includes("RAW_BODY_ONLY_MUST_NOT_LEAK"), false, "Non-priority Content arg must be omitted");
+      assert.equal(secretExport.stdout.includes("SGVsbG8="), false, "Non-image data URI base64 must be stripped");
+      assert.match(secretExport.stdout, /Steps Shown: 2 of 2/);
+      assert.equal(secretExport.stdout.includes("Final step"), false, "--end 1 must exclude step 2");
+
+      // Invalid --start/--end and empty --parent must fail closed
+      const badRangeExport = runCli(
+        ["transcript", "export", "--id", secretEdgeConv, "--sanitized", "--start", "5", "--end", "2"],
+        multiEnv
+      );
+      assert.notEqual(badRangeExport.status, 0, "--start > --end must fail closed");
+      const emptyParentList = runCli(["transcript", "list", "--parent", ""], multiEnv);
+      assert.notEqual(emptyParentList.status, 0, "Empty --parent must fail closed");
+
+      // Empty transcript file exports cleanly with "(no matching steps)"
+      const emptyConv = "empty-export-conv";
+      const emptyLogs = path.join(brainDir, emptyConv, ".system_generated", "logs");
+      fs.mkdirSync(emptyLogs, { recursive: true });
+      fs.writeFileSync(path.join(emptyLogs, "transcript.jsonl"), "");
+      const emptyExp = runCli(["transcript", "export", "--id", emptyConv, "--sanitized"], multiEnv);
+      assert.equal(emptyExp.status, 0, emptyExp.stderr);
+      assert.match(emptyExp.stdout, /\(no matching steps\)/);
+
+      // Symlinked conversation directory in brain root must not be listed
+      const outsideBrainDir = path.join(tempHome, "outside-brain-conv");
+      const outsideLogs = path.join(outsideBrainDir, ".system_generated", "logs");
+      fs.mkdirSync(outsideLogs, { recursive: true });
+      fs.writeFileSync(path.join(outsideLogs, "transcript.jsonl"), JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "outside" }) + "\n");
+      let createdBrainSym = false;
+      try {
+        fs.symlinkSync(outsideBrainDir, path.join(brainDir, "symlinked-outside-conv"));
+        createdBrainSym = true;
+      } catch {}
+      if (createdBrainSym) {
+        const listWithSym = runCli(["transcript", "list", "--limit", "50", "--json"], multiEnv);
+        assert.equal(listWithSym.status, 0, listWithSym.stderr);
+        const listedIds = JSON.parse(listWithSym.stdout).conversations.map((c) => c.conversationId);
+        assert.equal(listedIds.includes("symlinked-outside-conv"), false, "list must exclude symlinked conversation dirs");
+      }
+
       // 3. transcript export --parent <parentUuid> --sanitized --out <path> produces L6-safe index
       const scratchOut = path.join(tempHome, "scratch-export", "transcript-index.md");
       const parentExportCli = runCli(
@@ -807,13 +881,51 @@ try {
       assert.equal(exportedMd.includes("HUGE_UNEXPORTED_FILE_BODY"), false, "Sanitized export must omit raw Content payloads");
       assert.equal(exportedMd.includes("supersecret_token_123456"), false, "Sanitized export must redact bearer tokens");
 
-      // 4. --out protection rejects .system_generated, stateDir, and .. traversal
+      // 4. --out protection rejects .system_generated, stateDir, benchmarks, symlink-to-benchmarks, and .. traversal
       const sysGenOut = path.join(brainDir, swarmChildA, ".system_generated", "leak.md");
       const blockedOutCli = runCli(
         ["transcript", "export", "--id", swarmChildA, "--sanitized", "--out", sysGenOut],
         multiEnv
       );
       assert.notEqual(blockedOutCli.status, 0, "export --out into .system_generated must fail closed");
+
+      const benchOut = path.join(tempHome, "benchmarks", "leak.json");
+      const blockedBenchOut = runCli(
+        ["transcript", "export", "--id", swarmChildA, "--sanitized", "--out", benchOut],
+        multiEnv
+      );
+      assert.notEqual(blockedBenchOut.status, 0, "export --out into benchmarks/ must fail closed");
+
+      fs.mkdirSync(path.join(tempHome, "benchmarks"), { recursive: true });
+      let createdBenchSym = false;
+      const benchSymLink = path.join(tempHome, "scratch-bench-link");
+      try {
+        fs.symlinkSync(path.join(tempHome, "benchmarks"), benchSymLink);
+        createdBenchSym = true;
+      } catch {}
+      if (createdBenchSym) {
+        const blockedSymBench = runCli(
+          ["transcript", "export", "--id", swarmChildA, "--sanitized", "--out", path.join(benchSymLink, "sub", "leak.md")],
+          multiEnv
+        );
+        assert.notEqual(blockedSymBench.status, 0, "export --out through symlink into benchmarks/ must fail closed");
+      }
+
+      // Positional comma-separated multi-id export under active policy binds sorted multi: grant key
+      manageTranscriptAccessPolicy({ callerConvId: "owner-exp", mode: "self-only" });
+      recordTranscriptHookGrant({
+        callerConvId: "owner-exp",
+        subcommand: "export",
+        targetConvId: `multi:${[swarmChildA, swarmChildB].sort().join(",")}`,
+        mode: "open"
+      });
+      const multiPosCli = runCli(
+        ["transcript", "export", `${swarmChildB},${swarmChildA}`, "--sanitized", "--json"],
+        { ...multiEnv, GEMINI_CONVERSATION_ID: "owner-exp" }
+      );
+      assert.equal(multiPosCli.status, 0, multiPosCli.stderr);
+      assert.equal(JSON.parse(multiPosCli.stdout).exportedCount, 2);
+      manageTranscriptAccessPolicy({ on: true, _testAuthorizedOwner: "owner-exp" });
 
       // 5. Under active policy restriction, export --parent / --id require matching PreToolUse grant (L39)
       manageTranscriptAccessPolicy({ callerConvId: "owner-exp", mode: "self-only" });
