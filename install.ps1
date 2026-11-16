@@ -37,7 +37,7 @@ if ($IsUninstall) {
         if ($ExistingContent -match "agy-context-saver-managed") {
             Remove-Item -Path $NodeCmdPath -Force -ErrorAction SilentlyContinue
             if (Test-Path $NodeCmdBakPath) {
-                Copy-Item -Path $NodeCmdBakPath -Destination $NodeCmdPath -Force
+                Move-Item -Path $NodeCmdBakPath -Destination $NodeCmdPath -Force
                 Write-Host "[OK] Restored previous node.cmd from backup: $NodeCmdBakPath" -ForegroundColor Green
             } else {
                 Write-Host "[OK] Removed managed node.cmd wrapper: $NodeCmdPath" -ForegroundColor Green
@@ -66,16 +66,12 @@ if (-not $IsReadOnly -and -not $IsRestoreOnly) {
     $NodeCmdLines = @(
         '@echo off',
         'REM agy-context-saver-managed',
-        'setlocal',
-        'set "ARGS=%*"',
-        '',
-        'echo %ARGS% | findstr /i "execution-guard" >nul',
-        'if %errorlevel% equ 0 (',
-        "    `"$NodeExe`" `"$DestHook`"",
-        '    exit /b %errorlevel%',
-        ')',
-        '',
+        'if /i "%~nx1"=="execution-guard-hook.mjs" goto :hook',
+        'if /i "%~nx1"=="execution-guard.mjs" goto :hook',
         "`"$NodeExe`" %*",
+        'exit /b %errorlevel%',
+        ':hook',
+        "`"$NodeExe`" `"$DestHook`" %*",
         'exit /b %errorlevel%'
     )
     $NodeCmdContent = $NodeCmdLines -join "`r`n"

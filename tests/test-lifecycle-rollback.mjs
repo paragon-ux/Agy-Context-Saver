@@ -120,20 +120,32 @@ try {
   assert.equal(uninstalledDetect.isInstalled, false);
   console.log("✓ Clean uninstallation verified");
 
-  // --- 3. Copy Fallback & Re-Installation Verification ---
+  // --- 3. Copy Fallback, Symlink-to-Copy Upgrade & Re-Installation Verification ---
   console.log("\n--- 3. Copy Fallback & Re-Install Recovery ---");
-  const copyRes = await runInstall({ silent: true, forceCopyFallback: true });
+  // Seed a symlinked install first, then upgrade via forceCopyFallback (ACS-SCRIPT-003)
+  await runInstall({ silent: true });
+  await runInstall({ silent: true, forceCopyFallback: true });
+  const copyRes = detectExistingInstallation();
   assert.equal(copyRes.isComplete, true);
-  assert.equal(fs.lstatSync(pluginDest).isSymbolicLink(), false, "Copy fallback must copy directory rather than symlinking");
+  assert.equal(fs.lstatSync(pluginDest).isSymbolicLink(), false, "forceCopyFallback must replace prior symlink with real directory copy (ACS-SCRIPT-003)");
   assert.ok(fs.existsSync(path.join(pluginDest, "bin", "agy-context.mjs")), "Copied plugin must contain CLI binary");
   assert.ok(fs.existsSync(path.join(pluginDest, "lib", "transcript-core.mjs")), "Copied plugin must contain transcript engine");
+
+  // Seed managed node.cmd & node.cmd.bak, verify uninstall removes managed wrapper and restores backup (ACS-SCRIPT-002)
+  const nodeCmdPath = path.join(configDir, "node.cmd");
+  const nodeCmdBakPath = path.join(configDir, "node.cmd.bak");
+  fs.writeFileSync(nodeCmdPath, "@echo off\r\nREM agy-context-saver-managed\r\n", "utf-8");
+  fs.writeFileSync(nodeCmdBakPath, "@echo off\r\nREM original-user-wrapper\r\n", "utf-8");
 
   // --- 4. Backup Restoration Verification ---
   console.log("\n--- 4. Backup Restore Option Verification ---");
   await runUninstall({ silent: true, restoreBackups: true });
+  assert.ok(fs.existsSync(nodeCmdPath), "Uninstall must restore node.cmd from node.cmd.bak");
+  assert.match(fs.readFileSync(nodeCmdPath, "utf-8"), /original-user-wrapper/);
+  assert.equal(fs.existsSync(nodeCmdBakPath), false, "node.cmd.bak should be moved rather than left orphaned");
   const restoredHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
   assert.ok(restoredHooks["foreign-preservation-hook"], "Backup restore must restore prior hooks.json");
-  console.log("✓ Copy fallback and backup restoration verified");
+  console.log("✓ Copy fallback, symlink-to-copy upgrade, node.cmd cleanup, and backup restoration verified");
 } finally {
   try {
     fs.rmSync(testProfileDir, { recursive: true, force: true });

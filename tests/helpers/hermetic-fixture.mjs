@@ -247,6 +247,9 @@ export function runRtkCli(args, options = {}) {
 export async function setupHermeticTestEnv(options = {}) {
   const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-hermetic-profile-"));
   process.env.AGY_TEST_PROFILE_DIR = profileDir;
+  if (!process.env.GIT_CONFIG_GLOBAL) {
+    process.env.GIT_CONFIG_GLOBAL = path.join(profileDir, ".gitconfig");
+  }
 
   // Seed synthetic historical conversation fixture
   seedHermeticConversationFixture(profileDir);

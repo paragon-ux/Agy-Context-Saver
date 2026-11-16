@@ -39,7 +39,7 @@
    - Validate hook latency and CLI ergonomics against new Antigravity releases and model backends.
 2. **Multi-plugin and `/swarm` stress testing:**
    - Verify co-existence with third-party hooks in `hooks.json` and external MCP servers in `mcp_config.json` without config contention.
-   - Stress-test concurrent `/swarm` cohorts (`Agy-Squad` specialists and flat `audit-<id>` integrity auditors) to keep hook overhead under `5ms`.
+   - Stress-test concurrent `/swarm` cohorts (`Agy-Squad` specialists and flat `audit-<id>` integrity auditors) to keep hook dispatch overhead minimal.
 3. **Editor status visibility:**
    - Keep `rules/AGENTS.md`, `skills/context-governance/SKILL.md`, and `plugin.json` prompts concise and aligned with Antigravity UI panels.
 
@@ -50,6 +50,6 @@
 1. **Standalone skills for specialized workflows:**
    - Keep high-ceremony workflows (compliance ledgers, blind evaluation harnesses) in opt-in Antigravity skills rather than the core hook.
 2. **Zero-dependency standard library runtime:**
-   - Maintain zero runtime npm dependencies (`fs`, `path`, `os`, `readline`, `child_process`, `crypto`), keeping transcript query memory under `30 MB` and hook evaluation under `5ms`.
+   - Maintain zero runtime npm dependencies (`fs`, `path`, `os`, `readline`, `child_process`, `crypto`), streaming transcripts line-by-line with cached RTK resolution and lazy `rg` discovery.
 3. **Automated drift detection and repair:**
    - Use `agy-context setup` (`scripts/install-register.mjs`) to detect and repair hook or shim drift while preserving `.bak` configuration backups.

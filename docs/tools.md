@@ -31,7 +31,7 @@ Streams `transcript.jsonl` to report step counts, user turns, tool call counts, 
 | Flag / Argument | Value | Required | Description |
 | :--- | :---: | :---: | :--- |
 | `[<id>]` / `--id` | `<uuid>` | No* | Conversation UUID as positional arg or `--id`. (*Required when `>= 2` active `/swarm` sessions ran in the last 5 minutes.) |
-| `--file` | `<path>` | No | Explicit path to `transcript.jsonl` (disabled under `self-only` mode). |
+| `--file` | `<path>` | No | Explicit path to `transcript.jsonl` inside Antigravity's brain roots (`antigravity`, `antigravity-cli`, `antigravity-ide`; disabled under `self-only` mode outside caller's session). |
 | `--json` | `(none)` | No | Output JSON instead of Markdown. |
 
 ```bash
@@ -82,7 +82,7 @@ agy-context transcript outline 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --limit 50
 Searches conversation transcripts by regex or substring, hydrating truncated fields from `transcript_full.jsonl` automatically in `auto` mode.
 
 - `grep`, `search`, `find`: enable `--include-tools` by default so matches inside tool names and arguments are returned.
-- `tools`: defaults to `--roles assistant --field tool_args --include-tools --start 0 --end 999999` to list tool calls and arguments across a step range.
+- `tools`: defaults to `--roles assistant --field tool_args --include-tools --start 0 --end 999999 --limit 500` to list tool calls and arguments across a step range.
 
 | Flag / Argument | Value | Default | Description |
 | :--- | :---: | :---: | :--- |
@@ -92,7 +92,7 @@ Searches conversation transcripts by regex or substring, hydrating truncated fie
 | `--mode` | `auto \| compact \| full` | `auto` | `auto` scans `transcript.jsonl` and hydrates `truncated_fields` from `transcript_full.jsonl` when matched. |
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive `step_index` bounds. |
 | `--last-turns` | `<N>` | `(none)` | Restrict search to the last `N` turns (aliases: `--last`, `--tail`). |
-| `--limit` | `<N>` | `5` (`30` w/ `--summary`) | Maximum matching steps to return. |
+| `--limit` | `<N>` | `5` (`30` w/ `--summary`, up to `500` on explicit range/`tools`) | Maximum matching steps to return. |
 | `--summary` / `--outline` | `(none)` | `false` | Print 1-line timeline bullets with `[ERROR]` and `[tools: ...]` tags. |
 | `--include-tools` | `(none)` | `false` (`true` on `grep`/`search`/`find`/`tools`) | Search and display tool call names and arguments. |
 | `--full-args` | `(none)` | `false` | Print full tool call arguments without inline truncation. |
@@ -137,7 +137,7 @@ agy-context transcript step --step 42 --full
 - **Alias:** `ls`
 - **Usage:** `agy-context transcript list [--limit <N>] [--json]`
 
-Lists recent conversation directories in `~/.gemini/antigravity/brain` containing a `.system_generated/logs/transcript.jsonl` file, sorted newest-first by modification time (`mtime`). Disabled when the caller is restricted by a `self-only` or `deny` parent access policy.
+Lists recent conversation directories across Antigravity brain roots (`~/.gemini/antigravity/brain`, `~/.gemini/antigravity-cli/brain`, `~/.gemini/antigravity-ide/brain`) containing a `.system_generated/logs/transcript.jsonl` file, sorted newest-first by modification time (`mtime`). Disabled when the caller is restricted by a `self-only` or `deny` parent access policy.
 
 ```bash
 agy-context transcript ls --limit 5
@@ -161,7 +161,7 @@ Manages parent transcript access policies for child subagents (`define_subagent`
 | `--mode` | `open \| allowlist \| self-only \| deny` | `open` | Set explicit cohort default mode. |
 | `--allow` | `<id,@roster*...>` | `(none)` | Comma-separated allowed conversation IDs or `@roster*` prefix globs (switches `open` to `allowlist`). |
 | `--deny` | `<id,@roster*...>` | `(none)` | Comma-separated denied conversation IDs or `@roster*` prefix globs. |
-| `--ttl` | `<sec>` | `3600` (1h) | Policy expiration time in seconds. |
+| `--ttl` | `<sec>` | `3600` (1h) | Policy expiration time in seconds (must be a positive integer). |
 | `--json` | `(none)` | `false` | Output JSON. |
 
 See [Lifecycle Governance](governance.md#parent-transcript-access-control) for first-line launch directives (`[agy-transcript-access: deny|self-only|allow]`) and the 5-tier precedence rules.

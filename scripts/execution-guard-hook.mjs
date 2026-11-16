@@ -28,12 +28,21 @@
  * 6. Fail-Closed on Governed Operations (LH-10).
  */
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+
+let activeHookCwd = "";
+let activeTranscriptPath = "";
+
+function resolveHookPath(p) {
+  if (!p || typeof p !== "string") return "";
+  return activeHookCwd ? path.resolve(activeHookCwd, p) : path.resolve(p);
+}
 
 const HOOK_DEDUP_TTL_MS = 5000;
 const HOOK_SAME_ARG_CROSS_SCRIPT_MS = 500;
@@ -184,11 +193,14 @@ function matchesRawProtectedInternalState(targetPath) {
   if (/['"]\.system_['"]\s*(?:[+.]\s*)?['"]gen/i.test(targetPath)) return true;
   if (/(?:^|[^a-zA-Z0-9_-])system_generated\b/i.test(targetPath)) return true;
   if (/\btranscript(?:_full)?\.jsonl\b/i.test(targetPath)) return true;
-  if (/\.gemini[\/\\]+antigravity[\/\\]+brain[\/\\]+.*(?:\$|logs[\/\\]|tasks[\/\\]|steps[\/\\])/i.test(targetPath)) {
+  if (/\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]?)?$/i.test(targetPath)) {
+    return true;
+  }
+  if (/\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+.*(?:logs[\/\\]|tasks[\/\\]|steps[\/\\]|\$)/i.test(targetPath)) {
     return true;
   }
   // Block hidden segments (e.g. .s*/*/*, .*) or wildcard globs directly under brain/<convId>/ (allowing .agents/)
-  if (/\.gemini[\/\\]+antigravity[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]+)?(?:\.(?!agents(?:$|[\/\\]))|[*?\[])/i.test(targetPath)) {
+  if (/\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]+)?(?:\.(?!agents(?:$|[\/\\]))|[*?\[])/i.test(targetPath)) {
     return true;
   }
   // Protect Agy-Context-Saver state directory and session/policy JSON files
@@ -235,9 +247,9 @@ function isProtectedShellOrScriptOperation(text) {
     return true;
   }
 
-  // Block symlinks, bulk copies/archives, file reads, or directory enumeration of <brainDir>/<convId> outside /scratch/, /browser_sandbox/, or .agents/ (in either order)
+  // Block symlinks, bulk copies/archives, file reads, or directory enumeration of <brainDir>/<convId> outside /scratch/, /browser_sandbox/, /swarm_view/, or .agents/ (in either order)
   const hasUnprotectedBrainRef =
-    /\.gemini[\/\\]+antigravity[\/\\]+brain[\/\\]+(?![^\s'"]*[\/\\](?:scratch|browser_sandbox|\.agents)(?:$|[\/\\])|[^\s'"]*\.(?:md|txt|json|png|jpg|jpeg|svg|html|css|webp|pdf)\b)/i.test(
+    /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?![^\s'"]*[\/\\](?:scratch|browser_sandbox|swarm_view|\.agents)(?:$|[\/\\])|[^\s'"]*\.(?:md|txt|json|png|jpg|jpeg|svg|html|css|webp|pdf)\b)/i.test(
       text
     );
   if (
@@ -341,12 +353,12 @@ function isAntigravitySpecialFile(targetPath) {
   }
 
   // Antigravity brain markdown artifacts or scratch scripts (outside .system_generated)
-  if (normalized.includes("/.gemini/antigravity/brain/")) {
+  if (/\/\.gemini\/antigravity(?:-cli|-ide)?\/brain\//i.test(normalized)) {
     return true;
   }
 
   // Gemini / Antigravity plugin, MCP, or configuration files
-  if (normalized.includes("/.gemini/config/") || normalized.includes("/.gemini/antigravity/mcp/")) {
+  if (normalized.includes("/.gemini/config/") || /\/\.gemini\/antigravity(?:-cli|-ide)?\/mcp\//i.test(normalized)) {
     return true;
   }
 
@@ -419,7 +431,41 @@ function getProfileHomeDir() {
   return process.env.AGY_TEST_PROFILE_DIR || os.homedir();
 }
 
+function inferBrainRootFromTranscriptPath(tp) {
+  if (!tp || typeof tp !== "string") return "";
+  const norm = tp.replace(/\\/g, "/");
+  const m = norm.match(/^(.+?\/brain)(?:\/[^/]+\/\.system_generated\/.*)?$/i);
+  if (m) {
+    return os.platform() === "win32" ? path.normalize(m[1]) : m[1];
+  }
+  return "";
+}
+
+function getBrainDirs() {
+  if (process.env.AGY_BRAIN_DIR && process.env.AGY_BRAIN_DIR.trim()) {
+    return [process.env.AGY_BRAIN_DIR.trim()];
+  }
+  const home = getProfileHomeDir();
+  const candidates = [
+    path.join(home, ".gemini", "antigravity", "brain"),
+    path.join(home, ".gemini", "antigravity-cli", "brain"),
+    path.join(home, ".gemini", "antigravity-ide", "brain")
+  ];
+  const fromTranscript = inferBrainRootFromTranscriptPath(activeTranscriptPath);
+  if (fromTranscript && !candidates.includes(fromTranscript)) {
+    candidates.unshift(fromTranscript);
+  }
+  const existing = candidates.filter((dir) => {
+    try { return fs.existsSync(dir); } catch { return false; }
+  });
+  return existing.length > 0 ? existing : [candidates[0]];
+}
+
 function getBrainDir() {
+  const fromTranscript = inferBrainRootFromTranscriptPath(activeTranscriptPath);
+  if (fromTranscript && !(process.env.AGY_BRAIN_DIR && process.env.AGY_BRAIN_DIR.trim())) {
+    return fromTranscript;
+  }
   return process.env.AGY_BRAIN_DIR || path.join(getProfileHomeDir(), ".gemini", "antigravity", "brain");
 }
 
@@ -457,9 +503,21 @@ function getTaskState(match, convId) {
     if (path.posix.basename(sysDir) === ".system_generated") transcript = `${sysDir}/logs/transcript.jsonl`;
   }
   if (convId && convId !== "global") {
-    const sysDir = path.join(getBrainDir(), convId, ".system_generated");
-    logPath = logPath || path.join(sysDir, "tasks", `${taskName}.log`);
-    transcript = transcript || path.join(sysDir, "logs", "transcript.jsonl");
+    for (const bDir of getBrainDirs()) {
+      const sysDir = path.join(bDir, convId, ".system_generated");
+      const candidateTranscript = path.join(sysDir, "logs", "transcript.jsonl");
+      const candidateLog = path.join(sysDir, "tasks", `${taskName}.log`);
+      if (fs.existsSync(candidateTranscript) || fs.existsSync(candidateLog)) {
+        logPath = logPath || candidateLog;
+        transcript = transcript || candidateTranscript;
+        break;
+      }
+    }
+    if (!logPath || !transcript) {
+      const sysDir = path.join(getBrainDir(), convId, ".system_generated");
+      logPath = logPath || path.join(sysDir, "tasks", `${taskName}.log`);
+      transcript = transcript || path.join(sysDir, "logs", "transcript.jsonl");
+    }
   }
 
   if (transcript) {
@@ -543,15 +601,64 @@ function spawnRtk(bin, args, opts) {
   return spawnSync(bin, args, opts);
 }
 
+const ENV_CACHE_TTL_MS = 60000;
 let cachedRtkKey = null;
 let cachedRtkValue = undefined;
+
+function getFileMtimeMsSafe(p) {
+  if (!p) return 0;
+  try {
+    return Math.trunc(fs.statSync(p).mtimeMs);
+  } catch {
+    return 0;
+  }
+}
+
+function readRtkEnvCache(key) {
+  try {
+    const cacheFile = path.join(getStateDir(), "env-cache.json");
+    if (!fs.existsSync(cacheFile)) return undefined;
+    const parsed = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+    if (
+      parsed &&
+      parsed.key === key &&
+      typeof parsed.ts === "number" &&
+      (Date.now() - parsed.ts) < ENV_CACHE_TTL_MS
+    ) {
+      return parsed.resolved ?? null;
+    }
+  } catch {}
+  return undefined;
+}
+
+function writeRtkEnvCache(key, resolved) {
+  try {
+    ensureStateDir();
+    const cacheFile = path.join(getStateDir(), "env-cache.json");
+    const tmpFile = `${cacheFile}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify({ key, ts: Date.now(), resolved }), "utf-8");
+    try {
+      fs.renameSync(tmpFile, cacheFile);
+    } catch {
+      fs.writeFileSync(cacheFile, JSON.stringify({ key, ts: Date.now(), resolved }), "utf-8");
+      try { fs.unlinkSync(tmpFile); } catch {}
+    }
+  } catch {}
+}
 
 function resolveCompatibleRtk() {
   const localCandidate = getLocalRtkCandidate();
   const pathCandidate = findExecutableOnPath("rtk");
-  const key = `${pathCandidate}::${localCandidate}`;
+  const key = `${pathCandidate}::${localCandidate}::${getFileMtimeMsSafe(pathCandidate)}::${getFileMtimeMsSafe(localCandidate)}`;
   if (cachedRtkKey === key && cachedRtkValue !== undefined) {
     return cachedRtkValue;
+  }
+
+  const diskCached = readRtkEnvCache(key);
+  if (diskCached !== undefined) {
+    cachedRtkKey = key;
+    cachedRtkValue = diskCached;
+    return diskCached;
   }
 
   const opts = { encoding: "utf-8", timeout: 2000, windowsHide: true };
@@ -576,6 +683,7 @@ function resolveCompatibleRtk() {
 
   cachedRtkKey = key;
   cachedRtkValue = resolved;
+  writeRtkEnvCache(key, resolved);
   return resolved;
 }
 
@@ -1109,10 +1217,20 @@ function tryRealpath(p) {
 
 function isPathInsideDir(candidatePath, baseDir) {
   const norm = (p) => (os.platform() === "win32" ? p.toLowerCase() : p);
-  const resolvedCandidate = norm(tryRealpath(path.resolve(candidatePath)));
+  const resolvedCandidate = norm(tryRealpath(resolveHookPath(candidatePath)));
   const resolvedBase = norm(tryRealpath(path.resolve(baseDir)));
   const prefix = resolvedBase.endsWith(path.sep) ? resolvedBase : resolvedBase + path.sep;
   return resolvedCandidate.startsWith(prefix);
+}
+
+function isPathInsideAnyBrainDir(candidatePath, selfConvId = null) {
+  for (const dir of getBrainDirs()) {
+    const checkDir = selfConvId ? path.join(dir, String(selfConvId)) : dir;
+    if (isPathInsideDir(candidatePath, checkDir)) {
+      return dir;
+    }
+  }
+  return null;
 }
 
 function normalizeCmdName(token) {
@@ -1172,7 +1290,7 @@ function isAllowedAgyContextScriptPath(scriptToken) {
     tryRealpath(path.join(repoOrPluginRoot, "bin", "agy-context.mjs")),
     tryRealpath(path.join(installedPluginRoot, "bin", "agy-context.mjs"))
   ]);
-  const resolvedArg = tryRealpath(path.resolve(scriptToken));
+  const resolvedArg = tryRealpath(resolveHookPath(scriptToken));
   if (allowedTargets.has(resolvedArg)) return true;
 
   // Also allow relative "bin/agy-context.mjs" when invoked from repo/plugin root
@@ -1484,23 +1602,28 @@ function recordTranscriptHookGrant({
   mode = "open",
   isMutation = false
 } = {}) {
-  const store = readTranscriptAccessStore();
+  const grantsDir = path.join(getStateDir(), "grants");
+  try { fs.mkdirSync(grantsDir, { recursive: true }); } catch {}
   const now = Date.now();
-  if (isMutation) {
-    store.lastAccessMutationGrant = {
-      callerConvId,
-      ts: now
-    };
-  } else {
-    store.lastHookGrant = {
-      callerConvId,
-      subcommand,
-      targetConvId,
-      mode,
-      ts: now
-    };
+  const prefix = isMutation ? "mut-" : "grant-";
+  const record = isMutation
+    ? { callerConvId, ts: now }
+    : { callerConvId, subcommand, targetConvId, mode, ts: now };
+  const payload = JSON.stringify(record);
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const id = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+    const grantPath = path.join(grantsDir, `${prefix}${now}-${process.pid}-${id}.json`);
+    try {
+      const fd = fs.openSync(grantPath, "wx", 0o600);
+      try {
+        fs.writeFileSync(fd, payload, "utf-8");
+      } finally {
+        fs.closeSync(fd);
+      }
+      return;
+    } catch {}
   }
-  writeTranscriptAccessStore(store);
 }
 
 function extractFirstLineDirective(bodyText) {
@@ -1541,10 +1664,19 @@ function getCallerLineage(convId) {
     return session.lineage;
   }
 
-  const brainDir = getBrainDir();
-  const compactPath = path.join(brainDir, convId, ".system_generated", "logs", "transcript.jsonl");
-  const fullPath = path.join(brainDir, convId, ".system_generated", "logs", "transcript_full.jsonl");
-  const targetFile = fs.existsSync(compactPath) ? compactPath : (fs.existsSync(fullPath) ? fullPath : null);
+  let targetFile = null;
+  for (const bDir of getBrainDirs()) {
+    const compactPath = path.join(bDir, convId, ".system_generated", "logs", "transcript.jsonl");
+    const fullPath = path.join(bDir, convId, ".system_generated", "logs", "transcript_full.jsonl");
+    if (fs.existsSync(compactPath)) {
+      targetFile = compactPath;
+      break;
+    }
+    if (fs.existsSync(fullPath)) {
+      targetFile = fullPath;
+      break;
+    }
+  }
 
   if (!targetFile) {
     return {
@@ -1566,11 +1698,27 @@ function getCallerLineage(convId) {
     const candidates = [st.birthtimeMs, st.ctimeMs, st.mtimeMs].filter((n) => Number.isFinite(n) && n > 0);
     if (candidates.length > 0) birthTimeMs = Math.min(...candidates);
 
+    const MAX_HEADER_BYTES = 524288; // 512 KiB ceiling for oversized Step 0 prompts
+    const CHUNK_SIZE = 16384;
+    const chunks = [];
+    let totalRead = 0;
+    let newlineCount = 0;
     const fd = fs.openSync(targetFile, "r");
     try {
-      const buf = Buffer.alloc(16384);
-      const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
-      headStr = buf.toString("utf-8", 0, bytesRead);
+      while (totalRead < MAX_HEADER_BYTES) {
+        const toRead = Math.min(CHUNK_SIZE, MAX_HEADER_BYTES - totalRead);
+        const buf = Buffer.alloc(toRead);
+        const bytesRead = fs.readSync(fd, buf, 0, toRead, totalRead);
+        if (bytesRead <= 0) break;
+        const slice = buf.subarray(0, bytesRead);
+        chunks.push(slice);
+        totalRead += bytesRead;
+        for (let b = 0; b < bytesRead; b++) {
+          if (slice[b] === 10) newlineCount++;
+        }
+        if (newlineCount >= 4) break;
+      }
+      headStr = Buffer.concat(chunks).toString("utf-8");
     } finally {
       fs.closeSync(fd);
     }
@@ -1582,12 +1730,14 @@ function getCallerLineage(convId) {
   let parentConvId = null;
   let rosterName = null;
   let launchDirective = null;
+  let line0Parsed = false;
 
   const lines = headStr.split(/\r?\n/).filter((l) => l.trim()).slice(0, 4);
   for (let i = 0; i < lines.length; i++) {
     let item = null;
     try {
       item = JSON.parse(lines[i]);
+      if (i === 0) line0Parsed = true;
     } catch {
       continue;
     }
@@ -1628,7 +1778,7 @@ function getCallerLineage(convId) {
   }
 
   const lineage = {
-    transcriptFound: lines.length > 0,
+    transcriptFound: lines.length > 0 && line0Parsed,
     isTopLevelUserSession,
     isChildSession,
     isSwarmChild,
@@ -1684,25 +1834,53 @@ function findGoverningPolicyForCaller(store, convId, lineage) {
     return policies[convId];
   }
 
-  // 2. If caller is explicitly listed in any active policy's deny or allow list
-  for (const pol of policyList) {
-    if (matchesAgentList(pol.deny, convId, lineage.rosterName) || matchesAgentList(pol.allow, convId, lineage.rosterName)) {
-      return pol;
-    }
-  }
-
-  // 3. Verified top-level user conversation (`USER_INPUT` at Step 0) is NEVER subject to another session's child lock
+  // 2. Verified top-level user conversation (`USER_INPUT` at Step 0) is NEVER subject to another session's child lock
   if (lineage.isTopLevelUserSession && !lineage.isChildSession) {
     return null;
   }
 
-  // 4. Child session with explicit `sender=<parentConvId>` in Step 0/1
-  if (lineage.isChildSession && lineage.parentConvId) {
-    return policies[lineage.parentConvId] || policies["local-operator"] || policies["global"] || null;
+  // 3. Real child transcript with lineage: scope policy lookup strictly to its ancestor chain (+ global local-operator fallback)
+  if (lineage.parentConvId) {
+    const ancestors = [];
+    const visited = new Set(convId ? [convId] : []);
+    let curParent = lineage.parentConvId;
+    for (let depth = 0; curParent && !visited.has(curParent) && depth < 8; depth++) {
+      visited.add(curParent);
+      ancestors.push(curParent);
+      const parentLin = getCallerLineage(curParent);
+      curParent = parentLin?.parentConvId || null;
+    }
+
+    for (const anc of ancestors) {
+      const pol = policies[anc];
+      if (!pol) continue;
+      if (matchesAgentList(pol.deny, convId, lineage.rosterName) || matchesAgentList(pol.allow, convId, lineage.rosterName)) {
+        return pol;
+      }
+    }
+    for (const anc of ancestors) {
+      if (policies[anc]) return policies[anc];
+    }
+    return policies["local-operator"] || policies["global"] || null;
+  }
+
+  // 4. Child transcript without explicit sender metadata: check matching allow/deny or global/active owner
+  if (lineage.isChildSession) {
+    for (const pol of policyList) {
+      if (matchesAgentList(pol.deny, convId, lineage.rosterName) || matchesAgentList(pol.allow, convId, lineage.rosterName)) {
+        return pol;
+      }
+    }
+    return policies["local-operator"] || policies["global"] || (store.activeOwnerId && policies[store.activeOwnerId]) || null;
   }
 
   // 5. Fallback for synthetic test conversationIds (when transcript file does not exist on disk)
   if (!lineage.transcriptFound) {
+    for (const pol of policyList) {
+      if (matchesAgentList(pol.deny, convId, lineage.rosterName) || matchesAgentList(pol.allow, convId, lineage.rosterName)) {
+        return pol;
+      }
+    }
     return (store.activeOwnerId && policies[store.activeOwnerId]) || policyList[0] || null;
   }
 
@@ -2026,16 +2204,18 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     };
   }
 
-  // Validate flags: disallow `..` traversal and `--file` outside <brainDir>
+  // Validate flags: disallow `..` traversal and `--file` outside <brainDirs>
   for (let i = subOffset + 1; i < tokens.length; i++) {
     const tok = tokens[i];
     if (tok === "--file") {
       const val = tokens[i + 1];
-      if (!val || hasDotDotTraversal(val) || !isPathInsideDir(val, getBrainDir())) {
+      if (!val || hasDotDotTraversal(val) || !isPathInsideAnyBrainDir(val)) {
+        const dirs = getBrainDirs();
+        const dirDesc = dirs.length === 1 ? `'${dirs[0]}'` : `'${dirs.join("' or '")}'`;
         return {
           matched: true,
           allowed: false,
-          reason: `Antigravity Execution Governance: '--file' in 'agy-context transcript' must stay inside '${getBrainDir()}' without '..' path traversal.`
+          reason: `Antigravity Execution Governance: '--file' in 'agy-context transcript' must stay inside ${dirDesc} without '..' path traversal.`
         };
       }
       i++;
@@ -2043,11 +2223,13 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     }
     if (tok.startsWith("--file=")) {
       const val = tok.slice("--file=".length);
-      if (!val || hasDotDotTraversal(val) || !isPathInsideDir(val, getBrainDir())) {
+      if (!val || hasDotDotTraversal(val) || !isPathInsideAnyBrainDir(val)) {
+        const dirs = getBrainDirs();
+        const dirDesc = dirs.length === 1 ? `'${dirs[0]}'` : `'${dirs.join("' or '")}'`;
         return {
           matched: true,
           allowed: false,
-          reason: `Antigravity Execution Governance: '--file' in 'agy-context transcript' must stay inside '${getBrainDir()}' without '..' path traversal.`
+          reason: `Antigravity Execution Governance: '--file' in 'agy-context transcript' must stay inside ${dirDesc} without '..' path traversal.`
         };
       }
       continue;
@@ -2162,8 +2344,7 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       }
 
       if (targetInfo.explicitFile) {
-        const selfBrainDir = path.join(getBrainDir(), convId);
-        if (!isPathInsideDir(targetInfo.explicitFile, selfBrainDir)) {
+        if (!isPathInsideAnyBrainDir(targetInfo.explicitFile, convId)) {
           return {
             matched: true,
             allowed: false,
@@ -2196,9 +2377,12 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
         };
       }
 
+      const targetWasCurrentPlaceholder = Boolean(
+        targetInfo.targetId && targetInfo.targetId.toLowerCase() === "current"
+      );
       const needsSelfIdInjection =
         !targetInfo.explicitFile &&
-        (!targetInfo.targetId || targetInfo.targetId.toLowerCase() === "current") &&
+        (!targetInfo.targetId || targetWasCurrentPlaceholder) &&
         Boolean(convId && convId !== "global");
 
       return {
@@ -2208,13 +2392,17 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
         mode: "self-only",
         targetConvId: convId,
         needsReadGrant: true,
-        injectSelfId: needsSelfIdInjection ? convId : null
+        injectSelfId: needsSelfIdInjection ? convId : null,
+        targetWasCurrentPlaceholder
       };
     }
 
     let resolvedTargetConvId = targetInfo.targetId || null;
     if (targetInfo.explicitFile) {
-      if (accessEval.ownerId && !accessEval.isOwner && !isPathInsideDir(targetInfo.explicitFile, getBrainDir())) {
+      const matchedBrainDir = isPathInsideAnyBrainDir(targetInfo.explicitFile);
+      if (accessEval.ownerId && !accessEval.isOwner && !matchedBrainDir) {
+        const dirs = getBrainDirs();
+        const dirDesc = dirs.length === 1 ? `'${dirs[0]}'` : `'${dirs.join("' or '")}'`;
         return {
           matched: true,
           allowed: false,
@@ -2225,14 +2413,14 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
             source: accessEval.source,
             callerConvId: convId,
             rosterName: accessEval.rosterName,
-            detail: `'--file' paths outside '${getBrainDir()}' are disabled while a parent transcript access policy is active.`
+            detail: `'--file' paths outside ${dirDesc} are disabled while a parent transcript access policy is active.`
           })
         };
       }
-      if (isPathInsideDir(targetInfo.explicitFile, getBrainDir())) {
+      if (matchedBrainDir) {
         const rel = path.relative(
-          tryRealpath(path.resolve(getBrainDir())),
-          tryRealpath(path.resolve(targetInfo.explicitFile))
+          tryRealpath(path.resolve(matchedBrainDir)),
+          tryRealpath(resolveHookPath(targetInfo.explicitFile))
         );
         const firstSeg = rel.split(path.sep)[0];
         if (firstSeg && firstSeg !== "." && firstSeg !== "..") {
@@ -2436,7 +2624,7 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
         if (tok.startsWith("<")) tok = tok.slice(1).trim();
         if (!tok || isAllowedAgyContextScriptPath(tok)) continue;
         try {
-          const resolvedFile = path.resolve(tok);
+          const resolvedFile = resolveHookPath(tok);
           const normFile = resolvedFile.replace(/\\/g, "/");
           const isTmpOrScratchFile =
             normFile.startsWith("/tmp/") ||
@@ -2837,7 +3025,7 @@ function rewriteRtkGrepSegment(rtkPrefixWord, restAfterRtk, { inPipeline = false
   if (!inPipeline && pathPositionals.length > 0) {
     allExistingRegularFiles = pathPositionals.every((p) => {
       try {
-        return fs.statSync(p.value).isFile();
+        return fs.statSync(resolveHookPath(p.value)).isFile();
       } catch {
         return false;
       }
@@ -3164,11 +3352,22 @@ function isProtectedGovernanceFileMutation(targetPath, convId = "global") {
 function hasGovernanceMutationInText(text, convId = "global") {
   if (!text || typeof text !== "string") return false;
   const norm = text.replace(/\\/g, "/");
-  const hasMutationOp =
-    /\b(?:rm|del|remove-item|mv|cp|tee|truncate|shred|install|sed|perl|chmod|chown|ln|dd|patch|writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rmSync|rmdir|rmdirSync|rename|renameSync|truncateSync|chmodSync|copyFile|copyFileSync|WriteAllText|Delete|Remove)\b|>/i.test(
+  const hasMutationVerb =
+    /(?:^|[^\w-])(?:rm|del|remove-item|mv|cp|tee|truncate|shred|install|sed|perl|chmod|chown|ln|dd|patch|writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rmSync|rmdir|rmdirSync|rename|renameSync|truncateSync|chmodSync|copyFile|copyFileSync|WriteAllText|Delete|Remove|os\.remove|os\.unlink|shutil\.(?:copy|move|rmtree))\b|\bPath\([^\n)]*\)\.(?:write_text|write_bytes|unlink)\b/i.test(
       norm
     );
-  if (!hasMutationOp) return false;
+  let hasGovernanceRedirect = false;
+  if (norm.includes(">")) {
+    for (const seg of splitShellSegments(text)) {
+      const redirs = extractRedirectTargets(tokenizeShellWordsDetailed(seg.text || ""));
+      if (redirs.some((tok) => isProtectedGovernanceFileMutation(tok, convId))) {
+        hasGovernanceRedirect = true;
+        break;
+      }
+    }
+  }
+  if (!hasMutationVerb && !hasGovernanceRedirect) return false;
+  if (hasGovernanceRedirect) return true;
 
   if (
     /\/\.gemini\/(?:config|antigravity)\/hooks\.json(?:\.bak)?\b/i.test(norm) ||
@@ -3203,11 +3402,12 @@ function escapeDoubleQuotedArg(str) {
 function getFileMetrics(filePath) {
   if (!filePath || typeof filePath !== "string") return null;
   try {
-    if (!fs.existsSync(filePath)) return null;
-    const stat = fs.statSync(filePath);
+    const resolvedPath = resolveHookPath(filePath);
+    if (!resolvedPath || !fs.existsSync(resolvedPath)) return null;
+    const stat = fs.statSync(resolvedPath);
     if (!stat.isFile()) return null;
     const bytes = stat.size;
-    const content = fs.readFileSync(filePath, "utf-8");
+    const content = fs.readFileSync(resolvedPath, "utf-8");
     if (content.length === 0) {
       return { bytes: 0, lineCount: 0, rawSplitCount: 1 };
     }
@@ -3246,6 +3446,9 @@ try {
     inputRaw
   );
   const payload = JSON.parse(inputRaw);
+  const hookCwdRaw = payload.cwd || payload.workspacePath || "";
+  activeHookCwd = hookCwdRaw && typeof hookCwdRaw === "string" ? hookCwdRaw.trim() : "";
+  activeTranscriptPath = typeof payload.transcriptPath === "string" ? payload.transcriptPath.trim() : "";
   const toolCall = payload.toolCall || payload.tool_call || {};
   const toolName = String(toolCall.name || toolCall.tool_name || "").trim().toLowerCase();
   const args = toolCall.args || toolCall.arguments || {};
@@ -3488,7 +3691,7 @@ try {
     if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectSelfId) {
       if (/--id(?:=|\s+)["']?current["']?\b/i.test(effectiveCmd)) {
         effectiveCmd = effectiveCmd.replace(/--id(?:=|\s+)["']?current["']?\b/i, `--id ${agyTranscriptCheck.injectSelfId}`);
-      } else if (/\s+["']?current["']?\s*$/i.test(effectiveCmd)) {
+      } else if (agyTranscriptCheck.targetWasCurrentPlaceholder && /\s+["']?current["']?\s*$/i.test(effectiveCmd)) {
         effectiveCmd = effectiveCmd.replace(/\s+["']?current["']?\s*$/i, ` --id ${agyTranscriptCheck.injectSelfId}`);
       } else {
         effectiveCmd = `${effectiveCmd.trim()} --id ${agyTranscriptCheck.injectSelfId}`;
@@ -3526,7 +3729,7 @@ try {
         const pathTok = rtkTokens.slice(2).find((t) => !t.startsWith("-"));
         if (pathTok) {
           try {
-            const st = fs.statSync(pathTok);
+            const st = fs.statSync(resolveHookPath(pathTok));
             if (st.isFile() && st.size > 46080) {
               effectiveCmd = effectiveCmd.replace(/^(\S+\s+read\b)/i, "$1 --tail-lines 150");
             }
@@ -3648,14 +3851,16 @@ try {
 
     // 2e. Symmetrical Hybrid Slice & Guarded Full-File Policy for `read_file` and `view_file`
     if (toolName === "read_file" || toolName === "view_file") {
-      const rgAvailable = Boolean(findExecutableOnPath("rg"));
-      const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rnE";
-      const discoveryGuidance = `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}', or run 'rtk read ${target || "<file>"}' via run_command instead`;
+      const getDiscoveryGuidance = () => {
+        const rgAvailable = Boolean(findExecutableOnPath("rg"));
+        const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rnE";
+        return `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}', or run 'rtk read ${target || "<file>"}' via run_command instead`;
+      };
 
       if (hasByteOffset && !hasSliceParams) {
         respond({
           decision: "deny",
-          reason: `Antigravity Governance: Unbounded 'ByteOffset'-only read via '${toolName}' is denied. ${discoveryGuidance}.`
+          reason: `Antigravity Governance: Unbounded 'ByteOffset'-only read via '${toolName}' is denied. ${getDiscoveryGuidance()}.`
         });
       }
 
@@ -3690,25 +3895,25 @@ try {
             const kib = (metrics.bytes / 1024).toFixed(1);
             respond({
               decision: "deny",
-              reason: `Antigravity Governance: Explicit full-file read via '${toolName}' (${metrics.lineCount} lines, ${kib} KiB) exceeds the full-file audit ceiling (max ${MAX_FULL_FILE_LINES} lines and 45 KiB). ${discoveryGuidance}.`
+              reason: `Antigravity Governance: Explicit full-file read via '${toolName}' (${metrics.lineCount} lines, ${kib} KiB) exceeds the full-file audit ceiling (max ${MAX_FULL_FILE_LINES} lines and 45 KiB). ${getDiscoveryGuidance()}.`
             });
           }
 
           respond({
             decision: "deny",
-            reason: `Antigravity Governance: Oversized partial file slice via '${toolName}' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window). Partial slices above ${MAX_SAFE_SLICE_LINES} lines are denied; full-file reads are only permitted when explicitly covering line 1 through the actual end of a file <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${discoveryGuidance}.`
+            reason: `Antigravity Governance: Oversized partial file slice via '${toolName}' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window). Partial slices above ${MAX_SAFE_SLICE_LINES} lines are denied; full-file reads are only permitted when explicitly covering line 1 through the actual end of a file <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${getDiscoveryGuidance()}.`
           });
         }
 
         respond({
           decision: "deny",
-          reason: `Antigravity Governance: Invalid slice range via '${toolName}'. Ensure StartLine and EndLine are positive integers with EndLine >= StartLine. ${discoveryGuidance}.`
+          reason: `Antigravity Governance: Invalid slice range via '${toolName}'. Ensure StartLine and EndLine are positive integers with EndLine >= StartLine. ${getDiscoveryGuidance()}.`
         });
       }
 
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Full-file inspection via '${toolName}' without explicit bounds is denied. ${discoveryGuidance} (or pass explicit StartLine=1, EndLine=<TotalLines> for a one-pass audit when the file is <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB).`
+        reason: `Antigravity Governance: Full-file inspection via '${toolName}' without explicit bounds is denied. ${getDiscoveryGuidance()} (or pass explicit StartLine=1, EndLine=<TotalLines> for a one-pass audit when the file is <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB).`
       });
     }
 

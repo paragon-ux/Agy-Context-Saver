@@ -41,5 +41,5 @@ jobs:
       - name: Run automated test suites
         run: npm test
 
-      - name: Verify npm package can be assembled
-        run: npm pack --dry-run --json
+      - name: Verify npm package contents
+        run: npm run verify:package

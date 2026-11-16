@@ -120,6 +120,19 @@ assert.equal(parsedHookOut.overwrite?.CommandLine, "rtk git status");
 assert.equal(parsedHookOut.overwrite?.WaitMsBeforeAsync, 10000);
 console.log("✓ Installed CLI shim and plugin hooks.json relative execution verified");
 
+// Status on an uninstalled/incomplete profile must exit non-zero
+const emptyProfile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-status-empty-"));
+try {
+  const emptyStatus = spawnSync(process.execPath, [cliScript, "status", "--json"], {
+    encoding: "utf-8",
+    env: { ...process.env, AGY_TEST_PROFILE_DIR: emptyProfile }
+  });
+  assert.notEqual(emptyStatus.status, 0, "agy-context status on incomplete profile must exit non-zero");
+  assert.equal(JSON.parse(emptyStatus.stdout).isComplete, false);
+} finally {
+  fs.rmSync(emptyProfile, { recursive: true, force: true });
+}
+
 hermetic.cleanup();
 console.log("\n=================================================");
 console.log("ALL 2.0 INSTALLED SYSTEM VERIFICATION TESTS PASSED!");
