@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -70,7 +70,7 @@ export function findExistingRtk(options = {}) {
 
   // Check PATH first so a system rtk >= 1.1.0 is preferred over bundled binaries
   try {
-    const out = execSync("rtk --version", { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const out = execFileSync("rtk", ["--version"], { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
     if (isCompatibleRtkVersion(out)) {
       return { path: "rtk", version: out, isLocal: false };
     }
@@ -84,7 +84,7 @@ export function findExistingRtk(options = {}) {
       const localExe = path.join(dir, exeName);
       if (fs.existsSync(localExe)) {
         try {
-          const out = execSync(`"${localExe}" --version`, { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+          const out = execFileSync(localExe, ["--version"], { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
           if (isCompatibleRtkVersion(out)) {
             return { path: localExe, version: out, isLocal: true };
           }
@@ -156,7 +156,7 @@ export async function ensureRtkInstalled(options = {}) {
   log(`✓ Downloaded ${Math.round(buffer.length / 1024)} KB. Extracting archive...`);
   try {
     // Windows 10/11, macOS, and Linux all provide native tar
-    execSync(`tar -xf "${archivePath}" -C "${binDir}"`, { stdio: "pipe" });
+    execFileSync("tar", ["-xf", archivePath, "-C", binDir], { stdio: "pipe" });
   } catch (err) {
     // Fallback on Windows if tar fails
     if (os.platform() === "win32") {

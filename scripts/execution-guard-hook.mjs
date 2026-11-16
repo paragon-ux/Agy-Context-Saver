@@ -1244,11 +1244,69 @@ function wasFileWrittenInSession(convId = "global", targetPath) {
 }
 
 function isPathInsideDir(candidatePath, baseDir) {
-  const norm = (p) => (os.platform() === "win32" ? p.toLowerCase() : p);
+  const norm = (p) => (os.platform() === "win32" || os.platform() === "darwin" ? p.toLowerCase() : p);
   const resolvedCandidate = norm(tryRealpath(resolveHookPath(candidatePath)));
   const resolvedBase = norm(tryRealpath(path.resolve(baseDir)));
   const prefix = resolvedBase.endsWith(path.sep) ? resolvedBase : resolvedBase + path.sep;
   return resolvedCandidate.startsWith(prefix);
+}
+
+function resolveWithExistingAncestor(targetPath) {
+  const absTarget = resolveHookPath(targetPath);
+  if (!absTarget) return "";
+  if (fs.existsSync(absTarget)) {
+    try { return fs.realpathSync(absTarget); } catch { return absTarget; }
+  }
+  const missingTail = [];
+  let probe = absTarget;
+  while (probe && !fs.existsSync(probe)) {
+    const parent = path.dirname(probe);
+    if (parent === probe) break;
+    missingTail.unshift(path.basename(probe));
+    probe = parent;
+  }
+  let baseReal = probe;
+  if (fs.existsSync(probe)) {
+    try { baseReal = fs.realpathSync(probe); } catch {}
+  }
+  return missingTail.length > 0 ? path.join(baseReal, ...missingTail) : baseReal;
+}
+
+function isProtectedExportOutPathInHook(outPath, resolvedOut) {
+  const normCase = (p) => (os.platform() === "win32" || os.platform() === "darwin" ? p.toLowerCase() : p);
+  const isInsideCaseAware = (target, root) => {
+    const rel = path.relative(normCase(root), normCase(target));
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  };
+
+  if (/(?:^|[\\/])\.git(?:[\\/]|$)/i.test(outPath) || /(?:^|[\\/])\.git(?:[\\/]|$)/i.test(resolvedOut)) {
+    return true;
+  }
+  try {
+    const lst = fs.lstatSync(resolvedOut);
+    if (lst.isSymbolicLink() || !lst.isFile()) {
+      return true;
+    }
+  } catch {}
+
+  const realTarget = resolveWithExistingAncestor(resolvedOut);
+  if (
+    isProtectedInternalState(realTarget) ||
+    isProtectedBenchmarkPath(realTarget) ||
+    /(?:^|[\\/])\.git(?:[\\/]|$)/i.test(realTarget)
+  ) {
+    return true;
+  }
+
+  const profileHome = getProfileHomeDir();
+  const protectedRoots = [
+    getStateDir(),
+    path.join(profileHome, ".gemini", "config"),
+    path.join(profileHome, ".gemini", "antigravity", "bin"),
+    path.join(profileHome, ".gemini", "antigravity", "mcp")
+  ].map((p) => resolveWithExistingAncestor(p));
+
+  return protectedRoots.some((pr) => pr && isInsideCaseAware(realTarget, pr));
 }
 
 function isPathInsideAnyBrainDir(candidatePath, selfConvId = null) {
@@ -1278,6 +1336,7 @@ const TRANSCRIPT_READ_SUBCOMMANDS = new Set([
   "list",
   "ls",
   "export",
+  "dump",
   "grep",
   "search",
   "find",
@@ -1672,7 +1731,12 @@ function extractFirstLineDirective(bodyText) {
 /**
  * Inspects Steps 0–2 of `<brainDir>/<convId>/.system_generated/logs/transcript.jsonl`
  * to deterministically classify top-level user chats vs. `/swarm` workers vs. subagents,
+/**
+ * Inspects initial transcript JSONL steps (up to 12 header lines before execution turns)
+ * to classify caller session lineage (`isTopLevelUserSession`, `isChildSession`, `isSwarmChild`),
  * extract `parentConvId` and `@rosterName`, and parse any first-line `[agy-transcript-access: ...]` directive.
+ *
+ * SYNC-MIRROR: Must match `inspectTranscriptLineageFromFile()` in `lib/transcript-core.mjs`.
  */
 function getCallerLineage(convId) {
   if (!convId || convId === "global") {
@@ -1720,7 +1784,8 @@ function getCallerLineage(convId) {
     };
   }
 
-  let birthTimeMs = Date.now();
+  const MAX_HEADER_LINES = 12;
+  let birthTimeMs = 0;
   let headStr = "";
   try {
     const st = fs.statSync(targetFile);
@@ -1745,7 +1810,7 @@ function getCallerLineage(convId) {
         for (let b = 0; b < bytesRead; b++) {
           if (slice[b] === 10) newlineCount++;
         }
-        if (newlineCount >= 4) break;
+        if (newlineCount >= MAX_HEADER_LINES) break;
       }
       headStr = Buffer.concat(chunks).toString("utf-8");
     } finally {
@@ -1757,11 +1822,12 @@ function getCallerLineage(convId) {
   let isChildSession = false;
   let isSwarmChild = false;
   let parentConvId = null;
+  let boardFallbackSender = null;
   let rosterName = null;
   let launchDirective = null;
   let line0Parsed = false;
 
-  const lines = headStr.split(/\r?\n/).filter((l) => l.trim()).slice(0, 4);
+  const lines = headStr.split(/\r?\n/).filter((l) => l.trim()).slice(0, MAX_HEADER_LINES);
   for (let i = 0; i < lines.length; i++) {
     let item = null;
     try {
@@ -1779,9 +1845,14 @@ function getCallerLineage(convId) {
 
     if (item?.type === "SYSTEM_MESSAGE" || item?.source === "SYSTEM") {
       const senderMatch = content.match(/\[Message\][^\n]*\bsender=([a-zA-Z0-9_-]{4,})\b/);
+      const isBoardNotification = content.includes("content=[swarm] new board message");
       if (senderMatch) {
         isChildSession = true;
-        if (!parentConvId) parentConvId = senderMatch[1];
+        if (isBoardNotification) {
+          if (!boardFallbackSender) boardFallbackSender = senderMatch[1];
+        } else if (!parentConvId) {
+          parentConvId = senderMatch[1];
+        }
       }
 
       const swarmAssignMatch = content.match(
@@ -1790,20 +1861,26 @@ function getCallerLineage(convId) {
       if (swarmAssignMatch) {
         isChildSession = true;
         isSwarmChild = true;
+        if (senderMatch) parentConvId = senderMatch[1];
         rosterName = swarmAssignMatch[1];
         const dir = extractFirstLineDirective(swarmAssignMatch[2]);
         if (dir) launchDirective = dir;
         break;
       }
 
-      if (senderMatch && i === 0 && !content.includes("content=[swarm] new board message")) {
+      if (senderMatch && i === 0 && !isBoardNotification) {
         const msgBodyMatch = content.match(/\bpriority=MESSAGE_PRIORITY_[A-Z_]+\s+content=([\s\S]*)$/);
         if (msgBodyMatch) {
           const dir = extractFirstLineDirective(msgBodyMatch[1]);
           if (dir) launchDirective = dir;
         }
       }
+    } else if (i > 0) {
+      break;
     }
+  }
+  if (!parentConvId && boardFallbackSender) {
+    parentConvId = boardFallbackSender;
   }
 
   const lineage = {
@@ -2111,7 +2188,7 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     valueFlags = HEALTH_VALUE_FLAGS;
   } else if (subcommand === "list" || subcommand === "ls") {
     valueFlags = LIST_VALUE_FLAGS;
-  } else if (subcommand === "export") {
+  } else if (subcommand === "export" || subcommand === "dump") {
     valueFlags = EXPORT_VALUE_FLAGS;
   }
 
@@ -2175,12 +2252,13 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     subcommand === "health" ||
     subcommand === "stats" ||
     subcommand === "info" ||
-    subcommand === "export"
+    subcommand === "export" ||
+    subcommand === "dump"
   ) {
     if (opts.id === undefined && posCopy.length >= 1) {
       const pId = posCopy.shift();
       opts.id = pId;
-      if (subcommand === "export") {
+      if (subcommand === "export" || subcommand === "dump") {
         for (const part of String(pId).split(",").map((s) => s.trim()).filter(Boolean)) {
           idValues.push(part);
         }
@@ -2198,7 +2276,7 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
 
   const uniqueIds = Array.from(new Set(idValues.map((s) => String(s).trim()).filter(Boolean)));
   return {
-    targetId: subcommand === "export" && uniqueIds.length === 1 ? uniqueIds[0] : (opts.id ? String(opts.id).trim() : null),
+    targetId: (subcommand === "export" || subcommand === "dump") && uniqueIds.length === 1 ? uniqueIds[0] : (opts.id ? String(opts.id).trim() : null),
     targetIds: uniqueIds,
     targetParent: opts.parent !== undefined ? String(opts.parent).trim() : null,
     outPath: outPaths.length > 0 ? outPaths[outPaths.length - 1] : null,
@@ -2392,7 +2470,10 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       };
     }
 
-    if (subcommand === "export" && Array.isArray(targetInfo.outPaths) && targetInfo.outPaths.length > 0) {
+    const isExportSub = subcommand === "export" || subcommand === "dump";
+    const isListSub = subcommand === "list" || subcommand === "ls";
+
+    if (isExportSub && Array.isArray(targetInfo.outPaths) && targetInfo.outPaths.length > 0) {
       for (const outPath of targetInfo.outPaths) {
         const resolvedOut = resolveHookPath(outPath);
         if (
@@ -2403,19 +2484,20 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
           isProtectedBenchmarkPath(resolvedOut) ||
           hasGovernanceMutationInText(`> ${outPath}`, convId) ||
           hasGovernanceMutationInText(`> ${resolvedOut}`, convId) ||
+          isProtectedExportOutPathInHook(outPath, resolvedOut) ||
           !/\.(?:md|json|txt)$/i.test(outPath)
         ) {
           return {
             matched: true,
             allowed: false,
-            reason: `Antigravity Execution Governance: '--out' path '${outPath}' in 'agy-context transcript export' must be a safe .md/.json/.txt artifact outside protected internal state, governance, and benchmark directories.`
+            reason: `Antigravity Execution Governance: '--out' path '${outPath}' in 'agy-context transcript ${subcommand}' must be a safe .md/.json/.txt artifact outside protected internal state, governance, and benchmark directories.`
           };
         }
       }
     }
 
     if (accessEval.mode === "self-only") {
-      if (subcommand === "list" || subcommand === "ls") {
+      if (isListSub) {
         return {
           matched: true,
           allowed: false,
@@ -2431,7 +2513,7 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
         };
       }
 
-      if (subcommand === "export" && targetInfo.targetParent) {
+      if (isExportSub && targetInfo.targetParent) {
         return {
           matched: true,
           allowed: false,
@@ -2448,7 +2530,7 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       }
 
       if (
-        subcommand === "export" &&
+        isExportSub &&
         Array.isArray(targetInfo.targetIds) &&
         (targetInfo.targetIds.length > 1 ||
           targetInfo.targetIds.some((id) => id.toLowerCase() !== "current" && id !== convId))
@@ -2525,7 +2607,7 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     let resolvedTargetConvId = targetInfo.targetId || null;
     let injectParentId = null;
     if (
-      (subcommand === "export" || subcommand === "list" || subcommand === "ls") &&
+      (isExportSub || isListSub) &&
       targetInfo.targetParent &&
       targetInfo.targetParent.toLowerCase() === "current" &&
       convId &&
@@ -2533,7 +2615,7 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     ) {
       injectParentId = convId;
     }
-    if (subcommand === "export") {
+    if (isExportSub) {
       if (targetInfo.targetParent) {
         const resolvedP = injectParentId || targetInfo.targetParent;
         resolvedTargetConvId = `parent:${resolvedP}`;

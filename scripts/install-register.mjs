@@ -168,14 +168,50 @@ export async function safeCopyFileIfChanged(sourcePath, targetPath) {
  */
 export function detectExistingInstallation() {
   const pluginExists = fs.existsSync(pluginDest);
+  let pluginLst = null;
+  try {
+    pluginLst = fs.lstatSync(pluginDest);
+  } catch {}
+  const pluginIsSymlink = Boolean(pluginLst && pluginLst.isSymbolicLink());
   let pluginTarget = null;
+  let pluginPointsElsewhere = false;
+  let pluginInstalledVersion = null;
+  const isLocalCheckout =
+    fs.existsSync(path.join(repoRoot, ".git")) &&
+    !repoRoot.includes("_npx") &&
+    !repoRoot.includes("npm-cache") &&
+    !repoRoot.includes("node_modules");
+
   if (pluginExists) {
-    try {
-      pluginTarget = fs.readlinkSync(pluginDest);
-    } catch {
+    if (pluginIsSymlink) {
+      try {
+        pluginTarget = fs.readlinkSync(pluginDest);
+      } catch {
+        pluginTarget = "symlink";
+      }
+      if (isLocalCheckout) {
+        try {
+          const destReal = fs.realpathSync(pluginDest);
+          const repoReal = fs.realpathSync(repoRoot);
+          pluginPointsElsewhere =
+            os.platform() === "win32" || os.platform() === "darwin"
+              ? destReal.toLowerCase() !== repoReal.toLowerCase()
+              : destReal !== repoReal;
+        } catch {
+          pluginPointsElsewhere = true;
+        }
+      }
+    } else {
       pluginTarget = "direct folder or junction";
     }
+    try {
+      const installedPkg = JSON.parse(fs.readFileSync(path.join(pluginDest, "package.json"), "utf8"));
+      if (typeof installedPkg?.version === "string" && installedPkg.version.trim()) {
+        pluginInstalledVersion = installedPkg.version.trim();
+      }
+    } catch {}
   }
+  const pluginVersionMismatch = Boolean(pluginInstalledVersion && pluginInstalledVersion !== PACKAGE_VERSION);
 
   let pluginHookRegistered = false;
   let pluginHookCommand = null;
@@ -231,6 +267,8 @@ export function detectExistingInstallation() {
 
   const isComplete =
     pluginExists &&
+    !pluginPointsElsewhere &&
+    !pluginVersionMismatch &&
     hookRegistered &&
     scriptExists &&
     !legacyHookPresent &&
@@ -242,7 +280,15 @@ export function detectExistingInstallation() {
     isInstalled,
     isComplete,
     details: {
-      plugin: { exists: pluginExists, target: pluginTarget },
+      plugin: {
+        exists: pluginExists,
+        target: pluginTarget,
+        isSymlink: pluginIsSymlink,
+        isCopyFallback: pluginExists && !pluginIsSymlink,
+        pointsElsewhere: pluginPointsElsewhere,
+        version: pluginInstalledVersion,
+        versionMismatch: pluginVersionMismatch
+      },
       hook: {
         key: HOOK_KEY,
         registered: hookRegistered,
@@ -345,6 +391,7 @@ async function sweepLegacyMcpSchemas({ log, warn }) {
 export function formatWindowsCmdShim(targetCliPath) {
   return [
     "@echo off",
+    "chcp 65001 >nul",
     "setlocal",
     "where node >nul 2>nul",
     "if errorlevel 1 goto :fallback",
@@ -783,8 +830,18 @@ export async function runRestoreBackups(options = {}) {
 export function runStatus(options = {}) {
   const log = options.silent ? () => {} : console.log;
   const existing = detectExistingInstallation();
+  const plug = existing.details.plugin;
+  const pluginNote = !plug.exists
+    ? "NOT LINKED"
+    : plug.pointsElsewhere
+      ? `REDIRECTED (${pluginDest} -> ${plug.target}; re-run agy-context setup)`
+      : plug.versionMismatch
+        ? `STALE VERSION (${plug.version} != ${PACKAGE_VERSION} at ${pluginDest}; re-run agy-context setup)`
+        : plug.isCopyFallback
+          ? `ACTIVE COPY (${pluginDest})`
+          : `ACTIVE (${pluginDest})`;
   log("Checking Agy-Context-Saver installation status...\n");
-  log(`- Native Plugin Link: ${existing.details.plugin.exists ? "ACTIVE (" + pluginDest + ")" : "NOT LINKED"}`);
+  log(`- Native Plugin Link: ${pluginNote}`);
   const hookStatusLabel = existing.details.hook.registered
     ? "ACTIVE (plugin + global hooks.json)"
     : existing.details.hook.pluginHookRegistered
@@ -843,9 +900,41 @@ Commands & Options:
 `);
 }
 
+function isDirectExecution() {
+  if (!process.argv[1]) return false;
+  const tryRealpath = (p) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const resolvedArg = tryRealpath(path.resolve(process.argv[1]));
+  const resolvedSelf = tryRealpath(fileURLToPath(import.meta.url));
+  if (resolvedArg === resolvedSelf) return true;
+  if (os.platform() === "win32" || os.platform() === "darwin") {
+    return resolvedArg.toLowerCase() === resolvedSelf.toLowerCase();
+  }
+  return false;
+}
+
 // Auto-run if executed directly as script
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isDirectExecution()) {
   const args = process.argv.slice(2);
+  const knownFlags = new Set(["--help", "-h", "--uninstall", "--status", "--check", "-c", "--restore-backups", "--allow-degraded"]);
+  const knownPositionals = new Set(["help", "uninstall", "status", "restore-backups"]);
+  for (const arg of args) {
+    if (arg.startsWith("-")) {
+      if (!knownFlags.has(arg)) {
+        console.error(`Error: Unknown option '${arg}'. Run 'node scripts/install-register.mjs --help' for usage.`);
+        process.exit(1);
+      }
+    } else if (!knownPositionals.has(arg)) {
+      console.error(`Error: Unknown argument '${arg}'. Run 'node scripts/install-register.mjs --help' for usage.`);
+      process.exit(1);
+    }
+  }
+
   const isHelp = args.includes("--help") || args.includes("-h") || args.includes("help");
   const isUninstall = args.includes("--uninstall") || args.includes("uninstall");
   const isStatus = args.includes("--status") || args.includes("status");
@@ -854,6 +943,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const allowDegraded = args.includes("--allow-degraded");
 
   if (isHelp) {
+    if (isUninstall || isStatus || isCheck || isRestoreBackups || allowDegraded) {
+      console.error("Error: Conflicting flags: --help cannot be combined with operational flags.");
+      process.exit(1);
+    }
     printCliHelp();
     process.exit(0);
   }

@@ -2,8 +2,8 @@
 
 [![npm version](https://img.shields.io/npm/v/agy-context-saver.svg)](https://www.npmjs.com/package/agy-context-saver)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-Zensical-purple.svg)](https://paragon-ux.github.io/agy-context-saver/)
-[![Tests](https://img.shields.io/badge/tests-100%25%20passing-brightgreen.svg)](https://github.com/paragon-ux/agy-context-saver/actions)
+[![Docs](https://img.shields.io/badge/docs-Zensical-purple.svg)](https://paragon-ux.github.io/Agy-Context-Saver/)
+[![Tests](https://img.shields.io/badge/tests-100%25%20passing-brightgreen.svg)](https://github.com/paragon-ux/Agy-Context-Saver/actions)
 
 `Agy-Context-Saver` is a `PreToolUse` execution hook and transcript CLI (`agy-context`) for **Google Antigravity** (`agy`) on Linux, macOS, and Windows (`Node.js >= 22`, zero external npm dependencies). It pairs with **RTK (`>= 1.1.0`)** to compress shell output, bound workspace file reads, stop background-task busy-polling, and govern transcript inspection across parent sessions, subagents, and `/swarm` workers.
 
@@ -52,17 +52,17 @@ agy-context uninstall --restore-backups
 | Surface | Purpose | Common usage |
 | :--- | :--- | :--- |
 | `agy-context transcript health` (`stats`, `info`) | Check turn counts, transcript byte size, RTK status, and polling events | `agy-context transcript health [<id>] [--json]` |
-| `agy-context transcript read` (`outline`, `summary`) | Read recent turns in Markdown or print a 1-line-per-step tool outline | `agy-context transcript read [<id>] --last-turns 3` / `agy-context transcript outline [<id>]` |
-| `agy-context transcript query` (`grep`, `search`, `find`, `tools`) | Search compact and truncated full steps by regex, role, or tool call arguments | `agy-context transcript grep "<pattern>" [<id>] --summary` / `agy-context transcript tools [<id>]` |
+| `agy-context transcript read` | Read recent turns in Markdown (`--outline` delegates to `query` summary) | `agy-context transcript read [<id>] --last-turns 3` |
+| `agy-context transcript query` (`grep`, `search`, `find`, `tools`, `outline`, `summary`) | Search compact and truncated full steps by regex, role, tool call arguments, or print a 1-line-per-step outline | `agy-context transcript grep "<pattern>" [<id>] --summary` / `agy-context transcript outline [<id>]` |
 | `agy-context transcript step` | Extract untruncated fields for a step, comma list, or range (`N..M`) | `agy-context transcript step 10..15 [<id>] --field content --tail 40` |
 | `agy-context transcript list` (`ls`) | List recent conversation transcripts in the Antigravity brain directory (supports `--parent` and `--lineage`) | `agy-context transcript ls --parent <uuid> --lineage --limit 5` |
-| `agy-context transcript export` (`dump`) | Export a transcript with optional `--sanitized` payload redaction to stdout or `--out` | `agy-context transcript export [<id>] --sanitized --out scratch/export.json` |
+| `agy-context transcript export` (`dump`) | Export an L6-safe `--sanitized` transcript summary index to stdout or `--out` (`--sanitized` required) | `agy-context transcript export [<id>] --sanitized --out scratch/export.md` |
 | `agy-context transcript access` (`policy`) | View or update child subagent and `/swarm` worker transcript access | `agy-context transcript access --status` / `--off` / `--self-only` / `--allow @audit-squad*` / `--on` |
 | `agy-context status` / `setup` / `uninstall` | Audit, synchronize, or remove plugin link, hook, CLI shims, and RTK config | `agy-context status` / `agy-context setup --check` |
 
 ## Documentation
 
-Full documentation is hosted at [paragon-ux.github.io/agy-context-saver](https://paragon-ux.github.io/agy-context-saver/) and in [`docs/`](docs/):
+Full documentation is hosted at [paragon-ux.github.io/Agy-Context-Saver](https://paragon-ux.github.io/Agy-Context-Saver/) and in [`docs/`](docs/):
 
 - [Overview](docs/index.md)
 - [Installation and setup](docs/installation.md)

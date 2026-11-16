@@ -22,7 +22,6 @@ import {
   listTranscriptConversations,
   exportSanitizedTranscript,
   manageTranscriptAccessPolicy,
-  verifyTranscriptCoreAccess,
   consumeTranscriptAccessGrant
 } from "../lib/transcript-core.mjs";
 import { getStateDir } from "../scripts/state-dir.mjs";
@@ -210,6 +209,26 @@ function isProtectedInternalOutPath(targetPath) {
   );
 }
 
+function resolveWithExistingAncestor(targetPath) {
+  const absTarget = path.resolve(targetPath);
+  if (fs.existsSync(absTarget)) {
+    try { return fs.realpathSync(absTarget); } catch { return absTarget; }
+  }
+  const missingTail = [];
+  let probe = absTarget;
+  while (probe && !fs.existsSync(probe)) {
+    const parent = path.dirname(probe);
+    if (parent === probe) break;
+    missingTail.unshift(path.basename(probe));
+    probe = parent;
+  }
+  let baseReal = probe;
+  if (fs.existsSync(probe)) {
+    try { baseReal = fs.realpathSync(probe); } catch {}
+  }
+  return missingTail.length > 0 ? path.join(baseReal, ...missingTail) : baseReal;
+}
+
 function validateSafeExportOutPath(outArg) {
   if (outArg === undefined) return undefined;
   const trimmed = String(outArg).trim();
@@ -234,13 +253,15 @@ function validateSafeExportOutPath(outArg) {
     path.join(profileHome, ".gemini", "config"),
     path.join(profileHome, ".gemini", "antigravity", "bin"),
     path.join(profileHome, ".gemini", "antigravity", "mcp")
-  ].map((p) => {
-    try { return fs.realpathSync(p); } catch { return path.resolve(p); }
-  });
+  ].map((p) => resolveWithExistingAncestor(p));
 
-  if (fs.existsSync(abs)) {
-    const lst = fs.lstatSync(abs);
-    if (lst.isSymbolicLink() || !lst.isFile()) {
+  let absLst = null;
+  try {
+    absLst = fs.lstatSync(abs);
+  } catch {}
+
+  if (absLst) {
+    if (absLst.isSymbolicLink() || !absLst.isFile()) {
       throw new Error(`Invalid --out path '${abs}': refusing symlink or non-regular file.`);
     }
     const realTarget = fs.realpathSync(abs);
@@ -253,21 +274,13 @@ function validateSafeExportOutPath(outArg) {
       }
     }
   } else {
-    let probe = path.dirname(abs);
-    while (probe && !fs.existsSync(probe)) {
-      const parent = path.dirname(probe);
-      if (parent === probe) break;
-      probe = parent;
+    const resolvedTarget = resolveWithExistingAncestor(abs);
+    if (isProtectedInternalOutPath(resolvedTarget)) {
+      throw new Error(`Refusing '--out' inside protected internal or benchmark directory: '${resolvedTarget}'.`);
     }
-    if (fs.existsSync(probe)) {
-      const realProbe = fs.realpathSync(probe);
-      if (isProtectedInternalOutPath(realProbe)) {
-        throw new Error(`Refusing '--out' inside protected internal or benchmark directory: '${realProbe}'.`);
-      }
-      for (const pr of protectedRoots) {
-        if (isInsideDirCaseAware(realProbe, pr)) {
-          throw new Error(`Refusing '--out' inside protected governance/state directory: '${realProbe}'.`);
-        }
+    for (const pr of protectedRoots) {
+      if (isInsideDirCaseAware(resolvedTarget, pr)) {
+        throw new Error(`Refusing '--out' inside protected governance/state directory: '${resolvedTarget}'.`);
       }
     }
   }
@@ -547,10 +560,6 @@ async function handleTranscriptCommand(argv) {
     if (opts.parent !== undefined && !String(opts.parent).trim()) {
       throw new Error("Flag '--parent' must be a non-empty conversation ID or 'current'.");
     }
-    const accessCheck = verifyTranscriptCoreAccess({ subcommand: sub });
-    if (!accessCheck.allowed) {
-      emitError(accessCheck.error, Boolean(opts.json));
-    }
     const parsedLimit = parseOptionalInt(opts.limit, "limit");
     if (parsedLimit !== undefined && parsedLimit <= 0) {
       throw new Error(`Flag '--limit' must be a positive integer (received: '${opts.limit}').`);
@@ -561,6 +570,9 @@ async function handleTranscriptCommand(argv) {
       parentId: opts.parent,
       includeLineage: Boolean(opts.lineage)
     });
+    if (listed.isError) {
+      emitError(listed.text || listed.error, Boolean(opts.json));
+    }
     const dirLabel = listed.brainDirs.length === 1 ? listed.brainDirs[0] : listed.brainDirs.join(", ");
     if (opts.json) {
       console.log(
@@ -594,7 +606,7 @@ async function handleTranscriptCommand(argv) {
     return;
   }
 
-  if (sub === "export") {
+  if (sub === "export" || sub === "dump") {
     const { opts, positional } = parseFlags(rest, {
       booleans: new Set(["sanitized", "json"]),
       values: new Set(["parent", "start", "end", "limit", "out", "output", "file"]),
@@ -608,7 +620,7 @@ async function handleTranscriptCommand(argv) {
       opts.id = [positional.shift()];
     }
     if (positional.length > 0) {
-      throw new Error(`Unexpected positional arguments for 'transcript export': ${positional.join(" ")}`);
+      throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
     }
     if (opts.parent !== undefined && !String(opts.parent).trim()) {
       throw new Error("Flag '--parent' must be a non-empty conversation ID or 'current'.");

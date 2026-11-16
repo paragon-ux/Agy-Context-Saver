@@ -45,14 +45,14 @@ Checks turn counts, step counts, raw transcript size, RTK status, and busy-polli
 agy-context transcript health [<id>] [--id <conv>] [--json] [--file <path>]
 ```
 
-### 2. `agy-context transcript read` (aliases: `outline`, `summary`)
-Streams recent conversation turns in Markdown, or prints a 1-line-per-step outline when `--outline` (or `outline` / `summary`) is used.
+### 2. `agy-context transcript read`
+Streams recent conversation turns in Markdown, or delegates to `query --summary --include-tools` when `--outline` is passed.
 ```bash
 agy-context transcript read [<id>] [--id <conv>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--outline] [--include-thinking] [--json] [--file <path>]
 ```
 
-### 3. `agy-context transcript query` (aliases: `grep`, `search`, `find`, `tools`)
-Searches transcripts by regex or substring with automatic dereferencing of truncated fields, role filtering (`user`, `assistant`, `subagent`, `tool`, `generic`, `system`, `error`, `all`), and `--full-args` / `--field` projection. The `tools` alias defaults to `--roles assistant --field tool_args --include-tools`.
+### 3. `agy-context transcript query` (aliases: `grep`, `search`, `find`, `tools`, `outline`, `summary`)
+Searches transcripts by regex or substring with automatic dereferencing of truncated fields, role filtering (`user`, `assistant`, `subagent`, `tool`, `generic`, `system`, `error`, `all`), and `--full-args` / `--field` projection. The `tools` alias defaults to `--roles assistant --field tool_args --include-tools`, and `outline` / `summary` map to `query --summary --include-tools`.
 - **Multi-step forensic workflow**:
   1. `agy-context transcript outline [<conv>] --start 0 --end 100` (1-line-per-step index with `[ERROR]` and `[tools: ...]` tags)
   2. `agy-context transcript tools [<conv>] --start 0 --end 100` (all untruncated tool call arguments in one call)
@@ -74,9 +74,9 @@ agy-context transcript list [--limit N] [--parent <uuid>] [--lineage] [--json]
 ```
 
 ### 6. `agy-context transcript export` (alias: `dump`)
-Exports a conversation transcript (`--sanitized` to redact tool payload bodies and secrets for safe sharing or restricted child review), optionally scoped by turn/step range or written via `--out`/`--output <path>`.
+Exports an `L6`-safe sanitized conversation transcript summary (`--sanitized` is required to redact tool payload bodies and secrets for safe sharing or restricted child review), optionally scoped by step range or written via `--out`/`--output <path>`.
 ```bash
-agy-context transcript export [<id>] [--id <conv>] [--sanitized] [--limit N] [--last-turns N] [--start N] [--end N] [--out|--output <path>] [--json] [--file <path>]
+agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out|--output <path>] [--file <path>] [--json]
 ```
 
 ### 7. `agy-context transcript access` (alias: `policy`)

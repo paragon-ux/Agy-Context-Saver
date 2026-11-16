@@ -1362,6 +1362,125 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
     const expectedMultiKey = `multi:${[pA, cliRestricted].sort().join(",")}`;
     assert.equal(latestGrant?.targetConvId, expectedMultiKey, "Positional comma-separated export must bind sorted multi: grant key");
 
+    // ACS-LIVE-SVC-001 & ACS-PR4-ARCH-001: Step 0 `[swarm] new board message` (sender=sibling) must not override Step 1 `Your assignment` (sender=coordinator)
+    const { inspectTranscriptLineageFromFile } = await import("../lib/transcript-core.mjs");
+    const liveBoardWorker = "cli-swarm-board-worker";
+    const liveBoardWorkerLogs = path.join(cliBrainRoot, liveBoardWorker, ".system_generated", "logs");
+    fs.mkdirSync(liveBoardWorkerLogs, { recursive: true });
+    const liveBoardTrPath = path.join(liveBoardWorkerLogs, "transcript_full.jsonl");
+    fs.writeFileSync(
+      liveBoardTrPath,
+      [
+        {
+          step_index: 0,
+          source: "SYSTEM",
+          type: "SYSTEM_MESSAGE",
+          content: `[Message] timestamp=2026-11-16T00:00:07Z sender=${cliRestricted} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #1`
+        },
+        {
+          step_index: 1,
+          source: "SYSTEM",
+          type: "SYSTEM_MESSAGE",
+          content: `[Message] timestamp=2026-11-16T00:00:08Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #2 for @audit-live):\n[agy-transcript-access: allow]\nAudit`
+        }
+      ]
+        .map((x) => JSON.stringify(x))
+        .join("\n") + "\n"
+    );
+    const sharedCoreLineage = inspectTranscriptLineageFromFile(liveBoardTrPath);
+    assert.equal(sharedCoreLineage.parentConvId, pA);
+    assert.equal(sharedCoreLineage.rosterName, "audit-live");
+    assert.equal(sharedCoreLineage.launchDirective, "allow");
+    const hookBoardWorkerRes = runHook(
+      {
+        conversationId: liveBoardWorker,
+        transcriptPath: liveBoardTrPath,
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript read --id ${pA}` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(
+      hookBoardWorkerRes.decision,
+      "allow",
+      "getCallerLineage must bind Step 1 coordinator sender= (pA, allowlist @audit-*) rather than Step 0 board sibling (ACS-LIVE-SVC-001 / ACS-PR4-ARCH-001)"
+    );
+
+    // ACS-PR4-RUN-001 / ACS-TEST-001 / ACS-TEST-002: `transcript dump` hook routing & negative --out coverage
+    const dumpAllowed = runHook(
+      {
+        conversationId: pA,
+        cwd: wsDir,
+        transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript dump --parent current --sanitized --out scratch/dump-index.md" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(dumpAllowed.decision, "allow", "transcript dump --parent current --sanitized --out scratch/... must be allowed");
+    assert.match(dumpAllowed.overwrite?.CommandLine || "", new RegExp(`--parent ${pA}`));
+
+    const cliRestrictedDump = "cli-restricted-dump";
+    const cliRestrictedDumpLogs = path.join(cliBrainRoot, cliRestrictedDump, ".system_generated", "logs");
+    fs.mkdirSync(cliRestrictedDumpLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(cliRestrictedDumpLogs, "transcript.jsonl"),
+      JSON.stringify({
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-16T00:00:09Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: self-only]\nSelf-only dump`
+      }) + "\n"
+    );
+
+    const selfDumpOwn = runHook(
+      {
+        conversationId: cliRestrictedDump,
+        transcriptPath: path.join(cliRestrictedDumpLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript dump --sanitized" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(selfDumpOwn.decision, "allow", "self-only caller running transcript dump on own session must be allowed");
+    assert.match(selfDumpOwn.overwrite?.CommandLine || "", new RegExp(`--id ${cliRestrictedDump}`));
+
+    for (const badDumpCmd of [
+      `agy-context transcript dump --id ${pA} --sanitized --out "${path.join(cliStateDir, "leak.md")}"`,
+      `agy-context transcript dump --id ${pA} --sanitized --out "${path.join(cliProfile, ".gemini", "config", "hooks.json.md")}"`,
+      `agy-context transcript dump --id ${pA} --sanitized --out ../outside.md`
+    ]) {
+      const deniedDumpOut = runHook(
+        {
+          conversationId: pA,
+          cwd: wsDir,
+          transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+          toolCall: { name: "run_command", args: { CommandLine: badDumpCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(deniedDumpOut.decision, "deny", `Protected/traversal --out must be denied: ${badDumpCmd}`);
+    }
+
+    const deniedSelfDumpCross = runHook(
+      {
+        conversationId: cliRestrictedDump,
+        transcriptPath: path.join(cliRestrictedDumpLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript dump --sanitized --id ${pA}` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(deniedSelfDumpCross.decision, "deny", "self-only mode must deny cross-session transcript dump");
+
     const pollBreakerConv = "swarm-poll-breaker";
     for (let attempt = 1; attempt <= 5; attempt++) {
       const schedRes = runHook({

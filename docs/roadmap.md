@@ -24,7 +24,7 @@
    - Enforced bounded `read_file` slices (`<= 150` lines, or full-file reads `<= 800` lines and `<= 45 KiB`) paired with `rtk grep`, `rtk find`, and `rtk ls`, while routing step spillovers and completed task logs to `rtk read`.
 2. **CLI-first transcript engine (`bin/agy-context.mjs`, `lib/transcript-core.mjs`):**
    - Retired default MCP registration so idle sessions pay zero tool-schema token overhead.
-   - Shipped `agy-context transcript` subcommands and aliases (`read` + `outline`/`summary`, `query` + `grep`/`search`/`find`/`tools`, `step` with multi-step ranges `N,M`, `N-M`, `N..M` and `--head`/`--tail`/`--full`, `health` + `stats`/`info`, `list` + `ls`, `access` + `policy`) plus `--field` projection, expanded in `v2.0.1` with `list --parent <uuid> --lineage` and sanitized `export --sanitized` (`dump`).
+   - Shipped `agy-context transcript` subcommands and aliases (`read`, `query` + `grep`/`search`/`find`/`tools`/`outline`/`summary`, `step` with multi-step ranges `N,M`, `N-M`, `N..M` and `--head`/`--tail`/`--full`, `health` + `stats`/`info`, `list` + `ls`, `access` + `policy`) plus `--field` projection, expanded in `v2.0.1` with `list --parent <uuid> --lineage` and sanitized `export --sanitized` (`dump`).
    - Registered the `PreToolUse` hook in both plugin `hooks.json` and global `~/.gemini/config/hooks.json` so `/swarm` workers inherit governance automatically.
 3. **Parent transcript access governance:**
    - Added `agy-context transcript access` (`--status`, `--off`, `--on`, `--self-only`, `--mode`, `--allow`, `--deny`, `--ttl`) and first-line launch directives (`[agy-transcript-access: deny|self-only|allow]`).

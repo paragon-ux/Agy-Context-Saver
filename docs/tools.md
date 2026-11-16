@@ -50,10 +50,9 @@ agy-context transcript info --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --json
 
 ## 2. `agy-context transcript read`
 
-- **Aliases:** `outline`, `summary`
-- **Usage:** `agy-context transcript read [<id>] [options]` | `agy-context transcript outline [<id>] [options]`
+- **Usage:** `agy-context transcript read [<id>] [options]`
 
-Streams conversation turns from `transcript.jsonl` (or `transcript_full.jsonl`) into Markdown, or prints a 1-line-per-step session outline when invoked with `--outline`, `outline`, or `summary`.
+Streams conversation turns from `transcript.jsonl` (or `transcript_full.jsonl`) into Markdown, or delegates to a 1-line-per-step session outline via `query --summary --include-tools` when `--outline` or `--summary` is passed (`outline` / `summary` aliases route directly to `query --summary --include-tools`).
 
 | Flag / Argument | Value | Default | Description |
 | :--- | :---: | :---: | :--- |
@@ -61,28 +60,29 @@ Streams conversation turns from `transcript.jsonl` (or `transcript_full.jsonl`) 
 | `--mode` | `compact \| full` | `compact` | Read `transcript.jsonl` (`compact`) or `transcript_full.jsonl` (`full`). |
 | `--last-turns` | `<N>` | `3` | Number of recent turns (`0` returns trailing bounded window up to 200 steps; aliases: `--last`, `--tail`). |
 | `--offset` / `--limit` | `<N>` | `(none)` | Turn window offset or maximum steps/turns (`500` default in `--outline` mode). |
-| `--outline` / `--summary` | `(none)` | `false` | Print a 1-line-per-step outline with `[tools: ...]` call summaries. |
-| `--start` / `--end` | `<N>` | `0` / `999999` | Step index bounds in `--outline` / `outline` / `summary` mode. |
+| `--outline` / `--summary` | `(none)` | `false` | Delegate to `query --summary --include-tools` to print a 1-line-per-step outline (ignores `--mode`, `--last-turns`, `--offset`). |
+| `--start` / `--end` | `<N>` | `0` / `999999` | Step index bounds in `--outline` / `--summary` mode. |
 | `--full-args` | `(none)` | `false` | Show untruncated tool argument previews in `--outline` mode. |
 | `--include-thinking` | `(none)` | `false` | Include model thinking blocks. |
 | `--file` / `--json` | `<path>` / `(none)` | `(none)` | Explicit `.jsonl` file path or JSON output. |
 
 ```bash
 agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --last-turns 2
-agy-context transcript outline 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --limit 50
+agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --outline --limit 50
 ```
 
 ---
 
 ## 3. `agy-context transcript query`
 
-- **Aliases:** `grep`, `search`, `find`, `tools`
-- **Usage:** `agy-context transcript query [<pattern>] [<id>] [options]`
+- **Aliases:** `grep`, `search`, `find`, `tools`, `outline`, `summary`
+- **Usage:** `agy-context transcript query [<pattern>] [<id>] [options]` | `agy-context transcript outline [<id>] [options]`
 
 Searches conversation transcripts by regex or substring, hydrating truncated fields from `transcript_full.jsonl` automatically in `auto` mode.
 
 - `grep`, `search`, `find`: enable `--include-tools` by default so matches inside tool names and arguments are returned.
 - `tools`: defaults to `--roles assistant --field tool_args --include-tools --start 0 --end 999999 --limit 500` to list tool calls and arguments across a step range.
+- `outline`, `summary`: map to `query --summary --include-tools --start 0 --end 999999 --limit 500` (accepting `[<id>]` as the positional conversation ID).
 
 | Flag / Argument | Value | Default | Description |
 | :--- | :---: | :---: | :--- |
@@ -103,6 +103,7 @@ Searches conversation transcripts by regex or substring, hydrating truncated fie
 ```bash
 agy-context transcript grep "verification failed" 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --limit 5
 agy-context transcript tools "run_command" --field tool_args:CommandLine --full-args
+agy-context transcript outline 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --limit 50
 agy-context transcript query --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --summary --limit 10
 ```
 
@@ -148,6 +149,7 @@ agy-context transcript list --parent 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --line
 
 ## 6. `agy-context transcript export`
 
+- **Alias:** `dump`
 - **Usage:** `agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out|--output <path>] [--file <path>] [--json]`
 
 Generates an `L6`-safe sanitized Markdown (or `--json`) summary index of executed steps and compact tool calls, omitting raw `.system_generated/` JSONL lines, `thinking` blocks, and large file bodies while redacting embedded media/base64 payloads and token strings. `--sanitized` is required; raw transcript export is prohibited.

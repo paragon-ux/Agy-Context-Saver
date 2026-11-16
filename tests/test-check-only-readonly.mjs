@@ -108,6 +108,27 @@ try {
   assert.notEqual(cliConflict.status, 0, 'bin/agy-context.mjs setup --check --restore-backups must be rejected with non-zero exit code (D-05).');
   assert.equal(fs.readFileSync(hooksPath, 'utf8'), activeHooks, 'bin/agy-context.mjs setup --check --restore-backups must not mutate hooks.json.');
   console.log('PASS: conflicting --check --restore-backups flags are rejected without mutating profile (D-05).');
+
+  // ACS-PR4-SCRIPT-001: unknown flags, unknown positionals, and --help conflicts on install-register.mjs must fail closed without mutating an empty profile
+  const cleanHome = path.join(tempRoot, 'clean-home-strict');
+  fs.mkdirSync(cleanHome, { recursive: true });
+  const strictEnv = { ...env, HOME: cleanHome, USERPROFILE: cleanHome, AGY_TEST_PROFILE_DIR: cleanHome };
+  for (const badArgs of [
+    ['--bogus'],
+    ['--stat'],
+    ['bogus-positional'],
+    ['--help', '--check']
+  ]) {
+    const res = spawnSync(process.execPath, ['scripts/install-register.mjs', ...badArgs], {
+      cwd: isolatedRepo,
+      env: strictEnv,
+      encoding: 'utf8',
+      timeout: 30000
+    });
+    assert.notEqual(res.status, 0, `Expected strict rejection for install-register.mjs ${badArgs.join(' ')}`);
+    assert.deepEqual(fs.readdirSync(cleanHome), [], `Rejected install-register.mjs ${badArgs.join(' ')} mutated profile`);
+  }
+  console.log('PASS: unknown flags/positionals on install-register.mjs fail closed without mutating profile (ACS-PR4-SCRIPT-001).');
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true });
 }

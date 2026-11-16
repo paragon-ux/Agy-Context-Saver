@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
 
 console.log("=================================================");
@@ -137,8 +138,9 @@ try {
   await runInstall({ silent: true });
   assert.equal(fs.existsSync(path.join(pluginDest, "stale-copy-file.txt")), false, "runInstall() must refresh stale copied pluginDest rather than leaving old files");
 
-  // Windows .cmd shim avoids parenthesized %errorlevel% cmd parse-time bug and install.ps1 emits BOM-less UTF-8 + chcp 65001 (L46)
+  // Windows .cmd shim avoids parenthesized %errorlevel% cmd parse-time bug and uses chcp 65001 >nul matching install.ps1 (L46)
   const cmdShimText = formatWindowsCmdShim(path.join(pluginDest, "bin", "agy-context.mjs"));
+  assert.match(cmdShimText, /chcp 65001 >nul/);
   assert.match(cmdShimText, /if errorlevel 1 goto :fallback/);
   assert.match(cmdShimText, /:fallback/);
   assert.doesNotMatch(cmdShimText, /if %errorlevel% equ 0 \(/i);
@@ -146,6 +148,37 @@ try {
   assert.match(ps1Text, /chcp 65001 >nul/);
   assert.match(ps1Text, /\[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
   assert.doesNotMatch(ps1Text, /-Encoding ASCII/);
+  if (os.platform() !== "win32") {
+    // ACS-TEST-003: POSIX shim escaping with `$` and spaces in AGY_TEST_PROFILE_DIR
+    const { spawnSync } = await import("node:child_process");
+    const specialProfile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-posix $shim dir-"));
+    try {
+      const fakeRtkBin = path.join(specialProfile, "fake-rtk");
+      fs.mkdirSync(fakeRtkBin, { recursive: true });
+      const fakeRtk = path.join(fakeRtkBin, "rtk");
+      fs.writeFileSync(fakeRtk, '#!/bin/sh\necho "rtk 1.1.0"\n');
+      fs.chmodSync(fakeRtk, 0o755);
+      const specialEnv = {
+        ...process.env,
+        AGY_TEST_PROFILE_DIR: specialProfile,
+        PATH: `${fakeRtkBin}:${process.env.PATH || ""}`
+      };
+      const installScriptPath = fileURLToPath(new URL("../scripts/install-register.mjs", import.meta.url));
+      const installSpecial = spawnSync(process.execPath, [installScriptPath], {
+        env: specialEnv,
+        encoding: "utf8"
+      });
+      assert.equal(installSpecial.status, 0, installSpecial.stderr || installSpecial.stdout);
+      const posixShim = path.join(specialProfile, ".gemini", "antigravity", "bin", "agy-context");
+      const shimBody = fs.readFileSync(posixShim, "utf8");
+      assert.match(shimBody, /\\\$shim/, "POSIX shim must backslash-escape $ in target path (ACS-TEST-003)");
+      const shimExec = spawnSync(posixShim, ["--version"], { env: specialEnv, encoding: "utf8" });
+      assert.equal(shimExec.status, 0, `Escaped POSIX shim failed: ${shimExec.stderr}`);
+      assert.match(shimExec.stdout.trim(), /^\d+\.\d+\.\d+/);
+    } finally {
+      fs.rmSync(specialProfile, { recursive: true, force: true });
+    }
+  }
   if (os.platform() === "win32") {
     const winShimRoot = path.join(testProfileDir, "win-shim-exec");
     fs.mkdirSync(winShimRoot, { recursive: true });
