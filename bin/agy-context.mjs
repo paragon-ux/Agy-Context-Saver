@@ -22,7 +22,8 @@ import {
   listTranscriptConversations,
   exportSanitizedTranscript,
   manageTranscriptAccessPolicy,
-  consumeTranscriptAccessGrant
+  consumeTranscriptAccessGrant,
+  utf8SliceToBytes
 } from "../lib/transcript-core.mjs";
 import { getStateDir } from "../scripts/state-dir.mjs";
 import {
@@ -386,12 +387,69 @@ function parseMaxCharsFlag(opts) {
   return parsed;
 }
 
-function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, { label = "transcript output", customMessage = null } = {}) {
+const JSON_HEAVY_ARRAY_KEYS = ["items", "steps", "data"];
+const JSON_HEAVY_OBJECT_KEYS = ["step", "data", "steps", "items"];
+
+/**
+ * Serializes a transcript result payload (text excluded) so the JSON artifact never exceeds `maxChars`.
+ * Heavy arrays are trimmed to the longest leading prefix that fits; if no prefix fits, heavy fields are
+ * dropped. Truncation is always declared via `jsonTruncated`, `jsonItemsIncluded`, and `jsonItemsTotal`.
+ */
+function serializeBoundedJsonPayload(payload, maxChars) {
+  const pretty = (obj) => JSON.stringify(obj, null, 2) + "\n";
+  const size = (s) => Buffer.byteLength(s, "utf8");
+  let out = pretty(payload);
+  if (size(out) <= maxChars) return { content: out, truncated: false, included: null, total: null, payload };
+
+  const arrayKey = JSON_HEAVY_ARRAY_KEYS.find((k) => Array.isArray(payload[k]) && payload[k].length > 0);
+  if (arrayKey) {
+    const total = payload[arrayKey].length;
+    const duplicateKeys = JSON_HEAVY_ARRAY_KEYS.filter((k) => k !== arrayKey && Array.isArray(payload[k]));
+    const base = { ...payload };
+    for (const k of duplicateKeys) delete base[k];
+    const meta = (n) => ({ jsonTruncated: true, jsonItemsIncluded: n, jsonItemsTotal: total, jsonTruncatedReason: `JSON artifact exceeds ${maxChars} chars; rerun with --max-chars/narrower --start/--end or read the Markdown form` });
+    const build = (n) => ({ ...base, [arrayKey]: payload[arrayKey].slice(0, n), ...meta(n) });
+    let lo = 0;
+    let hi = total;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (size(pretty(build(mid))) <= maxChars) lo = mid;
+      else hi = mid - 1;
+    }
+    out = pretty(build(lo));
+    if (size(out) <= maxChars) return { content: out, truncated: true, included: lo, total, payload: build(lo) };
+  }
+
+  const slim = { ...payload };
+  for (const k of JSON_HEAVY_OBJECT_KEYS) delete slim[k];
+  const slimmed = {
+    ...slim,
+    jsonTruncated: true,
+    jsonItemsIncluded: 0,
+    jsonItemsTotal: arrayKey ? payload[arrayKey].length : 1,
+    jsonTruncatedReason: `JSON artifact exceeds ${maxChars} chars; heavy fields omitted (use the Markdown form or a smaller --max-chars-bounded range)`
+  };
+  return { content: pretty(slimmed), truncated: true, included: 0, total: slimmed.jsonItemsTotal, payload: slimmed };
+}
+
+function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, { label = "transcript output", customMessage = null, maxJsonChars = MAX_DEEP_OUT_CHARS } = {}) {
   validateSafeExportOutPath(rawOut);
   fs.mkdirSync(path.dirname(safeOutPath), { recursive: true });
   validateSafeExportOutPath(rawOut);
   const { text, ...payload } = res;
-  const fileContent = asJson ? JSON.stringify(payload, null, 2) + "\n" : text + "\n";
+  const jsonCap = Math.min(MAX_DEEP_OUT_CHARS, Number.isFinite(Number(maxJsonChars)) && Number(maxJsonChars) > 0 ? Math.floor(Number(maxJsonChars)) : MAX_DEEP_OUT_CHARS);
+  let jsonMeta = null;
+  let fileContent;
+  if (asJson) {
+    jsonMeta = serializeBoundedJsonPayload(payload, jsonCap);
+    fileContent = jsonMeta.content;
+  } else {
+    fileContent = text + "\n";
+    if (Buffer.byteLength(fileContent, "utf8") > jsonCap) {
+      const notice = `\n\n... [Output truncated at ${jsonCap} bytes; narrow --start/--end/--offset or raise --max-chars (max ${MAX_DEEP_OUT_CHARS})] ...\n`;
+      fileContent = utf8SliceToBytes(fileContent, jsonCap - Buffer.byteLength(notice, "utf8")) + notice;
+    }
+  }
   const tmpOut = `${safeOutPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
     fs.writeFileSync(tmpOut, fileContent, { encoding: "utf8", flag: "wx" });
@@ -408,7 +466,10 @@ function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, { 
           ...compactMeta,
           outputPath: safeOutPath,
           bytesWritten: Buffer.byteLength(fileContent, "utf8"),
-          charsWritten: fileContent.length
+          charsWritten: fileContent.length,
+          ...(jsonMeta && jsonMeta.truncated
+            ? { jsonTruncated: true, jsonItemsIncluded: jsonMeta.included, jsonItemsTotal: jsonMeta.total }
+            : {})
         },
         null,
         2
@@ -485,7 +546,7 @@ async function handleTranscriptCommand(argv) {
         emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
       }
       if (safeOutPath) {
-        writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript ${sub}` });
+        writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript ${sub}`, maxJsonChars: parsedMaxChars });
       } else if (opts.json) {
         const { text, ...payload } = res;
         console.log(JSON.stringify(payload, null, 2));
@@ -520,7 +581,7 @@ async function handleTranscriptCommand(argv) {
       emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
     }
     if (safeOutPath) {
-      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript read (${res.mode})` });
+      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript read (${res.mode})`, maxJsonChars: parsedMaxChars });
     } else if (opts.json) {
       const { text, ...payload } = res;
       console.log(JSON.stringify(payload, null, 2));
@@ -613,7 +674,7 @@ async function handleTranscriptCommand(argv) {
       emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
     }
     if (safeOutPath) {
-      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript ${sub}` });
+      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript ${sub}`, maxJsonChars: parsedMaxChars });
     } else if (opts.json) {
       const { text, ...payload } = res;
       console.log(JSON.stringify(payload, null, 2));
@@ -688,7 +749,7 @@ async function handleTranscriptCommand(argv) {
       emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
     }
     if (safeOutPath) {
-      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript step` });
+      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript step`, maxJsonChars: parsedMaxChars });
     } else if (opts.json) {
       const { text, ...payload } = res;
       console.log(JSON.stringify(payload, null, 2));

@@ -66,7 +66,7 @@ Streams conversation turns from `transcript.jsonl` (or `transcript_full.jsonl`) 
 | `--include-thinking` | `(none)` | `false` | Include model thinking blocks. |
 | `--full` | `(none)` | `false` | Opt into the deep `512 KB` rendering tier, bypassing inline line/arg clamps (`1,000c` lines, `4,000c` thinking, `240c` large bodies). |
 | `--max-chars` | `<N>` | `(tier default)` | Override the character output ceiling explicitly (up to `512 KB`). |
-| `--out` / `--output` | `<path>` | `(none)` | Write deep output (up to `512 KB`) to a safe `.md`/`.json`/`.txt` artifact outside protected directories and print a compact summary to stdout. |
+| `--out` / `--output` | `<path>` | `(none)` | Write deep output (up to `512 KB`, including bounded `--json` artifacts with `jsonTruncated` metadata) to a safe `.md`/`.json`/`.txt` artifact outside protected directories and print a compact summary to stdout. |
 | `--file` / `--json` | `<path>` / `(none)` | `(none)` | Explicit `.jsonl` file path or JSON output. |
 
 ```bash
@@ -99,12 +99,12 @@ Searches conversation transcripts by regex or substring, hydrating truncated fie
 | `--limit` | `<N>` | `5` (`30` w/ `--summary`, up to `500` on explicit range/`tools`, `2000` w/ `--full`/`--out`) | Maximum matching steps to return. |
 | `--summary` / `--outline` | `(none)` | `false` | Print 1-line timeline bullets with `[ERROR]`, `[spill: steps/<N>]`, and `[tools: ...]` tags. |
 | `--include-tools` | `(none)` | `false` (`true` on `grep`/`search`/`find`/`tools`) | Search and display tool call names and arguments. |
-| `--full-args` | `(none)` | `false` | Print full tool call arguments (unclamping `LARGE_BODY_ARG_KEYS` when combined with `--full` or `--out`). |
+| `--full-args` | `(none)` | `false` | Print full tool call arguments (unclamping `LARGE_BODY_ARG_KEYS` when combined with `--full`). |
 | `--field` | `<spec>` | `all` (`tool_args` on `tools`) | Project a single field: `content`, `thinking`, `tool_calls`, `tool_args`, `tool_args:<Key>`, or `all`. |
 | `--include-thinking` | `(none)` | `false` | Search and include thinking blocks. |
 | `--full` | `(none)` | `false` | Opt into deep `512 KB` ceiling with expanded previews and untruncated field rendering. |
 | `--max-chars` | `<N>` | `(tier default)` | Explicit character ceiling override (up to `512 KB`). |
-| `--out` / `--output` | `<path>` | `(none)` | Write deep results to a safe `.md`/`.json`/`.txt` artifact outside protected directories. |
+| `--out` / `--output` | `<path>` | `(none)` | Write deep results (up to `512 KB`, including bounded `--json` artifacts with `jsonTruncated` metadata) to a safe `.md`/`.json`/`.txt` artifact outside protected directories and print a compact summary to stdout. |
 | `--json` / `--file` | `(none)` / `<path>` | `(none)` | Output JSON or read an explicit `.jsonl` file path. |
 
 ```bash
@@ -133,7 +133,7 @@ Extracts untruncated fields from `transcript_full.jsonl` for a single step, a co
 | `--line-start` / `--line-end` | `<N>` | `(none)` | 1-indexed inclusive line slice across any `--field` output (single-line payloads wrap into 120-char slices when line-slicing). |
 | `--full` | `(none)` | `false` | Opt into the deep `512 KB` ceiling, bypassing `4,000c` thinking, `1,000c` line, and `240c` large-body argument clamps (`24 KB` safety ceiling applies when `--full`/`--out`/`--max-chars` are omitted). |
 | `--max-chars` | `<N>` | `(tier default)` | Explicit character ceiling override (works with or without `--full`, up to `512 KB`). |
-| `--out` / `--output` | `<path>` | `(none)` | Write deep single/batch step output to a safe `.md`/`.json`/`.txt` artifact outside protected directories. |
+| `--out` / `--output` | `<path>` | `(none)` | Write deep single/batch step output (up to `512 KB`, including bounded `--json` artifacts with `jsonTruncated` metadata) to a safe `.md`/`.json`/`.txt` artifact outside protected directories and print a compact summary to stdout. |
 | `--file` / `--json` | `<path>` / `(none)` | `(none)` | Explicit `.jsonl` file path or JSON output. |
 
 ```bash

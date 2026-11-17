@@ -1592,6 +1592,46 @@ try {
     assert.match(beyond.stdout, /No lines in requested range/);
 
     console.log("✓ PR #7 audit regressions verified");
+
+    // 9.8 --out --json artifact obeys the 512 KB deep-tier cap (and explicit --max-chars) with declared truncation
+    const convHuge = "conv-huge-json-cap";
+    const hugeLogs = path.join(brainDir, convHuge, ".system_generated", "logs");
+    fs.mkdirSync(hugeLogs, { recursive: true });
+    const hugeLines = [];
+    for (let s = 0; s < 400; s++) {
+      hugeLines.push(JSON.stringify({
+        step_index: s,
+        type: s % 2 === 0 ? "USER_INPUT" : "PLANNER_RESPONSE",
+        created_at: "2026-11-17T10:00:00Z",
+        content: `step ${s} ` + "W".repeat(3500),
+        tool_calls: s % 2 === 1 ? [{ name: "run_command", args: { CommandLine: `echo ${s} ` + "Q".repeat(400) } }] : undefined
+      }));
+    }
+    fs.writeFileSync(path.join(hugeLogs, "transcript.jsonl"), hugeLines.join("\n") + "\n");
+    const hugeJsonFile = path.join(ergOutDir, "huge_cap.json");
+    const hugeRes = runCli(["transcript", "outline", "--id", convHuge, "--full", "--out", hugeJsonFile, "--json"]);
+    assert.equal(hugeRes.status, 0, hugeRes.stderr);
+    const hugeBytes = fs.statSync(hugeJsonFile).size;
+    assert.ok(hugeBytes <= 512 * 1024, `--out --json must stay <= 512 KB, got ${hugeBytes}`);
+    const hugeFile = JSON.parse(fs.readFileSync(hugeJsonFile, "utf8"));
+    assert.equal(hugeFile.jsonTruncated, true, "oversized JSON artifact must declare truncation");
+    assert.ok(hugeFile.jsonItemsIncluded > 0 && hugeFile.jsonItemsIncluded < hugeFile.jsonItemsTotal);
+    assert.equal(hugeFile.items.length, hugeFile.jsonItemsIncluded);
+    const hugeStdout = JSON.parse(hugeRes.stdout);
+    assert.equal(hugeStdout.jsonTruncated, true);
+    assert.ok(hugeRes.stdout.length < 2000, "stdout stays compact");
+
+    const smallCapFile = path.join(ergOutDir, "small_cap.json");
+    const smallCapRes = runCli(["transcript", "outline", "--id", convHuge, "--full", "--max-chars", "20000", "--out", smallCapFile, "--json"]);
+    assert.equal(smallCapRes.status, 0, smallCapRes.stderr);
+    assert.ok(fs.statSync(smallCapFile).size <= 20000, "explicit --max-chars must bound the JSON artifact");
+
+    const hugeMdFile = path.join(ergOutDir, "huge_cap.md");
+    const hugeMdRes = runCli(["transcript", "read", "--id", convHuge, "--mode", "full", "--full", "--last-turns", "400", "--out", hugeMdFile]);
+    assert.equal(hugeMdRes.status, 0, hugeMdRes.stderr);
+    assert.ok(fs.statSync(hugeMdFile).size <= 512 * 1024, "Markdown --out artifact must stay <= 512 KB in bytes");
+
+    console.log("✓ --out --json and Markdown artifacts honor the 512 KB deep-tier cap");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });
