@@ -297,9 +297,54 @@ assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
       if (prevProfileEnv === undefined) delete process.env.AGY_TEST_PROFILE_DIR;
       else process.env.AGY_TEST_PROFILE_DIR = prevProfileEnv;
     }
+
+    // S2R-SCRIPT-001: status and status --json must surface corrupt=true and error details on malformed hooks.json, mcp_config.json, and config.json
+    const { hooksJsonPath, mcpJsonPath: w3McpPath, configJsonPath: w3CfgPath } = (() => {
+      const cfgDir = path.join(w3Profile, ".gemini", "config");
+      return {
+        hooksJsonPath: path.join(cfgDir, "hooks.json"),
+        mcpJsonPath: path.join(cfgDir, "mcp_config.json"),
+        configJsonPath: path.join(cfgDir, "config.json")
+      };
+    })();
+    const reSetupW3 = spawnSync(process.execPath, [installScript], { encoding: "utf-8", env: w3Env });
+    assert.equal(reSetupW3.status, 0, reSetupW3.stderr || reSetupW3.stdout);
+    fs.writeFileSync(w3CfgPath, JSON.stringify({ plugins: { "agy-context-saver": { enabled: true } } }, null, 2), "utf8");
+    for (const [cfgFile, badContent, detailKey] of [
+      [hooksJsonPath, "{ bad hooks json", "hook"],
+      [w3McpPath, "{ bad mcp json", "mcp"],
+      [w3McpPath, JSON.stringify({ mcpServers: [] }), "mcp"],
+      [w3CfgPath, "[]\n", "config"]
+    ]) {
+      const saved = fs.existsSync(cfgFile) ? fs.readFileSync(cfgFile, "utf8") : null;
+      fs.writeFileSync(cfgFile, badContent, "utf8");
+      const corruptHuman = spawnSync(process.execPath, [cliScript, "status"], { encoding: "utf-8", env: w3Env });
+      assert.notEqual(corruptHuman.status, 0, `S2R-SCRIPT-001: corrupt ${detailKey} must fail status`);
+      assert.match(corruptHuman.stdout, /CORRUPT/, `S2R-SCRIPT-001: corrupt ${detailKey} status output must include CORRUPT`);
+      const corruptJsonRes = spawnSync(process.execPath, [cliScript, "status", "--json"], { encoding: "utf-8", env: w3Env });
+      assert.notEqual(corruptJsonRes.status, 0, `S2R-SCRIPT-001: corrupt ${detailKey} must fail status --json`);
+      const corruptJson = JSON.parse(corruptJsonRes.stdout);
+      assert.equal(corruptJson.isComplete, false);
+      assert.equal(corruptJson.details[detailKey].corrupt, true, `S2R-SCRIPT-001: details.${detailKey}.corrupt must be true`);
+      assert.ok(corruptJson.details[detailKey].error, `S2R-SCRIPT-001: details.${detailKey}.error must be populated`);
+      if (saved !== null) fs.writeFileSync(cfgFile, saved, "utf8");
+      else fs.rmSync(cfgFile, { force: true });
+    }
   } finally {
     fs.rmSync(w3Profile, { recursive: true, force: true });
   }
+}
+
+// S2R-DEP-001: release-preflight.mjs package "files" matcher handles ! negation, * / ** globs, and ./ prefixes
+{
+  const { isPackageFileCovered } = await import("../scripts/release-preflight.mjs");
+  const sampleFiles = ["bin/agy-context.mjs", "./docs", "!docs/reviews/**", "!docs/*.draft.md", "scripts/*.mjs"];
+  assert.equal(isPackageFileCovered("bin/agy-context.mjs", sampleFiles), true);
+  assert.equal(isPackageFileCovered("docs/tools.md", sampleFiles), true);
+  assert.equal(isPackageFileCovered("docs/reviews/audit.md", sampleFiles), false, "S2R-DEP-001: !docs/reviews/** must exclude nested files");
+  assert.equal(isPackageFileCovered("docs/notes.draft.md", sampleFiles), false, "S2R-DEP-001: !docs/*.draft.md must exclude matching globs");
+  assert.equal(isPackageFileCovered("scripts/install-register.mjs", sampleFiles), true, "S2R-DEP-001: scripts/*.mjs must match .mjs files");
+  assert.equal(isPackageFileCovered("scripts/subdir/other.mjs", sampleFiles), false, "S2R-DEP-001: single * must not cross slashes");
 }
 
 hermetic.cleanup();
