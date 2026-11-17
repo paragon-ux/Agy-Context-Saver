@@ -194,8 +194,96 @@ try {
     env: { ...process.env, AGY_TEST_PROFILE_DIR: emptyProfile }
   });
   assert.notEqual(emptyDirectStatus.status, 0, "install-register.mjs --status on incomplete profile must exit non-zero (ACS-SVC-001-P3-1)");
+
+  // S2-DEP-004 & S2-SCRIPT-012: direct install-register.mjs --status --json works with empty stderr on both complete & incomplete profiles
+  const emptyDirectJson = spawnSync(process.execPath, [installScript, "--status", "--json"], {
+    encoding: "utf-8",
+    env: { ...process.env, AGY_TEST_PROFILE_DIR: emptyProfile }
+  });
+  assert.notEqual(emptyDirectJson.status, 0);
+  assert.equal(emptyDirectJson.stderr.trim(), "", "status --json must not pollute stderr (S2-SCRIPT-012)");
+  assert.equal(JSON.parse(emptyDirectJson.stdout).isComplete, false);
 } finally {
   fs.rmSync(emptyProfile, { recursive: true, force: true });
+}
+
+const completeDirectJson = spawnSync(process.execPath, [installScript, "--status", "--json"], { encoding: "utf-8" });
+assert.equal(completeDirectJson.status, 0, `Direct install-register.mjs --status --json failed: ${completeDirectJson.stderr}`);
+assert.equal(completeDirectJson.stderr.trim(), "");
+assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
+
+// S2-SCRIPT-005, S2-SCRIPT-006, S2-SCRIPT-011, S2-DEP-001, S2-DEP-006 regressions
+{
+  const w3Profile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-w3-parity-"));
+  const w3Env = { ...process.env, AGY_TEST_PROFILE_DIR: w3Profile };
+  try {
+    const setupW3 = spawnSync(process.execPath, [installScript], { encoding: "utf-8", env: w3Env });
+    assert.equal(setupW3.status, 0, setupW3.stderr || setupW3.stdout);
+    const { resolveProfilePaths, runUninstall } = await import("../scripts/install-register.mjs");
+    const prevProfileEnv = process.env.AGY_TEST_PROFILE_DIR;
+    process.env.AGY_TEST_PROFILE_DIR = w3Profile;
+    try {
+      const dynPaths = resolveProfilePaths();
+      assert.ok(dynPaths.pluginDest.startsWith(w3Profile), "resolveProfilePaths() must dynamically reflect AGY_TEST_PROFILE_DIR (S2-DEP-006)");
+
+      // S2-DEP-001: legacy MCP stripping creates namespaced mcp_config.json.agy-context-saver.bak without touching foreign mcp_config.json.agy-squad.bak
+      const agySquadBak = path.join(dynPaths.geminiConfigDir, "mcp_config.json.agy-squad.bak");
+      fs.writeFileSync(agySquadBak, JSON.stringify({ mcpServers: { "agy-squad": { command: "node" } } }), "utf8");
+      fs.writeFileSync(dynPaths.mcpJsonPath, JSON.stringify({ mcpServers: { "agy-context-saver": { command: "node" }, other: { command: "x" } } }), "utf8");
+      const reSync = spawnSync(process.execPath, [installScript], { encoding: "utf-8", env: w3Env });
+      assert.equal(reSync.status, 0, reSync.stderr || reSync.stdout);
+      assert.ok(fs.existsSync(dynPaths.mcpBakPath), "Must create namespaced mcp_config.json.agy-context-saver.bak (S2-DEP-001)");
+      assert.match(dynPaths.mcpBakPath, /mcp_config\.json\.agy-context-saver\.bak$/);
+      assert.ok(fs.existsSync(agySquadBak), "Companion mcp_config.json.agy-squad.bak must remain untouched");
+
+      // S2-SCRIPT-006: malformed hooks.json causes runUninstall() to fail closed BEFORE removing pluginDest or destHook
+      const savedHooks = fs.readFileSync(dynPaths.hooksJsonPath, "utf8");
+      fs.writeFileSync(dynPaths.hooksJsonPath, "{ malformed json", "utf8");
+      await assert.rejects(() => runUninstall({ silent: true }), /Configuration error|invalid JSON/i);
+      assert.ok(fs.existsSync(dynPaths.pluginDest), "Fail-closed runUninstall must preserve pluginDest when hooks.json is malformed (S2-SCRIPT-006)");
+      assert.ok(fs.existsSync(dynPaths.destHook), "Fail-closed runUninstall must preserve destHook when hooks.json is malformed (S2-SCRIPT-006)");
+      fs.writeFileSync(dynPaths.hooksJsonPath, savedHooks, "utf8");
+
+      // S2-SCRIPT-005 & S2-SCRIPT-011: broken pluginDest, broken destHook, and broken shim symlinks detected & unlinked
+      let madeSymlinks = false;
+      try {
+        await runUninstall({ silent: true });
+        fs.mkdirSync(path.dirname(dynPaths.pluginDest), { recursive: true });
+        fs.mkdirSync(path.dirname(dynPaths.destHook), { recursive: true });
+        fs.mkdirSync(dynPaths.antigravityBinDir, { recursive: true });
+        fs.symlinkSync(path.join(w3Profile, "missing-plugin-target"), dynPaths.pluginDest, os.platform() === "win32" ? "junction" : "dir");
+        fs.symlinkSync(path.join(w3Profile, "missing-hook-target.mjs"), dynPaths.destHook, "file");
+        const shimFile = path.join(dynPaths.antigravityBinDir, os.platform() === "win32" ? "agy-context.cmd" : "agy-context");
+        fs.symlinkSync(path.join(w3Profile, "missing-shim-target"), shimFile, "file");
+        madeSymlinks = true;
+      } catch (err) {
+        if (err?.code !== "EPERM") throw err;
+      }
+      if (madeSymlinks) {
+        const brokenStatus = spawnSync(process.execPath, [installScript, "--status", "--json"], { encoding: "utf-8", env: w3Env });
+        assert.notEqual(brokenStatus.status, 0);
+        const brokenJson = JSON.parse(brokenStatus.stdout);
+        assert.equal(brokenJson.isInstalled, true, "Broken pluginDest symlink must report isInstalled=true (PARTIAL INSTALLATION) (S2-SCRIPT-005)");
+        assert.equal(brokenJson.isComplete, false);
+        assert.equal(brokenJson.details.plugin.brokenSymlink, true);
+
+        const brokenHuman = spawnSync(process.execPath, [installScript, "--status"], { encoding: "utf-8", env: w3Env });
+        assert.match(brokenHuman.stdout, /BROKEN SYMLINK/);
+        assert.match(brokenHuman.stdout, /PARTIAL INSTALLATION/);
+
+        await runUninstall({ silent: true });
+        assert.throws(() => fs.lstatSync(dynPaths.pluginDest), { code: "ENOENT" }, "runUninstall must remove broken pluginDest symlink");
+        assert.throws(() => fs.lstatSync(dynPaths.destHook), { code: "ENOENT" }, "runUninstall must remove broken destHook symlink (S2-SCRIPT-011)");
+        const shimFile = path.join(dynPaths.antigravityBinDir, os.platform() === "win32" ? "agy-context.cmd" : "agy-context");
+        assert.throws(() => fs.lstatSync(shimFile), { code: "ENOENT" }, "runUninstall must remove broken CLI shim symlink (S2-SCRIPT-011)");
+      }
+    } finally {
+      if (prevProfileEnv === undefined) delete process.env.AGY_TEST_PROFILE_DIR;
+      else process.env.AGY_TEST_PROFILE_DIR = prevProfileEnv;
+    }
+  } finally {
+    fs.rmSync(w3Profile, { recursive: true, force: true });
+  }
 }
 
 hermetic.cleanup();

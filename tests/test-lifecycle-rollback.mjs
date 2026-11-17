@@ -46,6 +46,9 @@ try {
     runUninstall,
     detectExistingInstallation,
     formatWindowsCmdShim,
+    resolveProfilePaths
+  } = await import("../scripts/install-register.mjs");
+  const {
     pluginDest,
     destHook,
     hooksJsonPath,
@@ -54,7 +57,7 @@ try {
     mcpBakPath,
     antigravityMcpRootDir,
     antigravityBinDir
-  } = await import("../scripts/install-register.mjs");
+  } = resolveProfilePaths();
 
   // --- 1. Upgrade / Fresh Install Sweeps Legacy Hook & All agy-context-saver* MCP Entries (ACS-HOOK-11) ---
   console.log("--- 1. Install & Legacy MCP/Hook Sweep (ACS-HOOK-11) ---");

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver Registration & Installation Engine (v2.0.2)
+ * Agy-Context-Saver Registration & Installation Engine (v2.0.3)
  * Zero-delay cross-platform installer with CLI-first shim provisioning,
  * unified hook registration, and legacy MCP retirement/sweep.
  *
@@ -25,13 +25,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const PACKAGE_VERSION = (() => {
   try {
-    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.0.2";
+    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.0.3";
   } catch {
-    return "2.0.2";
+    return "2.0.3";
   }
 })();
 
-function resolveProfilePaths() {
+export function resolveProfilePaths() {
   const homeDir = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
   const geminiConfigDir = path.join(homeDir, ".gemini", "config");
   const pluginsDir = path.join(geminiConfigDir, "plugins");
@@ -41,7 +41,8 @@ function resolveProfilePaths() {
   const hooksBakPath = path.join(geminiConfigDir, "hooks.json.bak");
   const configJsonPath = path.join(geminiConfigDir, "config.json");
   const mcpJsonPath = path.join(geminiConfigDir, "mcp_config.json");
-  const mcpBakPath = path.join(geminiConfigDir, "mcp_config.json.bak");
+  const mcpBakPath = path.join(geminiConfigDir, "mcp_config.json.agy-context-saver.bak");
+  const legacyMcpBakPath = path.join(geminiConfigDir, "mcp_config.json.bak");
   const antigravityMcpRootDir = path.join(homeDir, ".gemini", "antigravity", "mcp");
   const antigravityMcpDir = path.join(antigravityMcpRootDir, "agy-context-saver");
   const antigravityBinDir = path.join(homeDir, ".gemini", "antigravity", "bin");
@@ -58,6 +59,7 @@ function resolveProfilePaths() {
     configJsonPath,
     mcpJsonPath,
     mcpBakPath,
+    legacyMcpBakPath,
     antigravityMcpRootDir,
     antigravityMcpDir,
     antigravityBinDir,
@@ -65,18 +67,6 @@ function resolveProfilePaths() {
     destHookNormalized
   };
 }
-
-const {
-  pluginDest,
-  hooksJsonPath,
-  hooksBakPath,
-  mcpJsonPath,
-  mcpBakPath,
-  antigravityMcpRootDir,
-  antigravityMcpDir,
-  antigravityBinDir,
-  destHook
-} = resolveProfilePaths();
 
 const sourceHook = path.join(repoRoot, "scripts", "execution-guard-hook.mjs");
 const repoHooksJsonPath = path.join(repoRoot, "hooks.json");
@@ -199,7 +189,7 @@ export async function safeCopyFileIfChanged(sourcePath, targetPath) {
 /**
  * Detects whether Agy-Context-Saver is already installed across all Antigravity 2.0 integration points.
  */
-export function detectExistingInstallation() {
+export function detectExistingInstallation(options = {}) {
   const {
     pluginDest,
     hooksJsonPath,
@@ -212,6 +202,7 @@ export function detectExistingInstallation() {
     pluginLst = fs.lstatSync(pluginDest);
   } catch {}
   const pluginIsSymlink = Boolean(pluginLst && pluginLst.isSymbolicLink());
+  const pluginBrokenSymlink = Boolean(pluginLst && pluginIsSymlink && !pluginExists);
   let pluginTarget = null;
   let pluginPointsElsewhere = false;
   let pluginInstalledVersion = null;
@@ -221,7 +212,14 @@ export function detectExistingInstallation() {
     !repoRoot.includes("npm-cache") &&
     !repoRoot.includes("node_modules");
 
-  if (pluginExists) {
+  if (pluginBrokenSymlink) {
+    try {
+      pluginTarget = fs.readlinkSync(pluginDest);
+    } catch {
+      pluginTarget = "broken symlink";
+    }
+    pluginPointsElsewhere = true;
+  } else if (pluginExists) {
     if (pluginIsSymlink) {
       try {
         pluginTarget = fs.readlinkSync(pluginDest);
@@ -297,11 +295,12 @@ export function detectExistingInstallation() {
   }
   const cliShim = detectCliShims();
   const mcp = findLegacyMcpArtifacts();
-  const rtkInfo = findExistingRtk();
+  const rtkInfo = findExistingRtk({ silent: Boolean(options.silent) });
   const hookRegistered = pluginHookRegistered && globalHookRegistered && mirroredHookExists && !mirroredHookStale;
 
   const isInstalled =
     pluginExists ||
+    Boolean(pluginLst) ||
     pluginHookRegistered ||
     globalHookRegistered ||
     legacyHookPresent ||
@@ -330,6 +329,7 @@ export function detectExistingInstallation() {
         exists: pluginExists,
         target: pluginTarget,
         isSymlink: pluginIsSymlink,
+        brokenSymlink: pluginBrokenSymlink,
         isCopyFallback: pluginExists && !pluginIsSymlink,
         pointsElsewhere: pluginPointsElsewhere,
         version: pluginInstalledVersion,
@@ -646,7 +646,11 @@ export async function runInstall(options = {}) {
     pluginLst &&
     (!pluginExists || isTempOrNpx || options.forceCopyFallback || !pluginLst.isSymbolicLink() || pluginPointsElsewhere)
   ) {
-    await fsPromises.rm(pluginDest, { recursive: true, force: true });
+    if (pluginLst.isSymbolicLink()) {
+      await fsPromises.unlink(pluginDest);
+    } else {
+      await fsPromises.rm(pluginDest, { recursive: true, force: true });
+    }
     pluginLst = null;
   }
 
@@ -765,6 +769,11 @@ export async function runUninstall(options = {}) {
   const warn = options.silent ? () => {} : console.warn;
   log("Uninstalling Agy-Context-Saver...");
 
+  // 0. Fail-closed Pre-Validation: verify JSON config files BEFORE removing plugin/hook artifacts (S2-SCRIPT-006)
+  const validatedHooks = parseAndValidateJsonConfig(hooksJsonPath, "hooks");
+  const validatedMcp = parseAndValidateJsonConfig(mcpJsonPath, "mcp");
+  const validatedConfig = parseAndValidateJsonConfig(configJsonPath, "config");
+
   // 1. Remove plugin link (including broken symlinks)
   let pluginStat = null;
   try {
@@ -783,10 +792,18 @@ export async function runUninstall(options = {}) {
     }
   }
 
-  // 2. Remove mirrored hook script
-  if (fs.existsSync(destHook)) {
+  // 2. Remove mirrored hook script (including dangling symlinks via lstatSync, S2-SCRIPT-011)
+  let destHookStat = null;
+  try {
+    destHookStat = fs.lstatSync(destHook);
+  } catch {}
+  if (destHookStat) {
     try {
-      await fsPromises.unlink(destHook);
+      if (destHookStat.isDirectory() && !destHookStat.isSymbolicLink()) {
+        await fsPromises.rm(destHook, { recursive: true, force: true });
+      } else {
+        await fsPromises.unlink(destHook);
+      }
       log(`[OK] Removed mirrored hook script: ${destHook}`);
     } catch (err) {
       warn(`[WARN] Could not remove mirrored hook script: ${err.message}`);
@@ -794,46 +811,51 @@ export async function runUninstall(options = {}) {
   }
 
   // 3. Remove both current and legacy hook keys from hooks.json, and plugin toggle from config.json
-  if (fs.existsSync(hooksJsonPath)) {
-    try {
-      const hooksConfig = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
-      if (hooksConfig && typeof hooksConfig === "object") {
-        delete hooksConfig[LEGACY_HOOK_KEY];
-        delete hooksConfig[HOOK_KEY];
-        await safeWriteFileIfChanged(hooksJsonPath, JSON.stringify(hooksConfig, null, 2));
-        log(`[OK] Removed hook registration from: ${hooksJsonPath}`);
-      }
-    } catch {}
+  if (validatedHooks && typeof validatedHooks === "object") {
+    const nextHooks = { ...validatedHooks };
+    delete nextHooks[LEGACY_HOOK_KEY];
+    delete nextHooks[HOOK_KEY];
+    await safeWriteFileIfChanged(hooksJsonPath, JSON.stringify(nextHooks, null, 2));
+    log(`[OK] Removed hook registration from: ${hooksJsonPath}`);
   }
-  if (fs.existsSync(configJsonPath)) {
-    try {
-      const cfg = JSON.parse(fs.readFileSync(configJsonPath, "utf-8"));
-      if (cfg && typeof cfg === "object" && cfg.plugins && typeof cfg.plugins === "object" && HOOK_KEY in cfg.plugins) {
-        delete cfg.plugins[HOOK_KEY];
-        await safeWriteFileIfChanged(configJsonPath, JSON.stringify(cfg, null, 2));
-        log(`[OK] Removed '${HOOK_KEY}' plugin entry from: ${configJsonPath}`);
-      }
-    } catch {}
+  if (
+    validatedConfig &&
+    typeof validatedConfig === "object" &&
+    validatedConfig.plugins &&
+    typeof validatedConfig.plugins === "object" &&
+    !Array.isArray(validatedConfig.plugins) &&
+    HOOK_KEY in validatedConfig.plugins
+  ) {
+    const nextPlugins = { ...validatedConfig.plugins };
+    delete nextPlugins[HOOK_KEY];
+    const nextConfig = { ...validatedConfig, plugins: nextPlugins };
+    await safeWriteFileIfChanged(configJsonPath, JSON.stringify(nextConfig, null, 2));
+    log(`[OK] Removed '${HOOK_KEY}' plugin entry from: ${configJsonPath}`);
   }
 
-  // 4. Strip any agy-context-saver* keys from mcp_config.json (preserving foreign servers, creating .bak if absent)
-  if (fs.existsSync(mcpJsonPath)) {
-    try {
-      const parsedMcp = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
-      await stripLegacyMcpRegistrations(parsedMcp, { log, warn });
-    } catch {}
+  // 4. Strip any agy-context-saver* keys from mcp_config.json (preserving foreign servers, creating namespaced .bak if absent)
+  if (validatedMcp) {
+    await stripLegacyMcpRegistrations(validatedMcp, { log, warn });
   }
 
   // 5. Sweep ALL agy-context-saver* directories under ~/.gemini/antigravity/mcp/
   await sweepLegacyMcpSchemas({ log, warn });
 
-  // 6. Remove CLI shims from ~/.gemini/antigravity/bin/
+  // 6. Remove CLI shims from ~/.gemini/antigravity/bin/ (including dangling symlinks via lstatSync, S2-SCRIPT-011)
   for (const name of CLI_SHIM_NAMES) {
     for (const candidate of [name, `${name}.cmd`]) {
       const shimPath = path.join(antigravityBinDir, candidate);
-      if (fs.existsSync(shimPath)) {
+      let shimStat = null;
+      try {
+        shimStat = fs.lstatSync(shimPath);
+      } catch {}
+      if (shimStat) {
         try {
-          await fsPromises.unlink(shimPath);
+          if (shimStat.isDirectory() && !shimStat.isSymbolicLink()) {
+            await fsPromises.rm(shimPath, { recursive: true, force: true });
+          } else {
+            await fsPromises.unlink(shimPath);
+          }
           log(`[OK] Removed CLI shim: ${shimPath}`);
         } catch (err) {
           warn(`[WARN] Could not remove CLI shim ${shimPath}: ${err.message}`);
@@ -885,7 +907,7 @@ export async function runUninstall(options = {}) {
 }
 
 export async function runRestoreBackups(options = {}) {
-  const { hooksJsonPath, hooksBakPath, mcpJsonPath, mcpBakPath } = resolveProfilePaths();
+  const { hooksJsonPath, hooksBakPath, mcpJsonPath, mcpBakPath, legacyMcpBakPath } = resolveProfilePaths();
   const log = options.silent ? () => {} : console.log;
   const warn = options.silent ? () => {} : console.warn;
   let restoredCount = 0;
@@ -902,10 +924,28 @@ export async function runRestoreBackups(options = {}) {
     log(`[INFO] No hooks.json backup found at ${hooksBakPath}`);
   }
 
+  let mcpBackupToRestore = null;
   if (fs.existsSync(mcpBakPath)) {
+    mcpBackupToRestore = mcpBakPath;
+  } else if (fs.existsSync(legacyMcpBakPath)) {
     try {
-      await fsPromises.copyFile(mcpBakPath, mcpJsonPath);
-      log(`[OK] Restored mcp_config.json from backup: ${mcpBakPath}`);
+      const legacyParsed = JSON.parse(fs.readFileSync(legacyMcpBakPath, "utf-8"));
+      if (
+        legacyParsed &&
+        typeof legacyParsed === "object" &&
+        legacyParsed.mcpServers &&
+        typeof legacyParsed.mcpServers === "object" &&
+        Object.keys(legacyParsed.mcpServers).some(isLegacyAgyMcpKey)
+      ) {
+        mcpBackupToRestore = legacyMcpBakPath;
+      }
+    } catch {}
+  }
+
+  if (mcpBackupToRestore) {
+    try {
+      await fsPromises.copyFile(mcpBackupToRestore, mcpJsonPath);
+      log(`[OK] Restored mcp_config.json from backup: ${mcpBackupToRestore}`);
       restoredCount++;
     } catch (err) {
       warn(`[WARN] Could not restore mcp backup: ${err.message}`);
@@ -920,17 +960,19 @@ export async function runRestoreBackups(options = {}) {
 export function runStatus(options = {}) {
   const { pluginDest, destHook, antigravityBinDir } = resolveProfilePaths();
   const log = options.silent ? () => {} : console.log;
-  const existing = detectExistingInstallation();
+  const existing = detectExistingInstallation({ silent: Boolean(options.silent) });
   const plug = existing.details.plugin;
-  const pluginNote = !plug.exists
-    ? "NOT LINKED"
-    : plug.pointsElsewhere
-      ? `REDIRECTED (${pluginDest} -> ${plug.target}; re-run agy-context setup)`
-      : plug.versionMismatch
-        ? `STALE VERSION (${plug.version} != ${PACKAGE_VERSION} at ${pluginDest}; re-run agy-context setup)`
-        : plug.isCopyFallback
-          ? `ACTIVE COPY (${pluginDest})`
-          : `ACTIVE (${pluginDest})`;
+  const pluginNote = plug.brokenSymlink
+    ? `BROKEN SYMLINK (${pluginDest} -> ${plug.target || "missing"}; re-run agy-context setup)`
+    : !plug.exists
+      ? "NOT LINKED"
+      : plug.pointsElsewhere
+        ? `REDIRECTED (${pluginDest} -> ${plug.target}; re-run agy-context setup)`
+        : plug.versionMismatch
+          ? `STALE VERSION (${plug.version} != ${PACKAGE_VERSION} at ${pluginDest}; re-run agy-context setup)`
+          : plug.isCopyFallback
+            ? `ACTIVE COPY (${pluginDest})`
+            : `ACTIVE (${pluginDest})`;
   log("Checking Agy-Context-Saver installation status...\n");
   log(`- Native Plugin Link: ${pluginNote}`);
   const hookStatusLabel = existing.details.hook.registered
@@ -963,18 +1005,6 @@ export function runStatus(options = {}) {
   return existing;
 }
 
-export {
-  pluginDest,
-  destHook,
-  hooksJsonPath,
-  hooksBakPath,
-  mcpJsonPath,
-  mcpBakPath,
-  antigravityMcpRootDir,
-  antigravityMcpDir,
-  antigravityBinDir
-};
-
 function printCliHelp() {
   console.log(`
 Agy-Context-Saver Registration & Lifecycle Engine (v${PACKAGE_VERSION})
@@ -983,7 +1013,7 @@ Usage:
   node scripts/install-register.mjs [command/option]
 
 Commands & Options:
-  --status, status             Check live integration status (plugin, hook, CLI shim, RTK >= 1.1.0, MCP cleanup)
+  --status, status [--json]    Check live integration status (plugin, hook, CLI shim, RTK >= 1.1.0, MCP cleanup)
   --check, -c                  Run read-only pre-flight validation check without writing changes
   --uninstall, uninstall       Remove governor hook, plugin link, CLI shims, and legacy MCP configs/schemas
   --restore-backups            Restore original configuration backup files (*.bak) (standalone or during uninstall)
@@ -1014,7 +1044,7 @@ function isDirectExecution() {
 // Auto-run if executed directly as script
 if (isDirectExecution()) {
   const args = process.argv.slice(2);
-  const knownFlags = new Set(["--help", "-h", "--uninstall", "--status", "--check", "-c", "--restore-backups", "--allow-degraded"]);
+  const knownFlags = new Set(["--help", "-h", "--uninstall", "--status", "--json", "--check", "-c", "--restore-backups", "--allow-degraded"]);
   const knownPositionals = new Set(["help", "uninstall", "status", "restore-backups"]);
   for (const arg of args) {
     if (arg.startsWith("-")) {
@@ -1031,12 +1061,13 @@ if (isDirectExecution()) {
   const isHelp = args.includes("--help") || args.includes("-h") || args.includes("help");
   const isUninstall = args.includes("--uninstall") || args.includes("uninstall");
   const isStatus = args.includes("--status") || args.includes("status");
+  const isJson = args.includes("--json");
   const isCheck = args.includes("--check") || args.includes("-c");
   const isRestoreBackups = args.includes("--restore-backups") || args.includes("restore-backups");
   const allowDegraded = args.includes("--allow-degraded");
 
   if (isHelp) {
-    if (isUninstall || isStatus || isCheck || isRestoreBackups || allowDegraded) {
+    if (isUninstall || isStatus || isJson || isCheck || isRestoreBackups || allowDegraded) {
       console.error("Error: Conflicting flags: --help cannot be combined with operational flags.");
       process.exit(1);
     }
@@ -1055,6 +1086,10 @@ if (isDirectExecution()) {
     console.error("Error: Conflicting flags: specify either --check or --status, not both.");
     process.exit(1);
   }
+  if (isJson && !isStatus) {
+    console.error("Error: Flag '--json' is only supported with --status / status.");
+    process.exit(1);
+  }
   if (allowDegraded && (isUninstall || isStatus || isRestoreBackups)) {
     console.error("Error: Invalid flag: --allow-degraded is only supported with setup/install or --check.");
     process.exit(1);
@@ -1064,7 +1099,10 @@ if (isDirectExecution()) {
     if (isCheck) {
       await runInstall({ checkOnly: true, allowDegraded });
     } else if (isStatus) {
-      const st = runStatus();
+      const st = runStatus({ silent: isJson });
+      if (isJson) {
+        console.log(JSON.stringify(st, null, 2));
+      }
       if (!st.isComplete) {
         process.exitCode = 1;
       }

@@ -5,6 +5,13 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] - 2026-11-16
+
+### Fixed
+- **Hook Scoping & Lossless Search/Spillover Handling (`LEAD-DEP-001`, `ACS-HOOK-GREP-CLAMP`, `scripts/execution-guard-hook.mjs`, `rules/AGENTS.md`, `skills/context-governance/SKILL.md`, `docs/tools.md`)**: Narrowed `mcp/index.js` protected-path checks strictly to `Agy-Context-Saver` root paths so companion `Agy-Squad/mcp/index.js` imports run cleanly, extended `ACS-HOOK-09` lossy rewrite guards for `grep` searches needing untruncated lines/`>25` matches, and surfaced explicit `--head-lines`/`--tail-lines` guidance for `>45 KiB` spillover reads.
+- **Transcript Compact Window & Summary Signal Density (`ACS-RUN-TRANSCRIPT-CLAMP`, `lib/transcript-core.mjs`)**: Stripped leading step metadata headers (`Created At:` / `Completed At:`) before `120`-char `queryTranscript` summary slicing and widened `formatCompactToolList` argument previews and `--mode compact` window/non-dialogue step bounds under the `24 KB` ceiling while preserving `L38`/`L39` brain containment and single-use grants.
+- **Installer Broken-Symlink Detection, Fail-Closed Uninstall & Namespaced Backups (`S2-DEP-001`, `S2-SCRIPT-005`, `S2-SCRIPT-006`, `S2-SCRIPT-011`, `S2-SCRIPT-012`, `S2-DEP-004`, `S2-DEP-006`, `scripts/install-register.mjs`)**: Detected broken `pluginDest` symlinks as `BROKEN SYMLINK` (`PARTIAL INSTALLATION`), cleaned dangling `destHook`/CLI shim symlinks via `fs.lstatSync`, validated `hooks.json`/`config.json`/`mcp_config.json` before unlinking files in `runUninstall()`, namespaced backups to `mcp_config.json.agy-context-saver.bak` with read-only legacy `.bak` fallback, kept `status --json` stderr clean via `findExistingRtk({ silent: true })`, added `--json` to direct `install-register.mjs --status`, and switched path helpers cleanly to dynamic `resolveProfilePaths()`.
+
 ## [2.0.2] - 2026-11-16
 
 ### Added
