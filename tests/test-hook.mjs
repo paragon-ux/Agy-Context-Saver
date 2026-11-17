@@ -1909,6 +1909,87 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
     );
     assert.equal(boundedHeadLargeSpill.decision, "allow");
 
+    // Two-tier ergonomics hook regressions: --line-start/--line-end/--max-chars/--out value flags & path guards across read/query/outline/step
+    for (const validErgoCmd of [
+      `agy-context transcript read --id ${pA} --full --max-chars 16000 --out scratch/read_ergo.md`,
+      `agy-context transcript outline --id ${pA} --full --out scratch/outline_ergo.md`,
+      `agy-context transcript query --id ${pA} "verdict" --max-chars 12000 --out scratch/query_ergo.json`,
+      `agy-context transcript tools --id ${pA} --full --out scratch/tools_ergo.md`,
+      `agy-context transcript step --id ${pA} --step 1 --field tool_args:CommandLine --line-start 1 --line-end 30 --max-chars 8000`,
+      `agy-context transcript step --id ${pA} --step 1 --full --out scratch/step_ergo.txt`
+    ]) {
+      const okErgoHook = runHook(
+        {
+          conversationId: pA,
+          cwd: wsDir,
+          transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+          toolCall: { name: "run_command", args: { CommandLine: validErgoCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(okErgoHook.decision, "allow", `Valid new transcript flags must be allowed by hook: ${validErgoCmd} (${okErgoHook.reason || ""})`);
+    }
+
+    for (const badOutErgoCmd of [
+      `agy-context transcript read --id ${pA} --out scripts/evil.mjs`,
+      `agy-context transcript outline --id ${pA} --out benchmarks/evil.json`,
+      `agy-context transcript query --id ${pA} "x" --out .system_generated/evil.txt`,
+      `agy-context transcript step --id ${pA} --step 1 --out eval_data.exe`
+    ]) {
+      const denyOutHook = runHook(
+        {
+          conversationId: pA,
+          cwd: wsDir,
+          transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+          toolCall: { name: "run_command", args: { CommandLine: badOutErgoCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(denyOutHook.decision, "deny", `Protected/unsafe --out path must be denied by hook: ${badOutErgoCmd}`);
+    }
+
+    const ergoRestricted = "cli-self-ergo-child";
+    const ergoRestrictedLogs = path.join(cliBrainRoot, ergoRestricted, ".system_generated", "logs");
+    fs.mkdirSync(ergoRestrictedLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(ergoRestrictedLogs, "transcript.jsonl"),
+      JSON.stringify({
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-17T00:00:05Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: self-only]\nErgo CLI task`
+      }) + "\n"
+    );
+
+    const selfStepSliceOut = runHook(
+      {
+        conversationId: ergoRestricted,
+        cwd: wsDir,
+        transcriptPath: path.join(ergoRestrictedLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript step --step 1 --field tool_args:CommandLine --line-start 1 --line-end 10 --out scratch/self_step.md" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(selfStepSliceOut.decision, "allow", "self-only caller using --line-start/--line-end/--out on own transcript must be allowed");
+    assert.match(selfStepSliceOut.overwrite?.CommandLine || "", new RegExp(`--id ${ergoRestricted}`));
+
+    const selfStepOtherDeny = runHook(
+      {
+        conversationId: ergoRestricted,
+        cwd: wsDir,
+        transcriptPath: path.join(ergoRestrictedLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript step --id ${pA} --step 1 --line-start 1 --line-end 10 --out scratch/other.md` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(selfStepOtherDeny.decision, "deny", "self-only caller passing --id <other> with new step flags must be denied");
+
     console.log("✓ Group H regression checks passed (payload.cwd, 2>/dev/null, antigravity-cli, swarm_view, Step0>16KiB, cross-swarm isolation, query current, Wave 2 regressions)");
   } finally {
     fs.rmSync(wsDir, { recursive: true, force: true });

@@ -5,6 +5,13 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.4] - 2026-11-17
+
+### Changed
+- **Two-Tier Transcript Clamping & Pagination Ergonomics (`lib/transcript-core.mjs`, `bin/agy-context.mjs`, `scripts/execution-guard-hook.mjs`, `rules/AGENTS.md`, `skills/context-governance/SKILL.md`, `docs/*`)**:
+  - **Tier A Inline Defaults (`INLINE_SAFE_CHARS = 9200`):** Tuned `read`, `outline`/`summary`, `query`, and `tools` defaults to stay safely below Antigravity's `~10 KB` `run_command` output spillover threshold, adding middle-elided path previews (and suppressing redundant `<256 B` size badges), compact `(HH:MM:SSZ)` single-UTC-date headers, collapsed duplicate consecutive tool entries `(xN)`, order-independent boilerplate stripping surfacing `[spill: steps/N]` across `read`/`outline`/`export --sanitized`, exact 0-indexed `fileOrdinalMap` pagination, and exact `nextCursor` continuation hints (`--offset`/`--limit`, `--start`/`--end`, `--end`).
+  - **Tier B Explicit Deep Opt-In (`512 KB` / `--out`):** Wired `--full`, `--max-chars <N>`, and safe `--out`/`--output <path>` across `read`, `outline`, `query`, `tools`, and `step` (enforcing `L45`-equivalent hook and CLI path/extension guards across all subcommands), added `--line-start`/`--line-end` and universal `--head`/`--tail` slicing across all `step --field` modes, bypassed internal `4,000c` thinking, `1,000c` `MAX_LINE_CHARS`, and `240c`/`300c` `LARGE_BODY_ARG_KEYS` caps under `--full` (while respecting explicit `--max-chars`), and corrected single-step clamp messaging plus `**full** (unclamped)` mode labels.
+
 ## [2.0.3] - 2026-11-16
 
 ### Fixed

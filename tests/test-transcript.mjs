@@ -15,6 +15,7 @@ import {
   getRequiredBackoffSeconds,
   listTranscriptConversations,
   exportSanitizedTranscript,
+  stripSummaryStepBoilerplate,
   inspectTranscriptLineageFromFile,
   manageTranscriptAccessPolicy,
   recordTranscriptHookGrant,
@@ -1259,6 +1260,243 @@ try {
     );
 
     console.log("✓ Parent policy CLI, runtime hook-grant verification, atomic concurrent grants, and ACS-RUN-008..010 + Wave 2 regressions verified");
+  }
+
+  console.log("\n--- 8. Two-Tier Ergonomics, Calibration Bounds, Deep Opt-In & Out Files ---");
+  {
+    // 8.1 Order-independent boilerplate stripping & spill tag preservation
+    const orderSwapRaw = [
+      "Created At: 2026-11-17T12:00:00-05:00",
+      "Completed At: 2026-11-17T12:00:03-05:00",
+      "A pre-tool hook changed the arguments of this tool call before it ran. Changed: CommandLine.",
+      "Command exited with code 0.",
+      "Command output:",
+      "ACTUAL_ORDER_SWAP_PAYLOAD"
+    ].join("\n");
+    assert.equal(stripSummaryStepBoilerplate(orderSwapRaw), "ACTUAL_ORDER_SWAP_PAYLOAD");
+
+    const spillRaw = [
+      "The tool's output was truncated due to being too long. You can find the full output in a file at file:///home/u/.gemini/antigravity/brain/cid/.system_generated/steps/42/output.txt.",
+      "Here is a preview with the middle of the output truncated:",
+      "Created At: 2026-11-17T12:00:00-05:00",
+      "Completed At: 2026-11-17T12:00:04-05:00",
+      "Command exited with code 0.",
+      "Command output:",
+      "SPILL_BODY_HEAD_LINE"
+    ].join("\n");
+    assert.equal(stripSummaryStepBoilerplate(spillRaw), "[spill: steps/42] SPILL_BODY_HEAD_LINE");
+
+    const sysWrappedRaw = [
+      "The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as important information to pay attention to.",
+      "",
+      "<SYSTEM_MESSAGE>",
+      "[Message] timestamp=2026-11-17T17:00:00Z sender=parent-1 priority=MESSAGE_PRIORITY_HIGH content=SYSTEM_SIGNAL_OK",
+      "</SYSTEM_MESSAGE>"
+    ].join("\n");
+    assert.equal(stripSummaryStepBoilerplate(sysWrappedRaw), "SYSTEM_SIGNAL_OK");
+
+    // 8.2 Build rich compact + full sibling conversation for Tier A / Tier B tests
+    const convErg = "conv-ergonomics-two-tier";
+    const ergLogsDir = path.join(brainDir, convErg, ".system_generated", "logs");
+    fs.mkdirSync(ergLogsDir, { recursive: true });
+    const ergOutDir = path.join(tempHome, "erg-artifacts");
+    fs.mkdirSync(ergOutDir, { recursive: true });
+
+    const longThinking = "THINK_START " + "T".repeat(4500) + " THINK_END_MARKER";
+    const longSingleLine = "LONG_LINE_START_" + "L".repeat(1250) + "_LONG_LINE_END";
+    const multiLineScript = Array.from({ length: 12 }, (_, idx) => `line_${idx + 1}: echo STEP_LINE_${idx + 1}`).join("\n") + "\n" + "CMD_TAIL_KEEP_" + "X".repeat(2500);
+    const longPathArg = "/home/paragon-ux/Antigravity/Agy-Squad/scratch/very_long_nested_directory_name/specialist-1/target_report.md";
+    const mediumShortArg = "alpha_beta_gamma_delta_epsilon_zeta_eta_theta_iota_kappa_lambda_mu_nu_xi_omicron_pi_rho_sigma"; // ~95 chars (<256 B)
+
+    const compactLines = [];
+    const fullLines = [];
+    let stepNum = 0;
+
+    // Step 0..23: 8 turns x (USER_INPUT + ASSISTANT duplicate read_file x3 + GENERIC boiled output + longPath + mediumArg)
+    for (let t = 0; t < 8; t++) {
+      const ts = `2026-11-17T10:${String(t).padStart(2, "0")}:05Z`;
+      const userObj = {
+        step_index: stepNum++,
+        type: "USER_INPUT",
+        created_at: ts,
+        content: `Turn ${t} user request checking ergo flow and pagination.`
+      };
+      compactLines.push(JSON.stringify(userObj));
+      fullLines.push(JSON.stringify(userObj));
+
+      const asstObj = {
+        step_index: stepNum++,
+        type: "PLANNER_RESPONSE",
+        created_at: ts,
+        content: `Turn ${t} assistant response analyzing path ${mediumShortArg}.`,
+        thinking: t === 7 ? longThinking : `Short thought ${t}`,
+        truncated_fields: t === 7 ? ["thinking", "tool_calls", "content"] : [],
+        tool_calls: t === 7
+          ? [
+              { name: "run_command", args: { CommandLine: multiLineScript, WaitMsBeforeAsync: 5000 } },
+              { name: "write_file", args: { Path: longPathArg, Content: "HDR\n" + "B".repeat(3200) + "\nEND_CONTENT_MARKER" } }
+            ]
+          : [
+              { name: "read_file", args: { Path: longPathArg, StartLine: 1, EndLine: 100 } },
+              { name: "read_file", args: { Path: longPathArg, StartLine: 1, EndLine: 100 } },
+              { name: "read_file", args: { Path: longPathArg, StartLine: 1, EndLine: 100 } },
+              { name: "custom_probe", args: { Note: mediumShortArg } }
+            ]
+      };
+      const compactAsst = t === 7
+        ? {
+            ...asstObj,
+            thinking: longThinking.slice(0, 500),
+            content: `Turn ${t} assistant response clipped.`,
+            tool_calls: [
+              { name: "run_command", args: { CommandLine: multiLineScript.slice(0, 400), WaitMsBeforeAsync: 5000 } },
+              { name: "write_file", args: { Path: longPathArg, Content: "HDR\n" + "B".repeat(400) } }
+            ]
+          }
+        : asstObj;
+      compactLines.push(JSON.stringify(compactAsst));
+      fullLines.push(JSON.stringify(asstObj));
+
+      const genObj = {
+        step_index: stepNum++,
+        type: "GENERIC",
+        created_at: ts,
+        content: t === 7
+          ? longSingleLine
+          : `Created At: 2026-11-17T05:${String(t).padStart(2, "0")}:05-05:00\nCompleted At: 2026-11-17T05:${String(t).padStart(2, "0")}:06-05:00\nCommand exited with code 0.\n\nCommand output:\nTurn ${t} clean payload ` + "P".repeat(1400)
+      };
+      compactLines.push(JSON.stringify(genObj));
+      fullLines.push(JSON.stringify(genObj));
+    }
+
+    fs.writeFileSync(path.join(ergLogsDir, "transcript.jsonl"), compactLines.join("\n") + "\n", "utf8");
+    fs.writeFileSync(path.join(ergLogsDir, "transcript_full.jsonl"), fullLines.join("\n") + "\n", "utf8");
+
+    // 8.3 Tier A read default stays <= ~9.4 KB inline, strips Created At:, middle-elides Path, suppresses [0.1 KB], emits nextCursor
+    const tierARead = runCli(["transcript", "read", "--id", convErg, "--last-turns", "8", "--json"]);
+    assert.equal(tierARead.status, 0);
+    const tierAReadJson = JSON.parse(tierARead.stdout);
+    assert.equal(tierAReadJson.mode, "compact");
+    assert.ok(tierAReadJson.clamped === true && tierAReadJson.nextCursor && Number.isInteger(tierAReadJson.nextCursor.offset));
+
+    const tierAReadText = runCli(["transcript", "read", "--id", convErg, "--last-turns", "8"]);
+    assert.equal(tierAReadText.status, 0);
+    assert.ok(tierAReadText.stdout.length <= 9600, `Tier A read must stay under spillover (~9.6KB), got ${tierAReadText.stdout.length}`);
+    assert.match(tierAReadText.stdout, /target_report\.md/, "Path middle-elide must keep basename visible in Tier A read");
+    assert.ok(!tierAReadText.stdout.includes("[0.1 KB]"), "Short <256B args must not emit noisy [0.1 KB] suffix");
+    assert.ok(!tierAReadText.stdout.includes("Created At: 2026-11-17T05:06:05"), "Compact non-dialogue generic step must strip top Created At boilerplate");
+    assert.match(tierAReadText.stdout, /--offset \d+ --limit \d+/);
+
+    // Follow explicit --offset / --limit pagination forward cleanly
+    const page1 = await readTranscript({ conversationId: convErg, offset: 0, limit: 6 });
+    assert.ok(!page1.isError && page1.displayedSteps >= 1 && page1.displayedSteps <= 6);
+    assert.equal(page1.steps[0].step_index, 0);
+    if (page1.nextCursor) {
+      const page2 = await readTranscript({ conversationId: convErg, offset: page1.nextCursor.offset, limit: page1.nextCursor.limit });
+      assert.ok(!page2.isError && page2.steps[0].step_index === page1.nextCursor.offset, "Explicit pagination must advance without skipping steps");
+    }
+
+    // 8.4 Tier A outline & tools stay <= 9.6 KB inline, collapse duplicates, compact UTC dates, and provide nextCursor
+    const tierAOutline = runCli(["transcript", "outline", "--id", convErg, "--start", "0", "--end", "23"]);
+    assert.equal(tierAOutline.status, 0);
+    assert.ok(tierAOutline.stdout.length <= 9600, `Tier A outline must stay inline (got ${tierAOutline.stdout.length})`);
+    assert.match(tierAOutline.stdout, /date=2026-11-17 UTC/);
+    assert.match(tierAOutline.stdout, /\(10:00:05Z\)/);
+    assert.match(tierAOutline.stdout, /read_file\(Path="[^"]*target_report\.md"\) \(x3\)/);
+
+    const tierATools = runCli(["transcript", "tools", "--id", convErg, "--start", "0", "--end", "23", "--json"]);
+    assert.equal(tierATools.status, 0);
+    const tierAToolsJson = JSON.parse(tierATools.stdout);
+    assert.equal(tierAToolsJson.clamped, true);
+    assert.ok(tierAToolsJson.nextCursor && Number.isInteger(tierAToolsJson.nextCursor.end));
+
+    // 8.5 Tier B --full un-clamps thinking (4.5K), single long line (1.25K), and LARGE_BODY args; Mode badge avoids (**full**) (**full**)
+    const richAsstStep = stepNum - 2; // Turn 7 PLANNER_RESPONSE (has longThinking & multiLineScript)
+    const richGenStep = stepNum - 1;  // Turn 7 GENERIC (has longSingleLine)
+    const fullStepRes = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--full"]);
+    assert.equal(fullStepRes.status, 0);
+    assert.match(fullStepRes.stdout, /THINK_END_MARKER/, "step --full must bypass 4000c thinking cap");
+    assert.match(fullStepRes.stdout, /END_CONTENT_MARKER/, "step --full must bypass 240c LARGE_BODY_ARG_KEYS cap");
+    assert.match(fullStepRes.stdout, /CMD_TAIL_KEEP_/, "step --full must preserve full 2.5KB CommandLine arg");
+
+    const fullLineStepRes = runCli(["transcript", "step", "--id", convErg, "--step", String(richGenStep), "--full"]);
+    assert.equal(fullLineStepRes.status, 0);
+    assert.match(fullLineStepRes.stdout, /_LONG_LINE_END/, "step --full must bypass MAX_LINE_CHARS=1000 cap");
+
+    // Single-step clamping header must not claim 'batch view'
+    const singleClampedStep = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--field", "tool_args", "--full", "--max-chars", "600"]);
+    assert.equal(singleClampedStep.status, 0);
+    assert.ok(!singleClampedStep.stdout.includes("clamped in batch view"), "Single-step clamp message must not say batch view");
+    assert.match(singleClampedStep.stdout, /Step \d+ \(tool_args\) clamped at 600 chars/);
+
+    // 8.6 --line-start / --line-end and --tail on tool_args:<Key> and validation failures
+    const sliceCmdRes = runCli([
+      "transcript", "step", "--id", convErg, "--step", String(richAsstStep),
+      "--field", "tool_args:CommandLine", "--line-start", "2", "--line-end", "4"
+    ]);
+    assert.equal(sliceCmdRes.status, 0);
+    assert.match(sliceCmdRes.stdout, /line_1: echo STEP_LINE_1/);
+    assert.match(sliceCmdRes.stdout, /line_3: echo STEP_LINE_3/);
+    assert.ok(!sliceCmdRes.stdout.includes("STEP_LINE_4"));
+    assert.ok(!sliceCmdRes.stdout.includes("[0] `run_command`"));
+    assert.match(sliceCmdRes.stdout, /\[Lines 2-4 of 17\]/);
+
+    const tailArgsRes = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--field", "tool_args", "--tail", "3"]);
+    assert.equal(tailArgsRes.status, 0);
+    assert.match(tailArgsRes.stdout, /END_CONTENT_MARKER/);
+    assert.ok(!tailArgsRes.stdout.includes("STEP_LINE_1"));
+    assert.match(tailArgsRes.stdout, /\[Lines 13-15 of 15\]/);
+
+    for (const badCli of [
+      ["transcript", "step", "--id", convErg, "--step", "1", "--line-start", "5", "--line-end", "2"],
+      ["transcript", "step", "--id", convErg, "--step", "1", "--max-chars", "0"],
+      ["transcript", "read", "--id", convErg, "--out", path.join(ergOutDir, "a.md"), "--output", path.join(ergOutDir, "b.md")]
+    ]) {
+      const badExit = runCli(badCli);
+      assert.notEqual(badExit.status, 0, `Invalid flags must fail closed: ${badCli.join(" ")}`);
+    }
+
+    // 8.7 --out across read, outline, query, tools, step (small stdout summary, deep file output) + path guard
+    const readOutFile = path.join(ergOutDir, "read_full.md");
+    const outlineOutFile = path.join(ergOutDir, "outline_full.md");
+    const queryOutFile = path.join(ergOutDir, "query_full.md");
+    const stepOutFile = path.join(ergOutDir, "step_full.md");
+    const readFullOutCli = runCli(["transcript", "read", "--id", convErg, "--mode", "full", "--full", "--include-thinking", "--last-turns", "8", "--out", readOutFile]);
+    assert.equal(readFullOutCli.status, 0);
+    assert.ok(readFullOutCli.stdout.length < 300, "CLI with --out must only print compact confirmation to stdout");
+    const readFullDisk = fs.readFileSync(readOutFile, "utf8");
+    assert.match(readFullDisk, /Mode: \*\*full\*\* \(unclamped\)/);
+    assert.match(readFullDisk, /THINK_END_MARKER/);
+    assert.match(readFullDisk, /END_CONTENT_MARKER/);
+
+    const outlineOutCli = runCli(["transcript", "outline", "--id", convErg, "--full", "--out", outlineOutFile]);
+    assert.equal(outlineOutCli.status, 0);
+    assert.ok(fs.readFileSync(outlineOutFile, "utf8").includes("Step 23"));
+
+    const queryOutCli = runCli(["transcript", "query", "--id", convErg, "--query", "THINK_END_MARKER", "--include-thinking", "--full", "--out", queryOutFile]);
+    assert.equal(queryOutCli.status, 0);
+    assert.ok(fs.readFileSync(queryOutFile, "utf8").includes("THINK_END_MARKER"));
+
+    const stepOutCli = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--full", "--out", stepOutFile]);
+    assert.equal(stepOutCli.status, 0);
+    assert.ok(fs.readFileSync(stepOutFile, "utf8").includes("CMD_TAIL_KEEP_"));
+
+    for (const badOutTarget of [
+      path.join(ergLogsDir, "evil.md"),
+      path.join(tempHome, "benchmarks", "evil.json"),
+      path.join(tempHome, "scripts", "evil.mjs")
+    ]) {
+      const deniedOut = runCli(["transcript", "read", "--id", convErg, "--out", badOutTarget]);
+      assert.notEqual(deniedOut.status, 0, `Protected --out target must fail closed on read: ${badOutTarget}`);
+    }
+
+    // 8.8 export --sanitized strips Created At: order-independently and emits [spill: steps/N]
+    const expErg = await exportSanitizedTranscript({ conversationIds: [convErg], sanitized: true });
+    assert.ok(!expErg.isError);
+    assert.ok(!expErg.text.includes("Created At: 2026-11-17T05:00:05"), "Sanitized export table must strip Created At metadata");
+    assert.match(expErg.text, /Turn 0 clean payload/);
+
+    console.log("✓ Two-tier ergonomics, Tier A inline bounds, Tier B --full/--line-start/--max-chars/--out, pagination cursors & sanitization verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

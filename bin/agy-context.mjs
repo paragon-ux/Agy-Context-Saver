@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver CLI (v2.0.3)
+ * Agy-Context-Saver CLI (v2.0.4)
  *
  * Local-first CLI for streaming transcript inspection, forensic querying,
  * context health diagnostics, and lifecycle management.
@@ -39,9 +39,9 @@ const pkgPath = path.resolve(__dirname, "../package.json");
 function getVersion() {
   try {
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-    return pkg.version || "2.0.3";
+    return pkg.version || "2.0.4";
   } catch {
-    return "2.0.3";
+    return "2.0.4";
   }
 }
 
@@ -53,9 +53,9 @@ Usage:
   agy-context <command> [options]
 
 Transcript Commands:
-  agy-context transcript read   [--id <conv>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--outline] [--include-thinking] [--json] [--file <path>]
-  agy-context transcript query  [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--json] [--file <path>]
-  agy-context transcript step   [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--head N] [--tail N] [--full] [--json] [--file <path>]
+  agy-context transcript read   [--id <conv>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--outline] [--include-thinking] [--full] [--max-chars N] [--out <path>] [--json] [--file <path>]
+  agy-context transcript query  [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--full] [--max-chars N] [--out <path>] [--json] [--file <path>]
+  agy-context transcript step   [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--head N] [--tail N] [--line-start N] [--line-end N] [--full] [--max-chars N] [--out <path>] [--json] [--file <path>]
   agy-context transcript health [--id <conv>] [--json] [--file <path>]
   agy-context transcript list   [--limit N] [--parent <id>] [--lineage] [--json]
   agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out|--output <path>] [--file <path>] [--json]
@@ -304,6 +304,48 @@ function emitError(message, asJson = false, extra = {}) {
   process.exit(1);
 }
 
+const MAX_DEEP_OUT_CHARS = 512 * 1024;
+
+function resolveOutFlag(opts) {
+  if (opts.out !== undefined && opts.output !== undefined && opts.out !== opts.output) {
+    throw new Error("Conflicting '--out' and '--output' values provided.");
+  }
+  const rawOut = opts.out !== undefined ? opts.out : opts.output;
+  const safeOutPath = validateSafeExportOutPath(rawOut);
+  return { rawOut, safeOutPath };
+}
+
+function parseMaxCharsFlag(opts) {
+  const raw = opts["max-chars"];
+  if (raw === undefined) return undefined;
+  const parsed = parseOptionalInt(raw, "max-chars");
+  if (parsed === undefined || parsed <= 0) {
+    throw new Error(`Flag '--max-chars' must be a positive integer (received: '${raw}').`);
+  }
+  return parsed;
+}
+
+function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, { label = "transcript output", customMessage = null } = {}) {
+  validateSafeExportOutPath(rawOut);
+  fs.mkdirSync(path.dirname(safeOutPath), { recursive: true });
+  validateSafeExportOutPath(rawOut);
+  const { text, ...payload } = res;
+  const fileContent = asJson ? JSON.stringify(payload, null, 2) + "\n" : text + "\n";
+  const tmpOut = `${safeOutPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tmpOut, fileContent, { encoding: "utf8", flag: "wx" });
+    fs.renameSync(tmpOut, safeOutPath);
+  } catch (err) {
+    try { fs.unlinkSync(tmpOut); } catch {}
+    throw err;
+  }
+  if (asJson) {
+    console.log(JSON.stringify({ ...payload, outputPath: safeOutPath }, null, 2));
+  } else {
+    console.log(customMessage || `[OK] Wrote ${label} (${text.length} chars) to: ${safeOutPath}`);
+  }
+}
+
 async function handleTranscriptCommand(argv) {
   const sub = argv[0];
   if (!sub || sub === "--help" || sub === "-h" || sub === "help") {
@@ -318,8 +360,8 @@ async function handleTranscriptCommand(argv) {
 
   if (sub === "read" || sub === "outline" || sub === "summary") {
     const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["include-thinking", "outline", "summary", "include-tools", "full-args", "json"]),
-      values: new Set(["id", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "file"])
+      booleans: new Set(["include-thinking", "outline", "summary", "include-tools", "full-args", "full", "json"]),
+      values: new Set(["id", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "max-chars", "out", "output", "file"])
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
@@ -333,6 +375,12 @@ async function handleTranscriptCommand(argv) {
       throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
     }
     const explicitFile = validateExplicitFileFlag(opts.file);
+    const { rawOut, safeOutPath } = resolveOutFlag(opts);
+    const parsedMaxChars = parseMaxCharsFlag(opts);
+    const isFull = Boolean(opts.full);
+    const effectiveMaxChars = parsedMaxChars !== undefined
+      ? parsedMaxChars
+      : (safeOutPath && !isFull ? MAX_DEEP_OUT_CHARS : undefined);
     const limit = parseOptionalInt(opts.limit, "limit");
 
     if (sub === "outline" || sub === "summary" || opts.outline || opts.summary) {
@@ -343,10 +391,12 @@ async function handleTranscriptCommand(argv) {
         filePath: explicitFile,
         startStep: startStep !== undefined ? startStep : 0,
         endStep: endStep !== undefined ? endStep : 999999,
-        maxResults: limit !== undefined ? limit : 500,
+        maxResults: limit !== undefined ? limit : ((isFull || safeOutPath) ? 2000 : 500),
         summaryOnly: true,
         includeToolCalls: true,
         fullArgs: Boolean(opts["full-args"]),
+        full: isFull,
+        maxOutputChars: effectiveMaxChars,
         includeThinking: Boolean(opts["include-thinking"]),
         allowExternalPaths: false,
         subcommand: sub
@@ -354,7 +404,9 @@ async function handleTranscriptCommand(argv) {
       if (res.isError) {
         emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
       }
-      if (opts.json) {
+      if (safeOutPath) {
+        writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript ${sub}` });
+      } else if (opts.json) {
         const { text, ...payload } = res;
         console.log(JSON.stringify(payload, null, 2));
       } else {
@@ -379,13 +431,17 @@ async function handleTranscriptCommand(argv) {
       offset,
       limit,
       includeThinking: Boolean(opts["include-thinking"]),
+      full: isFull,
+      maxOutputChars: effectiveMaxChars,
       allowExternalPaths: false
     });
 
     if (res.isError) {
       emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
     }
-    if (opts.json) {
+    if (safeOutPath) {
+      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript read (${res.mode})` });
+    } else if (opts.json) {
       const { text, ...payload } = res;
       console.log(JSON.stringify(payload, null, 2));
     } else {
@@ -396,14 +452,20 @@ async function handleTranscriptCommand(argv) {
 
   if (sub === "query" || sub === "grep" || sub === "search" || sub === "find" || sub === "tools") {
     const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["summary", "outline", "include-tools", "full-args", "include-thinking", "json"]),
-      values: new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "last", "tail", "limit", "field", "file"])
+      booleans: new Set(["summary", "outline", "include-tools", "full-args", "include-thinking", "full", "json"]),
+      values: new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "last", "tail", "limit", "field", "max-chars", "out", "output", "file"])
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
       printHelp();
       process.exit(0);
     }
+    const isFull = Boolean(opts.full);
+    const { rawOut, safeOutPath } = resolveOutFlag(opts);
+    const parsedMaxChars = parseMaxCharsFlag(opts);
+    const effectiveMaxChars = parsedMaxChars !== undefined
+      ? parsedMaxChars
+      : (safeOutPath && !isFull ? MAX_DEEP_OUT_CHARS : undefined);
     if (sub === "grep" || sub === "search" || sub === "find") {
       opts["include-tools"] = true;
     }
@@ -411,7 +473,7 @@ async function handleTranscriptCommand(argv) {
       if (!opts.roles) opts.roles = "assistant";
       if (!opts.field) opts.field = "tool_args";
       opts["include-tools"] = true;
-      if (opts.limit === undefined) opts.limit = "500";
+      if (opts.limit === undefined) opts.limit = (isFull || safeOutPath) ? "2000" : "500";
       if (opts.start === undefined && opts.last === undefined && opts["last-turns"] === undefined && opts.tail === undefined) {
         opts.start = "0";
         if (opts.end === undefined) opts.end = "999999";
@@ -453,6 +515,8 @@ async function handleTranscriptCommand(argv) {
       summaryOnly: Boolean(opts.summary || opts.outline),
       includeToolCalls: Boolean(opts["include-tools"]),
       fullArgs: Boolean(opts["full-args"]),
+      full: isFull,
+      maxOutputChars: effectiveMaxChars,
       field: opts.field,
       includeThinking: Boolean(opts["include-thinking"]),
       allowExternalPaths: false,
@@ -462,7 +526,9 @@ async function handleTranscriptCommand(argv) {
     if (res.isError) {
       emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
     }
-    if (opts.json) {
+    if (safeOutPath) {
+      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript ${sub}` });
+    } else if (opts.json) {
       const { text, ...payload } = res;
       console.log(JSON.stringify(payload, null, 2));
     } else {
@@ -474,7 +540,7 @@ async function handleTranscriptCommand(argv) {
   if (sub === "step") {
     const { opts, positional } = parseFlags(rest, {
       booleans: new Set(["json", "full"]),
-      values: new Set(["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "file"])
+      values: new Set(["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "line-start", "line-end", "max-chars", "out", "output", "file"])
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
@@ -494,10 +560,27 @@ async function handleTranscriptCommand(argv) {
     const endStep = parseOptionalInt(opts.end, "end");
     const tailLines = parseOptionalInt(opts["tail-lines"] !== undefined ? opts["tail-lines"] : opts.tail, "tail");
     const headLines = parseOptionalInt(opts["head-lines"] !== undefined ? opts["head-lines"] : opts.head, "head");
+    const lineStart = parseOptionalInt(opts["line-start"], "line-start");
+    const lineEnd = parseOptionalInt(opts["line-end"], "line-end");
+    if (lineStart !== undefined && lineStart <= 0) {
+      throw new Error(`Flag '--line-start' must be a positive 1-indexed integer (received: '${opts["line-start"]}').`);
+    }
+    if (lineEnd !== undefined && lineEnd <= 0) {
+      throw new Error(`Flag '--line-end' must be a positive 1-indexed integer (received: '${opts["line-end"]}').`);
+    }
+    if (lineStart !== undefined && lineEnd !== undefined && lineEnd < lineStart) {
+      throw new Error(`Invalid line slice '--line-start ${lineStart} --line-end ${lineEnd}': '--line-end' must be >= '--line-start'.`);
+    }
     if (opts.step === undefined && startStep === undefined && endStep === undefined) {
       throw new Error(`Missing required flag '--step <N|N,M|N-M>' (or '--start N --end M') for 'transcript step'.`);
     }
     const explicitFile = validateExplicitFileFlag(opts.file);
+    const { rawOut, safeOutPath } = resolveOutFlag(opts);
+    const parsedMaxChars = parseMaxCharsFlag(opts);
+    const isFull = Boolean(opts.full);
+    const effectiveMaxChars = parsedMaxChars !== undefined
+      ? parsedMaxChars
+      : (safeOutPath && !isFull ? MAX_DEEP_OUT_CHARS : undefined);
 
     const res = await getStepDetail({
       conversationId: opts.id,
@@ -508,13 +591,19 @@ async function handleTranscriptCommand(argv) {
       field: opts.field || "all",
       headLines,
       tailLines,
+      lineStart,
+      lineEnd,
+      full: isFull,
+      maxOutputChars: effectiveMaxChars,
       allowExternalPaths: false
     });
 
     if (res.isError) {
       emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
     }
-    if (opts.json) {
+    if (safeOutPath) {
+      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript step` });
+    } else if (opts.json) {
       const { text, ...payload } = res;
       console.log(JSON.stringify(payload, null, 2));
     } else {
@@ -641,11 +730,7 @@ async function handleTranscriptCommand(argv) {
     if (opts.parent !== undefined && !String(opts.parent).trim()) {
       throw new Error("Flag '--parent' must be a non-empty conversation ID or 'current'.");
     }
-    if (opts.out !== undefined && opts.output !== undefined && opts.out !== opts.output) {
-      throw new Error("Conflicting '--out' and '--output' values provided.");
-    }
-    const rawOut = opts.out !== undefined ? opts.out : opts.output;
-    const safeOutPath = validateSafeExportOutPath(rawOut);
+    const { rawOut, safeOutPath } = resolveOutFlag(opts);
     const explicitFile = validateExplicitFileFlag(opts.file);
     const startStep = parseOptionalInt(opts.start, "start");
     const endStep = parseOptionalInt(opts.end, "end");
@@ -680,24 +765,9 @@ async function handleTranscriptCommand(argv) {
     }
 
     if (safeOutPath) {
-      validateSafeExportOutPath(rawOut);
-      fs.mkdirSync(path.dirname(safeOutPath), { recursive: true });
-      validateSafeExportOutPath(rawOut);
-      const { text, ...payload } = res;
-      const fileContent = opts.json ? JSON.stringify(payload, null, 2) + "\n" : text + "\n";
-      const tmpOut = `${safeOutPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-      try {
-        fs.writeFileSync(tmpOut, fileContent, { encoding: "utf8", flag: "wx" });
-        fs.renameSync(tmpOut, safeOutPath);
-      } catch (err) {
-        try { fs.unlinkSync(tmpOut); } catch {}
-        throw err;
-      }
-      if (opts.json) {
-        console.log(JSON.stringify({ ...payload, outputPath: safeOutPath }, null, 2));
-      } else {
-        console.log(`[OK] Exported sanitized L6 transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}`);
-      }
+      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), {
+        customMessage: `[OK] Exported sanitized L6 transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}`
+      });
       return;
     }
 

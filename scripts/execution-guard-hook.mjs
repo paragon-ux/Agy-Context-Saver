@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.0.3)
+ * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.0.4)
  *
  * Closed Execution Topology & Governance Invariants:
  * 1. RTK Transparent Command Optimization:
@@ -2219,7 +2219,21 @@ function canCallerMutateTranscriptAccess(convId) {
 }
 
 function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
-  const READ_VALUE_FLAGS = new Set(["id", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "file"]);
+  const READ_VALUE_FLAGS = new Set([
+    "id",
+    "mode",
+    "last-turns",
+    "last",
+    "tail",
+    "offset",
+    "limit",
+    "start",
+    "end",
+    "max-chars",
+    "out",
+    "output",
+    "file"
+  ]);
   const QUERY_VALUE_FLAGS = new Set([
     "id",
     "query",
@@ -2232,6 +2246,9 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     "tail",
     "limit",
     "field",
+    "max-chars",
+    "out",
+    "output",
     "file"
   ]);
   const STEP_VALUE_FLAGS = new Set([
@@ -2245,6 +2262,11 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     "tail-lines",
     "head",
     "head-lines",
+    "line-start",
+    "line-end",
+    "max-chars",
+    "out",
+    "output",
     "file"
   ]);
   const HEALTH_VALUE_FLAGS = new Set(["id", "file"]);
@@ -2545,7 +2567,7 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     const isExportSub = subcommand === "export" || subcommand === "dump";
     const isListSub = subcommand === "list" || subcommand === "ls";
 
-    if (isExportSub && Array.isArray(targetInfo.outPaths) && targetInfo.outPaths.length > 0) {
+    if (Array.isArray(targetInfo.outPaths) && targetInfo.outPaths.length > 0) {
       for (const outPath of targetInfo.outPaths) {
         const resolvedOut = resolveHookPath(outPath);
         if (
