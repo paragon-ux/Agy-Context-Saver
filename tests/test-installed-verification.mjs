@@ -433,7 +433,8 @@ assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
           "$lock = [IO.File]::Open($env:AGY_FIXTURE_LOCK, 'CreateNew', 'ReadWrite', 'None')",
           "try { & $env:AGY_FIXTURE_SHIM uninstall; exit $LASTEXITCODE } finally { $lock.Dispose() }"
         ].join("\n");
-        const locked = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", lockScript], {
+        const powershell = path.join(env.SystemRoot || env.windir || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+        const locked = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", lockScript], {
           encoding: "utf8",
           env: { ...env, AGY_FIXTURE_LOCK: lockFile, AGY_FIXTURE_SHIM: `${installedShim}.cmd` }
         });
