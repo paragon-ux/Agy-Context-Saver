@@ -52,7 +52,7 @@ agy-context transcript info --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --json
 
 - **Usage:** `agy-context transcript read [<id>] [options]`
 
-Streams conversation turns from `transcript.jsonl` (or `transcript_full.jsonl`) into Markdown, or delegates to a 1-line-per-step session outline via `query --summary --include-tools` when `--outline` or `--summary` is passed (`outline` / `summary` aliases route directly to `query --summary --include-tools`). Defaults stay within a ~`9.2 KB` inline ceiling so standard tool calls avoid `run_command` output spillover while stripping `Created At:` metadata noise, middle-eliding long file paths, and printing continuation `--offset`/`--limit` hints.
+Streams conversation turns from `transcript.jsonl` (or `transcript_full.jsonl`) into Markdown, or delegates to a 1-line-per-step session outline via `query --summary --include-tools` when `--outline` or `--summary` is passed (`outline` / `summary` aliases route directly to `query --summary --include-tools`). Markdown and JSON defaults stay within a `9,200`-byte inline ceiling so standard tool calls avoid `run_command` output spillover while stripping `Created At:` metadata noise, middle-eliding long file paths, and printing continuation `--offset`/`--limit` hints.
 
 | Flag / Argument | Value | Default | Description |
 | :--- | :---: | :---: | :--- |
@@ -65,7 +65,7 @@ Streams conversation turns from `transcript.jsonl` (or `transcript_full.jsonl`) 
 | `--full-args` | `(none)` | `false` | Show untruncated tool argument previews in `--outline` mode. |
 | `--include-thinking` | `(none)` | `false` | Include model thinking blocks. |
 | `--full` | `(none)` | `false` | Opt into the deep `512 KB` rendering tier, bypassing inline line/arg clamps (`1,000c` lines, `4,000c` thinking, `240c` large bodies). |
-| `--max-chars` | `<N>` | `(tier default)` | Override the character output ceiling explicitly (up to `512 KB`). |
+| `--max-chars` | `<N>` | `(tier default)` | Override the serialized UTF-8 output budget (up to `524,288` bytes). With `--out`, the budget applies to the artifact. |
 | `--out` / `--output` | `<path>` | `(none)` | Write deep output (up to `512 KB`, including bounded `--json` artifacts with `jsonTruncated` metadata) to a safe `.md`/`.json`/`.txt` artifact outside protected directories and print a compact summary to stdout. |
 | `--file` / `--json` | `<path>` / `(none)` | `(none)` | Explicit `.jsonl` file path or JSON output. |
 
@@ -77,12 +77,18 @@ agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --mode full --f
 
 ---
 
+### Output budgets
+
+`read`, `outline`, `query` and `tools` default to 9,200 UTF-8 bytes. `step` defaults to 24,000 bytes. The deep tier allows up to 524,288 bytes. An explicit `--max-chars` budget includes serialization and the trailing newline. With `--out`, stdout reports the write and the limit applies to the file.
+
+Bounded JSON stays parseable. When serialization omits records or raw fields, `jsonTruncated` and the included/total counts describe the reduction. `nextCursor` describes the serialized page. If an individual record is too large for a JSON page, use a larger budget or inspect the step in Markdown with a field or line slice. A budget that cannot fit the required metadata returns a nonzero exit code and a diagnostic. Existing output files are preserved on that error.
+
 ## 3. `agy-context transcript query`
 
 - **Aliases:** `grep`, `search`, `find`, `tools`, `outline`, `summary`
 - **Usage:** `agy-context transcript query [<pattern>] [<id>] [options]` | `agy-context transcript outline [<id>] [options]`
 
-Searches conversation transcripts by regex or substring, hydrating truncated fields from `transcript_full.jsonl` automatically in `auto` mode. Default inline queries stay within a ~`9.2 KB` ceiling (with `date=YYYY-MM-DD UTC` header compaction, collapsed duplicate tool tags `(xN)`, order-independent boilerplate stripping with `[spill: steps/<N>]` surfacing, and `nextCursor` hints); `--full`, `--max-chars`, or `--out` opts into the deep `512 KB` tier.
+Searches conversation transcripts by regex or substring, hydrating truncated fields from `transcript_full.jsonl` automatically in `auto` mode. Default inline queries stay within a `9,200`-byte ceiling in Markdown and JSON (with `date=YYYY-MM-DD UTC` header compaction, collapsed duplicate tool tags `(xN)`, order-independent boilerplate stripping with `[spill: steps/<N>]` surfacing, and `nextCursor` hints); `--full`, `--max-chars`, or `--out` opts into the deep `512 KB` tier.
 
 - `grep`, `search`, `find`: enable `--include-tools` by default so matches inside tool names and arguments are returned.
 - `tools`: defaults to `--roles assistant --field tool_args --include-tools --start 0 --end 999999 --limit 500` (widened to `2000` with `--full` or `--out`) to list tool calls and arguments across a step range.
@@ -103,7 +109,7 @@ Searches conversation transcripts by regex or substring, hydrating truncated fie
 | `--field` | `<spec>` | `all` (`tool_args` on `tools`) | Project a single field: `content`, `thinking`, `tool_calls`, `tool_args`, `tool_args:<Key>`, or `all`. |
 | `--include-thinking` | `(none)` | `false` | Search and include thinking blocks. |
 | `--full` | `(none)` | `false` | Opt into deep `512 KB` ceiling with expanded previews and untruncated field rendering. |
-| `--max-chars` | `<N>` | `(tier default)` | Explicit character ceiling override (up to `512 KB`). |
+| `--max-chars` | `<N>` | `(tier default)` | Override the serialized UTF-8 output budget (up to `524,288` bytes). With `--out`, the budget applies to the artifact. |
 | `--out` / `--output` | `<path>` | `(none)` | Write deep results (up to `512 KB`, including bounded `--json` artifacts with `jsonTruncated` metadata) to a safe `.md`/`.json`/`.txt` artifact outside protected directories and print a compact summary to stdout. |
 | `--json` / `--file` | `(none)` / `<path>` | `(none)` | Output JSON or read an explicit `.jsonl` file path. |
 
@@ -132,7 +138,7 @@ Extracts untruncated fields from `transcript_full.jsonl` for a single step, a co
 | `--head` / `--tail` | `<N>` | `(none)` | Return only the first or last `N` lines across any rendered `--field` output (aliases: `--head-lines`, `--tail-lines`). |
 | `--line-start` / `--line-end` | `<N>` | `(none)` | 1-indexed inclusive line slice across any `--field` output (single-line payloads wrap into 120-char slices when line-slicing). |
 | `--full` | `(none)` | `false` | Opt into the deep `512 KB` ceiling, bypassing `4,000c` thinking, `1,000c` line, and `240c` large-body argument clamps (`24 KB` safety ceiling applies when `--full`/`--out`/`--max-chars` are omitted). |
-| `--max-chars` | `<N>` | `(tier default)` | Explicit character ceiling override (works with or without `--full`, up to `512 KB`). |
+| `--max-chars` | `<N>` | `(tier default)` | Override the serialized UTF-8 output budget (up to `524,288` bytes). With `--out`, the budget applies to the artifact. |
 | `--out` / `--output` | `<path>` | `(none)` | Write deep single/batch step output (up to `512 KB`, including bounded `--json` artifacts with `jsonTruncated` metadata) to a safe `.md`/`.json`/`.txt` artifact outside protected directories and print a compact summary to stdout. |
 | `--file` / `--json` | `<path>` / `(none)` | `(none)` | Explicit `.jsonl` file path or JSON output. |
 

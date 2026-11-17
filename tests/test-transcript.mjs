@@ -1427,7 +1427,8 @@ try {
     const singleClampedStep = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--field", "tool_args", "--full", "--max-chars", "600"]);
     assert.equal(singleClampedStep.status, 0);
     assert.ok(!singleClampedStep.stdout.includes("clamped in batch view"), "Single-step clamp message must not say batch view");
-    assert.match(singleClampedStep.stdout, /Step \d+ \(tool_args\) clamped at 600 chars/);
+    assert.ok(Buffer.byteLength(singleClampedStep.stdout, "utf8") <= 600);
+    assert.match(singleClampedStep.stdout, /clamped at 600 (?:bytes|chars)/);
 
     // 8.6 --line-start / --line-end and --tail on tool_args:<Key> and validation failures
     const sliceCmdRes = runCli([
@@ -1507,7 +1508,7 @@ try {
     fs.mkdirSync(utfLogs, { recursive: true });
     const utfLines = [];
     for (let s = 0; s < 40; s++) {
-      utfLines.push(JSON.stringify({ step_index: s * 2, type: "USER_INPUT", created_at: "2026-11-17T10:00:00Z", content: `u${s} ` + "─✓→".repeat(300) }));
+      utfLines.push(JSON.stringify({ step_index: s * 2, type: "USER_INPUT", created_at: "2026-11-17T10:00:00Z", content: `u${s} ` + "─✓→😀".repeat(230) }));
       utfLines.push(JSON.stringify({ step_index: s * 2 + 1, type: "PLANNER_RESPONSE", created_at: "2026-11-17T10:00:01Z", content: "答".repeat(700) }));
     }
     fs.writeFileSync(path.join(utfLogs, "transcript.jsonl"), utfLines.join("\n") + "\n");
@@ -1630,6 +1631,83 @@ try {
     const hugeMdRes = runCli(["transcript", "read", "--id", convHuge, "--mode", "full", "--full", "--last-turns", "400", "--out", hugeMdFile]);
     assert.equal(hugeMdRes.status, 0, hugeMdRes.stderr);
     assert.ok(fs.statSync(hugeMdFile).size <= 512 * 1024, "Markdown --out artifact must stay <= 512 KB in bytes");
+
+    // RR-ACS-RUN-001 exercises the bytes the CLI actually emits.
+    const assertBounded = (result, limit) => {
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok(Buffer.byteLength(result.stdout, "utf8") <= limit, "serialized stdout exceeded its byte budget");
+      assert.ok(!result.stdout.includes("\uFFFD"), "UTF-8 output lost a code point");
+    };
+    for (const sub of ["read", "outline", "query", "tools"]) {
+      const args = ["transcript", sub, "--id", convHuge, "--limit", "80"];
+      for (const json of [[], ["--json"]]) {
+        const inline = runCli([...args, ...json]);
+        assertBounded(inline, 9200);
+        const explicit = runCli([...args, ...json, "--max-chars", "5000"]);
+        assertBounded(explicit, 5000);
+        if (json.length) {
+          JSON.parse(inline.stdout);
+          JSON.parse(explicit.stdout);
+        }
+      }
+    }
+    const utfJson = runCli(["transcript", "read", "--id", convUtf, "--last-turns", "40", "--json", "--max-chars", "5000"]);
+    assertBounded(utfJson, 5000);
+    assert.match(utfJson.stdout, /[答✓]/);
+    assert.equal(JSON.parse(utfJson.stdout).clamped, true);
+
+    const readPageArgs = ["transcript", "read", "--id", convHuge, "--limit", "80", "--json", "--max-chars", "5000"];
+    const firstPage = runCli([...readPageArgs, "--offset", "0"]);
+    assertBounded(firstPage, 5000);
+    const page = JSON.parse(firstPage.stdout);
+    assert.equal(page.steps[0].step_index, 0);
+    assert.equal(page.displayedSteps, page.steps.length);
+    assert.equal(page.nextCursor.offset, page.steps.at(-1)._fileOrd + 1);
+    const secondPage = runCli([...readPageArgs, "--offset", String(page.nextCursor.offset)]);
+    assertBounded(secondPage, 5000);
+    assert.equal(JSON.parse(secondPage.stdout).steps[0].step_index, page.nextCursor.offset);
+
+    const forwardOutlineArgs = ["transcript", "outline", "--id", convHuge, "--json", "--max-chars", "5000"];
+    const outlineFile = path.join(ergOutDir, "forward-outline.json");
+    const savedOutline = runCli([...forwardOutlineArgs, "--start", "0", "--end", "20", "--out", outlineFile]);
+    assert.equal(savedOutline.status, 0, savedOutline.stderr);
+    assert.ok(fs.statSync(outlineFile).size <= 5000);
+    const outlinePage = JSON.parse(fs.readFileSync(outlineFile, "utf8"));
+    assert.equal(outlinePage.jsonTruncated, true);
+    assert.equal(outlinePage.items[0].step_index, 0);
+    assert.deepEqual(outlinePage.nextCursor, { start: outlinePage.items.at(-1).step_index + 1, end: 20 });
+    assert.deepEqual(JSON.parse(savedOutline.stdout).nextCursor, outlinePage.nextCursor);
+    const nextOutline = runCli([...forwardOutlineArgs, "--start", String(outlinePage.nextCursor.start), "--end", "20"]);
+    assertBounded(nextOutline, 5000);
+    assert.equal(JSON.parse(nextOutline.stdout).items[0].step_index, outlinePage.nextCursor.start);
+
+    const batchSteps = ["0", "2", "4", "8"];
+    const batch = runCli(["transcript", "step", "--id", convHuge, "--step", batchSteps.join(","), "--field", "content", "--json", "--max-chars", "15000"]);
+    assertBounded(batch, 15000);
+    const batchPage = JSON.parse(batch.stdout);
+    assert.ok(batchPage.steps.length > 0 && batchPage.steps.length < batchSteps.length);
+    assert.deepEqual(batchPage.stepIndices, batchPage.steps.map((entry) => entry.stepIndex));
+    const remainder = await getStepDetail({ conversationId: convHuge, stepIndex: batchPage.nextCursor.step, full: true });
+    assert.deepEqual(remainder.requestedSteps ?? [remainder.stepIndex], batchSteps.slice(batchPage.steps.length).map(Number));
+
+    const stepArgs = ["transcript", "step", "--id", convUtf, "--step", "1", "--field", "content"];
+    assertBounded(runCli([...stepArgs, "--max-chars", "600"]), 600);
+    const stepJson = runCli([...stepArgs, "--json", "--max-chars", "600"]);
+    assertBounded(stepJson, 600);
+    assert.equal(JSON.parse(stepJson.stdout).stepIndex, 1);
+
+    for (const json of [[], ["--json"]]) {
+      const lowPath = path.join(ergOutDir, json.length ? "too-small.json" : "too-small.md");
+      fs.writeFileSync(lowPath, "keep existing artifact");
+      for (const output of [[], ["--out", lowPath]]) {
+        const small = runCli(["transcript", "read", "--id", convUtf, "--max-chars", "80", ...json, ...output]);
+        assert.equal(small.status, 1);
+        assert.equal(small.stdout, "");
+        assert.match(small.stderr, /too small.*transcript/i);
+        if (json.length) assert.equal(JSON.parse(small.stderr).isError, true);
+      }
+      assert.equal(fs.readFileSync(lowPath, "utf8"), "keep existing artifact");
+    }
 
     console.log("✓ --out --json and Markdown artifacts honor the 512 KB deep-tier cap");
   }

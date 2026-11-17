@@ -23,6 +23,10 @@ import {
   exportSanitizedTranscript,
   manageTranscriptAccessPolicy,
   consumeTranscriptAccessGrant,
+  INLINE_SAFE_CHARS,
+  MAX_BOUNDED_READ_STEPS,
+  MAX_DEEP_OUTPUT_CHARS,
+  MAX_FIELD_CHARS,
   utf8SliceToBytes
 } from "../lib/transcript-core.mjs";
 import { getStateDir } from "../scripts/state-dir.mjs";
@@ -366,8 +370,6 @@ function emitError(message, asJson = false, extra = {}) {
   process.exit(1);
 }
 
-const MAX_DEEP_OUT_CHARS = 512 * 1024;
-
 function resolveOutFlag(opts) {
   if (opts.out !== undefined && opts.output !== undefined && opts.out !== opts.output) {
     throw new Error("Conflicting '--out' and '--output' values provided.");
@@ -381,102 +383,161 @@ function parseMaxCharsFlag(opts) {
   const raw = opts["max-chars"];
   if (raw === undefined) return undefined;
   const parsed = parsePositiveInt(raw, "max-chars");
-  if (parsed > MAX_DEEP_OUT_CHARS) {
-    throw new Error(`Flag '--max-chars' exceeds 512 KB ceiling (${MAX_DEEP_OUT_CHARS} chars; received: '${raw}').`);
+  if (parsed > MAX_DEEP_OUTPUT_CHARS) {
+    throw new Error(`Flag '--max-chars' exceeds 512 KB ceiling (${MAX_DEEP_OUTPUT_CHARS} bytes; received: '${raw}').`);
   }
   return parsed;
 }
 
-const JSON_HEAVY_ARRAY_KEYS = ["items", "steps", "data"];
-const JSON_HEAVY_OBJECT_KEYS = ["step", "data", "steps", "items"];
+function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryEnd } = {}) {
+  const encode = (obj, indent) => JSON.stringify(obj, null, indent) + "\n";
+  const fits = (text) => Buffer.byteLength(text, "utf8") <= maxBytes;
+  const pretty = encode(payload, 2);
+  if (fits(pretty)) return { content: pretty };
+  const compact = encode(payload);
+  if (fits(compact)) return { content: compact };
 
-/**
- * Serializes a transcript result payload (text excluded) so the JSON artifact never exceeds `maxChars`.
- * Heavy arrays are trimmed to the longest leading prefix that fits; if no prefix fits, heavy fields are
- * dropped. Truncation is always declared via `jsonTruncated`, `jsonItemsIncluded`, and `jsonItemsTotal`.
- */
-function serializeBoundedJsonPayload(payload, maxChars) {
-  const pretty = (obj) => JSON.stringify(obj, null, 2) + "\n";
-  const size = (s) => Buffer.byteLength(s, "utf8");
-  let out = pretty(payload);
-  if (size(out) <= maxChars) return { content: out, truncated: false, included: null, total: null, payload };
+  const key = Array.isArray(payload.items) ? "items" : "steps";
+  const entries = payload[key];
+  const total = entries?.length || (payload.stepIndex !== undefined ? 1 : 0);
+  const meta = (included) => ({
+    jsonTruncated: true,
+    jsonItemsIncluded: included,
+    jsonItemsTotal: total,
+    jsonTruncatedReason: "Output exceeds the byte budget. Use a larger budget or a narrower selection."
+  });
 
-  const arrayKey = JSON_HEAVY_ARRAY_KEYS.find((k) => Array.isArray(payload[k]) && payload[k].length > 0);
-  if (arrayKey) {
-    const total = payload[arrayKey].length;
-    const duplicateKeys = JSON_HEAVY_ARRAY_KEYS.filter((k) => k !== arrayKey && Array.isArray(payload[k]));
-    const base = { ...payload };
-    for (const k of duplicateKeys) delete base[k];
-    const meta = (n) => ({ jsonTruncated: true, jsonItemsIncluded: n, jsonItemsTotal: total, jsonTruncatedReason: `JSON artifact exceeds ${maxChars} chars; rerun with --max-chars/narrower --start/--end or read the Markdown form` });
-    const build = (n) => ({ ...base, [arrayKey]: payload[arrayKey].slice(0, n), ...meta(n) });
+  if (entries?.length) {
+    const isBatch = Array.isArray(payload.stepIndices);
+    const isRead = payload.displayedSteps !== undefined;
+    const forward = isBatch || readPageSize !== undefined || summaryEnd !== undefined ||
+      payload.nextCursor?.start !== undefined;
+    const stepNumber = (entry) => Number(entry.step_index ?? entry._ordinal ?? 0);
+
+    const build = (count) => {
+      const retained = forward ? entries.slice(0, count) : entries.slice(entries.length - count);
+      const page = { ...payload, [key]: retained, clamped: true, ...meta(count) };
+      if (count < total) {
+        if (isBatch) {
+          const pending = entries.slice(count).map((entry) => entry.stepIndex);
+          if (payload.nextCursor) pending.push(payload.nextCursor.step);
+          page.nextCursor = { step: pending.join(",") };
+        } else if (isRead && forward) {
+          page.nextCursor = {
+            offset: count ? retained.at(-1)._fileOrd + 1 : entries[0]._fileOrd,
+            limit: readPageSize
+          };
+        } else if (isRead && count) {
+          const first = retained[0]._fileOrd;
+          const limit = Math.min(20, first);
+          page.nextCursor = { offset: first - limit, limit };
+        } else if (isRead) {
+          page.nextCursor = { offset: entries.at(-1)._fileOrd, limit: 1 };
+        } else if (forward) {
+          page.nextCursor = {
+            start: stepNumber(entries[count]),
+            end: payload.nextCursor?.start !== undefined ? payload.nextCursor.end : summaryEnd
+          };
+        } else {
+          page.nextCursor = { end: count ? stepNumber(retained[0]) - 1 : stepNumber(entries.at(-1)) };
+        }
+      }
+      if (isBatch) {
+        page.data = payload.data.slice(0, count);
+        page.stepIndices = retained.map((entry) => entry.stepIndex);
+        page.stepIndex = retained[0]?.stepIndex ?? null;
+      } else if (isRead) {
+        page.displayedSteps = count;
+      } else {
+        page.displayedCount = count;
+      }
+      return page;
+    };
+
     let lo = 0;
     let hi = total;
     while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
-      if (size(pretty(build(mid))) <= maxChars) lo = mid;
+      const mid = Math.floor((lo + hi + 1) / 2);
+      if (fits(encode(build(mid)))) lo = mid;
       else hi = mid - 1;
     }
-    out = pretty(build(lo));
-    if (size(out) <= maxChars) return { content: out, truncated: true, included: lo, total, payload: build(lo) };
+    const page = build(lo);
+    const content = encode(page);
+    if (fits(content)) return { content, metadata: page };
+  } else if (payload.stepIndex !== undefined) {
+    // A single step can carry its selected field without duplicating the entire raw step.
+    const { step, data, ...header } = payload;
+    const selected = { ...header, data, clamped: true, ...meta(1) };
+    const content = encode(selected);
+    if (fits(content)) return { content, metadata: selected };
+    const summary = { ...header, clamped: true, ...meta(0) };
+    const summaryContent = encode(summary);
+    if (fits(summaryContent)) return { content: summaryContent, metadata: summary };
   }
 
-  const slim = { ...payload };
-  for (const k of JSON_HEAVY_OBJECT_KEYS) delete slim[k];
-  const slimmed = {
-    ...slim,
-    jsonTruncated: true,
-    jsonItemsIncluded: 0,
-    jsonItemsTotal: arrayKey ? payload[arrayKey].length : 1,
-    jsonTruncatedReason: `JSON artifact exceeds ${maxChars} chars; heavy fields omitted (use the Markdown form or a smaller --max-chars-bounded range)`
-  };
-  return { content: pretty(slimmed), truncated: true, included: 0, total: slimmed.jsonItemsTotal, payload: slimmed };
+  throw new Error(`The ${maxBytes}-byte budget is too small for transcript JSON metadata. Increase --max-chars or narrow the selection.`);
 }
 
-function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, { label = "transcript output", customMessage = null, maxJsonChars = MAX_DEEP_OUT_CHARS } = {}) {
+function serializeTranscriptResult(res, asJson, maxBytes, pageOptions) {
+  if (asJson) {
+    const { text, ...payload } = res;
+    return serializeBoundedJsonPayload(payload, maxBytes, pageOptions);
+  }
+
+  const content = res.text + "\n";
+  if (Buffer.byteLength(content, "utf8") <= maxBytes) return { content };
+  const next = Object.entries(res.nextCursor ?? {}).map(([flag, value]) => `--${flag} ${value}`).join(" ");
+  const nextHint = next ? `; next: ${next}` : "";
+  const notice = `\n\n[Output clamped at ${maxBytes} bytes${nextHint}; use a larger --max-chars or narrow the selection.]\n`;
+  const available = maxBytes - Buffer.byteLength(notice, "utf8");
+  const heading = res.text.split("\n", 1)[0];
+  if (available <= Buffer.byteLength(heading, "utf8")) {
+    throw new Error(`The ${maxBytes}-byte budget is too small for transcript Markdown metadata. Increase --max-chars or narrow the selection.`);
+  }
+  return { content: utf8SliceToBytes(res.text, available).trimEnd() + notice };
+}
+
+function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, {
+  label = "transcript output",
+  customMessage = null,
+  maxBytes = MAX_DEEP_OUTPUT_CHARS,
+  ...pageOptions
+} = {}) {
+  const { content, metadata } = serializeTranscriptResult(res, asJson, maxBytes, pageOptions);
   validateSafeExportOutPath(rawOut);
   fs.mkdirSync(path.dirname(safeOutPath), { recursive: true });
   validateSafeExportOutPath(rawOut);
-  const { text, ...payload } = res;
-  const jsonCap = Math.min(MAX_DEEP_OUT_CHARS, Number.isFinite(Number(maxJsonChars)) && Number(maxJsonChars) > 0 ? Math.floor(Number(maxJsonChars)) : MAX_DEEP_OUT_CHARS);
-  let jsonMeta = null;
-  let fileContent;
-  if (asJson) {
-    jsonMeta = serializeBoundedJsonPayload(payload, jsonCap);
-    fileContent = jsonMeta.content;
-  } else {
-    fileContent = text + "\n";
-    if (Buffer.byteLength(fileContent, "utf8") > jsonCap) {
-      const notice = `\n\n... [Output truncated at ${jsonCap} bytes; narrow --start/--end/--offset or raise --max-chars (max ${MAX_DEEP_OUT_CHARS})] ...\n`;
-      fileContent = utf8SliceToBytes(fileContent, jsonCap - Buffer.byteLength(notice, "utf8")) + notice;
-    }
-  }
   const tmpOut = `${safeOutPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
-    fs.writeFileSync(tmpOut, fileContent, { encoding: "utf8", flag: "wx" });
+    fs.writeFileSync(tmpOut, content, { encoding: "utf8", flag: "wx" });
     fs.renameSync(tmpOut, safeOutPath);
   } catch (err) {
     try { fs.unlinkSync(tmpOut); } catch {}
     throw err;
   }
+
+  const bytesWritten = Buffer.byteLength(content, "utf8");
   if (asJson) {
-    const { steps, items, sessions, step, data, ...compactMeta } = payload;
-    console.log(
-      JSON.stringify(
-        {
-          ...compactMeta,
-          outputPath: safeOutPath,
-          bytesWritten: Buffer.byteLength(fileContent, "utf8"),
-          charsWritten: fileContent.length,
-          ...(jsonMeta && jsonMeta.truncated
-            ? { jsonTruncated: true, jsonItemsIncluded: jsonMeta.included, jsonItemsTotal: jsonMeta.total }
-            : {})
-        },
-        null,
-        2
-      )
-    );
+    const { text, steps, items, sessions, step, data, ...compactMeta } = metadata ?? res;
+    console.log(JSON.stringify({
+      ...compactMeta,
+      outputPath: safeOutPath,
+      bytesWritten,
+      charsWritten: content.length
+    }, null, 2));
   } else {
-    console.log(customMessage || `[OK] Wrote ${label} (${text.length} chars) to: ${safeOutPath}`);
+    console.log(customMessage || `[OK] Wrote ${label} (${bytesWritten} bytes) to: ${safeOutPath}`);
+  }
+}
+
+function emitTranscriptResult(res, asJson, rawOut, safeOutPath, options) {
+  if (res.isError) {
+    emitError(res.text, asJson, res.candidates ? { candidates: res.candidates } : {});
+  }
+  if (safeOutPath) {
+    writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson, options);
+  } else {
+    process.stdout.write(serializeTranscriptResult(res, asJson, options.maxBytes, options).content);
   }
 }
 
@@ -516,9 +577,7 @@ async function handleTranscriptCommand(argv) {
     const { rawOut, safeOutPath } = resolveOutFlag(opts);
     const parsedMaxChars = parseMaxCharsFlag(opts);
     const isFull = Boolean(opts.full);
-    const effectiveMaxChars = parsedMaxChars !== undefined
-      ? parsedMaxChars
-      : (safeOutPath && !isFull ? MAX_DEEP_OUT_CHARS : undefined);
+    const effectiveMaxChars = parsedMaxChars ?? (safeOutPath || isFull ? MAX_DEEP_OUTPUT_CHARS : INLINE_SAFE_CHARS);
     const limit = parsePositiveInt(opts.limit, "limit");
 
     if (sub === "outline" || sub === "summary" || opts.outline || opts.summary) {
@@ -542,17 +601,11 @@ async function handleTranscriptCommand(argv) {
         allowExternalPaths: false,
         subcommand: sub
       });
-      if (res.isError) {
-        emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
-      }
-      if (safeOutPath) {
-        writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript ${sub}`, maxJsonChars: parsedMaxChars });
-      } else if (opts.json) {
-        const { text, ...payload } = res;
-        console.log(JSON.stringify(payload, null, 2));
-      } else {
-        console.log(res.text);
-      }
+      emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
+        label: `transcript ${sub}`,
+        maxBytes: effectiveMaxChars,
+        summaryEnd: endStep ?? 999999
+      });
       return;
     }
 
@@ -577,17 +630,11 @@ async function handleTranscriptCommand(argv) {
       allowExternalPaths: false
     });
 
-    if (res.isError) {
-      emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
-    }
-    if (safeOutPath) {
-      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript read (${res.mode})`, maxJsonChars: parsedMaxChars });
-    } else if (opts.json) {
-      const { text, ...payload } = res;
-      console.log(JSON.stringify(payload, null, 2));
-    } else {
-      console.log(res.text);
-    }
+    emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
+      label: `transcript read (${res.mode})`,
+      maxBytes: effectiveMaxChars,
+      readPageSize: offset !== undefined || limit !== undefined ? Math.min(MAX_BOUNDED_READ_STEPS, limit ?? 50) : undefined
+    });
     return;
   }
 
@@ -626,9 +673,7 @@ async function handleTranscriptCommand(argv) {
     const isFull = Boolean(opts.full);
     const { rawOut, safeOutPath } = resolveOutFlag(opts);
     const parsedMaxChars = parseMaxCharsFlag(opts);
-    const effectiveMaxChars = parsedMaxChars !== undefined
-      ? parsedMaxChars
-      : (safeOutPath && !isFull ? MAX_DEEP_OUT_CHARS : undefined);
+    const effectiveMaxChars = parsedMaxChars ?? (safeOutPath || isFull ? MAX_DEEP_OUTPUT_CHARS : INLINE_SAFE_CHARS);
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
     }
@@ -670,17 +715,11 @@ async function handleTranscriptCommand(argv) {
       subcommand: sub
     });
 
-    if (res.isError) {
-      emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
-    }
-    if (safeOutPath) {
-      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript ${sub}`, maxJsonChars: parsedMaxChars });
-    } else if (opts.json) {
-      const { text, ...payload } = res;
-      console.log(JSON.stringify(payload, null, 2));
-    } else {
-      console.log(res.text);
-    }
+    emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
+      label: `transcript ${sub}`,
+      maxBytes: effectiveMaxChars,
+      summaryEnd: (opts.summary || opts.outline) && startStep !== undefined ? endStep : undefined
+    });
     return;
   }
 
@@ -725,9 +764,7 @@ async function handleTranscriptCommand(argv) {
     const { rawOut, safeOutPath } = resolveOutFlag(opts);
     const parsedMaxChars = parseMaxCharsFlag(opts);
     const isFull = Boolean(opts.full);
-    const effectiveMaxChars = parsedMaxChars !== undefined
-      ? parsedMaxChars
-      : (safeOutPath && !isFull ? MAX_DEEP_OUT_CHARS : undefined);
+    const effectiveMaxChars = parsedMaxChars ?? (safeOutPath && !isFull ? MAX_DEEP_OUTPUT_CHARS : undefined);
 
     const res = await getStepDetail({
       conversationId: opts.id,
@@ -745,17 +782,10 @@ async function handleTranscriptCommand(argv) {
       allowExternalPaths: false
     });
 
-    if (res.isError) {
-      emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
-    }
-    if (safeOutPath) {
-      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), { label: `transcript step`, maxJsonChars: parsedMaxChars });
-    } else if (opts.json) {
-      const { text, ...payload } = res;
-      console.log(JSON.stringify(payload, null, 2));
-    } else {
-      console.log(res.text);
-    }
+    emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
+      label: "transcript step",
+      maxBytes: effectiveMaxChars ?? (isFull ? MAX_DEEP_OUTPUT_CHARS : MAX_FIELD_CHARS)
+    });
     return;
   }
 

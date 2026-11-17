@@ -515,13 +515,13 @@ export function formatWindowsCmdShim(targetCliPath) {
     "@echo off",
     "chcp 65001 >nul",
     "setlocal",
-    "where node >nul 2>nul",
+    "where node.exe >nul 2>nul",
     "if errorlevel 1 goto :fallback",
-    `node "${targetCliPath}" %*`,
-    "exit /b %errorlevel%",
+    // A label-less GOTO ends the batch context. The queued executable can
+    // delete this shim (and any managed node.cmd) and return its own status.
+    `(goto) 2>nul & node.exe "${targetCliPath}" %*`,
     ":fallback",
-    `"${process.execPath}" "${targetCliPath}" %*`,
-    "exit /b %errorlevel%",
+    `(goto) 2>nul & "${process.execPath}" "${targetCliPath}" %*`,
     ""
   ].join("\r\n");
 }
@@ -698,8 +698,14 @@ export async function runInstall(options = {}) {
 
   let pluginLst = null;
   try {
-    pluginLst = fs.lstatSync(pluginDest);
-  } catch {}
+    pluginLst = fs.lstatSync(pluginDest, { bigint: true });
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  const sourceStat = fs.statSync(repoRoot, { bigint: true });
+  // A shim installed from an npm tarball runs directly from the plugin copy.
+  const installedSource = pluginLst?.isDirectory() &&
+    pluginLst.dev === sourceStat.dev && pluginLst.ino === sourceStat.ino;
   const pluginExists = fs.existsSync(pluginDest);
   let pluginPointsElsewhere = false;
   if (pluginLst && pluginExists && pluginLst.isSymbolicLink()) {
@@ -716,7 +722,7 @@ export async function runInstall(options = {}) {
   }
 
   if (
-    pluginLst &&
+    pluginLst && !installedSource &&
     (!pluginExists || isTempOrNpx || options.forceCopyFallback || !pluginLst.isSymbolicLink() || pluginPointsElsewhere)
   ) {
     if (pluginLst.isSymbolicLink()) {
