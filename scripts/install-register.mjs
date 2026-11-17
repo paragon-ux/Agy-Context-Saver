@@ -867,36 +867,32 @@ export async function runUninstall(options = {}) {
   let pluginStat = null;
   try {
     pluginStat = fs.lstatSync(pluginDest);
-  } catch {}
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
   if (pluginStat) {
-    try {
-      if (pluginStat.isSymbolicLink()) {
-        await fsPromises.unlink(pluginDest);
-      } else {
-        await fsPromises.rm(pluginDest, { recursive: true, force: true });
-      }
-      log(`[OK] Removed plugin link: ${pluginDest}`);
-    } catch (err) {
-      warn(`[WARN] Could not remove plugin link: ${err.message}`);
+    if (pluginStat.isSymbolicLink()) {
+      await fsPromises.unlink(pluginDest);
+    } else {
+      await fsPromises.rm(pluginDest, { recursive: true, force: true });
     }
+    log(`[OK] Removed plugin link: ${pluginDest}`);
   }
 
   // 2. Remove mirrored hook script (including dangling symlinks via lstatSync, S2-SCRIPT-011)
   let destHookStat = null;
   try {
     destHookStat = fs.lstatSync(destHook);
-  } catch {}
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
   if (destHookStat) {
-    try {
-      if (destHookStat.isDirectory() && !destHookStat.isSymbolicLink()) {
-        await fsPromises.rm(destHook, { recursive: true, force: true });
-      } else {
-        await fsPromises.unlink(destHook);
-      }
-      log(`[OK] Removed mirrored hook script: ${destHook}`);
-    } catch (err) {
-      warn(`[WARN] Could not remove mirrored hook script: ${err.message}`);
+    if (destHookStat.isDirectory() && !destHookStat.isSymbolicLink()) {
+      await fsPromises.rm(destHook, { recursive: true, force: true });
+    } else {
+      await fsPromises.unlink(destHook);
     }
+    log(`[OK] Removed mirrored hook script: ${destHook}`);
   }
 
   // 3. Remove both current and legacy hook keys from hooks.json, and plugin toggle from config.json
@@ -934,21 +930,16 @@ export async function runUninstall(options = {}) {
   for (const name of CLI_SHIM_NAMES) {
     for (const candidate of [name, `${name}.cmd`]) {
       const shimPath = path.join(antigravityBinDir, candidate);
-      let shimStat = null;
       try {
-        shimStat = fs.lstatSync(shimPath);
-      } catch {}
-      if (shimStat) {
-        try {
-          if (shimStat.isDirectory() && !shimStat.isSymbolicLink()) {
-            await fsPromises.rm(shimPath, { recursive: true, force: true });
-          } else {
-            await fsPromises.unlink(shimPath);
-          }
-          log(`[OK] Removed CLI shim: ${shimPath}`);
-        } catch (err) {
-          warn(`[WARN] Could not remove CLI shim ${shimPath}: ${err.message}`);
+        const shimStat = fs.lstatSync(shimPath);
+        if (shimStat.isDirectory() && !shimStat.isSymbolicLink()) {
+          await fsPromises.rm(shimPath, { recursive: true, force: true });
+        } else {
+          await fsPromises.unlink(shimPath);
         }
+        log(`[OK] Removed CLI shim: ${shimPath}`);
+      } catch (err) {
+        if (err.code !== "ENOENT") throw err;
       }
     }
   }

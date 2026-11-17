@@ -427,6 +427,24 @@ assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
       assert.deepEqual(JSON.parse(fs.readFileSync(mcp, "utf8")), foreign);
       ok(shim(pkgShim, "setup"));
       ok(shim(installedShim, "--version"));
+      if (win) {
+        const lockFile = path.join(installed, "uninstall-locked.txt");
+        const lockScript = [
+          "$lock = [IO.File]::Open($env:AGY_FIXTURE_LOCK, 'CreateNew', 'ReadWrite', 'None')",
+          "try { & $env:AGY_FIXTURE_SHIM uninstall; exit $LASTEXITCODE } finally { $lock.Dispose() }"
+        ].join("\n");
+        const locked = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", lockScript], {
+          encoding: "utf8",
+          env: { ...env, AGY_FIXTURE_LOCK: lockFile, AGY_FIXTURE_SHIM: `${installedShim}.cmd` }
+        });
+        assert.equal(locked.status, 1, locked.stderr || locked.stdout || locked.error?.message);
+        assert.match(locked.stderr, /uninstall-locked\.txt/);
+        assert.ok(fs.existsSync(lockFile));
+        assert.ok(fs.existsSync(`${installedShim}.cmd`));
+        assert.deepEqual(JSON.parse(fs.readFileSync(mcp, "utf8")), foreign);
+        ok(shim(pkgShim, "uninstall"));
+        assert.equal(fs.existsSync(installed), false);
+      }
     } finally {
       fs.rmSync(testRoot, { recursive: true, force: true });
     }
