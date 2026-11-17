@@ -107,10 +107,16 @@ function parseFlags(argv, spec) {
     const inlineVal = eqIdx === -1 ? null : token.slice(eqIdx + 1);
 
     if (key === "help") {
+      if (inlineVal !== null) {
+        throw new Error(`Boolean flag '--help' does not accept value '${inlineVal}'.`);
+      }
       opts.help = true;
       continue;
     }
     if (key === "version") {
+      if (inlineVal !== null) {
+        throw new Error(`Boolean flag '--version' does not accept value '${inlineVal}'.`);
+      }
       opts.version = true;
       continue;
     }
@@ -167,9 +173,28 @@ function assertCleanHelp(opts, positional) {
 
 function parseOptionalInt(val, flagName) {
   if (val === undefined) return undefined;
+  if (typeof val === "boolean" || (typeof val === "string" && val.trim() === "")) {
+    throw new Error(`Flag '--${flagName}' must be an integer (received: '${val}').`);
+  }
   const num = Number(val);
   if (!Number.isFinite(num) || !Number.isInteger(num)) {
     throw new Error(`Flag '--${flagName}' must be an integer (received: '${val}').`);
+  }
+  return num;
+}
+
+function parseNonNegInt(val, flagName) {
+  const num = parseOptionalInt(val, flagName);
+  if (num !== undefined && num < 0) {
+    throw new Error(`Flag '--${flagName}' must be a non-negative integer (received: '${val}').`);
+  }
+  return num;
+}
+
+function parsePositiveInt(val, flagName) {
+  const num = parseOptionalInt(val, flagName);
+  if (num !== undefined && num <= 0) {
+    throw new Error(`Flag '--${flagName}' must be a positive integer (received: '${val}').`);
   }
   return num;
 }
@@ -191,9 +216,30 @@ function validateExplicitFileFlag(fileArg) {
   return real;
 }
 
+function normalizeWinDevicePath(p) {
+  let s = String(p || "");
+  if (/^\\\\\?\\UNC\\/i.test(s)) {
+    return "\\\\" + s.slice(8);
+  }
+  if (/^\\\\[?.]\\/.test(s)) {
+    return s.slice(4);
+  }
+  return s;
+}
+
+function hasUncOrDevicePrefix(p) {
+  const s = String(p || "").trim();
+  return /^(?:\\\\|\/\/)/.test(s) || /^[\\/]{2}[?.][\\/]/.test(s);
+}
+
 function isInsideDirCaseAware(targetPath, baseDir) {
+  const cleanTarget = normalizeWinDevicePath(targetPath);
+  const cleanBase = normalizeWinDevicePath(baseDir);
+  if (hasUncOrDevicePrefix(cleanTarget) || hasUncOrDevicePrefix(cleanBase)) {
+    return false;
+  }
   const norm = (p) => (process.platform === "win32" || process.platform === "darwin" ? p.toLowerCase() : p);
-  const rel = path.relative(norm(baseDir), norm(targetPath));
+  const rel = path.relative(norm(cleanBase), norm(cleanTarget));
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
@@ -212,6 +258,9 @@ function isProtectedInternalOutPath(targetPath) {
   return (
     /(?:^|\/)\.system_generated(?:\/|$)/i.test(normalized) ||
     /(?:^|\/)\.git(?:\/|$)/i.test(normalized) ||
+    /\/\.gemini\/(?:config|antigravity(?:-cli|-ide)?)\/(?:hooks\.json(?:\.bak)?|mcp_config\.json|config\.json)$/i.test(normalized) ||
+    /\/\.gemini\/config\/scripts\/execution-guard-hook\.mjs$/i.test(normalized) ||
+    /(?:^|\/)hooks\.json$/i.test(normalized) ||
     isProtectedBenchmarkOutPath(normalized)
   );
 }
@@ -242,6 +291,9 @@ function validateSafeExportOutPath(outArg) {
   if (!trimmed || trimmed.includes("\0")) {
     throw new Error(`Invalid --out path '${outArg}'.`);
   }
+  if (hasUncOrDevicePrefix(trimmed)) {
+    throw new Error(`Invalid --out path '${outArg}': UNC and device paths are prohibited.`);
+  }
   const segments = trimmed.split(/[\\/]/);
   if (segments.includes("..")) {
     throw new Error(`Invalid --out path '${outArg}': '..' traversal is prohibited.`);
@@ -250,8 +302,11 @@ function validateSafeExportOutPath(outArg) {
     throw new Error(`Invalid --out path '${outArg}': must end with .md, .json, or .txt.`);
   }
   const abs = path.resolve(trimmed);
+  if (hasUncOrDevicePrefix(abs)) {
+    throw new Error(`Invalid --out path '${outArg}': UNC and device paths are prohibited.`);
+  }
   if (isProtectedInternalOutPath(abs)) {
-    throw new Error(`Refusing '--out' inside protected internal or benchmark directory: '${abs}'.`);
+    throw new Error(`Refusing '--out' inside protected internal, governance, or benchmark directory: '${abs}'.`);
   }
 
   const profileHome = getProfileHomeDir();
@@ -259,7 +314,11 @@ function validateSafeExportOutPath(outArg) {
     getStateDir(),
     path.join(profileHome, ".gemini", "config"),
     path.join(profileHome, ".gemini", "antigravity", "bin"),
-    path.join(profileHome, ".gemini", "antigravity", "mcp")
+    path.join(profileHome, ".gemini", "antigravity", "mcp"),
+    path.join(profileHome, ".gemini", "antigravity-cli", "bin"),
+    path.join(profileHome, ".gemini", "antigravity-cli", "mcp"),
+    path.join(profileHome, ".gemini", "antigravity-ide", "bin"),
+    path.join(profileHome, ".gemini", "antigravity-ide", "mcp")
   ].map((p) => resolveWithExistingAncestor(p));
 
   let absLst = null;
@@ -272,8 +331,8 @@ function validateSafeExportOutPath(outArg) {
       throw new Error(`Invalid --out path '${abs}': refusing symlink or non-regular file.`);
     }
     const realTarget = fs.realpathSync(abs);
-    if (isProtectedInternalOutPath(realTarget)) {
-      throw new Error(`Refusing '--out' inside protected internal or benchmark directory: '${realTarget}'.`);
+    if (hasUncOrDevicePrefix(realTarget) || isProtectedInternalOutPath(realTarget)) {
+      throw new Error(`Refusing '--out' inside protected internal, governance, or benchmark directory: '${realTarget}'.`);
     }
     for (const pr of protectedRoots) {
       if (isInsideDirCaseAware(realTarget, pr)) {
@@ -282,8 +341,8 @@ function validateSafeExportOutPath(outArg) {
     }
   } else {
     const resolvedTarget = resolveWithExistingAncestor(abs);
-    if (isProtectedInternalOutPath(resolvedTarget)) {
-      throw new Error(`Refusing '--out' inside protected internal or benchmark directory: '${resolvedTarget}'.`);
+    if (hasUncOrDevicePrefix(resolvedTarget) || isProtectedInternalOutPath(resolvedTarget)) {
+      throw new Error(`Refusing '--out' inside protected internal, governance, or benchmark directory: '${resolvedTarget}'.`);
     }
     for (const pr of protectedRoots) {
       if (isInsideDirCaseAware(resolvedTarget, pr)) {
@@ -294,8 +353,10 @@ function validateSafeExportOutPath(outArg) {
   return abs;
 }
 
+let pendingErrorGrantContext = null;
+
 function emitError(message, asJson = false, extra = {}) {
-  consumeTranscriptAccessGrant();
+  consumeTranscriptAccessGrant(pendingErrorGrantContext || undefined);
   if (asJson) {
     console.error(JSON.stringify({ isError: true, error: message, ...extra }, null, 2));
   } else {
@@ -318,9 +379,9 @@ function resolveOutFlag(opts) {
 function parseMaxCharsFlag(opts) {
   const raw = opts["max-chars"];
   if (raw === undefined) return undefined;
-  const parsed = parseOptionalInt(raw, "max-chars");
-  if (parsed === undefined || parsed <= 0) {
-    throw new Error(`Flag '--max-chars' must be a positive integer (received: '${raw}').`);
+  const parsed = parsePositiveInt(raw, "max-chars");
+  if (parsed > MAX_DEEP_OUT_CHARS) {
+    throw new Error(`Flag '--max-chars' exceeds 512 KB ceiling (${MAX_DEEP_OUT_CHARS} chars; received: '${raw}').`);
   }
   return parsed;
 }
@@ -340,7 +401,19 @@ function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, { 
     throw err;
   }
   if (asJson) {
-    console.log(JSON.stringify({ ...payload, outputPath: safeOutPath }, null, 2));
+    const { steps, items, sessions, step, data, ...compactMeta } = payload;
+    console.log(
+      JSON.stringify(
+        {
+          ...compactMeta,
+          outputPath: safeOutPath,
+          bytesWritten: Buffer.byteLength(fileContent, "utf8"),
+          charsWritten: fileContent.length
+        },
+        null,
+        2
+      )
+    );
   } else {
     console.log(customMessage || `[OK] Wrote ${label} (${text.length} chars) to: ${safeOutPath}`);
   }
@@ -357,20 +430,24 @@ async function handleTranscriptCommand(argv) {
   }
 
   const rest = argv.slice(1);
+  pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
 
   if (sub === "read" || sub === "outline" || sub === "summary") {
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
     const { opts, positional } = parseFlags(rest, {
       booleans: new Set(["include-thinking", "outline", "summary", "include-tools", "full-args", "full", "json"]),
       values: new Set(["id", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "max-chars", "out", "output", "file"])
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
+      consumeTranscriptAccessGrant({ subcommand: sub });
       printHelp();
       process.exit(0);
     }
     if (opts.id === undefined && positional.length === 1) {
       opts.id = positional.shift();
     }
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
     }
@@ -381,11 +458,14 @@ async function handleTranscriptCommand(argv) {
     const effectiveMaxChars = parsedMaxChars !== undefined
       ? parsedMaxChars
       : (safeOutPath && !isFull ? MAX_DEEP_OUT_CHARS : undefined);
-    const limit = parseOptionalInt(opts.limit, "limit");
+    const limit = parsePositiveInt(opts.limit, "limit");
 
     if (sub === "outline" || sub === "summary" || opts.outline || opts.summary) {
-      const startStep = parseOptionalInt(opts.start, "start");
-      const endStep = parseOptionalInt(opts.end, "end");
+      const startStep = parseNonNegInt(opts.start, "start");
+      const endStep = parseNonNegInt(opts.end, "end");
+      if (startStep !== undefined && endStep !== undefined && endStep < startStep) {
+        throw new Error(`Invalid step range '--start ${startStep} --end ${endStep}': '--end' must be >= '--start'.`);
+      }
       const res = await queryTranscript({
         conversationId: opts.id,
         filePath: explicitFile,
@@ -420,8 +500,8 @@ async function handleTranscriptCommand(argv) {
       throw new Error(`Invalid --mode '${mode}' for 'transcript read' (expected 'compact' or 'full').`);
     }
     const rawLastTurns = opts["last-turns"] !== undefined ? opts["last-turns"] : (opts.last !== undefined ? opts.last : opts.tail);
-    const lastTurns = parseOptionalInt(rawLastTurns, "last-turns");
-    const offset = parseOptionalInt(opts.offset, "offset");
+    const lastTurns = parseNonNegInt(rawLastTurns, "last-turns");
+    const offset = parseNonNegInt(opts.offset, "offset");
 
     const res = await readTranscript({
       conversationId: opts.id,
@@ -451,21 +531,17 @@ async function handleTranscriptCommand(argv) {
   }
 
   if (sub === "query" || sub === "grep" || sub === "search" || sub === "find" || sub === "tools") {
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
     const { opts, positional } = parseFlags(rest, {
       booleans: new Set(["summary", "outline", "include-tools", "full-args", "include-thinking", "full", "json"]),
       values: new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "last", "tail", "limit", "field", "max-chars", "out", "output", "file"])
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
+      consumeTranscriptAccessGrant({ subcommand: sub });
       printHelp();
       process.exit(0);
     }
-    const isFull = Boolean(opts.full);
-    const { rawOut, safeOutPath } = resolveOutFlag(opts);
-    const parsedMaxChars = parseMaxCharsFlag(opts);
-    const effectiveMaxChars = parsedMaxChars !== undefined
-      ? parsedMaxChars
-      : (safeOutPath && !isFull ? MAX_DEEP_OUT_CHARS : undefined);
     if (sub === "grep" || sub === "search" || sub === "find") {
       opts["include-tools"] = true;
     }
@@ -473,7 +549,7 @@ async function handleTranscriptCommand(argv) {
       if (!opts.roles) opts.roles = "assistant";
       if (!opts.field) opts.field = "tool_args";
       opts["include-tools"] = true;
-      if (opts.limit === undefined) opts.limit = (isFull || safeOutPath) ? "2000" : "500";
+      if (opts.limit === undefined) opts.limit = (Boolean(opts.full) || opts.out !== undefined || opts.output !== undefined) ? "2000" : "500";
       if (opts.start === undefined && opts.last === undefined && opts["last-turns"] === undefined && opts.tail === undefined) {
         opts.start = "0";
         if (opts.end === undefined) opts.end = "999999";
@@ -485,6 +561,13 @@ async function handleTranscriptCommand(argv) {
     if (opts.id === undefined && positional.length >= 1) {
       opts.id = positional.shift();
     }
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
+    const isFull = Boolean(opts.full);
+    const { rawOut, safeOutPath } = resolveOutFlag(opts);
+    const parsedMaxChars = parseMaxCharsFlag(opts);
+    const effectiveMaxChars = parsedMaxChars !== undefined
+      ? parsedMaxChars
+      : (safeOutPath && !isFull ? MAX_DEEP_OUT_CHARS : undefined);
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
     }
@@ -493,11 +576,14 @@ async function handleTranscriptCommand(argv) {
       throw new Error(`Invalid --mode '${mode}' for 'transcript query' (expected 'auto', 'compact', or 'full').`);
     }
     const explicitFile = validateExplicitFileFlag(opts.file);
-    const startStep = parseOptionalInt(opts.start, "start");
-    const endStep = parseOptionalInt(opts.end, "end");
+    const startStep = parseNonNegInt(opts.start, "start");
+    const endStep = parseNonNegInt(opts.end, "end");
+    if (startStep !== undefined && endStep !== undefined && endStep < startStep) {
+      throw new Error(`Invalid step range '--start ${startStep} --end ${endStep}': '--end' must be >= '--start'.`);
+    }
     const rawLastTurns = opts["last-turns"] !== undefined ? opts["last-turns"] : (opts.last !== undefined ? opts.last : opts.tail);
-    const lastTurns = parseOptionalInt(rawLastTurns, "last-turns");
-    const maxResults = parseOptionalInt(opts.limit, "limit");
+    const lastTurns = parseNonNegInt(rawLastTurns, "last-turns");
+    const maxResults = parsePositiveInt(opts.limit, "limit");
     const roles = opts.roles
       ? opts.roles.split(",").map((r) => r.trim()).filter(Boolean)
       : ["all"];
@@ -538,12 +624,14 @@ async function handleTranscriptCommand(argv) {
   }
 
   if (sub === "step") {
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
     const { opts, positional } = parseFlags(rest, {
       booleans: new Set(["json", "full"]),
       values: new Set(["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "line-start", "line-end", "max-chars", "out", "output", "file"])
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
+      consumeTranscriptAccessGrant({ subcommand: sub });
       printHelp();
       process.exit(0);
     }
@@ -553,21 +641,19 @@ async function handleTranscriptCommand(argv) {
     if (opts.id === undefined && positional.length >= 1) {
       opts.id = positional.shift();
     }
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript step': ${positional.join(" ")}`);
     }
-    const startStep = parseOptionalInt(opts.start, "start");
-    const endStep = parseOptionalInt(opts.end, "end");
-    const tailLines = parseOptionalInt(opts["tail-lines"] !== undefined ? opts["tail-lines"] : opts.tail, "tail");
-    const headLines = parseOptionalInt(opts["head-lines"] !== undefined ? opts["head-lines"] : opts.head, "head");
-    const lineStart = parseOptionalInt(opts["line-start"], "line-start");
-    const lineEnd = parseOptionalInt(opts["line-end"], "line-end");
-    if (lineStart !== undefined && lineStart <= 0) {
-      throw new Error(`Flag '--line-start' must be a positive 1-indexed integer (received: '${opts["line-start"]}').`);
+    const startStep = parseNonNegInt(opts.start, "start");
+    const endStep = parseNonNegInt(opts.end, "end");
+    if (startStep !== undefined && endStep !== undefined && endStep < startStep) {
+      throw new Error(`Invalid step range '--start ${startStep} --end ${endStep}': '--end' must be >= '--start'.`);
     }
-    if (lineEnd !== undefined && lineEnd <= 0) {
-      throw new Error(`Flag '--line-end' must be a positive 1-indexed integer (received: '${opts["line-end"]}').`);
-    }
+    const tailLines = parsePositiveInt(opts["tail-lines"] !== undefined ? opts["tail-lines"] : opts.tail, "tail");
+    const headLines = parsePositiveInt(opts["head-lines"] !== undefined ? opts["head-lines"] : opts.head, "head");
+    const lineStart = parsePositiveInt(opts["line-start"], "line-start");
+    const lineEnd = parsePositiveInt(opts["line-end"], "line-end");
     if (lineStart !== undefined && lineEnd !== undefined && lineEnd < lineStart) {
       throw new Error(`Invalid line slice '--line-start ${lineStart} --line-end ${lineEnd}': '--line-end' must be >= '--line-start'.`);
     }

@@ -1497,6 +1497,101 @@ try {
     assert.match(expErg.text, /Turn 0 clean payload/);
 
     console.log("✓ Two-tier ergonomics, Tier A inline bounds, Tier B --full/--line-start/--max-chars/--out, pagination cursors & sanitization verified");
+
+    // 9. PR #7 audit regressions
+    console.log("\n--- 9. PR #7 Audit Regressions (UTF-8 bounds, duplicate collapse, validation, --out --json, spill tags) ---");
+
+    // 9.1 UTF-8 byte budget: multi-byte glyphs must not push inline output past ~10 KB
+    const convUtf = "conv-utf8-bounds";
+    const utfLogs = path.join(brainDir, convUtf, ".system_generated", "logs");
+    fs.mkdirSync(utfLogs, { recursive: true });
+    const utfLines = [];
+    for (let s = 0; s < 40; s++) {
+      utfLines.push(JSON.stringify({ step_index: s * 2, type: "USER_INPUT", created_at: "2026-11-17T10:00:00Z", content: `u${s} ` + "─✓→".repeat(300) }));
+      utfLines.push(JSON.stringify({ step_index: s * 2 + 1, type: "PLANNER_RESPONSE", created_at: "2026-11-17T10:00:01Z", content: "答".repeat(700) }));
+    }
+    fs.writeFileSync(path.join(utfLogs, "transcript.jsonl"), utfLines.join("\n") + "\n");
+    const utfRead = runCli(["transcript", "read", "--id", convUtf, "--last-turns", "40"]);
+    assert.equal(utfRead.status, 0);
+    assert.ok(Buffer.byteLength(utfRead.stdout, "utf8") <= 10000, `UTF-8 read must stay <= 10000 bytes, got ${Buffer.byteLength(utfRead.stdout, "utf8")}`);
+    const utfOutline = runCli(["transcript", "outline", "--id", convUtf]);
+    assert.equal(utfOutline.status, 0);
+    assert.ok(Buffer.byteLength(utfOutline.stdout, "utf8") <= 10000, "UTF-8 outline must stay <= 10000 bytes");
+
+    // 9.2 Oversized single step in tools/query --field must stay inline-bounded
+    const convBig = "conv-oversized-single";
+    const bigLogs = path.join(brainDir, convBig, ".system_generated", "logs");
+    fs.mkdirSync(bigLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(bigLogs, "transcript.jsonl"),
+      JSON.stringify({ step_index: 0, type: "PLANNER_RESPONSE", created_at: "2026-11-17T10:00:00Z", content: "x".repeat(20000), tool_calls: [{ name: "run_command", args: { CommandLine: "echo " + "Z".repeat(20000) } }] }) + "\n"
+    );
+    const bigTools = runCli(["transcript", "tools", "--id", convBig, "--mode", "compact"]);
+    assert.equal(bigTools.status, 0);
+    assert.ok(Buffer.byteLength(bigTools.stdout, "utf8") <= 10000, "tools on an oversized single step must stay inline-bounded");
+
+    // 9.3 Distinct tool calls sharing a displayed prefix are not collapsed; true duplicates are
+    const { formatCompactToolList } = await import("../lib/transcript-core.mjs");
+    const distinct = formatCompactToolList([
+      { name: "read_file", args: { Path: "a.mjs", StartLine: 1, EndLine: 150 } },
+      { name: "read_file", args: { Path: "a.mjs", StartLine: 151, EndLine: 300 } }
+    ]);
+    assert.ok(!distinct.includes("(x2)"), "distinct read_file slices must not collapse");
+    const dup = formatCompactToolList([
+      { name: "read_file", args: { Path: "a.mjs", StartLine: 1, EndLine: 150 } },
+      { name: "read_file", args: { Path: "a.mjs", StartLine: 1, EndLine: 150 } }
+    ]);
+    assert.ok(dup.includes("(x2)"), "identical read_file calls must collapse");
+
+    // 9.4 stripSummaryStepBoilerplate: prose-only boilerplate yields empty, Windows spill path, dialogue untouched in read
+    assert.equal(
+      stripSummaryStepBoilerplate("Created At: 2026-11-17T12:00:00-05:00\nCompleted At: 2026-11-17T12:00:01-05:00\nCommand exited with code 0."),
+      ""
+    );
+    assert.equal(
+      stripSummaryStepBoilerplate("The tool's output was truncated due to being too long. You can find the full output in a file at file:///C:/x/.system_generated/steps/7/output.txt.\nHere is a preview:\nBODY"),
+      "[spill: steps/7] BODY"
+    );
+
+    // 9.5 CLI validation of integer/range flags
+    for (const badArgs of [
+      ["transcript", "read", "--id", convErg, "--limit", "0"],
+      ["transcript", "read", "--id", convErg, "--offset", "-1"],
+      ["transcript", "read", "--id", convErg, "--last-turns", ""],
+      ["transcript", "outline", "--id", convErg, "--start", "50", "--end", "10"],
+      ["transcript", "query", "--id", convErg, "--start", "-1"],
+      ["transcript", "step", "--id", convErg, "--step", "1", "--head", "0"],
+      ["transcript", "step", "--id", convErg, "--step", "1", "--tail", "-2"],
+      ["transcript", "step", "--id", convErg, "--step", "1", "--max-chars", "999999999"],
+      ["transcript", "read", "--help=true"]
+    ]) {
+      const badRes = runCli(badArgs);
+      assert.notEqual(badRes.status, 0, `Must fail closed: ${badArgs.join(" ")}`);
+    }
+
+    // 9.6 --out + --json keeps stdout compact (no steps/items payloads)
+    const jsonOut = path.join(ergOutDir, "json_out.json");
+    const jsonOutRes = runCli(["transcript", "read", "--id", convErg, "--full", "--mode", "full", "--last-turns", "8", "--out", jsonOut, "--json"]);
+    assert.equal(jsonOutRes.status, 0);
+    const jsonOutStdout = JSON.parse(jsonOutRes.stdout);
+    assert.equal(jsonOutStdout.outputPath, jsonOut);
+    assert.ok(jsonOutStdout.steps === undefined && jsonOutStdout.items === undefined, "--out --json stdout must omit raw step payloads");
+    assert.ok(jsonOutRes.stdout.length < 2000, "--out --json stdout must stay compact");
+    assert.ok(Array.isArray(JSON.parse(fs.readFileSync(jsonOut, "utf8")).steps), "--out --json file keeps the full payload");
+
+    // 9.7 --out rejects UNC / device paths and hooks.json; missing tool_args key reports not present; line slice beyond end
+    for (const badOut of ["//server/share/leak.md", "\\\\server\\share\\leak.md", path.join(ergOutDir, "hooks.json")]) {
+      const badOutRes = runCli(["transcript", "read", "--id", convErg, "--out", badOut]);
+      assert.notEqual(badOutRes.status, 0, `Unsafe --out must fail closed: ${badOut}`);
+    }
+    const missingKey = runCli(["transcript", "step", "--id", convErg, "--step", String(richGenStep - 1), "--field", "tool_args:NoSuchKey"]);
+    assert.equal(missingKey.status, 0);
+    assert.ok(!/\bundefined\b/.test(missingKey.stdout), "missing tool_args key must not print 'undefined'");
+    const beyond = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--field", "tool_args:CommandLine", "--line-start", "9999"]);
+    assert.equal(beyond.status, 0);
+    assert.match(beyond.stdout, /No lines in requested range/);
+
+    console.log("✓ PR #7 audit regressions verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

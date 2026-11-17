@@ -1990,6 +1990,53 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
     );
     assert.equal(selfStepOtherDeny.decision, "deny", "self-only caller passing --id <other> with new step flags must be denied");
 
+    // PR #7 audit regressions: self-only --out confinement, unexpanded shell tokens, hooks.json, UNC, quoted `current`
+    for (const badSelfOut of [
+      `agy-context transcript read --out ${path.join(cliBrainRoot, pA, "notes.md")}`,
+      "agy-context transcript read --out AGENTS.md",
+      "agy-context transcript read --out $HOME/scratch/x.md",
+      "agy-context transcript read --out ~/scratch/x.md",
+      "agy-context transcript read --out scratch/hooks.json",
+      "agy-context transcript read --out //server/share/leak.md"
+    ]) {
+      const deniedSelfOut = runHook(
+        {
+          conversationId: ergoRestricted,
+          cwd: wsDir,
+          transcriptPath: path.join(ergoRestrictedLogs, "transcript.jsonl"),
+          toolCall: { name: "run_command", args: { CommandLine: badSelfOut } }
+        },
+        cliEnv
+      );
+      assert.equal(deniedSelfOut.decision, "deny", `Unsafe self-only --out must be denied: ${badSelfOut}`);
+    }
+
+    const quotedCurrent = runHook(
+      {
+        conversationId: ergoRestricted,
+        cwd: wsDir,
+        transcriptPath: path.join(ergoRestrictedLogs, "transcript.jsonl"),
+        toolCall: { name: "run_command", args: { CommandLine: 'agy-context transcript read --id="current"' } }
+      },
+      cliEnv
+    );
+    assert.equal(quotedCurrent.decision, "allow");
+    assert.match(quotedCurrent.overwrite?.CommandLine || "", new RegExp(`--id ${ergoRestricted}$`), "quoted current must be rewritten without a dangling quote");
+
+    const queryLiteralId = runHook(
+      {
+        conversationId: ergoRestricted,
+        cwd: wsDir,
+        transcriptPath: path.join(ergoRestrictedLogs, "transcript.jsonl"),
+        toolCall: { name: "run_command", args: { CommandLine: 'agy-context transcript query "--id current"' } }
+      },
+      cliEnv
+    );
+    if (queryLiteralId.decision === "allow") {
+      assert.match(queryLiteralId.overwrite?.CommandLine || "", /"--id current"/, "query literal must not be rewritten");
+      assert.match(queryLiteralId.overwrite?.CommandLine || "", new RegExp(`--id ${ergoRestricted}`));
+    }
+
     console.log("✓ Group H regression checks passed (payload.cwd, 2>/dev/null, antigravity-cli, swarm_view, Step0>16KiB, cross-swarm isolation, query current, Wave 2 regressions)");
   } finally {
     fs.rmSync(wsDir, { recursive: true, force: true });

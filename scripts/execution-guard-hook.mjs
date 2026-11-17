@@ -1326,10 +1326,33 @@ function resolveWithExistingAncestor(targetPath) {
   return missingTail.length > 0 ? path.join(baseReal, ...missingTail) : baseReal;
 }
 
+function normalizeWinDevicePathInHook(p) {
+  let s = String(p || "");
+  if (/^\\\\\?\\UNC\\/i.test(s)) {
+    return "\\\\" + s.slice(8);
+  }
+  if (/^\\\\[?.]\\/.test(s)) {
+    return s.slice(4);
+  }
+  return s;
+}
+
+function hasUncOrDevicePrefixInHook(p) {
+  const s = String(p || "").trim();
+  return /^(?:\\\\|\/\/)/.test(s) || /^[\\/]{2}[?.][\\/]/.test(s);
+}
+
 function isProtectedExportOutPathInHook(outPath, resolvedOut) {
+  const cleanTarget = normalizeWinDevicePathInHook(resolvedOut);
+  if (hasUncOrDevicePrefixInHook(outPath) || hasUncOrDevicePrefixInHook(cleanTarget) || /^\\/.test(String(outPath || "").trim())) {
+    return true;
+  }
   const normCase = (p) => (os.platform() === "win32" || os.platform() === "darwin" ? p.toLowerCase() : p);
   const isInsideCaseAware = (target, root) => {
-    const rel = path.relative(normCase(root), normCase(target));
+    const tNorm = normalizeWinDevicePathInHook(target);
+    const rNorm = normalizeWinDevicePathInHook(root);
+    if (hasUncOrDevicePrefixInHook(tNorm) || hasUncOrDevicePrefixInHook(rNorm)) return false;
+    const rel = path.relative(normCase(rNorm), normCase(tNorm));
     return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
   };
 
@@ -1344,10 +1367,15 @@ function isProtectedExportOutPathInHook(outPath, resolvedOut) {
   } catch {}
 
   const realTarget = resolveWithExistingAncestor(resolvedOut);
+  const realNorm = realTarget.replace(/\\/g, "/");
   if (
+    hasUncOrDevicePrefixInHook(realTarget) ||
     isProtectedInternalState(realTarget) ||
     isProtectedBenchmarkPath(realTarget) ||
-    /(?:^|[\\/])\.git(?:[\\/]|$)/i.test(realTarget)
+    /(?:^|[\\/])\.git(?:[\\/]|$)/i.test(realTarget) ||
+    /\/\.gemini\/(?:config|antigravity(?:-cli|-ide)?)\/(?:hooks\.json(?:\.bak)?|mcp_config\.json|config\.json)$/i.test(realNorm) ||
+    /\/\.gemini\/config\/scripts\/execution-guard-hook\.mjs$/i.test(realNorm) ||
+    /(?:^|\/)hooks\.json$/i.test(realNorm)
   ) {
     return true;
   }
@@ -1357,10 +1385,41 @@ function isProtectedExportOutPathInHook(outPath, resolvedOut) {
     getStateDir(),
     path.join(profileHome, ".gemini", "config"),
     path.join(profileHome, ".gemini", "antigravity", "bin"),
-    path.join(profileHome, ".gemini", "antigravity", "mcp")
+    path.join(profileHome, ".gemini", "antigravity", "mcp"),
+    path.join(profileHome, ".gemini", "antigravity-cli", "bin"),
+    path.join(profileHome, ".gemini", "antigravity-cli", "mcp"),
+    path.join(profileHome, ".gemini", "antigravity-ide", "bin"),
+    path.join(profileHome, ".gemini", "antigravity-ide", "mcp")
   ].map((p) => resolveWithExistingAncestor(p));
 
   return protectedRoots.some((pr) => pr && isInsideCaseAware(realTarget, pr));
+}
+
+function isSafeSelfOnlyOutPathInHook(outPath, resolvedOut, convId) {
+  if (!convId || convId === "global") return false;
+  const realTarget = resolveWithExistingAncestor(resolvedOut);
+  if (!realTarget || hasUncOrDevicePrefixInHook(outPath) || hasUncOrDevicePrefixInHook(realTarget)) {
+    return false;
+  }
+  const normCase = (p) => (os.platform() === "win32" || os.platform() === "darwin" ? p.toLowerCase() : p);
+  const isInside = (target, root) => {
+    const tNorm = normalizeWinDevicePathInHook(target);
+    const rNorm = normalizeWinDevicePathInHook(root);
+    if (!tNorm || !rNorm) return false;
+    const rel = path.relative(normCase(rNorm), normCase(tNorm));
+    return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+  };
+  const wsScratch = resolveWithExistingAncestor(path.join(resolveHookPath("."), "scratch"));
+  if (isInside(realTarget, wsScratch)) {
+    return true;
+  }
+  for (const brainDir of getBrainDirs()) {
+    const ownScratch = resolveWithExistingAncestor(path.join(brainDir, String(convId), "scratch"));
+    if (isInside(realTarget, ownScratch)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isPathInsideAnyBrainDir(candidatePath, selfConvId = null) {
@@ -2218,7 +2277,7 @@ function canCallerMutateTranscriptAccess(convId) {
   return true;
 }
 
-function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
+function getTranscriptValueFlagsForSubcommand(subcommand) {
   const READ_VALUE_FLAGS = new Set([
     "id",
     "mode",
@@ -2273,18 +2332,26 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
   const LIST_VALUE_FLAGS = new Set(["limit", "parent"]);
   const EXPORT_VALUE_FLAGS = new Set(["id", "parent", "start", "end", "limit", "out", "output", "file"]);
 
-  let valueFlags = READ_VALUE_FLAGS;
   if (subcommand === "query" || subcommand === "grep" || subcommand === "search" || subcommand === "find" || subcommand === "tools") {
-    valueFlags = QUERY_VALUE_FLAGS;
-  } else if (subcommand === "step") {
-    valueFlags = STEP_VALUE_FLAGS;
-  } else if (subcommand === "health" || subcommand === "stats" || subcommand === "info") {
-    valueFlags = HEALTH_VALUE_FLAGS;
-  } else if (subcommand === "list" || subcommand === "ls") {
-    valueFlags = LIST_VALUE_FLAGS;
-  } else if (subcommand === "export" || subcommand === "dump") {
-    valueFlags = EXPORT_VALUE_FLAGS;
+    return QUERY_VALUE_FLAGS;
   }
+  if (subcommand === "step") {
+    return STEP_VALUE_FLAGS;
+  }
+  if (subcommand === "health" || subcommand === "stats" || subcommand === "info") {
+    return HEALTH_VALUE_FLAGS;
+  }
+  if (subcommand === "list" || subcommand === "ls") {
+    return LIST_VALUE_FLAGS;
+  }
+  if (subcommand === "export" || subcommand === "dump") {
+    return EXPORT_VALUE_FLAGS;
+  }
+  return READ_VALUE_FLAGS;
+}
+
+function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
+  const valueFlags = getTranscriptValueFlagsForSubcommand(subcommand);
 
   const opts = {};
   const idValues = [];
@@ -2570,12 +2637,16 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     if (Array.isArray(targetInfo.outPaths) && targetInfo.outPaths.length > 0) {
       for (const outPath of targetInfo.outPaths) {
         const resolvedOut = resolveHookPath(outPath);
+        const hasUnexpandedShellToken = /^~(?:[\\/]|$)/.test(outPath) || /\$|%[A-Za-z_][A-Za-z0-9_]*%/.test(outPath);
         if (
+          hasUnexpandedShellToken ||
           hasDotDotTraversal(outPath) ||
           isProtectedInternalState(outPath) ||
           isProtectedInternalState(resolvedOut) ||
           isProtectedBenchmarkPath(outPath) ||
           isProtectedBenchmarkPath(resolvedOut) ||
+          isProtectedGovernanceFileMutation(outPath, convId) ||
+          isProtectedGovernanceFileMutation(resolvedOut, convId) ||
           hasGovernanceMutationInText(`> ${outPath}`, convId) ||
           hasGovernanceMutationInText(`> ${resolvedOut}`, convId) ||
           isProtectedExportOutPathInHook(outPath, resolvedOut) ||
@@ -2584,7 +2655,22 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
           return {
             matched: true,
             allowed: false,
-            reason: `Antigravity Execution Governance: '--out' path '${outPath}' in 'agy-context transcript ${subcommand}' must be a safe .md/.json/.txt artifact outside protected internal state, governance, and benchmark directories.`
+            reason: `Antigravity Execution Governance: '--out' path '${outPath}' in 'agy-context transcript ${subcommand}' must be a literal (no shell variables, '~', UNC, or device prefixes) safe .md/.json/.txt artifact outside protected internal state, governance, and benchmark directories.`
+          };
+        }
+        if (accessEval.mode === "self-only" && !isSafeSelfOnlyOutPathInHook(outPath, resolvedOut, convId)) {
+          return {
+            matched: true,
+            allowed: false,
+            isAccessDenial: true,
+            reason: buildTranscriptAccessDenial({
+              subcommand,
+              mode: "self-only",
+              source: accessEval.source,
+              callerConvId: convId,
+              rosterName: accessEval.rosterName,
+              detail: `'--out' must stay under '<workspace>/scratch/' or '<brainDir>/${convId}/scratch/' in self-only mode (received '${outPath}').`
+            })
           };
         }
       }
@@ -4401,8 +4487,8 @@ try {
 
     // In self-only mode, deterministically inject --id <convId> when --id and --file were omitted (or --id current / positional current)
     if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectSelfId) {
-      if (/--id(?:=|\s+)["']?current["']?\b/i.test(effectiveCmd)) {
-        effectiveCmd = effectiveCmd.replace(/--id(?:=|\s+)["']?current["']?\b/gi, `--id ${agyTranscriptCheck.injectSelfId}`);
+      if (/(^|\s)--id(?:=|\s+)(["']?)current\2(?=\s|$)/i.test(effectiveCmd)) {
+        effectiveCmd = effectiveCmd.replace(/(^|\s)--id(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--id ${agyTranscriptCheck.injectSelfId}`);
       } else if (agyTranscriptCheck.targetWasCurrentPlaceholder) {
         const updatedCmd = effectiveCmd.replace(
           /(^|\s)(["']?)current\2(?=(?:\s|$)(?!.*\s["']?current["']?(?:\s|$)))/i,
@@ -4414,7 +4500,7 @@ try {
       }
     }
     if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectParentId) {
-      effectiveCmd = effectiveCmd.replace(/--parent(?:=|\s+)["']?current["']?\b/gi, `--parent ${agyTranscriptCheck.injectParentId}`);
+      effectiveCmd = effectiveCmd.replace(/(^|\s)--parent(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--parent ${agyTranscriptCheck.injectParentId}`);
     }
 
     const isRtkRead = isRtkReadCommand(effectiveCmd);
