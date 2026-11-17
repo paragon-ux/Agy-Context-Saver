@@ -1882,6 +1882,23 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
     assert.match(unboundedLargeSpill.reason, /--head-lines 150/);
     assert.match(unboundedLargeSpill.reason, /--tail-lines 150/);
 
+    // Filter --level/-l does not bound line counts and must not bypass >45 KiB spillover protection
+    for (const nonBoundFlag of ["-l none", "--level minimal", "--level=none", "-n"]) {
+      const levelBypassRes = runHook(
+        {
+          conversationId: "spill-clamp-level",
+          cwd: wsDir,
+          toolCall: { name: "run_command", args: { CommandLine: `rtk read ${nonBoundFlag} "${largeSpillFile}"`, WaitMsBeforeAsync: 5000 } }
+        },
+        cliEnv
+      );
+      assert.equal(
+        levelBypassRes.decision,
+        "deny",
+        `Non-line-bounding 'rtk read ${nonBoundFlag}' on >45 KiB spillover must still deny (ACS-HOOK-GREP-CLAMP)`
+      );
+    }
+
     const boundedHeadLargeSpill = runHook(
       {
         conversationId: "spill-clamp-head",

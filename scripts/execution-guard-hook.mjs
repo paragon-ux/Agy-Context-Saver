@@ -4289,6 +4289,7 @@ try {
 
     // Raw-command internal state checks (skipping heredoc bodies, echo/printf text, and grep patterns)
     let isSpillover = false;
+    let spilloverTok = null;
     let taskMatch = null;
     const pendingWrittenSet = collectSegmentWrittenTargets(segments);
     if (!agyTranscriptCheck.allowed) {
@@ -4300,7 +4301,7 @@ try {
       });
       const inspectableCombined = inspectableTexts.join("\n");
       const singleTokens = segments.length === 1 ? tokenizeShellWords(segments[0].text) : [];
-      const spilloverTok = findStepSpilloverToken(singleTokens);
+      spilloverTok = findStepSpilloverToken(singleTokens);
       isSpillover = Boolean(spilloverTok);
       taskMatch = getTaskLogMatch(inspectableCombined);
 
@@ -4419,13 +4420,29 @@ try {
 
     // Fail loud with explicit guidance instead of silently injecting --tail-lines 150 on >45 KiB spillover/task logs (ACS-HOOK-GREP-CLAMP)
     if (isRtkRead && (isSpillover || taskMatch)) {
-      const hasLineBoundFlag = /(?:^|\s)(?:--head-lines|--tail-lines|--max-lines|-m|--level|-l)(?:=|\s|$)/.test(effectiveCmd);
+      const hasLineBoundFlag = /(?:^|\s)(?:--head-lines|--tail-lines|--max-lines|-m)(?:=|\s|$)/.test(effectiveCmd);
       if (!hasLineBoundFlag) {
         const rtkTokens = tokenizeShellWords(effectiveCmd);
-        const pathTok = rtkTokens.slice(2).find((t) => !t.startsWith("-"));
-        if (pathTok) {
+        const candidates = [];
+        if (spilloverTok) candidates.push(spilloverTok);
+        if (taskMatch?.token) candidates.push(taskMatch.token);
+        for (let i = 2; i < rtkTokens.length; i++) {
+          const tok = rtkTokens[i];
+          if (tok === "--") {
+            for (let j = i + 1; j < rtkTokens.length; j++) candidates.push(rtkTokens[j]);
+            break;
+          }
+          if (tok === "-l" || tok === "--level") {
+            i++;
+            continue;
+          }
+          if (!tok.startsWith("-")) {
+            candidates.push(tok);
+          }
+        }
+        for (const candidateTok of new Set(candidates)) {
           try {
-            const st = fs.statSync(resolveHookPath(pathTok));
+            const st = fs.statSync(resolveHookPath(candidateTok));
             if (st.isFile() && st.size > 46080) {
               const kib = (st.size / 1024).toFixed(1);
               respond({

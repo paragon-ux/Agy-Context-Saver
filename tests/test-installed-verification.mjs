@@ -236,13 +236,29 @@ assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
       assert.match(dynPaths.mcpBakPath, /mcp_config\.json\.agy-context-saver\.bak$/);
       assert.ok(fs.existsSync(agySquadBak), "Companion mcp_config.json.agy-squad.bak must remain untouched");
 
-      // S2-SCRIPT-006: malformed hooks.json causes runUninstall() to fail closed BEFORE removing pluginDest or destHook
-      const savedHooks = fs.readFileSync(dynPaths.hooksJsonPath, "utf8");
-      fs.writeFileSync(dynPaths.hooksJsonPath, "{ malformed json", "utf8");
-      await assert.rejects(() => runUninstall({ silent: true }), /Configuration error|invalid JSON/i);
-      assert.ok(fs.existsSync(dynPaths.pluginDest), "Fail-closed runUninstall must preserve pluginDest when hooks.json is malformed (S2-SCRIPT-006)");
-      assert.ok(fs.existsSync(dynPaths.destHook), "Fail-closed runUninstall must preserve destHook when hooks.json is malformed (S2-SCRIPT-006)");
-      fs.writeFileSync(dynPaths.hooksJsonPath, savedHooks, "utf8");
+      // S2-SCRIPT-006: malformed hooks.json, mcp_config.json, and config.json all fail closed BEFORE removing pluginDest or destHook
+      for (const [cfgPath, badBody, label] of [
+        [dynPaths.hooksJsonPath, "{ malformed json", "hooks.json"],
+        [dynPaths.mcpJsonPath, "{ malformed mcp", "mcp_config.json"],
+        [dynPaths.configJsonPath, "[]", "config.json"]
+      ]) {
+        const prevExists = fs.existsSync(cfgPath);
+        const savedBody = prevExists ? fs.readFileSync(cfgPath, "utf8") : null;
+        fs.writeFileSync(cfgPath, badBody, "utf8");
+        await assert.rejects(() => runUninstall({ silent: true }), /Configuration error|invalid JSON|must contain a JSON object/i);
+        assert.ok(fs.existsSync(dynPaths.pluginDest), `Fail-closed runUninstall must preserve pluginDest when ${label} is malformed (S2-SCRIPT-006)`);
+        assert.ok(fs.existsSync(dynPaths.destHook), `Fail-closed runUninstall must preserve destHook when ${label} is malformed (S2-SCRIPT-006)`);
+        if (prevExists) fs.writeFileSync(cfgPath, savedBody, "utf8");
+        else fs.rmSync(cfgPath, { force: true });
+      }
+      // Array config.json.plugins must also fail closed in runInstall() without corrupting config.json
+      const { runInstall } = await import("../scripts/install-register.mjs");
+      const savedConfigBody = fs.existsSync(dynPaths.configJsonPath) ? fs.readFileSync(dynPaths.configJsonPath, "utf8") : null;
+      fs.writeFileSync(dynPaths.configJsonPath, JSON.stringify({ plugins: ["antislop"] }), "utf8");
+      await assert.rejects(() => runInstall({ silent: true }), /property "plugins" must be a JSON object/i);
+      assert.deepEqual(JSON.parse(fs.readFileSync(dynPaths.configJsonPath, "utf8")), { plugins: ["antislop"] });
+      if (savedConfigBody !== null) fs.writeFileSync(dynPaths.configJsonPath, savedConfigBody, "utf8");
+      else fs.rmSync(dynPaths.configJsonPath, { force: true });
 
       // S2-SCRIPT-005 & S2-SCRIPT-011: broken pluginDest, broken destHook, and broken shim symlinks detected & unlinked
       let madeSymlinks = false;

@@ -529,7 +529,7 @@ export async function runInstall(options = {}) {
   const validatedMcp = parseAndValidateJsonConfig(mcpJsonPath, "mcp");
   const validatedConfig = parseAndValidateJsonConfig(configJsonPath, "config");
 
-  const existing = detectExistingInstallation();
+  const existing = detectExistingInstallation({ silent: Boolean(options.silent) });
 
   // If checkOnly is requested, execute strictly read-only inspection (zero disk writes, zero network calls)
   if (options.checkOnly) {
@@ -719,14 +719,24 @@ export async function runInstall(options = {}) {
 
   // 3. Ensure ~/.gemini/config/config.json enables plugin if present
   if (validatedConfig && typeof validatedConfig === "object") {
+    if (
+      validatedConfig.plugins !== undefined &&
+      (!validatedConfig.plugins || typeof validatedConfig.plugins !== "object" || Array.isArray(validatedConfig.plugins))
+    ) {
+      throw new Error(
+        `Configuration error: ${configJsonPath} property "plugins" must be a JSON object. Installation aborted to prevent data loss. Original file is unchanged.`
+      );
+    }
     const prevPluginEntry = validatedConfig.plugins?.[HOOK_KEY];
-    if (!prevPluginEntry || prevPluginEntry.enabled !== true) {
+    if (!prevPluginEntry || typeof prevPluginEntry !== "object" || Array.isArray(prevPluginEntry) || prevPluginEntry.enabled !== true) {
       const nextConfig = {
         ...validatedConfig,
         plugins: {
-          ...(validatedConfig.plugins && typeof validatedConfig.plugins === "object" ? validatedConfig.plugins : {}),
+          ...(validatedConfig.plugins && typeof validatedConfig.plugins === "object" && !Array.isArray(validatedConfig.plugins)
+            ? validatedConfig.plugins
+            : {}),
           [HOOK_KEY]: {
-            ...(prevPluginEntry && typeof prevPluginEntry === "object" ? prevPluginEntry : {}),
+            ...(prevPluginEntry && typeof prevPluginEntry === "object" && !Array.isArray(prevPluginEntry) ? prevPluginEntry : {}),
             enabled: true
           }
         }
@@ -751,7 +761,7 @@ export async function runInstall(options = {}) {
   const elapsed = (performance.now() - startTime).toFixed(1);
   const statusVerb = existing.isInstalled ? "synchronized & up-to-date" : "completed";
   log(`\nInstallation ${statusVerb} in ${elapsed}ms!\n`);
-  const postInstall = detectExistingInstallation();
+  const postInstall = detectExistingInstallation({ silent: Boolean(options.silent) });
   return { ...postInstall, isInstalled: true, elapsedMs: elapsed };
 }
 
