@@ -14,8 +14,11 @@ const root = path.resolve(path.dirname(__filename), '..');
 export function matchesPackageEntry(relativePath, normalized) {
   if (!normalized) return false;
   if (normalized.includes('*')) {
-    const escaped = normalized.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`^${escaped.replace(/\*\*|\*/g, (m) => (m === '**' ? '.*' : '[^/]*'))}$`).test(relativePath);
+    const escaped = normalized.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = escaped.replace(/\*\*\/|\*\*|\*/g, (m) =>
+      m === '**/' ? '(?:.*/)?' : m === '**' ? '.*' : '[^/]*'
+    );
+    return new RegExp(`^${pattern}$`).test(relativePath);
   }
   return relativePath === normalized || relativePath.startsWith(`${normalized}/`);
 }

@@ -327,15 +327,28 @@ assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
       assert.equal(corruptJson.isComplete, false);
       assert.equal(corruptJson.details[detailKey].corrupt, true, `S2R-SCRIPT-001: details.${detailKey}.corrupt must be true`);
       assert.ok(corruptJson.details[detailKey].error, `S2R-SCRIPT-001: details.${detailKey}.error must be populated`);
+      const directStatusJson = spawnSync(process.execPath, [installScript, "--status", "--json"], { encoding: "utf-8", env: w3Env });
+      assert.notEqual(directStatusJson.status, 0, `S2R-SCRIPT-001: direct install-register --status --json must exit non-zero on corrupt ${detailKey}`);
+      assert.equal(JSON.parse(directStatusJson.stdout).details[detailKey].corrupt, true);
       if (saved !== null) fs.writeFileSync(cfgFile, saved, "utf8");
       else fs.rmSync(cfgFile, { force: true });
     }
+    // Also verify malformed plugin hooks.json (inside copy-fallback plugin dir) surfaces hook.corrupt=true
+    const pluginLinkPath = path.join(w3Profile, ".gemini", "config", "plugins", "agy-context-saver");
+    fs.rmSync(pluginLinkPath, { recursive: true, force: true });
+    fs.mkdirSync(pluginLinkPath, { recursive: true });
+    fs.writeFileSync(path.join(pluginLinkPath, "hooks.json"), "{ malformed plugin hooks", "utf8");
+    const pluginCorruptRes = spawnSync(process.execPath, [cliScript, "status", "--json"], { encoding: "utf-8", env: w3Env });
+    assert.notEqual(pluginCorruptRes.status, 0);
+    const pluginCorruptJson = JSON.parse(pluginCorruptRes.stdout);
+    assert.equal(pluginCorruptJson.details.hook.corrupt, true);
+    assert.match(pluginCorruptJson.details.hook.error, /plugin hooks\.json/);
   } finally {
     fs.rmSync(w3Profile, { recursive: true, force: true });
   }
 }
 
-// S2R-DEP-001: release-preflight.mjs package "files" matcher handles ! negation, * / ** globs, and ./ prefixes
+// S2R-DEP-001: release-preflight.mjs package "files" matcher handles ! negation, * / ** globs, literal ?, and ./ prefixes
 {
   const { isPackageFileCovered } = await import("../scripts/release-preflight.mjs");
   const sampleFiles = ["bin/agy-context.mjs", "./docs", "!docs/reviews/**", "!docs/*.draft.md", "scripts/*.mjs"];
@@ -345,6 +358,10 @@ assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
   assert.equal(isPackageFileCovered("docs/notes.draft.md", sampleFiles), false, "S2R-DEP-001: !docs/*.draft.md must exclude matching globs");
   assert.equal(isPackageFileCovered("scripts/install-register.mjs", sampleFiles), true, "S2R-DEP-001: scripts/*.mjs must match .mjs files");
   assert.equal(isPackageFileCovered("scripts/subdir/other.mjs", sampleFiles), false, "S2R-DEP-001: single * must not cross slashes");
+  assert.equal(isPackageFileCovered("README.md", ["**/*.md"]), true, "S2R-DEP-001: **/*.md must match zero leading directories");
+  assert.equal(isPackageFileCovered("a/b", ["a/**/b"]), true, "S2R-DEP-001: a/**/b must match zero intermediate directories");
+  assert.equal(isPackageFileCovered("docs/b.md", ["docs/a?b*.md"]), false, "S2R-DEP-001: literal ? in pattern must not act as regex quantifier");
+  assert.equal(isPackageFileCovered("docs/a?b1.md", ["docs/a?b*.md"]), true);
 }
 
 hermetic.cleanup();
