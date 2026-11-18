@@ -63,7 +63,7 @@ Transcript Commands:
   agy-context transcript step   [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--head N] [--tail N] [--line-start N] [--line-end N] [--full] [--max-chars N] [--out <path>] [--json] [--file <path>]
   agy-context transcript health [--id <conv>] [--json] [--file <path>]
   agy-context transcript list   [--limit N] [--parent <id>] [--lineage] [--json]
-  agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out|--output <path>] [--file <path>] [--json]
+  agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--full] [--max-chars N] [--out|--output <path>] [--file <path>] [--json]
   agy-context transcript access [--status | --off | --on | --reset | --self-only | --mode <open|allowlist|self-only|deny> | --allow <id,@roster*...> | --deny <id,@roster*...> | --ttl <sec>] [--json]
   Aliases: grep/search/find -> query | stats/info -> health | tools -> query --roles assistant --field tool_args | outline/summary -> query --summary --include-tools | ls -> list | dump -> export | policy -> access
 
@@ -429,8 +429,12 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryE
           };
         } else if (isRead && count) {
           const first = retained[0]._fileOrd;
-          const limit = Math.min(20, first);
-          page.nextCursor = { offset: first - limit, limit };
+          if (first > 0) {
+            const limit = Math.min(MAX_BOUNDED_READ_STEPS, first);
+            page.nextCursor = { offset: 0, limit };
+          } else {
+            delete page.nextCursor;
+          }
         } else if (isRead) {
           page.nextCursor = { offset: entries.at(-1)._fileOrd, limit: 1 };
         } else if (forward) {
@@ -480,10 +484,17 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryE
 
 function serializeTranscriptResult(res, asJson, maxBytes, pageOptions) {
   if (asJson) {
-    const { text, ...payload } = res;
+    if (typeof res._serializedJson === "string") {
+      const { text, _serializedJson, _serializedMarkdown, ...payload } = res;
+      return { content: _serializedJson, metadata: payload };
+    }
+    const { text, _serializedJson, _serializedMarkdown, ...payload } = res;
     return serializeBoundedJsonPayload(payload, maxBytes, pageOptions);
   }
 
+  if (typeof res._serializedMarkdown === "string") {
+    return { content: res._serializedMarkdown };
+  }
   const content = res.text + "\n";
   if (Buffer.byteLength(content, "utf8") <= maxBytes) return { content };
   const next = Object.entries(res.nextCursor ?? {}).map(([flag, value]) => `--${flag} ${value}`).join(" ");
@@ -518,7 +529,17 @@ function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, {
 
   const bytesWritten = Buffer.byteLength(content, "utf8");
   if (asJson) {
-    const { text, steps, items, sessions, step, data, ...compactMeta } = metadata ?? res;
+    const {
+      text,
+      steps,
+      items,
+      sessions,
+      step,
+      data,
+      _serializedJson,
+      _serializedMarkdown,
+      ...compactMeta
+    } = metadata ?? res;
     console.log(JSON.stringify({
       ...compactMeta,
       outputPath: safeOutPath,
@@ -888,13 +909,15 @@ async function handleTranscriptCommand(argv) {
   }
 
   if (sub === "export" || sub === "dump") {
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
     const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["sanitized", "json"]),
-      values: new Set(["parent", "start", "end", "limit", "out", "output", "file"]),
+      booleans: new Set(["sanitized", "full", "json"]),
+      values: new Set(["parent", "start", "end", "limit", "max-chars", "out", "output", "file"]),
       multiValues: new Set(["id"])
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
+      consumeTranscriptAccessGrant({ subcommand: sub });
       printHelp();
       process.exit(0);
     }
@@ -909,6 +932,9 @@ async function handleTranscriptCommand(argv) {
     }
     const { rawOut, safeOutPath } = resolveOutFlag(opts);
     const explicitFile = validateExplicitFileFlag(opts.file);
+    const parsedMaxChars = parseMaxCharsFlag(opts);
+    const isFull = Boolean(opts.full);
+    const effectiveMaxChars = parsedMaxChars ?? (safeOutPath || isFull ? MAX_DEEP_OUTPUT_CHARS : INLINE_SAFE_CHARS);
     const startStep = parseOptionalInt(opts.start, "start");
     const endStep = parseOptionalInt(opts.end, "end");
     if (startStep !== undefined && startStep < 0) {
@@ -925,6 +951,7 @@ async function handleTranscriptCommand(argv) {
       throw new Error(`Flag '--limit' must be a positive integer (received: '${opts.limit}').`);
     }
 
+    const asJson = Boolean(opts.json);
     const res = await exportSanitizedTranscript({
       conversationIds: opts.id || [],
       parentId: opts.parent,
@@ -933,27 +960,18 @@ async function handleTranscriptCommand(argv) {
       startStep,
       endStep,
       limit,
-      maxOutputChars: safeOutPath ? 64000 : undefined,
+      maxOutputChars: effectiveMaxChars,
+      outputFormat: asJson ? "json" : "markdown",
       allowExternalPaths: false
     });
 
-    if (res.isError) {
-      emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
-    }
-
-    if (safeOutPath) {
-      writeSafeTranscriptOutFile(rawOut, safeOutPath, res, Boolean(opts.json), {
-        customMessage: `[OK] Exported sanitized L6 transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}`
-      });
-      return;
-    }
-
-    if (opts.json) {
-      const { text, ...payload } = res;
-      console.log(JSON.stringify(payload, null, 2));
-    } else {
-      console.log(res.text);
-    }
+    emitTranscriptResult(res, asJson, rawOut, safeOutPath, {
+      label: "sanitized transcript export",
+      customMessage: safeOutPath
+        ? `[OK] Exported sanitized L6 transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}`
+        : undefined,
+      maxBytes: effectiveMaxChars
+    });
     return;
   }
 

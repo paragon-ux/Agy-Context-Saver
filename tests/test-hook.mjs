@@ -2044,6 +2044,77 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
   }
 }
 
+// ============================================================================
+// GROUP I: PR #7 L46 Remediations (Tier 4 Option A Reset Parity & Export Flags)
+// ============================================================================
+console.log("\n--- Group I: Tier 4 Immutability After Reset & Export Flag Parsing ---");
+{
+  resetState();
+  const brainI = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain");
+  const writeTrI = (id, steps) => {
+    const dir = path.join(brainI, id, ".system_generated", "logs");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "transcript.jsonl"), steps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+  };
+  const coordI = "coord-group-i";
+  const specDenyI = "spec-deny-group-i";
+  writeTrI(coordI, [{ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "Coord I" }]);
+  writeTrI(specDenyI, [{
+    step_index: 0,
+    source: "SYSTEM",
+    type: "SYSTEM_MESSAGE",
+    content: `[Message] timestamp=2026-11-18T00:00:00Z sender=${coordI} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #1 for @i-spec1):\n[agy-transcript-access: deny]\nDo work`
+  }]);
+
+  // 1. Denied at baseline
+  assert.equal(
+    runHook({ conversationId: specDenyI, toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list --limit 1" } } }).decision,
+    "deny"
+  );
+
+  // 2. Temporary Tier 3 --allow permits read + export with --full and --max-chars before/after flags
+  assert.equal(
+    runHook({ conversationId: coordI, toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --mode allowlist --allow @i-spec*" } } }).decision,
+    "allow"
+  );
+  spawnSync(process.execPath, [path.resolve(repoRoot, "bin/agy-context.mjs"), "transcript", "access", "--mode", "allowlist", "--allow", "@i-spec*"], { encoding: "utf-8", env: process.env });
+
+  const exportWithMaxCharsHook = runHook({
+    conversationId: specDenyI,
+    cwd: process.cwd(),
+    toolCall: {
+      name: "run_command",
+      args: { CommandLine: `agy-context transcript export --max-chars 50000 ${specDenyI} --sanitized --full --json` }
+    }
+  });
+  assert.equal(exportWithMaxCharsHook.decision, "allow", "Allowlisted child running export with --max-chars before <id> and --full must be parsed & allowed");
+
+  // 3. Coordinator resets policy: status discloses remaining Tier 4 deny child, and child immediately drops back to Tier 4 deny
+  assert.equal(
+    runHook({ conversationId: coordI, toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --reset --json" } } }).decision,
+    "allow"
+  );
+  const resetExecI = spawnSync(
+    process.execPath,
+    [path.resolve(repoRoot, "bin/agy-context.mjs"), "transcript", "access", "--reset", "--json"],
+    { encoding: "utf-8", env: { ...process.env, GEMINI_CONVERSATION_ID: coordI } }
+  );
+  assert.equal(resetExecI.status, 0, resetExecI.stderr);
+  const resetPayloadI = JSON.parse(resetExecI.stdout);
+  assert.equal(resetPayloadI.mode, "open");
+  assert.equal(resetPayloadI.launchRestrictions.restrictedCount, 1);
+  assert.equal(resetPayloadI.launchRestrictions.sessions[0].conversationId, specDenyI);
+
+  const deniedAfterResetHook = runHook({
+    conversationId: specDenyI,
+    toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript export --max-chars 50000 ${specDenyI} --sanitized` } }
+  });
+  assert.equal(deniedAfterResetHook.decision, "deny", "Tier 4 launch-directive deny must remain immutable after parent access --reset");
+  assert.match(deniedAfterResetHook.reason || "", /source=launch-directive/);
+
+  console.log("✓ Group I Tier 4 reset immutability + export --max-chars/--full hook checks passed");
+}
+
 hermetic.cleanup();
 console.log("\n=================================================");
 console.log("ALL 2.0 PRETOOLUSE HOOK GOVERNANCE TESTS PASSED!");

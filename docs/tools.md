@@ -58,9 +58,9 @@ Streams conversation turns from `transcript.jsonl` (or `transcript_full.jsonl`) 
 | :--- | :---: | :---: | :--- |
 | `[<id>]` / `--id` | `<uuid>` | Active / auto | Conversation UUID (positional or `--id`). |
 | `--mode` | `compact \| full` | `compact` | Read `transcript.jsonl` (`compact`) or `transcript_full.jsonl` (`full`). |
-| `--last-turns` | `<N>` | `3` | Number of recent turns (`0` returns trailing bounded window up to 200 steps; aliases: `--last`, `--tail`). |
+| `--last-turns` | `<N>` | `3` | Number of recent turns (`0` returns trailing bounded window up to 200 steps; promptless `/swarm` workers with zero user messages anchor on substantive wakeup `SYSTEM_MESSAGE` steps; aliases: `--last`, `--tail`). |
 | `--offset` / `--limit` | `<N>` | `(none)` | 0-indexed step ordinal offset or maximum steps/turns (`500` default in `--outline` mode; `2000` with `--full`/`--out`). |
-| `--outline` / `--summary` | `(none)` | `false` | Delegate to `query --summary --include-tools` to print a 1-line-per-step outline (ignores `--mode`, `--last-turns`, `--offset`). |
+| `--outline` / `--summary` | `(none)` | `false` | Delegate to `query --summary --include-tools` to print a 1-line-per-step outline (ignores `--mode`, `--last-turns`, `--offset`); with `--json`, emits compact `{ step_index, type, role, created_at, status, summary }` items. |
 | `--start` / `--end` | `<N>` | `0` / `999999` | Step index bounds in `--outline` / `--summary` mode. |
 | `--full-args` | `(none)` | `false` | Show untruncated tool argument previews in `--outline` mode. |
 | `--include-thinking` | `(none)` | `false` | Include model thinking blocks. |
@@ -79,9 +79,9 @@ agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --mode full --f
 
 ### Output budgets
 
-`read`, `outline`, `query` and `tools` default to 9,200 UTF-8 bytes. `step` defaults to 24,000 bytes. The deep tier allows up to 524,288 bytes. An explicit `--max-chars` budget includes serialization and the trailing newline. With `--out`, stdout reports the write and the limit applies to the file.
+`read`, `outline`, `query`, `tools`, and `export --sanitized` default to 9,200 UTF-8 bytes. `step` defaults to 24,000 bytes. The deep tier (`--full`, `--out`) allows up to 524,288 bytes. An explicit `--max-chars` budget includes serialization and the trailing newline. With `--out`, stdout reports the write and the limit applies to the file.
 
-Bounded JSON stays parseable. When serialization omits records or raw fields, `jsonTruncated` and the included/total counts describe the reduction. `nextCursor` describes the serialized page. If an individual record is too large for a JSON page, use a larger budget or inspect the step in Markdown with a field or line slice. A budget that cannot fit the required metadata returns a nonzero exit code and a diagnostic. Existing output files are preserved on that error.
+Bounded JSON stays parseable. When serialization omits records or raw fields, `jsonTruncated` and the included/total counts describe the reduction (`jsonSessionsIncluded` / `jsonSessionsTotal` and `jsonRowsIncluded` / `jsonRowsTotal` for `export --json`). `nextCursor` describes the serialized page (`export` drops truncated rows/sessions rather than splitting inside individual cells). If an individual record is too large for a JSON page, use a larger budget or inspect the step in Markdown with a field or line slice. A budget that cannot fit the required metadata returns a nonzero exit code and a diagnostic. Existing output files are preserved on that error.
 
 ## 3. `agy-context transcript query`
 
@@ -103,7 +103,7 @@ Searches conversation transcripts by regex or substring, hydrating truncated fie
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive `step_index` bounds. |
 | `--last-turns` | `<N>` | `(none)` | Restrict search to the last `N` turns (aliases: `--last`, `--tail`). |
 | `--limit` | `<N>` | `5` (`30` w/ `--summary`, up to `500` on explicit range/`tools`, `2000` w/ `--full`/`--out`) | Maximum matching steps to return. |
-| `--summary` / `--outline` | `(none)` | `false` | Print 1-line timeline bullets with `[ERROR]`, `[spill: steps/<N>]`, and `[tools: ...]` tags. |
+| `--summary` / `--outline` | `(none)` | `false` | Print 1-line timeline bullets with `[ERROR]`, `[spill: steps/<N>]`, and `[tools: ...]` tags (or compact `{ step_index, type, role, created_at, status, summary }` items with `--json`). |
 | `--include-tools` | `(none)` | `false` (`true` on `grep`/`search`/`find`/`tools`) | Search and display tool call names and arguments. |
 | `--full-args` | `(none)` | `false` | Print full tool call arguments (unclamping `LARGE_BODY_ARG_KEYS` when combined with `--full`). |
 | `--field` | `<spec>` | `all` (`tool_args` on `tools`) | Project a single field: `content`, `thinking`, `tool_calls`, `tool_args`, `tool_args:<Key>`, or `all`. |
@@ -168,9 +168,9 @@ agy-context transcript list --parent 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --line
 ## 6. `agy-context transcript export`
 
 - **Alias:** `dump`
-- **Usage:** `agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out|--output <path>] [--file <path>] [--json]`
+- **Usage:** `agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--full] [--max-chars N] [--out|--output <path>] [--file <path>] [--json]`
 
-Generates an `L6`-safe sanitized Markdown (or `--json`) summary index of executed steps and compact tool calls, omitting raw `.system_generated/` JSONL lines, `thinking` blocks, and large file bodies while redacting embedded media/base64 payloads and token strings. `--sanitized` is required; raw transcript export is prohibited.
+Generates an `L6`-safe sanitized Markdown (or `--json`) summary index of executed steps and compact tool calls, omitting raw `.system_generated/` JSONL lines, `thinking` blocks, and large file bodies while redacting embedded media/base64 payloads and token strings. `--sanitized` is required; raw transcript export is prohibited. Standard stdout exports obey the `9,200`-byte inline ceiling, while `--full` or `--out` opts into the `524,288`-byte (`512 KB`) deep tier (`--max-chars` sets any custom ceiling up to `524,288` bytes, sizing Markdown and JSON independently in UTF-8 bytes and failing nonzero without overwriting existing files if metadata cannot fit).
 
 | Flag / Argument | Value | Default | Description |
 | :--- | :---: | :---: | :--- |
@@ -179,8 +179,10 @@ Generates an `L6`-safe sanitized Markdown (or `--json`) summary index of execute
 | `--sanitized` | `(none)` | Required | Explicit `L6` opt-in required on all `transcript export` calls. |
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive `step_index` range filter. |
 | `--limit` | `<N>` | `150` (max `500`) | Maximum steps retained per exported session. |
-| `--out` / `--output` | `<path>` | `(stdout)` | Safely write index to a `.md`, `.json`, or `.txt` path (e.g. `scratch/...`), rejecting `..`, symlinks, and protected state/config paths. |
-| `--file` / `--json` | `<path>` / `(none)` | `(none)` | Explicit single-session `.jsonl` path or JSON output. |
+| `--full` | `(none)` | `false` | Opt into the deep `524,288`-byte (`512 KB`) stdout rendering tier. |
+| `--max-chars` | `<N>` | `(tier default)` | Override the serialized UTF-8 byte ceiling (up to `524,288` bytes). With `--out`, applies to the written artifact. |
+| `--out` / `--output` | `<path>` | `(stdout)` | Safely write index to a `.md`, `.json`, or `.txt` path (e.g. `scratch/...`, up to `524,288` bytes), rejecting `..`, symlinks, and protected state/config paths. |
+| `--file` / `--json` | `<path>` / `(none)` | `(none)` | Explicit single-session `.jsonl` path or bounded JSON output (`jsonSessionsIncluded`/`Total`, `jsonRowsIncluded`/`Total`, `jsonTruncated`, `nextCursor`). |
 
 ```bash
 agy-context transcript export --parent 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --sanitized --out scratch/agy-squad/transcript-index.md
@@ -197,9 +199,9 @@ Manages parent transcript access policies for child subagents (`define_subagent`
 
 | Flag / Shorthand | Value | Default | Description |
 | :--- | :---: | :---: | :--- |
-| `--status` / `status` | `(none)` | Default if no flags | Show active policy mode, owner session ID, allow/deny lists, and remaining TTL. |
+| `--status` / `status` | `(none)` | Default if no flags | Show active policy mode, owner session ID, allow/deny lists, remaining TTL, and recent `launchRestrictions`. |
 | `--off` / `--deny-children` / `off` | `(none)` | `false` | Set cohort default mode to `deny` for all child sessions. |
-| `--on` / `--reset` / `on` / `reset` | `(none)` | `false` | Clear the caller's policy and restore `open` access. |
+| `--on` / `--reset` / `on` / `reset` | `(none)` | `false` | Clear the caller's parent CLI policy (`policies[ownerId]`) and restore `open` cohort default; child Tier 4 launch directives stay enforced and visible under `launchRestrictions`. |
 | `--self-only` / `self-only` | `(none)` | `false` | Restrict children to their own `--id <callerConvId>` transcript (`list`/`ls` and `--file` blocked). |
 | `--mode` | `open \| allowlist \| self-only \| deny` | `open` | Set explicit cohort default mode. |
 | `--allow` | `<id,@roster*...>` | `(none)` | Comma-separated allowed conversation IDs or `@roster*` prefix globs (switches `open` to `allowlist`). |
@@ -231,6 +233,6 @@ Checking Agy-Context-Saver installation status...
 - CLI Shim (agy-context): INSTALLED (~/.gemini/antigravity/bin)
 - RTK Command Optimizer (>= 1.1.0): INSTALLED (rtk 1.1.0)
 - MCP Cleanup: CLEAN (0 duplicate MCP configs/schemas)
-- Transcript Access Policy: OPEN (default)
+- Transcript Access Policy: OPEN (default)   # or OPEN (parent CLI policy) | Recent launch-restricted children: ... when Tier 4 child locks are active
 Overall Status: HEALTHY & ACTIVE
 ```

@@ -17,10 +17,14 @@ import {
   exportSanitizedTranscript,
   stripSummaryStepBoilerplate,
   inspectTranscriptLineageFromFile,
+  formatTranscriptAccessStatus,
+  scanRecentLaunchRestrictions,
   manageTranscriptAccessPolicy,
   recordTranscriptHookGrant,
-  consumeTranscriptAccessGrant
+  consumeTranscriptAccessGrant,
+  ACTIVE_SWARM_WINDOW_MS
 } from "../lib/transcript-core.mjs";
+import { runStatus } from "../scripts/install-register.mjs";
 import { getStateDir } from "../scripts/state-dir.mjs";
 import { createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
 
@@ -1610,7 +1614,7 @@ try {
     }
     fs.writeFileSync(path.join(hugeLogs, "transcript.jsonl"), hugeLines.join("\n") + "\n");
     const hugeJsonFile = path.join(ergOutDir, "huge_cap.json");
-    const hugeRes = runCli(["transcript", "outline", "--id", convHuge, "--full", "--out", hugeJsonFile, "--json"]);
+    const hugeRes = runCli(["transcript", "query", "--id", convHuge, "--limit", "400", "--full", "--out", hugeJsonFile, "--json"]);
     assert.equal(hugeRes.status, 0, hugeRes.stderr);
     const hugeBytes = fs.statSync(hugeJsonFile).size;
     assert.ok(hugeBytes <= 512 * 1024, `--out --json must stay <= 512 KB, got ${hugeBytes}`);
@@ -1621,6 +1625,14 @@ try {
     const hugeStdout = JSON.parse(hugeRes.stdout);
     assert.equal(hugeStdout.jsonTruncated, true);
     assert.ok(hugeRes.stdout.length < 2000, "stdout stays compact");
+
+    const hugeOutlineJson = path.join(ergOutDir, "huge_outline_compact.json");
+    const hugeOutlineRes = runCli(["transcript", "outline", "--id", convHuge, "--full", "--out", hugeOutlineJson, "--json"]);
+    assert.equal(hugeOutlineRes.status, 0, hugeOutlineRes.stderr);
+    const hugeOutlineParsed = JSON.parse(fs.readFileSync(hugeOutlineJson, "utf8"));
+    assert.equal(hugeOutlineParsed.items.length, 400, "outline --full --json must project compact summary objects across all 400 steps under 512 KB");
+    assert.equal(hugeOutlineParsed.items[0].content, undefined, "outline --full --json summary items must omit raw content");
+    assert.equal(hugeOutlineParsed.items[1].tool_calls, undefined, "outline --full --json summary items must omit raw tool_calls");
 
     const smallCapFile = path.join(ergOutDir, "small_cap.json");
     const smallCapRes = runCli(["transcript", "outline", "--id", convHuge, "--full", "--max-chars", "20000", "--out", smallCapFile, "--json"]);
@@ -1710,6 +1722,401 @@ try {
     }
 
     console.log("✓ --out --json and Markdown artifacts honor the 512 KB deep-tier cap");
+
+    // ========================================================================
+    // 10. PR #7 L46 Remediations (Option A Status, Compact Summary JSON, Export Bounds, Worker Cursors)
+    // ========================================================================
+    console.log("\n--- 10. PR #7 L46 Remediations (PR7-RUN-001..004, PR7-DOC-001) ---");
+
+    // 10.1 PR7-RUN-001: Option A honest recent launch-restriction disclosure & non-destructive scan
+    const l46StateDir = getStateDir();
+    fs.mkdirSync(l46StateDir, { recursive: true });
+    const nowMs = Date.now();
+    const staleMs = nowMs - ACTIVE_SWARM_WINDOW_MS - 60000;
+    const coordA = "coord-l46-opt-a";
+    const coordB = "coord-l46-other-b";
+    const childDenyId = "l46-child-deny-01";
+    const childSelfId = "l46-child-self-02";
+    const childAllowId = "l46-child-allow-03";
+    const childStaleId = "l46-child-stale-04";
+    const childStaleTsId = "l46-child-stalets-05";
+    const childOtherId = "l46-child-other-06";
+    const topDenyId = "l46-top-user-07";
+
+    const writeStateFile = (fileName, data, mtimeMs = nowMs) => {
+      const target = path.join(l46StateDir, fileName);
+      fs.writeFileSync(target, typeof data === "string" ? data : JSON.stringify(data, null, 2), "utf8");
+      const sec = mtimeMs / 1000;
+      fs.utimesSync(target, sec, sec);
+      return target;
+    };
+
+    const createdStatePaths = [];
+    try {
+      createdStatePaths.push(writeStateFile(`agy-session-${childDenyId}.json`, {
+        lastSeenTime: nowMs,
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: coordA, rosterName: "w2-spec1", launchDirective: "deny" }
+      }));
+      createdStatePaths.push(writeStateFile(`agy-session-${childSelfId}.json`, {
+        lastSeenTime: nowMs - 1000,
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: coordA, rosterName: "w2-spec2", launchDirective: "self-only" }
+      }));
+      createdStatePaths.push(writeStateFile(`agy-session-${childAllowId}.json`, {
+        lastSeenTime: nowMs,
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: coordA, rosterName: "w2-lead", launchDirective: "allow" }
+      }));
+      createdStatePaths.push(writeStateFile(`agy-session-${childStaleId}.json`, {
+        lastSeenTime: staleMs,
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: coordA, rosterName: "stale-mtime", launchDirective: "deny" }
+      }, staleMs));
+      createdStatePaths.push(writeStateFile(`agy-session-${childStaleTsId}.json`, {
+        lastSeenTime: staleMs,
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: coordA, rosterName: "stale-ts", launchDirective: "deny" }
+      }, nowMs));
+      createdStatePaths.push(writeStateFile(`agy-session-${childOtherId}.json`, {
+        lastSeenTime: nowMs,
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: coordB, rosterName: "other-spec", launchDirective: "deny" }
+      }));
+      createdStatePaths.push(writeStateFile(`agy-session-${topDenyId}.json`, {
+        lastSeenTime: nowMs,
+        lineage: { isTopLevelUserSession: true, isChildSession: false, parentConvId: null, launchDirective: "deny" }
+      }));
+      createdStatePaths.push(writeStateFile("agy-session-governance-state.json", {
+        global: { lastSeenTime: nowMs },
+        lineage: { isChildSession: true, parentConvId: coordA, launchDirective: "deny" }
+      }));
+      createdStatePaths.push(writeStateFile("agy-session-malformed-99.json", "{broken json"));
+      const outsideSymTarget = path.join(tempHome, "outside-session.json");
+      fs.writeFileSync(outsideSymTarget, JSON.stringify({ lastSeenTime: nowMs, lineage: { isChildSession: true, parentConvId: coordA, launchDirective: "deny" } }));
+      const symStatePath = path.join(l46StateDir, "agy-session-symlinked.json");
+      try {
+        fs.symlinkSync(outsideSymTarget, symStatePath);
+        createdStatePaths.push(symStatePath);
+      } catch {}
+
+      // Unscoped scan includes both cohorts (coordA deny+self-only + coordB deny = 3), ignoring allow/stale/top/legacy/corrupt/symlink
+      const unscopedScan = scanRecentLaunchRestrictions();
+      assert.equal(unscopedScan.restrictedCount, 3, "unscoped scan must find only valid recent deny/self-only children");
+      assert.equal(unscopedScan.denyCount, 2);
+      assert.equal(unscopedScan.selfOnlyCount, 1);
+
+      // Owner-scoped scan isolates coordA's 2 restricted children (excludes coordB, excludes allow/stale/top/legacy/corrupt/symlink)
+      const scopedScan = scanRecentLaunchRestrictions({ ownerId: coordA });
+      assert.equal(scopedScan.scope, "recent-child-sessions");
+      assert.equal(scopedScan.windowMs, ACTIVE_SWARM_WINDOW_MS);
+      assert.equal(scopedScan.restrictedCount, 2);
+      assert.equal(scopedScan.denyCount, 1);
+      assert.equal(scopedScan.selfOnlyCount, 1);
+      assert.deepEqual(
+        scopedScan.sessions.map((s) => ({ id: s.conversationId, mode: s.mode, source: s.source })),
+        [
+          { id: childDenyId, mode: "deny", source: "launch-directive" },
+          { id: childSelfId, mode: "self-only", source: "launch-directive" }
+        ]
+      );
+
+      // Parent grants temporary Tier 3 allowlist then resets policy: Tier 4 restrictions remain disclosed honestly
+      manageTranscriptAccessPolicy({ callerConvId: coordA, mode: "allowlist", allow: `@w2-spec1` });
+      recordTranscriptHookGrant({ callerConvId: coordA, subcommand: "access", mode: "open", isMutation: true });
+      const resetCli = runCli(["transcript", "access", "--reset", "--json"], { ...testEnv, GEMINI_CONVERSATION_ID: coordA });
+      assert.equal(resetCli.status, 0, resetCli.stderr);
+      const resetJson = JSON.parse(resetCli.stdout);
+      assert.equal(resetJson.active, false);
+      assert.equal(resetJson.mode, "open");
+      assert.equal(resetJson.launchRestrictions.restrictedCount, 2);
+      assert.equal(resetJson.launchRestrictions.denyCount, 1);
+      assert.equal(resetJson.launchRestrictions.selfOnlyCount, 1);
+
+      const statusTextCli = runCli(["transcript", "access", "--status"], { ...testEnv, GEMINI_CONVERSATION_ID: coordA });
+      assert.equal(statusTextCli.status, 0);
+      assert.match(statusTextCli.stdout, /Transcript Access Policy: OPEN \(parent CLI policy\)/);
+      assert.match(statusTextCli.stdout, /Recently active launch-restricted children: 2/);
+      assert.match(statusTextCli.stdout, /Launch directives: 1 deny, 1 self-only/);
+      assert.match(statusTextCli.stdout, /Reset clears parent policy overrides; launch directives remain in effect/);
+
+      // runStatus() plain-text output also discloses recent launch-restricted children instead of bare OPEN (default)
+      const statusLogs = [];
+      const prevConsoleLog = console.log;
+      console.log = (line) => statusLogs.push(String(line));
+      try {
+        runStatus({ silent: false });
+      } finally {
+        console.log = prevConsoleLog;
+      }
+      const combinedRunStatus = statusLogs.join("\n");
+      assert.match(combinedRunStatus, /OPEN \(parent CLI policy\)/);
+      assert.match(combinedRunStatus, /Recent launch-restricted children: 3/);
+      const cliStatusJson = runCli(["status", "--json"]);
+      assert.ok(cliStatusJson.status === 0 || cliStatusJson.status === 1);
+      const parsedInstallStatus = JSON.parse(cliStatusJson.stdout);
+      assert.equal(parsedInstallStatus.details.transcriptAccess.launchRestrictions.restrictedCount, 3);
+      assert.equal(fs.readFileSync(path.join(l46StateDir, `agy-session-${childDenyId}.json`), "utf8").includes("w2-spec1"), true);
+    } finally {
+      for (const p of createdStatePaths) {
+        try { fs.unlinkSync(p); } catch {}
+      }
+    }
+
+    // 10.2 PR7-RUN-002: query/read/outline/summary --summary --json project lightweight summary items
+    const convSum = "conv-summary-json-10";
+    const sumLogs = path.join(brainDir, convSum, ".system_generated", "logs");
+    fs.mkdirSync(sumLogs, { recursive: true });
+    const sumSteps = [];
+    for (let s = 70; s <= 84; s++) {
+      const isMatch = s >= 75; // 10 matching steps (75..84)
+      sumSteps.push({
+        step_index: s,
+        type: s === 84 ? "PLANNER_RESPONSE" : (isMatch ? "GENERIC" : "PLANNER_RESPONSE"),
+        status: s === 83 ? "ERROR" : "DONE",
+        created_at: `2026-11-18T00:${String(s - 70).padStart(2, "0")}:00.000Z`,
+        thinking: s === 84 ? "RAW_THINKING_MUST_NOT_APPEAR " + "T".repeat(4000) : undefined,
+        content: isMatch
+          ? (s === 84
+              ? `STAGE_84 lead report ` + "R".repeat(12500)
+              : `The tool's output was truncated due to being too long. You can find the full output in a file at file:///x/.system_generated/steps/${s}/output.txt.\nHere is a preview:\nSTAGE_${s} ${s === 83 ? "fatal error occurred" : "ok"}`)
+          : `Unrelated step ${s}`,
+        tool_calls: isMatch
+          ? [{ name: "read_file", args: { Path: "/home/u/Antigravity/report.md", Content: "RAW_TOOL_BODY " + "B".repeat(12000) } }]
+          : undefined
+      });
+    }
+    fs.writeFileSync(path.join(sumLogs, "transcript.jsonl"), sumSteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+
+    const sumQueryJson = runCli(["transcript", "query", "STAGE_", convSum, "--summary", "--json"]);
+    assert.equal(sumQueryJson.status, 0, sumQueryJson.stderr);
+    assert.ok(Buffer.byteLength(sumQueryJson.stdout, "utf8") <= 9200);
+    const sumQueryParsed = JSON.parse(sumQueryJson.stdout);
+    assert.equal(sumQueryParsed.matchedCount, 10);
+    assert.equal(sumQueryParsed.displayedCount, 10, "compact summary JSON must retain all 10 matches despite 12 KB step 84");
+    assert.equal(sumQueryParsed.items.length, 10);
+    assert.equal(sumQueryParsed.jsonTruncated, undefined);
+    const lastSumItem = sumQueryParsed.items[9];
+    assert.equal(lastSumItem.step_index, 84);
+    assert.equal(lastSumItem.type, "PLANNER_RESPONSE");
+    assert.equal(lastSumItem.role, "assistant");
+    assert.equal(lastSumItem.created_at, "2026-11-18T00:14:00Z");
+    assert.equal(lastSumItem.status, "OK");
+    assert.equal(lastSumItem.content, undefined);
+    assert.equal(lastSumItem.thinking, undefined);
+    assert.equal(lastSumItem.tool_calls, undefined);
+    assert.match(lastSumItem.summary, /STAGE_84/);
+    const errSumItem = sumQueryParsed.items.find((i) => i.step_index === 83);
+    assert.equal(errSumItem.status, "ERROR");
+    assert.match(errSumItem.summary, /\[ERROR\].*\[spill: steps\/83\]/);
+
+    for (const subCmd of [
+      ["transcript", "read", convSum, "--summary", "--json"],
+      ["transcript", "outline", convSum, "--json"],
+      ["transcript", "summary", convSum, "--json"]
+    ]) {
+      const aliasRes = runCli(subCmd);
+      assert.equal(aliasRes.status, 0, aliasRes.stderr);
+      const aliasParsed = JSON.parse(aliasRes.stdout);
+      assert.ok(Buffer.byteLength(aliasRes.stdout, "utf8") <= 9200);
+      assert.ok(aliasParsed.items.length >= 10 && aliasParsed.displayedCount === aliasParsed.items.length);
+      assert.equal(aliasParsed.items[0].tool_calls, undefined);
+      assert.equal(aliasParsed.items[0].content, undefined);
+    }
+
+    // Tight budget on compact summary truncates smoothly with non-empty items and valid cursor
+    const tightSum = runCli(["transcript", "query", "STAGE_", convSum, "--summary", "--json", "--max-chars", "1200"]);
+    assertBounded(tightSum, 1200);
+    const tightParsed = JSON.parse(tightSum.stdout);
+    assert.equal(tightParsed.jsonTruncated, true);
+    assert.ok(tightParsed.items.length > 0 && tightParsed.items.length < 10);
+    assert.equal(tightParsed.displayedCount, tightParsed.items.length);
+    assert.equal(tightParsed.jsonItemsIncluded, tightParsed.items.length);
+
+    // 10.3 PR7-RUN-003 & PR7-DOC-001: unified sanitized export limits across stdout, --full, --max-chars, and --out
+    const writeConvLines = (rootBrain, cid, steps) => {
+      const dir = path.join(rootBrain, cid, ".system_generated", "logs");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "transcript.jsonl"), steps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf8");
+    };
+    const expCoordId = "coord-l46-export-10";
+    const expChildIds = [];
+    for (let c = 1; c <= 9; c++) {
+      const cid = `l46-exp-child-${c}`;
+      expChildIds.push(cid);
+      const childSteps = [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          created_at: "2026-11-18T01:00:00Z",
+          content: `[Message] timestamp=2026-11-18T01:00:00Z sender=${expCoordId} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #${c} for @worker-${c}):\n[agy-transcript-access: deny]\nRun analysis ${c}`
+        }
+      ];
+      for (let s = 1; s <= 18; s++) {
+        childSteps.push({
+          step_index: s,
+          type: s % 2 === 1 ? "PLANNER_RESPONSE" : "GENERIC",
+          status: "DONE",
+          created_at: `2026-11-18T01:${String(s).padStart(2, "0")}:00Z`,
+          thinking: "SECRET_EXPORT_THINKING_NEVER_LEAK",
+          content: `Worker ${c} step ${s} 🚀🔥€— ` + "L".repeat(2500) + " TAIL_CONTENT_BODY_NEVER_LEAK",
+          tool_calls: s % 2 === 1
+            ? [{ name: "run_command", args: { CommandLine: `echo worker_${c}_step_${s} Bearer secret_tok_999` } }]
+            : undefined
+        });
+      }
+      writeConvLines(brainDir, cid, childSteps);
+    }
+
+    // (a) Markdown --out > 24 KB (< 524,288 B) retains ALL 9 child sessions instead of pretty-JSON-pruning at 64,000
+    const prevExpBrain = process.env.AGY_BRAIN_DIR;
+    process.env.AGY_BRAIN_DIR = brainDir;
+    try {
+      const cohortMdOut = path.join(ergOutDir, "cohort-index.md");
+      const cohortMdCli = runCli(["transcript", "export", "--parent", expCoordId, "--sanitized", "--out", cohortMdOut]);
+      assert.equal(cohortMdCli.status, 0, cohortMdCli.stderr);
+      const cohortMdDisk = fs.readFileSync(cohortMdOut, "utf8");
+      const cohortMdBytes = fs.statSync(cohortMdOut).size;
+      assert.ok(cohortMdBytes > 24000 && cohortMdBytes <= 524288, `expected ~25-45 KB index, got ${cohortMdBytes}`);
+      for (let c = 1; c <= 9; c++) {
+        assert.ok(cohortMdDisk.includes(`@worker-${c}`), `Markdown --out must retain session ${c} well below 512 KB`);
+      }
+      assert.ok(!cohortMdDisk.includes("SECRET_EXPORT_THINKING_NEVER_LEAK"));
+      assert.ok(!cohortMdDisk.includes("TAIL_CONTENT_BODY_NEVER_LEAK"));
+      assert.ok(!cohortMdDisk.includes("secret_tok_999"));
+      assert.ok(!cohortMdDisk.includes("\uFFFD"));
+
+      // (b) Explicit --max-chars 32000 on Markdown --out honors Markdown bytes even though pretty JSON would be ~70 KB
+      const cohortMdCapOut = path.join(ergOutDir, "cohort-md-32k.md");
+      const cohortMdCapCli = runCli([
+        "transcript", "export", "--parent", expCoordId, "--sanitized", "--max-chars", "35000", "--out", cohortMdCapOut
+      ]);
+      assert.equal(cohortMdCapCli.status, 0, cohortMdCapCli.stderr);
+      const cohortMdCapBytes = fs.statSync(cohortMdCapOut).size;
+      assert.ok(cohortMdCapBytes <= 35000);
+      assert.ok(fs.readFileSync(cohortMdCapOut, "utf8").includes("@worker-9"), "Markdown budget must not shrink by pretty-JSON overhead");
+
+      // (c) Stdout export --sanitized --json and Markdown both strictly obey 9,200 UTF-8 inline ceiling
+      const inlineExpJsonCli = runCli(["transcript", "export", "--parent", expCoordId, "--sanitized", "--json"]);
+      assertBounded(inlineExpJsonCli, 9200);
+      const inlineExpJsonParsed = JSON.parse(inlineExpJsonCli.stdout);
+      assert.equal(inlineExpJsonParsed.jsonTruncated, true);
+      assert.equal(inlineExpJsonParsed.jsonSessionsTotal, 9);
+      assert.ok(inlineExpJsonParsed.exportedCount >= 2 && inlineExpJsonParsed.exportedCount === inlineExpJsonParsed.sessions.length);
+
+      const inlineExpMdCli = runCli(["transcript", "export", "--parent", expCoordId, "--sanitized"]);
+      assertBounded(inlineExpMdCli, 9200);
+
+      // (d) --full expands stdout JSON/Markdown to 524,288 B deep tier
+      const fullExpJsonCli = runCli(["transcript", "export", "--parent", expCoordId, "--sanitized", "--full", "--json"]);
+      assertBounded(fullExpJsonCli, 524288);
+      assert.equal(JSON.parse(fullExpJsonCli.stdout).exportedCount, 9);
+
+      // (e) Explicit --max-chars on export JSON (stdout & --out) + impossibly small budget preservation
+      const cappedExpJsonOut = path.join(ergOutDir, "cohort-json-5k.json");
+      const cappedExpJsonCli = runCli([
+        "transcript", "export", "--parent", expCoordId, "--sanitized", "--max-chars", "5000", "--out", cappedExpJsonOut, "--json"
+      ]);
+      assert.equal(cappedExpJsonCli.status, 0, cappedExpJsonCli.stderr);
+      const cappedExpBytes = fs.statSync(cappedExpJsonOut).size;
+      assert.ok(cappedExpBytes <= 5000, `export JSON --out exceeded 5000 bytes: ${cappedExpBytes}`);
+      const cappedExpParsed = JSON.parse(fs.readFileSync(cappedExpJsonOut, "utf8"));
+      assert.equal(cappedExpParsed.jsonTruncated, true);
+      assert.equal(cappedExpParsed.jsonSessionsIncluded, cappedExpParsed.sessions.length);
+      const cappedExpStdout = JSON.parse(cappedExpJsonCli.stdout);
+      assert.equal(cappedExpStdout.bytesWritten, cappedExpBytes);
+      assert.equal(cappedExpStdout.sessions, undefined);
+
+      // Impossibly small --max-chars must fail nonzero and leave existing artifact untouched
+      const sentinelExportPath = path.join(ergOutDir, "preserve-export.json");
+      fs.writeFileSync(sentinelExportPath, "keep-export-sentinel", "utf8");
+      for (const fmtFlags of [[], ["--json"]]) {
+        const tinyFail = runCli([
+          "transcript", "export", "--parent", expCoordId, "--sanitized", "--max-chars", "80", "--out", sentinelExportPath, ...fmtFlags
+        ]);
+        assert.notEqual(tinyFail.status, 0, "impossibly small export budget must exit nonzero");
+        assert.equal(tinyFail.stdout, "");
+        assert.equal(fs.readFileSync(sentinelExportPath, "utf8"), "keep-export-sentinel");
+      }
+      const tooBigMax = runCli(["transcript", "export", "--id", expChildIds[0], "--sanitized", "--max-chars", "999999"]);
+      assert.notEqual(tooBigMax.status, 0);
+    } finally {
+      if (prevExpBrain !== undefined) process.env.AGY_BRAIN_DIR = prevExpBrain;
+      else delete process.env.AGY_BRAIN_DIR;
+    }
+
+    // 10.4 PR7-RUN-004: Worker-turn logical anchor (userTurns === 0) & Step 0 recovery without skips/duplicates
+    const convWorker = "conv-worker-turns-22";
+    const workerSteps = [
+      {
+        step_index: 0,
+        type: "SYSTEM_MESSAGE",
+        source: "SYSTEM",
+        created_at: "2026-11-18T02:00:00Z",
+        content: "[Message] sender=coord priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #1 for @worker-p3):\nInitial stage"
+      },
+      { step_index: 1, type: "PLANNER_RESPONSE", created_at: "2026-11-18T02:00:05Z", content: "Stage A started " + "A".repeat(300) },
+      { step_index: 2, type: "GENERIC", created_at: "2026-11-18T02:00:06Z", content: "STEP_02_OK " + "B".repeat(250) },
+      {
+        step_index: 3,
+        type: "SYSTEM_MESSAGE",
+        source: "SYSTEM",
+        created_at: "2026-11-18T02:00:07Z",
+        content: "[Message] sender=coord priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #2"
+      },
+      {
+        step_index: 4,
+        type: "SYSTEM_MESSAGE",
+        source: "SYSTEM",
+        created_at: "2026-11-18T02:01:00Z",
+        content: "[Message] sender=coord priority=MESSAGE_PRIORITY_HIGH content=@worker-p3 Stage C wakeup prompt"
+      }
+    ];
+    for (let s = 5; s <= 13; s++) {
+      workerSteps.push({ step_index: s, type: "GENERIC", created_at: `2026-11-18T02:01:${String(s).padStart(2, "0")}Z`, content: `Step ${s} output ` + "C".repeat(120) });
+    }
+    workerSteps.push({
+      step_index: 14,
+      type: "PLANNER_RESPONSE",
+      created_at: "2026-11-18T02:02:14Z",
+      content: "Writing UTF8 note",
+      tool_calls: [{ name: "write_file", args: { Content: "WORKER_UTF8_🚀🔥€—_MARKER", Path: "scratch/utf8.txt" } }]
+    });
+    for (let s = 15; s <= 20; s++) {
+      workerSteps.push({ step_index: s, type: "GENERIC", created_at: `2026-11-18T02:02:${String(s).padStart(2, "0")}Z`, content: `Post write step ${s} ` + "D".repeat(90) });
+    }
+    workerSteps.push({ step_index: 21, type: "PLANNER_RESPONSE", created_at: "2026-11-18T02:03:00Z", content: "Final short ASCII wrap-up" });
+    writeConvLines(brainDir, convWorker, workerSteps);
+
+    // Inline --last-turns 1 anchors on Step 4 (latest substantive wakeup SYSTEM_MESSAGE), NOT final Step 21 PLANNER_RESPONSE!
+    const workerLast1 = runCli(["transcript", "read", convWorker, "--last-turns", "1"]);
+    assert.equal(workerLast1.status, 0, workerLast1.stderr);
+    assert.match(workerLast1.stdout, /WORKER_UTF8_🚀🔥€—_MARKER/, "promptless worker --last-turns 1 must keep tool step 14 in the current turn");
+    assert.match(workerLast1.stdout, /Final short ASCII wrap-up/);
+    assert.equal(workerLast1.stdout.includes("STEP_02_OK"), false, "earlier worker turn before Step 4 wakeup stays scoped out of last-turns 1");
+
+    // When clamped at firstOrd = 21 (--max-chars 520), backward nextCursor reaches Step 0 with zero skips/duplicates!
+    const clampedWorker520 = runCli(["transcript", "read", convWorker, "--last-turns", "1", "--max-chars", "520", "--json"]);
+    assertBounded(clampedWorker520, 520);
+    const cwParsed = JSON.parse(clampedWorker520.stdout);
+    assert.equal(cwParsed.clamped, true);
+    assert.equal(cwParsed.steps[0].step_index, 21);
+    assert.ok(cwParsed.nextCursor && cwParsed.nextCursor.offset === 0, `expected offset 0 when firstOrd=21, got ${JSON.stringify(cwParsed.nextCursor)}`);
+    assert.ok(cwParsed.nextCursor.limit <= 21 && cwParsed.nextCursor.limit > 0);
+
+    // Walk explicitly from nextCursor forward and confirm every step 0..20 is visited with zero skips/duplicates
+    const seenOrdinals = new Set();
+    const collectedOrder = [];
+    let cur = cwParsed.nextCursor;
+    for (let hop = 0; hop < 30 && cur && cur.offset < 21; hop++) {
+      const pageRes = await readTranscript({ conversationId: convWorker, offset: cur.offset, limit: cur.limit });
+      assert.equal(pageRes.isError, undefined);
+      for (const st of pageRes.steps) {
+        assert.equal(seenOrdinals.has(st.step_index), false, `duplicate step ${st.step_index} during pagination`);
+        seenOrdinals.add(st.step_index);
+        collectedOrder.push(st.step_index);
+      }
+      cur = pageRes.nextCursor;
+    }
+    assert.equal(collectedOrder[0], 0, "pagination continuation must reach Step 0 first");
+    assert.deepEqual(collectedOrder, Array.from({ length: 21 }, (_, idx) => idx), "every step 0..20 must be covered without skips or duplicates");
+
+    console.log("✓ PR #7 L46 remediations verified (Option A status disclosure, compact summary JSON, unified sanitized export & worker cursors)");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

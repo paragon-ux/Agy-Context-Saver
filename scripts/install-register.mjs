@@ -1092,8 +1092,16 @@ export function runStatus(options = {}) {
     }`
   );
   const ta = existing.details.transcriptAccess || formatTranscriptAccessStatus();
+  const lr = ta.launchRestrictions;
+  const lrNote = lr && lr.restrictedCount > 0
+    ? ` | Recent launch-restricted children: ${lr.restrictedCount} (${lr.denyCount} deny, ${lr.selfOnlyCount} self-only; launch directives remain in effect)`
+    : "";
   log(
-    `- Transcript Access Policy: ${ta.active ? `${ta.mode.toUpperCase()} (owner: ${ta.ownerId})` : "OPEN (default)"}`
+    `- Transcript Access Policy: ${
+      ta.active
+        ? `${ta.mode.toUpperCase()} (owner: ${ta.ownerId})`
+        : (lr && lr.restrictedCount > 0 ? "OPEN (parent CLI policy)" : "OPEN (default)")
+    }${lrNote}`
   );
 
   const hasCorruption =

@@ -2330,7 +2330,7 @@ function getTranscriptValueFlagsForSubcommand(subcommand) {
   ]);
   const HEALTH_VALUE_FLAGS = new Set(["id", "file"]);
   const LIST_VALUE_FLAGS = new Set(["limit", "parent"]);
-  const EXPORT_VALUE_FLAGS = new Set(["id", "parent", "start", "end", "limit", "out", "output", "file"]);
+  const EXPORT_VALUE_FLAGS = new Set(["id", "parent", "start", "end", "limit", "max-chars", "out", "output", "file"]);
 
   if (subcommand === "query" || subcommand === "grep" || subcommand === "search" || subcommand === "find" || subcommand === "tools") {
     return QUERY_VALUE_FLAGS;
