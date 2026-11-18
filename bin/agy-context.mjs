@@ -493,23 +493,40 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryS
       return page;
     };
 
-    let lo = 0;
-    let hi = total;
-    while (lo < hi) {
-      const mid = Math.floor((lo + hi + 1) / 2);
-      if (fits(encode(build(mid)))) lo = mid;
-      else hi = mid - 1;
+    const fitCount = (indent) => {
+      let lo = 0;
+      let hi = total;
+      while (lo < hi) {
+        const mid = Math.floor((lo + hi + 1) / 2);
+        if (fits(encode(build(mid), indent))) lo = mid;
+        else hi = mid - 1;
+      }
+      return lo;
+    };
+    const prettyCount = fitCount(2);
+    if (prettyCount > 0) {
+      const page = build(prettyCount);
+      return { content: encode(page, 2), metadata: page };
     }
-    const page = build(lo);
+    const compactCount = fitCount();
+    const page = build(compactCount);
+    if (compactCount === 0) {
+      const prettyZero = encode(page, 2);
+      if (fits(prettyZero)) return { content: prettyZero, metadata: page };
+    }
     const content = encode(page);
     if (fits(content)) return { content, metadata: page };
   } else if (payload.stepIndex !== undefined) {
     // A single step can carry its selected field without duplicating the entire raw step.
     const { step, data, ...header } = payload;
     const selected = { ...header, data, clamped: true, ...meta(1) };
+    const prettySelected = encode(selected, 2);
+    if (fits(prettySelected)) return { content: prettySelected, metadata: selected };
     const content = encode(selected);
     if (fits(content)) return { content, metadata: selected };
     const summary = { ...header, clamped: true, ...meta(0) };
+    const prettySummary = encode(summary, 2);
+    if (fits(prettySummary)) return { content: prettySummary, metadata: summary };
     const summaryContent = encode(summary);
     if (fits(summaryContent)) return { content: summaryContent, metadata: summary };
   }

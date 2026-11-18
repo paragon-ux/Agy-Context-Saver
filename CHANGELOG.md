@@ -5,6 +5,11 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Transcript Output Normalization, Pretty Clamped JSON & Installer Test Cwd Independence (`lib/transcript-core.mjs`, `bin/agy-context.mjs`, `tests/test-installed-verification.mjs`, `tests/test-transcript.mjs`, `docs/tools.md`, `docs/plans/LEDGER.md`)**: Normalized `\r\n`/`\r` line endings and collapsed `\n{3,}` runs across `cleanMessageContent()`, `formatTranscriptItem()`, `formatSingleStepDetail()`, and `--json` step projections (`_fileOrd` preserved); trimmed `<thinking>` blocks before `>` quoting; stripped leading duplicate `Created At:`/`Completed At:` host timestamp headers across `step`, `--full`, `read --json`, and `query --json` (including directly after hook-rewrite and spillover truncation notices while keeping those notices, exit-code lines, and spillover URLs intact); pretty-printed bounded (`<= 64 KB`) single-line JSON outputs across `cleanMessageContent()` (including `--full`) and `step --field content` before line clamping/slicing; fixed `unwrapCompactArgValue()` and `normalizeCompactJsonArgValue()` to validate truncated escape tails, decode at most 1 compact layer, recurse into JSON containers, and gate compact decoding strictly on `transcript.jsonl` sources across `read`, `query`/`tools`, `outline`/`summary`, `step`, `export`, and direct `formatSingleStepDetail()`/`formatTranscriptItem()` ESM calls (preserving native quoted strings and backslash escapes in `transcript_full.jsonl`); updated `serializeBoundedJsonPayload()` to retain 2-space pretty JSON whenever clamped pages (or 0-item metadata) fit within the byte ceiling; and pinned `cwd: repoRoot` on `npm` invocations in `tests/test-installed-verification.mjs`.
+
 ## [2.0.4] - 2026-11-17
 
 ### Changed

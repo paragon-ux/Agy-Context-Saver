@@ -376,9 +376,10 @@ assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
     const env = { ...process.env, AGY_TEST_PROFILE_DIR: profile, npm_config_cache: path.join(testRoot, "npm-cache") };
     const foreign = { mcpServers: { "foreign-server": { command: "node", args: ["foreign.js"] } } };
     const npmCli = process.env.npm_execpath;
+    const repoRoot = path.resolve(__dirname, "..");
     const npm = (args) => npmCli
-      ? spawnSync(process.execPath, [npmCli, ...args], { env, encoding: "utf8" })
-      : spawnSync(win ? "npm.cmd" : "npm", args, { env, encoding: "utf8", shell: win });
+      ? spawnSync(process.execPath, [npmCli, ...args], { env, cwd: repoRoot, encoding: "utf8" })
+      : spawnSync(win ? "npm.cmd" : "npm", args, { env, cwd: repoRoot, encoding: "utf8", shell: win });
     const ok = (res) => assert.equal(res.status, 0, res.stderr || res.stdout || res.error?.message);
     function shim(command, ...args) {
       const launcher = win ? `${command}.cmd` : command;
