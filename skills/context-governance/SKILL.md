@@ -55,7 +55,7 @@ agy-context transcript read [<id>] [--id <conv>] [--mode compact|full] [--last-t
 Searches transcripts by regex or substring with automatic dereferencing of truncated fields, role filtering (`user`, `assistant`, `subagent`, `tool`, `generic`, `system`, `error`, `all`), and `--full-args` / `--field` projection. Default inline outputs stay within ~`9.2 KB` (`date=YYYY-MM-DD UTC` header compaction, duplicate tool collapse `(xN)`, boilerplate stripping with `[spill: steps/<N>]`, and compact `{ step_index, type, role, created_at, status, summary }` items on `--summary`/`outline --json`); `--full`, `--max-chars`, or `--out` opts into `512 KB`. The `tools` alias defaults to `--roles assistant --field tool_args --include-tools`, and `outline` / `summary` map to `query --summary --include-tools`.
 - **Multi-step forensic workflow**:
   1. `agy-context transcript outline [<conv>] --start 0 --end 100` (1-line-per-step index with `[ERROR]`, `[spill: steps/<N>]`, and `[tools: ...]` tags)
-  2. `agy-context transcript tools [<conv>] --start 0 --end 100` (tool call arguments; add `--full` or `--out` for large batches)
+  2. `agy-context transcript tools --id <conv> --start 0 --end 100` (tool call arguments; add `--full` or `--out` for large batches)
   3. `agy-context transcript step <N,M,K|N-M> [<conv>] --field content` (batch-extract specific step outputs without 1-by-1 `--step <N>` loops)
 ```bash
 agy-context transcript query [<pattern>] [<id>] [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:Key|all] [--include-thinking] [--full] [--max-chars N] [--out <path>] [--json] [--file <path>]

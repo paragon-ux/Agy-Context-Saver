@@ -389,7 +389,7 @@ function parseMaxCharsFlag(opts) {
   return parsed;
 }
 
-function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryEnd } = {}) {
+function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryEnd, summaryDirection } = {}) {
   const encode = (obj, indent) => JSON.stringify(obj, null, indent) + "\n";
   const fits = (text) => Buffer.byteLength(text, "utf8") <= maxBytes;
   const pretty = encode(payload, 2);
@@ -410,8 +410,11 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryE
   if (entries?.length) {
     const isBatch = Array.isArray(payload.stepIndices);
     const isRead = payload.displayedSteps !== undefined;
-    const forward = isBatch || readPageSize !== undefined || summaryEnd !== undefined ||
-      payload.nextCursor?.start !== undefined;
+    const hasBackwardSummaryCursor =
+      summaryDirection === "backward" ||
+      Boolean(payload.nextCursor && payload.nextCursor.end !== undefined && payload.nextCursor.start === undefined);
+    const forward = isBatch || readPageSize !== undefined ||
+      (!hasBackwardSummaryCursor && (summaryEnd !== undefined || payload.nextCursor?.start !== undefined));
     const stepNumber = (entry) => Number(entry.step_index ?? entry._ordinal ?? 0);
 
     const build = (count) => {
@@ -419,14 +422,28 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryE
       const page = { ...payload, [key]: retained, clamped: true, ...meta(count) };
       if (count < total) {
         if (isBatch) {
-          const pending = entries.slice(count).map((entry) => entry.stepIndex);
+          const skipIdx = count > 0 ? count : 1;
+          const pending = entries.slice(skipIdx).map((entry) => entry.stepIndex);
           if (payload.nextCursor) pending.push(payload.nextCursor.step);
-          page.nextCursor = { step: pending.join(",") };
+          if (pending.length > 0) {
+            page.nextCursor = { step: pending.join(",") };
+          } else {
+            delete page.nextCursor;
+          }
         } else if (isRead && forward) {
-          page.nextCursor = {
-            offset: count ? retained.at(-1)._fileOrd + 1 : entries[0]._fileOrd,
-            limit: readPageSize
-          };
+          if (count > 0) {
+            page.nextCursor = {
+              offset: retained.at(-1)._fileOrd + 1,
+              limit: readPageSize
+            };
+          } else if (entries.length > 1) {
+            page.nextCursor = {
+              offset: entries[0]._fileOrd + 1,
+              limit: readPageSize
+            };
+          } else {
+            delete page.nextCursor;
+          }
         } else if (isRead && count) {
           const first = retained[0]._fileOrd;
           if (first > 0) {
@@ -436,14 +453,32 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryE
             delete page.nextCursor;
           }
         } else if (isRead) {
-          page.nextCursor = { offset: entries.at(-1)._fileOrd, limit: 1 };
+          const lastOrd = entries.at(-1)._fileOrd;
+          if (lastOrd > 0) {
+            page.nextCursor = { offset: 0, limit: Math.min(MAX_BOUNDED_READ_STEPS, lastOrd) };
+          } else {
+            delete page.nextCursor;
+          }
         } else if (forward) {
-          page.nextCursor = {
-            start: stepNumber(entries[count]),
-            end: payload.nextCursor?.start !== undefined ? payload.nextCursor.end : summaryEnd
-          };
+          if (count > 0 || entries.length > 1) {
+            const nextIdx = count > 0 ? count : 1;
+            page.nextCursor = {
+              start: stepNumber(entries[nextIdx]),
+              end: payload.nextCursor?.start !== undefined ? payload.nextCursor.end : summaryEnd
+            };
+          } else {
+            delete page.nextCursor;
+          }
         } else {
-          page.nextCursor = { end: count ? stepNumber(retained[0]) - 1 : stepNumber(entries.at(-1)) };
+          const nextEnd = count ? stepNumber(retained[0]) - 1 : stepNumber(entries.at(-1)) - 1;
+          const minStart = summaryDirection === "backward" && payload.nextCursor?.start !== undefined
+            ? Number(payload.nextCursor.start)
+            : 0;
+          if (nextEnd >= minStart) {
+            page.nextCursor = minStart > 0 ? { start: minStart, end: nextEnd } : { end: nextEnd };
+          } else {
+            delete page.nextCursor;
+          }
         }
       }
       if (isBatch) {
@@ -485,11 +520,11 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryE
 function serializeTranscriptResult(res, asJson, maxBytes, pageOptions) {
   if (asJson) {
     if (typeof res._serializedJson === "string") {
-      const { text, _serializedJson, _serializedMarkdown, ...payload } = res;
+      const { text, _serializedJson, _serializedMarkdown, _summaryDirection, ...payload } = res;
       return { content: _serializedJson, metadata: payload };
     }
-    const { text, _serializedJson, _serializedMarkdown, ...payload } = res;
-    return serializeBoundedJsonPayload(payload, maxBytes, pageOptions);
+    const { text, _serializedJson, _serializedMarkdown, _summaryDirection, ...payload } = res;
+    return serializeBoundedJsonPayload(payload, maxBytes, { ...pageOptions, summaryDirection: _summaryDirection });
   }
 
   if (typeof res._serializedMarkdown === "string") {
@@ -538,6 +573,7 @@ function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, {
       data,
       _serializedJson,
       _serializedMarkdown,
+      _summaryDirection,
       ...compactMeta
     } = metadata ?? res;
     console.log(JSON.stringify({
@@ -924,6 +960,18 @@ async function handleTranscriptCommand(argv) {
     if ((!opts.id || opts.id.length === 0) && !opts.parent && !opts.file && positional.length >= 1) {
       opts.id = [positional.shift()];
     }
+    const exportIdsForGrant = (opts.id || [])
+      .flatMap((id) => String(id || "").split(","))
+      .map((id) => id.trim())
+      .filter(Boolean);
+    const exportTargetConvId = opts.parent
+      ? `parent:${String(opts.parent).trim()}`
+      : exportIdsForGrant.length === 1
+        ? exportIdsForGrant[0]
+        : exportIdsForGrant.length > 1
+          ? `multi:${[...new Set(exportIdsForGrant)].sort().join(",")}`
+          : null;
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: exportTargetConvId };
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
     }

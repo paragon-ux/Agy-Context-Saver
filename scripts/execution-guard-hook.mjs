@@ -2416,7 +2416,10 @@ function extractTargetConvIdFromTranscriptTokens(subcommand, restTokens) {
     subcommand === "export" ||
     subcommand === "dump"
   ) {
-    if (opts.id === undefined && posCopy.length >= 1) {
+    const canConsumePositionalId =
+      (subcommand !== "export" && subcommand !== "dump") ||
+      (opts.parent === undefined && opts.file === undefined);
+    if (opts.id === undefined && canConsumePositionalId && posCopy.length >= 1) {
       const pId = posCopy.shift();
       opts.id = pId;
       if (subcommand === "export" || subcommand === "dump") {
@@ -2637,7 +2640,7 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     if (Array.isArray(targetInfo.outPaths) && targetInfo.outPaths.length > 0) {
       for (const outPath of targetInfo.outPaths) {
         const resolvedOut = resolveHookPath(outPath);
-        const hasUnexpandedShellToken = /^~(?:[\\/]|$)/.test(outPath) || /\$|%[A-Za-z_][A-Za-z0-9_]*%/.test(outPath);
+        const hasUnexpandedShellToken = /^~/.test(outPath) || /\$|%[A-Za-z_][A-Za-z0-9_]*%/.test(outPath);
         if (
           hasUnexpandedShellToken ||
           hasDotDotTraversal(outPath) ||

@@ -1427,12 +1427,37 @@ try {
     assert.equal(fullLineStepRes.status, 0);
     assert.match(fullLineStepRes.stdout, /_LONG_LINE_END/, "step --full must bypass MAX_LINE_CHARS=1000 cap");
 
-    // Single-step clamping header must not claim 'batch view'
+    // Default step and --max-chars > 24000 without --full must still honor 4,000c thinking, 1,000c line, and 240c LARGE_BODY clamps
+    for (const extraFlags of [[], ["--max-chars", "50000"]]) {
+      const clampedDefaultAsst = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), ...extraFlags]);
+      assert.equal(clampedDefaultAsst.status, 0);
+      assert.equal(clampedDefaultAsst.stdout.includes("THINK_END_MARKER"), false, `step without --full must enforce 4,000c thinking clamp (${extraFlags.join(" ") || "default"})`);
+      assert.equal(clampedDefaultAsst.stdout.includes("END_CONTENT_MARKER"), false, `step without --full must enforce 240c LARGE_BODY clamp (${extraFlags.join(" ") || "default"})`);
+    }
+    const nonFullLargeLine = runCli(["transcript", "step", "--id", convErg, "--step", String(richGenStep), "--max-chars", "50000"]);
+    assert.equal(nonFullLargeLine.status, 0);
+    assert.equal(nonFullLargeLine.stdout.includes("_LONG_LINE_END"), false, "step --max-chars > 24000 without --full must still enforce MAX_LINE_CHARS");
+
+    // Single-step clamping header must not claim 'batch view' and must reserve wrapper/fence/notice bytes without double-truncation
     const singleClampedStep = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--field", "tool_args", "--full", "--max-chars", "600"]);
     assert.equal(singleClampedStep.status, 0);
     assert.ok(!singleClampedStep.stdout.includes("clamped in batch view"), "Single-step clamp message must not say batch view");
     assert.ok(Buffer.byteLength(singleClampedStep.stdout, "utf8") <= 600);
-    assert.match(singleClampedStep.stdout, /clamped at 600 (?:bytes|chars)/);
+    assert.match(singleClampedStep.stdout, /Step \d+ \(tool_args\) clamped at 600 chars/);
+
+    const singleClampedCalls = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--field", "tool_calls", "--full", "--max-chars", "600"]);
+    assert.equal(singleClampedCalls.status, 0);
+    assert.ok(Buffer.byteLength(singleClampedCalls.stdout, "utf8") <= 600);
+    assert.match(singleClampedCalls.stdout, /Step \d+ \(tool_calls\) clamped at 600 chars/);
+    assert.ok(singleClampedCalls.stdout.trimEnd().endsWith("```"), "clamped tool_calls must keep its closing json fence without blind double-truncation");
+
+    // read --full --max-chars < 512 KB must not claim '(unclamped)', and tiny --max-chars stays bounded without cursor-losing blind cut
+    const readFullCapped = runCli(["transcript", "read", "--id", convErg, "--mode", "full", "--full", "--max-chars", "5000"]);
+    assert.equal(readFullCapped.status, 0);
+    assert.equal(readFullCapped.stdout.includes("(unclamped)"), false, "read --full --max-chars 5000 must not claim (unclamped)");
+    const readTiny = runCli(["transcript", "read", "--id", convErg, "--max-chars", "450"]);
+    assert.equal(readTiny.status, 0);
+    assert.ok(Buffer.byteLength(readTiny.stdout, "utf8") <= 450, `tiny read --max-chars 450 overshot: ${Buffer.byteLength(readTiny.stdout, "utf8")}`);
 
     // 8.6 --line-start / --line-end and --tail on tool_args:<Key> and validation failures
     const sliceCmdRes = runCli([
@@ -1693,6 +1718,32 @@ try {
     assertBounded(nextOutline, 5000);
     assert.equal(JSON.parse(nextOutline.stdout).items[0].step_index, outlinePage.nextCursor.start);
 
+    // Tail-limited outline (--limit 50 on 400 steps) must paginate backward without losing steps 0..349 in JSON or Markdown
+    const tailOutlineJson = runCli(["transcript", "outline", "--id", convHuge, "--limit", "50", "--json", "--max-chars", "2000"]);
+    assertBounded(tailOutlineJson, 2000);
+    const tailOutlineParsed = JSON.parse(tailOutlineJson.stdout);
+    assert.equal(tailOutlineParsed.jsonTruncated, true);
+    assert.equal(tailOutlineParsed.items.at(-1).step_index, 399, "tail-limited outline JSON must retain latest steps");
+    assert.equal(tailOutlineParsed.nextCursor.start, undefined, "tail-limited outline JSON must not overwrite backward cursor with forward start");
+    assert.equal(tailOutlineParsed.nextCursor.end, tailOutlineParsed.items[0].step_index - 1);
+    const tailOutlinePrev = runCli(["transcript", "outline", "--id", convHuge, "--limit", "50", "--end", String(tailOutlineParsed.nextCursor.end), "--json", "--max-chars", "2000"]);
+    assertBounded(tailOutlinePrev, 2000);
+    assert.equal(JSON.parse(tailOutlinePrev.stdout).items.at(-1).step_index, tailOutlineParsed.nextCursor.end);
+
+    const tailOutlineMd = runCli(["transcript", "outline", "--id", convHuge, "--limit", "50", "--max-chars", "2000"]);
+    assertBounded(tailOutlineMd, 2000);
+    assert.match(tailOutlineMd.stdout, /Step 399 \|/);
+    assert.match(tailOutlineMd.stdout, /--end \d+/);
+
+    // count === 0 in serializeBoundedJsonPayload must not emit nextCursor pointing back at the un-fittable item
+    const tinyZeroItemJson = runCli(["transcript", "read", "--id", convHuge, "--json", "--max-chars", "280"]);
+    if (tinyZeroItemJson.status === 0) {
+      const parsedZero = JSON.parse(tinyZeroItemJson.stdout);
+      if (parsedZero.steps.length === 0 && parsedZero.nextCursor) {
+        assert.ok(parsedZero.nextCursor.offset < 399, "count === 0 backward read must advance past un-fittable last item");
+      }
+    }
+
     const batchSteps = ["0", "2", "4", "8"];
     const batch = runCli(["transcript", "step", "--id", convHuge, "--step", batchSteps.join(","), "--field", "content", "--json", "--max-chars", "15000"]);
     assertBounded(batch, 15000);
@@ -1851,6 +1902,20 @@ try {
       const parsedInstallStatus = JSON.parse(cliStatusJson.stdout);
       assert.equal(parsedInstallStatus.details.transcriptAccess.launchRestrictions.restrictedCount, 3);
       assert.equal(fs.readFileSync(path.join(l46StateDir, `agy-session-${childDenyId}.json`), "utf8").includes("w2-spec1"), true);
+
+      // Multi-coordinator --reset: when coordB holds an active policy, coordA --reset must align launchRestrictions with coordB
+      manageTranscriptAccessPolicy({ _testAuthorizedOwner: coordB, off: true });
+      try {
+        recordTranscriptHookGrant({ callerConvId: coordA, subcommand: "access", mode: "open", isMutation: true });
+        const crossResetCli = runCli(["transcript", "access", "--reset", "--json"], { ...testEnv, GEMINI_CONVERSATION_ID: coordA });
+        assert.equal(crossResetCli.status, 0, crossResetCli.stderr);
+        const crossResetJson = JSON.parse(crossResetCli.stdout);
+        assert.equal(crossResetJson.ownerId, coordB);
+        assert.equal(crossResetJson.launchRestrictions.restrictedCount, 1, "active coordB policy status must scope launchRestrictions to coordB");
+        assert.equal(crossResetJson.launchRestrictions.sessions[0].conversationId, childOtherId);
+      } finally {
+        manageTranscriptAccessPolicy({ _testAuthorizedOwner: coordB, reset: true });
+      }
     } finally {
       for (const p of createdStatePaths) {
         try { fs.unlinkSync(p); } catch {}
@@ -2035,6 +2100,37 @@ try {
       }
       const tooBigMax = runCli(["transcript", "export", "--id", expChildIds[0], "--sanitized", "--max-chars", "999999"]);
       assert.notEqual(tooBigMax.status, 0);
+
+      // (f) Single-session export tail vs --start head cursor consistency + multi-session trimmed-row cursor honesty
+      const singleExportTailFit = runCli([
+        "transcript", "export", "--id", convHuge, "--sanitized", "--limit", "50", "--max-chars", "50000", "--json"
+      ]);
+      assert.equal(singleExportTailFit.status, 0, singleExportTailFit.stderr);
+      const setf = JSON.parse(singleExportTailFit.stdout);
+      assert.equal(setf.clamped, true);
+      assert.equal(setf.sessions[0].rows[0].step, 350);
+      assert.equal(setf.sessions[0].rows.at(-1).step, 399);
+      assert.deepEqual(setf.nextCursor, { end: 349 });
+
+      const singleExportTailClamp = runCli([
+        "transcript", "export", "--id", convHuge, "--sanitized", "--limit", "50", "--max-chars", "3500", "--json"
+      ]);
+      assertBounded(singleExportTailClamp, 3500);
+      const setc = JSON.parse(singleExportTailClamp.stdout);
+      assert.equal(setc.sessions[0].rows.at(-1).step, 399, "single-session export byte-clamp without --start must retain tail rows");
+      assert.deepEqual(setc.nextCursor, { end: setc.sessions[0].rows[0].step - 1 });
+
+      const singleExportHeadClamp = runCli([
+        "transcript", "export", "--id", convHuge, "--sanitized", "--start", "0", "--limit", "50", "--max-chars", "3500", "--json"
+      ]);
+      assertBounded(singleExportHeadClamp, 3500);
+      const sehc = JSON.parse(singleExportHeadClamp.stdout);
+      assert.equal(sehc.sessions[0].rows[0].step, 0, "single-session export with --start 0 must collect from head");
+      assert.deepEqual(sehc.nextCursor, { start: sehc.sessions[0].rows.at(-1).step + 1 });
+
+      // Multi-session export that trims rows across multiple sessions omits misleading single-session nextCursor
+      assert.equal(cappedExpParsed.nextCursor, undefined, "multi-session export with trimmed retained rows must not skip trimmed rows via nextCursor");
+      assert.match(cappedExpParsed.jsonTruncatedReason, /trimmed rows across multiple sessions/);
     } finally {
       if (prevExpBrain !== undefined) process.env.AGY_BRAIN_DIR = prevExpBrain;
       else delete process.env.AGY_BRAIN_DIR;

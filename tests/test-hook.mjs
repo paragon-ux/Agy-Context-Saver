@@ -2112,6 +2112,17 @@ console.log("\n--- Group I: Tier 4 Immutability After Reset & Export Flag Parsin
   assert.equal(deniedAfterResetHook.decision, "deny", "Tier 4 launch-directive deny must remain immutable after parent access --reset");
   assert.match(deniedAfterResetHook.reason || "", /source=launch-directive/);
 
+  const badExportExtraPos = runHook({
+    conversationId: coordI,
+    toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript export --parent ${coordI} extra-pos --sanitized` } }
+  });
+  assert.equal(badExportExtraPos.decision, "deny", "export --parent with unexpected positional arg must fail hook validation");
+  const badTildeUserOut = runHook({
+    conversationId: coordI,
+    toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${coordI} --out ~otheruser/leak.md` } }
+  });
+  assert.equal(badTildeUserOut.decision, "deny", "--out ~user/... tilde expansion must be blocked by hook");
+
   console.log("✓ Group I Tier 4 reset immutability + export --max-chars/--full hook checks passed");
 }
 

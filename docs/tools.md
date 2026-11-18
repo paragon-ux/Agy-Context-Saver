@@ -59,7 +59,7 @@ Streams conversation turns from `transcript.jsonl` (or `transcript_full.jsonl`) 
 | `[<id>]` / `--id` | `<uuid>` | Active / auto | Conversation UUID (positional or `--id`). |
 | `--mode` | `compact \| full` | `compact` | Read `transcript.jsonl` (`compact`) or `transcript_full.jsonl` (`full`). |
 | `--last-turns` | `<N>` | `3` | Number of recent turns (`0` returns trailing bounded window up to 200 steps; promptless `/swarm` workers with zero user messages anchor on substantive wakeup `SYSTEM_MESSAGE` steps; aliases: `--last`, `--tail`). |
-| `--offset` / `--limit` | `<N>` | `(none)` | 0-indexed step ordinal offset or maximum steps/turns (`500` default in `--outline` mode; `2000` with `--full`/`--out`). |
+| `--offset` / `--limit` | `<N>` | `(none)` | 0-indexed forward step ordinal offset (starts at `0` when `--limit` is passed alone) and maximum steps per page (`50` default, hard-capped at `200` for `read`; `500` default / `2000` with `--full`/`--out` in `--outline` mode). |
 | `--outline` / `--summary` | `(none)` | `false` | Delegate to `query --summary --include-tools` to print a 1-line-per-step outline (ignores `--mode`, `--last-turns`, `--offset`); with `--json`, emits compact `{ step_index, type, role, created_at, status, summary }` items. |
 | `--start` / `--end` | `<N>` | `0` / `999999` | Step index bounds in `--outline` / `--summary` mode. |
 | `--full-args` | `(none)` | `false` | Show untruncated tool argument previews in `--outline` mode. |
@@ -81,7 +81,7 @@ agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --mode full --f
 
 `read`, `outline`, `query`, `tools`, and `export --sanitized` default to 9,200 UTF-8 bytes. `step` defaults to 24,000 bytes. The deep tier (`--full`, `--out`) allows up to 524,288 bytes. An explicit `--max-chars` budget includes serialization and the trailing newline. With `--out`, stdout reports the write and the limit applies to the file.
 
-Bounded JSON stays parseable. When serialization omits records or raw fields, `jsonTruncated` and the included/total counts describe the reduction (`jsonSessionsIncluded` / `jsonSessionsTotal` and `jsonRowsIncluded` / `jsonRowsTotal` for `export --json`). `nextCursor` describes the serialized page (`export` drops truncated rows/sessions rather than splitting inside individual cells). If an individual record is too large for a JSON page, use a larger budget or inspect the step in Markdown with a field or line slice. A budget that cannot fit the required metadata returns a nonzero exit code and a diagnostic. Existing output files are preserved on that error.
+Bounded JSON stays parseable. When serialization omits records or raw fields, `jsonTruncated` and the included/total counts describe the reduction (`jsonSessionsIncluded` / `jsonSessionsTotal` and `jsonRowsIncluded` / `jsonRowsTotal` for `export --json`). `nextCursor` describes the serialized page (`export` drops truncated rows/sessions rather than splitting inside individual cells, omitting `nextCursor` when multiple sessions trim rows on the same page). If an individual record is too large for a JSON page, use a larger budget or inspect the step in Markdown with a field or line slice. A budget that cannot fit the required metadata returns a nonzero exit code and a diagnostic. Existing output files are preserved on that error.
 
 ## 3. `agy-context transcript query`
 
@@ -135,8 +135,8 @@ Extracts untruncated fields from `transcript_full.jsonl` for a single step, a co
 | `[<id>]` / `--id` | `<uuid>` | Active / auto | Conversation UUID (second positional arg or `--id`). |
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive step range bounds when `--step` is omitted. |
 | `--field` | `<spec>` | `all` | Target field: `content`, `thinking`, `tool_calls`, `tool_args`, `tool_args:<Key>`, or `all`. |
-| `--head` / `--tail` | `<N>` | `(none)` | Return only the first or last `N` lines across any rendered `--field` output (aliases: `--head-lines`, `--tail-lines`). |
-| `--line-start` / `--line-end` | `<N>` | `(none)` | 1-indexed inclusive line slice across any `--field` output (single-line payloads wrap into 120-char slices when line-slicing). |
+| `--head` / `--tail` | `<N>` | `(none)` | Return only the first or last `N` lines across any rendered `--field` text output (aliases: `--head-lines`, `--tail-lines`). |
+| `--line-start` / `--line-end` | `<N>` | `(none)` | 1-indexed inclusive line slice across any rendered `--field` text output (single-line payloads wrap into 120-char slices when line-slicing). |
 | `--full` | `(none)` | `false` | Opt into the deep `512 KB` ceiling, bypassing `4,000c` thinking, `1,000c` line, and `240c` large-body argument clamps (`24 KB` safety ceiling applies when `--full`/`--out`/`--max-chars` are omitted). |
 | `--max-chars` | `<N>` | `(tier default)` | Override the serialized UTF-8 output budget (up to `524,288` bytes). With `--out`, the budget applies to the artifact. |
 | `--out` / `--output` | `<path>` | `(none)` | Write deep single/batch step output (up to `512 KB`, including bounded `--json` artifacts with `jsonTruncated` metadata) to a safe `.md`/`.json`/`.txt` artifact outside protected directories and print a compact summary to stdout. |
