@@ -75,7 +75,8 @@ agy-context transcript access --mode allowlist --allow @audit-squad*,@verifier
 # Deny specific workers or set a custom TTL in seconds
 agy-context transcript access --mode open --deny @worker* --ttl 1800
 
-# Restore open access for the parent cohort (shorthands: on, reset)
+# Restore open access for the parent cohort CLI policy (shorthands: on, reset)
+# Clears policies[ownerId] overrides only; Tier 4 launch directives stay enforced
 agy-context transcript access --on
 ```
 
@@ -101,7 +102,7 @@ The lineage parser checks only the first non-empty line of the child's initial a
 
 ### 4. Stale-Lock Protection & Runtime Hardening
 
-- **1-hour TTL and parent-keyed store:** Policies live under `policies[ownerId]` in `<stateDir>/transcript-access.json` with a 3600-second default TTL.
+- **1-hour TTL, immutable Tier 4 directives, and status visibility:** Parent CLI policies live under `policies[ownerId]` in `<stateDir>/transcript-access.json` with a 3600-second default TTL. Running `--on` / `--reset` clears the parent's `policies[ownerId]` overrides (Tiers 2, 3, and 5) without erasing Tier 4 `[agy-transcript-access: deny | self-only]` launch directives stored on child session files. Both `agy-context transcript access --status` and `agy-context status` preserve parent policy fields and append `launchRestrictions` disclosing recently active (`300s` window) launch-restricted child sessions alongside `policies[ownerId]`.
 - **Top-level session bypass:** A root user conversation (`Step 0` is `USER_INPUT` without a `<SYSTEM_MESSAGE>` `sender=<parentConvId>` header) is never restricted by another session's policy.
 - **Single-use capability grants and `--file` containment:** When a restriction is active, `PreToolUse` writes a 10-second single-use capability token to `<stateDir>/transcript-access.json`: read grants (`lastHookGrant`) bind `callerConvId`, canonical `subcommand`, `targetConvId`, and `mode`, while policy mutation grants (`lastAccessMutationGrant`) bind `callerConvId`. `lib/transcript-core.mjs` verifies all bound fields, clears the disk token on verification, clears the in-memory grant synchronously upon path resolution (before async stream I/O begins) and on any early error, and independently restricts `--file` to `<brainDir>/<callerConvId>` in `self-only` mode and `<brainDir>` under any active policy or launch restriction. These controls provide application-layer `PreToolUse` and CLI defense-in-depth rather than an OS-kernel sandbox.
 - **Child lifecycle and file protection:** Restricted children cannot run `setup`, `install`, `uninstall`, or `restore-backups`, and cannot modify `~/.gemini/config/plugins/agy-context-saver/`, `~/.gemini/config/scripts/execution-guard-hook.mjs`, `hooks.json`, or `<stateDir>/transcript-access.json`.

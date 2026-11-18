@@ -52,7 +52,7 @@ agy-context uninstall --restore-backups
 | Surface | Purpose | Common usage |
 | :--- | :--- | :--- |
 | `agy-context transcript health` (`stats`, `info`) | Check turn counts, transcript byte size, RTK status, and polling events | `agy-context transcript health [<id>] [--json]` |
-| `agy-context transcript read` | Read recent turns in Markdown (`--outline` delegates to `query` summary) | `agy-context transcript read [<id>] --last-turns 3` |
+| `agy-context transcript read` | Read recent turns in Markdown (`--outline` delegates to `query` summary); defaults stay under a ~9.2 KB inline ceiling, `--full` / `--max-chars N` / `--out <path>` opt into the 512 KB deep tier | `agy-context transcript read [<id>] --last-turns 3` |
 | `agy-context transcript query` (`grep`, `search`, `find`, `tools`, `outline`, `summary`) | Search compact and truncated full steps by regex, role, tool call arguments, or print a 1-line-per-step outline | `agy-context transcript grep "<pattern>" [<id>] --summary` / `agy-context transcript outline [<id>]` |
 | `agy-context transcript step` | Extract untruncated fields for a step, comma list, or range (`N..M`) | `agy-context transcript step 10..15 [<id>] --field content --tail 40` |
 | `agy-context transcript list` (`ls`) | List recent conversation transcripts in the Antigravity brain directory (supports `--parent` and `--lineage`) | `agy-context transcript ls --parent <uuid> --lineage --limit 5` |

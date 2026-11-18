@@ -15,11 +15,16 @@ import {
   getRequiredBackoffSeconds,
   listTranscriptConversations,
   exportSanitizedTranscript,
+  stripSummaryStepBoilerplate,
   inspectTranscriptLineageFromFile,
+  formatTranscriptAccessStatus,
+  scanRecentLaunchRestrictions,
   manageTranscriptAccessPolicy,
   recordTranscriptHookGrant,
-  consumeTranscriptAccessGrant
+  consumeTranscriptAccessGrant,
+  ACTIVE_SWARM_WINDOW_MS
 } from "../lib/transcript-core.mjs";
+import { runStatus } from "../scripts/install-register.mjs";
 import { getStateDir } from "../scripts/state-dir.mjs";
 import { createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
 
@@ -1259,6 +1264,1106 @@ try {
     );
 
     console.log("✓ Parent policy CLI, runtime hook-grant verification, atomic concurrent grants, and ACS-RUN-008..010 + Wave 2 regressions verified");
+  }
+
+  console.log("\n--- 8. Two-Tier Ergonomics, Calibration Bounds, Deep Opt-In & Out Files ---");
+  {
+    // 8.1 Order-independent boilerplate stripping & spill tag preservation
+    const orderSwapRaw = [
+      "Created At: 2026-11-17T12:00:00-05:00",
+      "Completed At: 2026-11-17T12:00:03-05:00",
+      "A pre-tool hook changed the arguments of this tool call before it ran. Changed: CommandLine.",
+      "Command exited with code 0.",
+      "Command output:",
+      "ACTUAL_ORDER_SWAP_PAYLOAD"
+    ].join("\n");
+    assert.equal(stripSummaryStepBoilerplate(orderSwapRaw), "ACTUAL_ORDER_SWAP_PAYLOAD");
+
+    const spillRaw = [
+      "The tool's output was truncated due to being too long. You can find the full output in a file at file:///home/u/.gemini/antigravity/brain/cid/.system_generated/steps/42/output.txt.",
+      "Here is a preview with the middle of the output truncated:",
+      "Created At: 2026-11-17T12:00:00-05:00",
+      "Completed At: 2026-11-17T12:00:04-05:00",
+      "Command exited with code 0.",
+      "Command output:",
+      "SPILL_BODY_HEAD_LINE"
+    ].join("\n");
+    assert.equal(stripSummaryStepBoilerplate(spillRaw), "[spill: steps/42] SPILL_BODY_HEAD_LINE");
+
+    const sysWrappedRaw = [
+      "The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as important information to pay attention to.",
+      "",
+      "<SYSTEM_MESSAGE>",
+      "[Message] timestamp=2026-11-17T17:00:00Z sender=parent-1 priority=MESSAGE_PRIORITY_HIGH content=SYSTEM_SIGNAL_OK",
+      "</SYSTEM_MESSAGE>"
+    ].join("\n");
+    assert.equal(stripSummaryStepBoilerplate(sysWrappedRaw), "SYSTEM_SIGNAL_OK");
+
+    // 8.2 Build rich compact + full sibling conversation for Tier A / Tier B tests
+    const convErg = "conv-ergonomics-two-tier";
+    const ergLogsDir = path.join(brainDir, convErg, ".system_generated", "logs");
+    fs.mkdirSync(ergLogsDir, { recursive: true });
+    const ergOutDir = path.join(tempHome, "erg-artifacts");
+    fs.mkdirSync(ergOutDir, { recursive: true });
+
+    const longThinking = "THINK_START " + "T".repeat(4500) + " THINK_END_MARKER";
+    const longSingleLine = "LONG_LINE_START_" + "L".repeat(1250) + "_LONG_LINE_END";
+    const multiLineScript = Array.from({ length: 12 }, (_, idx) => `line_${idx + 1}: echo STEP_LINE_${idx + 1}`).join("\n") + "\n" + "CMD_TAIL_KEEP_" + "X".repeat(2500);
+    const longPathArg = "/home/paragon-ux/Antigravity/Agy-Squad/scratch/very_long_nested_directory_name/specialist-1/target_report.md";
+    const mediumShortArg = "alpha_beta_gamma_delta_epsilon_zeta_eta_theta_iota_kappa_lambda_mu_nu_xi_omicron_pi_rho_sigma"; // ~95 chars (<256 B)
+
+    const compactLines = [];
+    const fullLines = [];
+    let stepNum = 0;
+
+    // Step 0..23: 8 turns x (USER_INPUT + ASSISTANT duplicate read_file x3 + GENERIC boiled output + longPath + mediumArg)
+    for (let t = 0; t < 8; t++) {
+      const ts = `2026-11-17T10:${String(t).padStart(2, "0")}:05Z`;
+      const userObj = {
+        step_index: stepNum++,
+        type: "USER_INPUT",
+        created_at: ts,
+        content: `Turn ${t} user request checking ergo flow and pagination.`
+      };
+      compactLines.push(JSON.stringify(userObj));
+      fullLines.push(JSON.stringify(userObj));
+
+      const asstObj = {
+        step_index: stepNum++,
+        type: "PLANNER_RESPONSE",
+        created_at: ts,
+        content: `Turn ${t} assistant response analyzing path ${mediumShortArg}.`,
+        thinking: t === 7 ? longThinking : `Short thought ${t}`,
+        truncated_fields: t === 7 ? ["thinking", "tool_calls", "content"] : [],
+        tool_calls: t === 7
+          ? [
+              { name: "run_command", args: { CommandLine: multiLineScript, WaitMsBeforeAsync: 5000 } },
+              { name: "write_file", args: { Path: longPathArg, Content: "HDR\n" + "B".repeat(3200) + "\nEND_CONTENT_MARKER" } }
+            ]
+          : [
+              { name: "read_file", args: { Path: longPathArg, StartLine: 1, EndLine: 100 } },
+              { name: "read_file", args: { Path: longPathArg, StartLine: 1, EndLine: 100 } },
+              { name: "read_file", args: { Path: longPathArg, StartLine: 1, EndLine: 100 } },
+              { name: "custom_probe", args: { Note: mediumShortArg } }
+            ]
+      };
+      const compactAsst = t === 7
+        ? {
+            ...asstObj,
+            thinking: longThinking.slice(0, 500),
+            content: `Turn ${t} assistant response clipped.`,
+            tool_calls: [
+              { name: "run_command", args: { CommandLine: multiLineScript.slice(0, 400), WaitMsBeforeAsync: 5000 } },
+              { name: "write_file", args: { Path: longPathArg, Content: "HDR\n" + "B".repeat(400) } }
+            ]
+          }
+        : asstObj;
+      compactLines.push(JSON.stringify(compactAsst));
+      fullLines.push(JSON.stringify(asstObj));
+
+      const genObj = {
+        step_index: stepNum++,
+        type: "GENERIC",
+        created_at: ts,
+        content: t === 7
+          ? longSingleLine
+          : `Created At: 2026-11-17T05:${String(t).padStart(2, "0")}:05-05:00\nCompleted At: 2026-11-17T05:${String(t).padStart(2, "0")}:06-05:00\nCommand exited with code 0.\n\nCommand output:\nTurn ${t} clean payload ` + "P".repeat(1400)
+      };
+      compactLines.push(JSON.stringify(genObj));
+      fullLines.push(JSON.stringify(genObj));
+    }
+
+    fs.writeFileSync(path.join(ergLogsDir, "transcript.jsonl"), compactLines.join("\n") + "\n", "utf8");
+    fs.writeFileSync(path.join(ergLogsDir, "transcript_full.jsonl"), fullLines.join("\n") + "\n", "utf8");
+
+    // 8.3 Tier A read default stays <= ~9.4 KB inline, strips Created At:, middle-elides Path, suppresses [0.1 KB], emits nextCursor
+    const tierARead = runCli(["transcript", "read", "--id", convErg, "--last-turns", "8", "--json"]);
+    assert.equal(tierARead.status, 0);
+    const tierAReadJson = JSON.parse(tierARead.stdout);
+    assert.equal(tierAReadJson.mode, "compact");
+    assert.ok(tierAReadJson.clamped === true && tierAReadJson.nextCursor && Number.isInteger(tierAReadJson.nextCursor.offset));
+
+    const tierAReadText = runCli(["transcript", "read", "--id", convErg, "--last-turns", "8"]);
+    assert.equal(tierAReadText.status, 0);
+    assert.ok(tierAReadText.stdout.length <= 9600, `Tier A read must stay under spillover (~9.6KB), got ${tierAReadText.stdout.length}`);
+    assert.match(tierAReadText.stdout, /target_report\.md/, "Path middle-elide must keep basename visible in Tier A read");
+    assert.ok(!tierAReadText.stdout.includes("[0.1 KB]"), "Short <256B args must not emit noisy [0.1 KB] suffix");
+    assert.ok(!tierAReadText.stdout.includes("Created At: 2026-11-17T05:06:05"), "Compact non-dialogue generic step must strip top Created At boilerplate");
+    assert.match(tierAReadText.stdout, /--offset \d+ --limit \d+/);
+
+    // Follow explicit --offset / --limit pagination forward cleanly
+    const page1 = await readTranscript({ conversationId: convErg, offset: 0, limit: 6 });
+    assert.ok(!page1.isError && page1.displayedSteps >= 1 && page1.displayedSteps <= 6);
+    assert.equal(page1.steps[0].step_index, 0);
+    if (page1.nextCursor) {
+      const page2 = await readTranscript({ conversationId: convErg, offset: page1.nextCursor.offset, limit: page1.nextCursor.limit });
+      assert.ok(!page2.isError && page2.steps[0].step_index === page1.nextCursor.offset, "Explicit pagination must advance without skipping steps");
+    }
+
+    // 8.4 Tier A outline & tools stay <= 9.6 KB inline, collapse duplicates, compact UTC dates, and provide nextCursor
+    const tierAOutline = runCli(["transcript", "outline", "--id", convErg, "--start", "0", "--end", "23"]);
+    assert.equal(tierAOutline.status, 0);
+    assert.ok(tierAOutline.stdout.length <= 9600, `Tier A outline must stay inline (got ${tierAOutline.stdout.length})`);
+    assert.match(tierAOutline.stdout, /date=2026-11-17 UTC/);
+    assert.match(tierAOutline.stdout, /\(10:00:05Z\)/);
+    assert.match(tierAOutline.stdout, /read_file\(Path="[^"]*target_report\.md"\) \(x3\)/);
+
+    const tierATools = runCli(["transcript", "tools", "--id", convErg, "--start", "0", "--end", "23", "--json"]);
+    assert.equal(tierATools.status, 0);
+    const tierAToolsJson = JSON.parse(tierATools.stdout);
+    assert.equal(tierAToolsJson.clamped, true);
+    assert.ok(tierAToolsJson.nextCursor && Number.isInteger(tierAToolsJson.nextCursor.end));
+
+    // 8.5 Tier B --full un-clamps thinking (4.5K), single long line (1.25K), and LARGE_BODY args; Mode badge avoids (**full**) (**full**)
+    const richAsstStep = stepNum - 2; // Turn 7 PLANNER_RESPONSE (has longThinking & multiLineScript)
+    const richGenStep = stepNum - 1;  // Turn 7 GENERIC (has longSingleLine)
+    const fullStepRes = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--full"]);
+    assert.equal(fullStepRes.status, 0);
+    assert.match(fullStepRes.stdout, /THINK_END_MARKER/, "step --full must bypass 4000c thinking cap");
+    assert.match(fullStepRes.stdout, /END_CONTENT_MARKER/, "step --full must bypass 240c LARGE_BODY_ARG_KEYS cap");
+    assert.match(fullStepRes.stdout, /CMD_TAIL_KEEP_/, "step --full must preserve full 2.5KB CommandLine arg");
+
+    const fullLineStepRes = runCli(["transcript", "step", "--id", convErg, "--step", String(richGenStep), "--full"]);
+    assert.equal(fullLineStepRes.status, 0);
+    assert.match(fullLineStepRes.stdout, /_LONG_LINE_END/, "step --full must bypass MAX_LINE_CHARS=1000 cap");
+
+    // Default step and --max-chars > 24000 without --full must still honor 4,000c thinking, 1,000c line, and 240c LARGE_BODY clamps
+    for (const extraFlags of [[], ["--max-chars", "50000"]]) {
+      const clampedDefaultAsst = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), ...extraFlags]);
+      assert.equal(clampedDefaultAsst.status, 0);
+      assert.equal(clampedDefaultAsst.stdout.includes("THINK_END_MARKER"), false, `step without --full must enforce 4,000c thinking clamp (${extraFlags.join(" ") || "default"})`);
+      assert.equal(clampedDefaultAsst.stdout.includes("END_CONTENT_MARKER"), false, `step without --full must enforce 240c LARGE_BODY clamp (${extraFlags.join(" ") || "default"})`);
+    }
+    const nonFullLargeLine = runCli(["transcript", "step", "--id", convErg, "--step", String(richGenStep), "--max-chars", "50000"]);
+    assert.equal(nonFullLargeLine.status, 0);
+    assert.equal(nonFullLargeLine.stdout.includes("_LONG_LINE_END"), false, "step --max-chars > 24000 without --full must still enforce MAX_LINE_CHARS");
+
+    // Single-step clamping header must not claim 'batch view' and must reserve wrapper/fence/notice bytes without double-truncation
+    const singleClampedStep = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--field", "tool_args", "--full", "--max-chars", "600"]);
+    assert.equal(singleClampedStep.status, 0);
+    assert.ok(!singleClampedStep.stdout.includes("clamped in batch view"), "Single-step clamp message must not say batch view");
+    assert.ok(Buffer.byteLength(singleClampedStep.stdout, "utf8") <= 600);
+    assert.match(singleClampedStep.stdout, /Step \d+ \(tool_args\) clamped at 600 chars/);
+
+    const singleClampedCalls = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--field", "tool_calls", "--full", "--max-chars", "600"]);
+    assert.equal(singleClampedCalls.status, 0);
+    assert.ok(Buffer.byteLength(singleClampedCalls.stdout, "utf8") <= 600);
+    assert.match(singleClampedCalls.stdout, /Step \d+ \(tool_calls\) clamped at 600 chars/);
+    assert.ok(singleClampedCalls.stdout.trimEnd().endsWith("```"), "clamped tool_calls must keep its closing json fence without blind double-truncation");
+
+    // read --full --max-chars < 512 KB must not claim '(unclamped)', and tiny --max-chars stays bounded without cursor-losing blind cut
+    const readFullCapped = runCli(["transcript", "read", "--id", convErg, "--mode", "full", "--full", "--max-chars", "5000"]);
+    assert.equal(readFullCapped.status, 0);
+    assert.equal(readFullCapped.stdout.includes("(unclamped)"), false, "read --full --max-chars 5000 must not claim (unclamped)");
+    const readTiny = runCli(["transcript", "read", "--id", convErg, "--max-chars", "450"]);
+    assert.equal(readTiny.status, 0);
+    assert.ok(Buffer.byteLength(readTiny.stdout, "utf8") <= 450, `tiny read --max-chars 450 overshot: ${Buffer.byteLength(readTiny.stdout, "utf8")}`);
+
+    // 8.6 --line-start / --line-end and --tail on tool_args:<Key> and validation failures
+    const sliceCmdRes = runCli([
+      "transcript", "step", "--id", convErg, "--step", String(richAsstStep),
+      "--field", "tool_args:CommandLine", "--line-start", "2", "--line-end", "4"
+    ]);
+    assert.equal(sliceCmdRes.status, 0);
+    assert.match(sliceCmdRes.stdout, /line_1: echo STEP_LINE_1/);
+    assert.match(sliceCmdRes.stdout, /line_3: echo STEP_LINE_3/);
+    assert.ok(!sliceCmdRes.stdout.includes("STEP_LINE_4"));
+    assert.ok(!sliceCmdRes.stdout.includes("[0] `run_command`"));
+    assert.match(sliceCmdRes.stdout, /\[Lines 2-4 of 17\]/);
+
+    const tailArgsRes = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--field", "tool_args", "--tail", "3"]);
+    assert.equal(tailArgsRes.status, 0);
+    assert.match(tailArgsRes.stdout, /END_CONTENT_MARKER/);
+    assert.ok(!tailArgsRes.stdout.includes("STEP_LINE_1"));
+    assert.match(tailArgsRes.stdout, /\[Lines 13-15 of 15\]/);
+
+    for (const badCli of [
+      ["transcript", "step", "--id", convErg, "--step", "1", "--line-start", "5", "--line-end", "2"],
+      ["transcript", "step", "--id", convErg, "--step", "1", "--max-chars", "0"],
+      ["transcript", "read", "--id", convErg, "--out", path.join(ergOutDir, "a.md"), "--output", path.join(ergOutDir, "b.md")]
+    ]) {
+      const badExit = runCli(badCli);
+      assert.notEqual(badExit.status, 0, `Invalid flags must fail closed: ${badCli.join(" ")}`);
+    }
+
+    // 8.7 --out across read, outline, query, tools, step (small stdout summary, deep file output) + path guard
+    const readOutFile = path.join(ergOutDir, "read_full.md");
+    const outlineOutFile = path.join(ergOutDir, "outline_full.md");
+    const queryOutFile = path.join(ergOutDir, "query_full.md");
+    const stepOutFile = path.join(ergOutDir, "step_full.md");
+    const readFullOutCli = runCli(["transcript", "read", "--id", convErg, "--mode", "full", "--full", "--include-thinking", "--last-turns", "8", "--out", readOutFile]);
+    assert.equal(readFullOutCli.status, 0);
+    assert.ok(readFullOutCli.stdout.length < 300, "CLI with --out must only print compact confirmation to stdout");
+    const readFullDisk = fs.readFileSync(readOutFile, "utf8");
+    assert.match(readFullDisk, /Mode: \*\*full\*\* \(unclamped\)/);
+    assert.match(readFullDisk, /THINK_END_MARKER/);
+    assert.match(readFullDisk, /END_CONTENT_MARKER/);
+
+    const outlineOutCli = runCli(["transcript", "outline", "--id", convErg, "--full", "--out", outlineOutFile]);
+    assert.equal(outlineOutCli.status, 0);
+    assert.ok(fs.readFileSync(outlineOutFile, "utf8").includes("Step 23"));
+
+    const queryOutCli = runCli(["transcript", "query", "--id", convErg, "--query", "THINK_END_MARKER", "--include-thinking", "--full", "--out", queryOutFile]);
+    assert.equal(queryOutCli.status, 0);
+    assert.ok(fs.readFileSync(queryOutFile, "utf8").includes("THINK_END_MARKER"));
+
+    const stepOutCli = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--full", "--out", stepOutFile]);
+    assert.equal(stepOutCli.status, 0);
+    assert.ok(fs.readFileSync(stepOutFile, "utf8").includes("CMD_TAIL_KEEP_"));
+
+    for (const badOutTarget of [
+      path.join(ergLogsDir, "evil.md"),
+      path.join(tempHome, "benchmarks", "evil.json"),
+      path.join(tempHome, "scripts", "evil.mjs")
+    ]) {
+      const deniedOut = runCli(["transcript", "read", "--id", convErg, "--out", badOutTarget]);
+      assert.notEqual(deniedOut.status, 0, `Protected --out target must fail closed on read: ${badOutTarget}`);
+    }
+
+    // 8.8 export --sanitized strips Created At: order-independently and emits [spill: steps/N]
+    const expErg = await exportSanitizedTranscript({ conversationIds: [convErg], sanitized: true });
+    assert.ok(!expErg.isError);
+    assert.ok(!expErg.text.includes("Created At: 2026-11-17T05:00:05"), "Sanitized export table must strip Created At metadata");
+    assert.match(expErg.text, /Turn 0 clean payload/);
+
+    console.log("✓ Two-tier ergonomics, Tier A inline bounds, Tier B --full/--line-start/--max-chars/--out, pagination cursors & sanitization verified");
+
+    // 9. PR #7 audit regressions
+    console.log("\n--- 9. PR #7 Audit Regressions (UTF-8 bounds, duplicate collapse, validation, --out --json, spill tags) ---");
+
+    // 9.1 UTF-8 byte budget: multi-byte glyphs must not push inline output past ~10 KB
+    const convUtf = "conv-utf8-bounds";
+    const utfLogs = path.join(brainDir, convUtf, ".system_generated", "logs");
+    fs.mkdirSync(utfLogs, { recursive: true });
+    const utfLines = [];
+    for (let s = 0; s < 40; s++) {
+      utfLines.push(JSON.stringify({ step_index: s * 2, type: "USER_INPUT", created_at: "2026-11-17T10:00:00Z", content: `u${s} ` + "─✓→😀".repeat(230) }));
+      utfLines.push(JSON.stringify({ step_index: s * 2 + 1, type: "PLANNER_RESPONSE", created_at: "2026-11-17T10:00:01Z", content: "答".repeat(700) }));
+    }
+    fs.writeFileSync(path.join(utfLogs, "transcript.jsonl"), utfLines.join("\n") + "\n");
+    const utfRead = runCli(["transcript", "read", "--id", convUtf, "--last-turns", "40"]);
+    assert.equal(utfRead.status, 0);
+    assert.ok(Buffer.byteLength(utfRead.stdout, "utf8") <= 10000, `UTF-8 read must stay <= 10000 bytes, got ${Buffer.byteLength(utfRead.stdout, "utf8")}`);
+    const utfOutline = runCli(["transcript", "outline", "--id", convUtf]);
+    assert.equal(utfOutline.status, 0);
+    assert.ok(Buffer.byteLength(utfOutline.stdout, "utf8") <= 10000, "UTF-8 outline must stay <= 10000 bytes");
+
+    // 9.2 Oversized single step in tools/query --field must stay inline-bounded
+    const convBig = "conv-oversized-single";
+    const bigLogs = path.join(brainDir, convBig, ".system_generated", "logs");
+    fs.mkdirSync(bigLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(bigLogs, "transcript.jsonl"),
+      JSON.stringify({ step_index: 0, type: "PLANNER_RESPONSE", created_at: "2026-11-17T10:00:00Z", content: "x".repeat(20000), tool_calls: [{ name: "run_command", args: { CommandLine: "echo " + "Z".repeat(20000) } }] }) + "\n"
+    );
+    const bigTools = runCli(["transcript", "tools", "--id", convBig, "--mode", "compact"]);
+    assert.equal(bigTools.status, 0);
+    assert.ok(Buffer.byteLength(bigTools.stdout, "utf8") <= 10000, "tools on an oversized single step must stay inline-bounded");
+
+    // 9.3 Distinct tool calls sharing a displayed prefix are not collapsed; true duplicates are
+    const { formatCompactToolList } = await import("../lib/transcript-core.mjs");
+    const distinct = formatCompactToolList([
+      { name: "read_file", args: { Path: "a.mjs", StartLine: 1, EndLine: 150 } },
+      { name: "read_file", args: { Path: "a.mjs", StartLine: 151, EndLine: 300 } }
+    ]);
+    assert.ok(!distinct.includes("(x2)"), "distinct read_file slices must not collapse");
+    const dup = formatCompactToolList([
+      { name: "read_file", args: { Path: "a.mjs", StartLine: 1, EndLine: 150 } },
+      { name: "read_file", args: { Path: "a.mjs", StartLine: 1, EndLine: 150 } }
+    ]);
+    assert.ok(dup.includes("(x2)"), "identical read_file calls must collapse");
+
+    // 9.4 stripSummaryStepBoilerplate: prose-only boilerplate yields empty, Windows spill path, dialogue untouched in read
+    assert.equal(
+      stripSummaryStepBoilerplate("Created At: 2026-11-17T12:00:00-05:00\nCompleted At: 2026-11-17T12:00:01-05:00\nCommand exited with code 0."),
+      ""
+    );
+    assert.equal(
+      stripSummaryStepBoilerplate("The tool's output was truncated due to being too long. You can find the full output in a file at file:///C:/x/.system_generated/steps/7/output.txt.\nHere is a preview:\nBODY"),
+      "[spill: steps/7] BODY"
+    );
+
+    // 9.5 CLI validation of integer/range flags
+    for (const badArgs of [
+      ["transcript", "read", "--id", convErg, "--limit", "0"],
+      ["transcript", "read", "--id", convErg, "--offset", "-1"],
+      ["transcript", "read", "--id", convErg, "--last-turns", ""],
+      ["transcript", "outline", "--id", convErg, "--start", "50", "--end", "10"],
+      ["transcript", "query", "--id", convErg, "--start", "-1"],
+      ["transcript", "step", "--id", convErg, "--step", "1", "--head", "0"],
+      ["transcript", "step", "--id", convErg, "--step", "1", "--tail", "-2"],
+      ["transcript", "step", "--id", convErg, "--step", "1", "--max-chars", "999999999"],
+      ["transcript", "read", "--help=true"]
+    ]) {
+      const badRes = runCli(badArgs);
+      assert.notEqual(badRes.status, 0, `Must fail closed: ${badArgs.join(" ")}`);
+    }
+
+    // 9.6 --out + --json keeps stdout compact (no steps/items payloads)
+    const jsonOut = path.join(ergOutDir, "json_out.json");
+    const jsonOutRes = runCli(["transcript", "read", "--id", convErg, "--full", "--mode", "full", "--last-turns", "8", "--out", jsonOut, "--json"]);
+    assert.equal(jsonOutRes.status, 0);
+    const jsonOutStdout = JSON.parse(jsonOutRes.stdout);
+    assert.equal(jsonOutStdout.outputPath, jsonOut);
+    assert.ok(jsonOutStdout.steps === undefined && jsonOutStdout.items === undefined, "--out --json stdout must omit raw step payloads");
+    assert.ok(jsonOutRes.stdout.length < 2000, "--out --json stdout must stay compact");
+    assert.ok(Array.isArray(JSON.parse(fs.readFileSync(jsonOut, "utf8")).steps), "--out --json file keeps the full payload");
+
+    // 9.7 --out rejects UNC / device paths and hooks.json; missing tool_args key reports not present; line slice beyond end
+    for (const badOut of ["//server/share/leak.md", "\\\\server\\share\\leak.md", path.join(ergOutDir, "hooks.json")]) {
+      const badOutRes = runCli(["transcript", "read", "--id", convErg, "--out", badOut]);
+      assert.notEqual(badOutRes.status, 0, `Unsafe --out must fail closed: ${badOut}`);
+    }
+    const missingKey = runCli(["transcript", "step", "--id", convErg, "--step", String(richGenStep - 1), "--field", "tool_args:NoSuchKey"]);
+    assert.equal(missingKey.status, 0);
+    assert.ok(!/\bundefined\b/.test(missingKey.stdout), "missing tool_args key must not print 'undefined'");
+    const beyond = runCli(["transcript", "step", "--id", convErg, "--step", String(richAsstStep), "--field", "tool_args:CommandLine", "--line-start", "9999"]);
+    assert.equal(beyond.status, 0);
+    assert.match(beyond.stdout, /No lines in requested range/);
+
+    console.log("✓ PR #7 audit regressions verified");
+
+    // 9.8 --out --json artifact obeys the 512 KB deep-tier cap (and explicit --max-chars) with declared truncation
+    const convHuge = "conv-huge-json-cap";
+    const hugeLogs = path.join(brainDir, convHuge, ".system_generated", "logs");
+    fs.mkdirSync(hugeLogs, { recursive: true });
+    const hugeLines = [];
+    for (let s = 0; s < 400; s++) {
+      hugeLines.push(JSON.stringify({
+        step_index: s,
+        type: s % 2 === 0 ? "USER_INPUT" : "PLANNER_RESPONSE",
+        created_at: "2026-11-17T10:00:00Z",
+        content: `step ${s} ` + "W".repeat(3500),
+        tool_calls: s % 2 === 1 ? [{ name: "run_command", args: { CommandLine: `echo ${s} ` + "Q".repeat(400) } }] : undefined
+      }));
+    }
+    fs.writeFileSync(path.join(hugeLogs, "transcript.jsonl"), hugeLines.join("\n") + "\n");
+    const hugeJsonFile = path.join(ergOutDir, "huge_cap.json");
+    const hugeRes = runCli(["transcript", "query", "--id", convHuge, "--limit", "400", "--full", "--out", hugeJsonFile, "--json"]);
+    assert.equal(hugeRes.status, 0, hugeRes.stderr);
+    const hugeBytes = fs.statSync(hugeJsonFile).size;
+    assert.ok(hugeBytes <= 512 * 1024, `--out --json must stay <= 512 KB, got ${hugeBytes}`);
+    const hugeFile = JSON.parse(fs.readFileSync(hugeJsonFile, "utf8"));
+    assert.equal(hugeFile.jsonTruncated, true, "oversized JSON artifact must declare truncation");
+    assert.ok(hugeFile.jsonItemsIncluded > 0 && hugeFile.jsonItemsIncluded < hugeFile.jsonItemsTotal);
+    assert.equal(hugeFile.items.length, hugeFile.jsonItemsIncluded);
+    const hugeStdout = JSON.parse(hugeRes.stdout);
+    assert.equal(hugeStdout.jsonTruncated, true);
+    assert.ok(hugeRes.stdout.length < 2000, "stdout stays compact");
+
+    const hugeOutlineJson = path.join(ergOutDir, "huge_outline_compact.json");
+    const hugeOutlineRes = runCli(["transcript", "outline", "--id", convHuge, "--full", "--out", hugeOutlineJson, "--json"]);
+    assert.equal(hugeOutlineRes.status, 0, hugeOutlineRes.stderr);
+    const hugeOutlineParsed = JSON.parse(fs.readFileSync(hugeOutlineJson, "utf8"));
+    assert.equal(hugeOutlineParsed.items.length, 400, "outline --full --json must project compact summary objects across all 400 steps under 512 KB");
+    assert.equal(hugeOutlineParsed.items[0].content, undefined, "outline --full --json summary items must omit raw content");
+    assert.equal(hugeOutlineParsed.items[1].tool_calls, undefined, "outline --full --json summary items must omit raw tool_calls");
+
+    const smallCapFile = path.join(ergOutDir, "small_cap.json");
+    const smallCapRes = runCli(["transcript", "outline", "--id", convHuge, "--full", "--max-chars", "20000", "--out", smallCapFile, "--json"]);
+    assert.equal(smallCapRes.status, 0, smallCapRes.stderr);
+    assert.ok(fs.statSync(smallCapFile).size <= 20000, "explicit --max-chars must bound the JSON artifact");
+
+    const hugeMdFile = path.join(ergOutDir, "huge_cap.md");
+    const hugeMdRes = runCli(["transcript", "read", "--id", convHuge, "--mode", "full", "--full", "--last-turns", "400", "--out", hugeMdFile]);
+    assert.equal(hugeMdRes.status, 0, hugeMdRes.stderr);
+    assert.ok(fs.statSync(hugeMdFile).size <= 512 * 1024, "Markdown --out artifact must stay <= 512 KB in bytes");
+
+    // RR-ACS-RUN-001 exercises the bytes the CLI actually emits.
+    const assertBounded = (result, limit) => {
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok(Buffer.byteLength(result.stdout, "utf8") <= limit, "serialized stdout exceeded its byte budget");
+      assert.ok(!result.stdout.includes("\uFFFD"), "UTF-8 output lost a code point");
+    };
+    for (const sub of ["read", "outline", "query", "tools"]) {
+      const args = ["transcript", sub, "--id", convHuge, "--limit", "80"];
+      for (const json of [[], ["--json"]]) {
+        const inline = runCli([...args, ...json]);
+        assertBounded(inline, 9200);
+        const explicit = runCli([...args, ...json, "--max-chars", "5000"]);
+        assertBounded(explicit, 5000);
+        if (json.length) {
+          JSON.parse(inline.stdout);
+          JSON.parse(explicit.stdout);
+        }
+      }
+    }
+    const utfJson = runCli(["transcript", "read", "--id", convUtf, "--last-turns", "40", "--json", "--max-chars", "5000"]);
+    assertBounded(utfJson, 5000);
+    assert.match(utfJson.stdout, /[答✓]/);
+    assert.equal(JSON.parse(utfJson.stdout).clamped, true);
+
+    const readPageArgs = ["transcript", "read", "--id", convHuge, "--limit", "80", "--json", "--max-chars", "5000"];
+    const firstPage = runCli([...readPageArgs, "--offset", "0"]);
+    assertBounded(firstPage, 5000);
+    const page = JSON.parse(firstPage.stdout);
+    assert.equal(page.steps[0].step_index, 0);
+    assert.equal(page.displayedSteps, page.steps.length);
+    assert.equal(page.nextCursor.offset, page.steps.at(-1)._fileOrd + 1);
+    const secondPage = runCli([...readPageArgs, "--offset", String(page.nextCursor.offset)]);
+    assertBounded(secondPage, 5000);
+    assert.equal(JSON.parse(secondPage.stdout).steps[0].step_index, page.nextCursor.offset);
+
+    const forwardOutlineArgs = ["transcript", "outline", "--id", convHuge, "--json", "--max-chars", "5000"];
+    const outlineFile = path.join(ergOutDir, "forward-outline.json");
+    const savedOutline = runCli([...forwardOutlineArgs, "--start", "0", "--end", "20", "--out", outlineFile]);
+    assert.equal(savedOutline.status, 0, savedOutline.stderr);
+    assert.ok(fs.statSync(outlineFile).size <= 5000);
+    const outlinePage = JSON.parse(fs.readFileSync(outlineFile, "utf8"));
+    assert.equal(outlinePage.jsonTruncated, true);
+    assert.equal(outlinePage.items[0].step_index, 0);
+    assert.deepEqual(outlinePage.nextCursor, { start: outlinePage.items.at(-1).step_index + 1, end: 20 });
+    assert.deepEqual(JSON.parse(savedOutline.stdout).nextCursor, outlinePage.nextCursor);
+    const nextOutline = runCli([...forwardOutlineArgs, "--start", String(outlinePage.nextCursor.start), "--end", "20"]);
+    assertBounded(nextOutline, 5000);
+    assert.equal(JSON.parse(nextOutline.stdout).items[0].step_index, outlinePage.nextCursor.start);
+
+    // Tail-limited outline (--limit 50 on 400 steps) must paginate backward without losing steps 0..349 in JSON or Markdown
+    const tailOutlineJson = runCli(["transcript", "outline", "--id", convHuge, "--limit", "50", "--json", "--max-chars", "2000"]);
+    assertBounded(tailOutlineJson, 2000);
+    const tailOutlineParsed = JSON.parse(tailOutlineJson.stdout);
+    assert.equal(tailOutlineParsed.jsonTruncated, true);
+    assert.equal(tailOutlineParsed.items.at(-1).step_index, 399, "tail-limited outline JSON must retain latest steps");
+    assert.equal(tailOutlineParsed.nextCursor.start, undefined, "tail-limited outline JSON must not overwrite backward cursor with forward start");
+    assert.equal(tailOutlineParsed.nextCursor.end, tailOutlineParsed.items[0].step_index - 1);
+    const tailOutlinePrev = runCli(["transcript", "outline", "--id", convHuge, "--limit", "50", "--end", String(tailOutlineParsed.nextCursor.end), "--json", "--max-chars", "2000"]);
+    assertBounded(tailOutlinePrev, 2000);
+    assert.equal(JSON.parse(tailOutlinePrev.stdout).items.at(-1).step_index, tailOutlineParsed.nextCursor.end);
+
+    const tailOutlineMd = runCli(["transcript", "outline", "--id", convHuge, "--limit", "50", "--max-chars", "2000"]);
+    assertBounded(tailOutlineMd, 2000);
+    assert.match(tailOutlineMd.stdout, /Step 399 \|/);
+    assert.match(tailOutlineMd.stdout, /--end \d+/);
+
+    // count === 0 in serializeBoundedJsonPayload must not emit nextCursor pointing back at the un-fittable item
+    const jsonTruncMetaReason = "Output exceeds the byte budget. Use a larger budget or a narrower selection.";
+    const readZeroBudget = Buffer.byteLength(JSON.stringify({
+      ...page,
+      steps: [],
+      displayedSteps: 0,
+      nextCursor: { offset: 0, limit: 399 },
+      jsonTruncated: true,
+      jsonItemsIncluded: 0,
+      jsonItemsTotal: page.steps.length,
+      jsonTruncatedReason: jsonTruncMetaReason
+    }) + "\n", "utf8") + 32;
+    const tinyZeroItemJson = runCli(["transcript", "read", "--id", convHuge, "--json", "--max-chars", String(readZeroBudget)]);
+    assertBounded(tinyZeroItemJson, readZeroBudget);
+    const parsedZero = JSON.parse(tinyZeroItemJson.stdout);
+    assert.equal(parsedZero.jsonTruncated, true);
+    assert.equal(parsedZero.steps.length, 0, "zero-item read budget on 3.8KB steps must force 0-item read fallback");
+    assert.ok(parsedZero.nextCursor && parsedZero.nextCursor.offset === 0 && parsedZero.nextCursor.limit > 0 && parsedZero.nextCursor.limit < 399,
+      `count === 0 backward read must advance past un-fittable last item (got ${JSON.stringify(parsedZero.nextCursor)})`);
+
+    const tinyForwardReadZero = runCli(["transcript", "read", "--id", convHuge, "--offset", "10", "--limit", "5", "--json", "--max-chars", String(readZeroBudget)]);
+    assertBounded(tinyForwardReadZero, readZeroBudget);
+    const parsedFwdZero = JSON.parse(tinyForwardReadZero.stdout);
+    assert.equal(parsedFwdZero.steps.length, 0);
+    assert.deepEqual(parsedFwdZero.nextCursor, { offset: 11, limit: 5 }, "count === 0 forward read must advance past un-fittable first item");
+
+    const outlineZeroBudget = Buffer.byteLength(JSON.stringify({
+      ...outlinePage,
+      items: [],
+      displayedCount: 0,
+      nextCursor: { start: 11, end: 30 },
+      jsonTruncated: true,
+      jsonItemsIncluded: 0,
+      jsonItemsTotal: 21,
+      jsonTruncatedReason: jsonTruncMetaReason
+    }) + "\n", "utf8") + 16;
+    const tinyForwardOutlineZero = runCli(["transcript", "outline", "--id", convHuge, "--start", "10", "--end", "30", "--json", "--max-chars", String(outlineZeroBudget)]);
+    assertBounded(tinyForwardOutlineZero, outlineZeroBudget);
+    const parsedFwdOutlineZero = JSON.parse(tinyForwardOutlineZero.stdout);
+    assert.equal(parsedFwdOutlineZero.jsonTruncated, true);
+    assert.equal(parsedFwdOutlineZero.items.length, 0, "zero-item outline budget must force 0-item forward outline fallback");
+    assert.deepEqual(parsedFwdOutlineZero.nextCursor, { start: 11, end: 30 }, "count === 0 forward outline must advance to next step");
+
+    const batchSteps = ["0", "2", "4", "8"];
+    const batch = runCli(["transcript", "step", "--id", convHuge, "--step", batchSteps.join(","), "--field", "content", "--json", "--max-chars", "15000"]);
+    assertBounded(batch, 15000);
+    const batchPage = JSON.parse(batch.stdout);
+    assert.ok(batchPage.steps.length > 0 && batchPage.steps.length < batchSteps.length);
+    assert.deepEqual(batchPage.stepIndices, batchPage.steps.map((entry) => entry.stepIndex));
+    const remainder = await getStepDetail({ conversationId: convHuge, stepIndex: batchPage.nextCursor.step, full: true });
+    assert.deepEqual(remainder.requestedSteps ?? [remainder.stepIndex], batchSteps.slice(batchPage.steps.length).map(Number));
+
+    const stepArgs = ["transcript", "step", "--id", convUtf, "--step", "1", "--field", "content"];
+    assertBounded(runCli([...stepArgs, "--max-chars", "600"]), 600);
+    const stepJson = runCli([...stepArgs, "--json", "--max-chars", "600"]);
+    assertBounded(stepJson, 600);
+    assert.equal(JSON.parse(stepJson.stdout).stepIndex, 1);
+
+    for (const json of [[], ["--json"]]) {
+      const lowPath = path.join(ergOutDir, json.length ? "too-small.json" : "too-small.md");
+      fs.writeFileSync(lowPath, "keep existing artifact");
+      for (const output of [[], ["--out", lowPath]]) {
+        const small = runCli(["transcript", "read", "--id", convUtf, "--max-chars", "80", ...json, ...output]);
+        assert.equal(small.status, 1);
+        assert.equal(small.stdout, "");
+        assert.match(small.stderr, /too small.*transcript/i);
+        if (json.length) assert.equal(JSON.parse(small.stderr).isError, true);
+      }
+      assert.equal(fs.readFileSync(lowPath, "utf8"), "keep existing artifact");
+    }
+
+    console.log("✓ --out --json and Markdown artifacts honor the 512 KB deep-tier cap");
+
+    // ========================================================================
+    // 10. PR #7 L46 Remediations (Option A Status, Compact Summary JSON, Export Bounds, Worker Cursors)
+    // ========================================================================
+    console.log("\n--- 10. PR #7 L46 Remediations (PR7-RUN-001..004, PR7-DOC-001) ---");
+
+    // 10.1 PR7-RUN-001: Option A honest recent launch-restriction disclosure & non-destructive scan
+    const l46StateDir = getStateDir();
+    fs.mkdirSync(l46StateDir, { recursive: true });
+    const nowMs = Date.now();
+    const staleMs = nowMs - ACTIVE_SWARM_WINDOW_MS - 60000;
+    const coordA = "coord-l46-opt-a";
+    const coordB = "coord-l46-other-b";
+    const childDenyId = "l46-child-deny-01";
+    const childSelfId = "l46-child-self-02";
+    const childAllowId = "l46-child-allow-03";
+    const childStaleId = "l46-child-stale-04";
+    const childStaleTsId = "l46-child-stalets-05";
+    const childOtherId = "l46-child-other-06";
+    const topDenyId = "l46-top-user-07";
+
+    const writeStateFile = (fileName, data, mtimeMs = nowMs) => {
+      const target = path.join(l46StateDir, fileName);
+      fs.writeFileSync(target, typeof data === "string" ? data : JSON.stringify(data, null, 2), "utf8");
+      const sec = mtimeMs / 1000;
+      fs.utimesSync(target, sec, sec);
+      return target;
+    };
+
+    const createdStatePaths = [];
+    try {
+      createdStatePaths.push(writeStateFile(`agy-session-${childDenyId}.json`, {
+        lastSeenTime: nowMs,
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: coordA, rosterName: "w2-spec1", launchDirective: "deny" }
+      }));
+      createdStatePaths.push(writeStateFile(`agy-session-${childSelfId}.json`, {
+        lastSeenTime: nowMs - 1000,
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: coordA, rosterName: "w2-spec2", launchDirective: "self-only" }
+      }));
+      createdStatePaths.push(writeStateFile(`agy-session-${childAllowId}.json`, {
+        lastSeenTime: nowMs,
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: coordA, rosterName: "w2-lead", launchDirective: "allow" }
+      }));
+      createdStatePaths.push(writeStateFile(`agy-session-${childStaleId}.json`, {
+        lastSeenTime: staleMs,
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: coordA, rosterName: "stale-mtime", launchDirective: "deny" }
+      }, staleMs));
+      createdStatePaths.push(writeStateFile(`agy-session-${childStaleTsId}.json`, {
+        lastSeenTime: staleMs,
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: coordA, rosterName: "stale-ts", launchDirective: "deny" }
+      }, nowMs));
+      createdStatePaths.push(writeStateFile(`agy-session-${childOtherId}.json`, {
+        lastSeenTime: nowMs,
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: coordB, rosterName: "other-spec", launchDirective: "deny" }
+      }));
+      createdStatePaths.push(writeStateFile(`agy-session-${topDenyId}.json`, {
+        lastSeenTime: nowMs,
+        lineage: { isTopLevelUserSession: true, isChildSession: false, parentConvId: null, launchDirective: "deny" }
+      }));
+      createdStatePaths.push(writeStateFile("agy-session-governance-state.json", {
+        global: { lastSeenTime: nowMs },
+        lineage: { isChildSession: true, parentConvId: coordA, launchDirective: "deny" }
+      }));
+      createdStatePaths.push(writeStateFile("agy-session-malformed-99.json", "{broken json"));
+      const outsideSymTarget = path.join(tempHome, "outside-session.json");
+      fs.writeFileSync(outsideSymTarget, JSON.stringify({ lastSeenTime: nowMs, lineage: { isChildSession: true, parentConvId: coordA, launchDirective: "deny" } }));
+      const symStatePath = path.join(l46StateDir, "agy-session-symlinked.json");
+      try {
+        fs.symlinkSync(outsideSymTarget, symStatePath);
+        createdStatePaths.push(symStatePath);
+      } catch {}
+
+      // Unscoped scan includes both cohorts (coordA deny+self-only + coordB deny = 3), ignoring allow/stale/top/legacy/corrupt/symlink
+      const unscopedScan = scanRecentLaunchRestrictions();
+      assert.equal(unscopedScan.restrictedCount, 3, "unscoped scan must find only valid recent deny/self-only children");
+      assert.equal(unscopedScan.denyCount, 2);
+      assert.equal(unscopedScan.selfOnlyCount, 1);
+
+      // Owner-scoped scan isolates coordA's 2 restricted children (excludes coordB, excludes allow/stale/top/legacy/corrupt/symlink)
+      const scopedScan = scanRecentLaunchRestrictions({ ownerId: coordA });
+      assert.equal(scopedScan.scope, "recent-child-sessions");
+      assert.equal(scopedScan.windowMs, ACTIVE_SWARM_WINDOW_MS);
+      assert.equal(scopedScan.restrictedCount, 2);
+      assert.equal(scopedScan.denyCount, 1);
+      assert.equal(scopedScan.selfOnlyCount, 1);
+      assert.deepEqual(
+        scopedScan.sessions.map((s) => ({ id: s.conversationId, mode: s.mode, source: s.source })),
+        [
+          { id: childDenyId, mode: "deny", source: "launch-directive" },
+          { id: childSelfId, mode: "self-only", source: "launch-directive" }
+        ]
+      );
+
+      // Parent grants temporary Tier 3 allowlist then resets policy: Tier 4 restrictions remain disclosed honestly
+      manageTranscriptAccessPolicy({ callerConvId: coordA, mode: "allowlist", allow: `@w2-spec1` });
+      recordTranscriptHookGrant({ callerConvId: coordA, subcommand: "access", mode: "open", isMutation: true });
+      const resetCli = runCli(["transcript", "access", "--reset", "--json"], { ...testEnv, GEMINI_CONVERSATION_ID: coordA });
+      assert.equal(resetCli.status, 0, resetCli.stderr);
+      const resetJson = JSON.parse(resetCli.stdout);
+      assert.equal(resetJson.active, false);
+      assert.equal(resetJson.mode, "open");
+      assert.equal(resetJson.launchRestrictions.restrictedCount, 2);
+      assert.equal(resetJson.launchRestrictions.denyCount, 1);
+      assert.equal(resetJson.launchRestrictions.selfOnlyCount, 1);
+
+      const statusTextCli = runCli(["transcript", "access", "--status"], { ...testEnv, GEMINI_CONVERSATION_ID: coordA });
+      assert.equal(statusTextCli.status, 0);
+      assert.match(statusTextCli.stdout, /Transcript Access Policy: OPEN \(parent CLI policy\)/);
+      assert.match(statusTextCli.stdout, /Recently active launch-restricted children: 2/);
+      assert.match(statusTextCli.stdout, /Launch directives: 1 deny, 1 self-only/);
+      assert.match(statusTextCli.stdout, /Reset clears parent policy overrides; launch directives remain in effect/);
+
+      // runStatus() plain-text output also discloses recent launch-restricted children instead of bare OPEN (default)
+      const statusLogs = [];
+      const prevConsoleLog = console.log;
+      console.log = (line) => statusLogs.push(String(line));
+      try {
+        runStatus({ silent: false });
+      } finally {
+        console.log = prevConsoleLog;
+      }
+      const combinedRunStatus = statusLogs.join("\n");
+      assert.match(combinedRunStatus, /OPEN \(parent CLI policy\)/);
+      assert.match(combinedRunStatus, /Recent launch-restricted children: 3/);
+      const cliStatusJson = runCli(["status", "--json"]);
+      assert.ok(cliStatusJson.status === 0 || cliStatusJson.status === 1);
+      const parsedInstallStatus = JSON.parse(cliStatusJson.stdout);
+      assert.equal(parsedInstallStatus.details.transcriptAccess.launchRestrictions.restrictedCount, 3);
+      assert.equal(fs.readFileSync(path.join(l46StateDir, `agy-session-${childDenyId}.json`), "utf8").includes("w2-spec1"), true);
+
+      // Multi-coordinator --reset: when coordB holds an active policy, coordA --reset must align launchRestrictions with coordB
+      manageTranscriptAccessPolicy({ _testAuthorizedOwner: coordB, off: true });
+      try {
+        recordTranscriptHookGrant({ callerConvId: coordA, subcommand: "access", mode: "open", isMutation: true });
+        const crossResetCli = runCli(["transcript", "access", "--reset", "--json"], { ...testEnv, GEMINI_CONVERSATION_ID: coordA });
+        assert.equal(crossResetCli.status, 0, crossResetCli.stderr);
+        const crossResetJson = JSON.parse(crossResetCli.stdout);
+        assert.equal(crossResetJson.ownerId, coordB);
+        assert.equal(crossResetJson.launchRestrictions.restrictedCount, 1, "active coordB policy status must scope launchRestrictions to coordB");
+        assert.equal(crossResetJson.launchRestrictions.sessions[0].conversationId, childOtherId);
+      } finally {
+        manageTranscriptAccessPolicy({ _testAuthorizedOwner: coordB, reset: true });
+      }
+    } finally {
+      for (const p of createdStatePaths) {
+        try { fs.unlinkSync(p); } catch {}
+      }
+    }
+
+    // 10.2 PR7-RUN-002: query/read/outline/summary --summary --json project lightweight summary items
+    const convSum = "conv-summary-json-10";
+    const sumLogs = path.join(brainDir, convSum, ".system_generated", "logs");
+    fs.mkdirSync(sumLogs, { recursive: true });
+    const sumSteps = [];
+    for (let s = 70; s <= 84; s++) {
+      const isMatch = s >= 75; // 10 matching steps (75..84)
+      sumSteps.push({
+        step_index: s,
+        type: s === 84 ? "PLANNER_RESPONSE" : (isMatch ? "GENERIC" : "PLANNER_RESPONSE"),
+        status: s === 83 ? "ERROR" : "DONE",
+        created_at: `2026-11-18T00:${String(s - 70).padStart(2, "0")}:00.000Z`,
+        thinking: s === 84 ? "RAW_THINKING_MUST_NOT_APPEAR " + "T".repeat(4000) : undefined,
+        content: isMatch
+          ? (s === 84
+              ? `STAGE_84 lead report ` + "R".repeat(12500)
+              : `The tool's output was truncated due to being too long. You can find the full output in a file at file:///x/.system_generated/steps/${s}/output.txt.\nHere is a preview:\nSTAGE_${s} ${s === 83 ? "fatal error occurred" : "ok"}`)
+          : `Unrelated step ${s}`,
+        tool_calls: isMatch
+          ? [{ name: "read_file", args: { Path: "/home/u/Antigravity/report.md", Content: "RAW_TOOL_BODY " + "B".repeat(12000) } }]
+          : undefined
+      });
+    }
+    fs.writeFileSync(path.join(sumLogs, "transcript.jsonl"), sumSteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+
+    const sumQueryJson = runCli(["transcript", "query", "STAGE_", convSum, "--summary", "--json"]);
+    assert.equal(sumQueryJson.status, 0, sumQueryJson.stderr);
+    assert.ok(Buffer.byteLength(sumQueryJson.stdout, "utf8") <= 9200);
+    const sumQueryParsed = JSON.parse(sumQueryJson.stdout);
+    assert.equal(sumQueryParsed.matchedCount, 10);
+    assert.equal(sumQueryParsed.displayedCount, 10, "compact summary JSON must retain all 10 matches despite 12 KB step 84");
+    assert.equal(sumQueryParsed.items.length, 10);
+    assert.equal(sumQueryParsed.jsonTruncated, undefined);
+    const lastSumItem = sumQueryParsed.items[9];
+    assert.equal(lastSumItem.step_index, 84);
+    assert.equal(lastSumItem.type, "PLANNER_RESPONSE");
+    assert.equal(lastSumItem.role, "assistant");
+    assert.equal(lastSumItem.created_at, "2026-11-18T00:14:00Z");
+    assert.equal(lastSumItem.status, "OK");
+    assert.equal(lastSumItem.content, undefined);
+    assert.equal(lastSumItem.thinking, undefined);
+    assert.equal(lastSumItem.tool_calls, undefined);
+    assert.match(lastSumItem.summary, /STAGE_84/);
+    const errSumItem = sumQueryParsed.items.find((i) => i.step_index === 83);
+    assert.equal(errSumItem.status, "ERROR");
+    assert.match(errSumItem.summary, /\[ERROR\].*\[spill: steps\/83\]/);
+
+    for (const subCmd of [
+      ["transcript", "read", convSum, "--summary", "--json"],
+      ["transcript", "outline", convSum, "--json"],
+      ["transcript", "summary", convSum, "--json"]
+    ]) {
+      const aliasRes = runCli(subCmd);
+      assert.equal(aliasRes.status, 0, aliasRes.stderr);
+      const aliasParsed = JSON.parse(aliasRes.stdout);
+      assert.ok(Buffer.byteLength(aliasRes.stdout, "utf8") <= 9200);
+      assert.ok(aliasParsed.items.length >= 10 && aliasParsed.displayedCount === aliasParsed.items.length);
+      assert.equal(aliasParsed.items[0].tool_calls, undefined);
+      assert.equal(aliasParsed.items[0].content, undefined);
+    }
+
+    // Tight budget on compact summary truncates smoothly with non-empty items and valid cursor
+    const tightSum = runCli(["transcript", "query", "STAGE_", convSum, "--summary", "--json", "--max-chars", "1200"]);
+    assertBounded(tightSum, 1200);
+    const tightParsed = JSON.parse(tightSum.stdout);
+    assert.equal(tightParsed.jsonTruncated, true);
+    assert.ok(tightParsed.items.length > 0 && tightParsed.items.length < 10);
+    assert.equal(tightParsed.displayedCount, tightParsed.items.length);
+    assert.equal(tightParsed.jsonItemsIncluded, tightParsed.items.length);
+
+    // P3 regression: query --summary --start <N> (without --end) must preserve --start <N> in nextCursor & Markdown footer
+    const startOnlySumMd = runCli(["transcript", "query", "STAGE_", convSum, "--summary", "--start", "76", "--limit", "4"]);
+    assert.equal(startOnlySumMd.status, 0, startOnlySumMd.stderr);
+    assert.match(startOnlySumMd.stdout, /Step 81 \|/);
+    assert.match(startOnlySumMd.stdout, /Step 84 \|/);
+    assert.equal(startOnlySumMd.stdout.includes("Step 80 |"), false);
+    assert.match(startOnlySumMd.stdout, /--start 76 --end 80/, "non-clamped --start-only summary footer must preserve --start bound");
+
+    const startOnlySumJson = runCli(["transcript", "query", "STAGE_", convSum, "--summary", "--start", "76", "--limit", "4", "--json"]);
+    assert.equal(startOnlySumJson.status, 0, startOnlySumJson.stderr);
+    const sosParsed = JSON.parse(startOnlySumJson.stdout);
+    assert.deepEqual(sosParsed.items.map((it) => it.step_index), [81, 82, 83, 84]);
+    assert.deepEqual(sosParsed.nextCursor, { start: 76, end: 80 });
+
+    const startOnlyHop2 = runCli([
+      "transcript", "query", "STAGE_", convSum, "--summary",
+      "--start", String(sosParsed.nextCursor.start), "--end", String(sosParsed.nextCursor.end), "--limit", "4", "--json"
+    ]);
+    assert.equal(startOnlyHop2.status, 0, startOnlyHop2.stderr);
+    const sosHop2 = JSON.parse(startOnlyHop2.stdout);
+    assert.deepEqual(sosHop2.items.map((it) => it.step_index), [77, 78, 79, 80]);
+    assert.deepEqual(sosHop2.nextCursor, { start: 76, end: 76 });
+
+    const startOnlyHop3 = runCli([
+      "transcript", "query", "STAGE_", convSum, "--summary",
+      "--start", String(sosHop2.nextCursor.start), "--end", String(sosHop2.nextCursor.end), "--limit", "4", "--json"
+    ]);
+    assert.equal(startOnlyHop3.status, 0, startOnlyHop3.stderr);
+    const sosHop3 = JSON.parse(startOnlyHop3.stdout);
+    assert.deepEqual(sosHop3.items.map((it) => it.step_index), [76]);
+    assert.equal(sosHop3.nextCursor, null);
+
+    // P3 + summaryStart: when Markdown fits (maxResultsTruncated === false) and JSON overflows, serializeBoundedJsonPayload preserves --start
+    const startOnlyJsonOverflow = runCli(["transcript", "query", "STAGE_", convSum, "--summary", "--start", "76", "--limit", "500", "--json", "--max-chars", "1200"]);
+    assertBounded(startOnlyJsonOverflow, 1200);
+    const sojoParsed = JSON.parse(startOnlyJsonOverflow.stdout);
+    assert.equal(sojoParsed.jsonTruncated, true);
+    assert.equal(sojoParsed.items.at(-1).step_index, 84);
+    assert.deepEqual(sojoParsed.nextCursor, { start: 76, end: sojoParsed.items[0].step_index - 1 });
+
+    // count === 0 backward !forward summary cursor preserves --start bound and drops cursor when exhausted (nextEnd < minStart)
+    const sumZeroBudget = Buffer.byteLength(JSON.stringify({
+      ...sosParsed,
+      items: [],
+      displayedCount: 0,
+      nextCursor: { start: 76, end: 83 },
+      jsonTruncated: true,
+      jsonItemsIncluded: 0,
+      jsonItemsTotal: 4,
+      jsonTruncatedReason: jsonTruncMetaReason
+    }) + "\n", "utf8") + 16;
+    const startOnlyZeroBackward = runCli(["transcript", "query", "STAGE_", convSum, "--summary", "--start", "76", "--limit", "4", "--json", "--max-chars", String(sumZeroBudget)]);
+    assertBounded(startOnlyZeroBackward, sumZeroBudget);
+    const sozbParsed = JSON.parse(startOnlyZeroBackward.stdout);
+    assert.equal(sozbParsed.jsonTruncated, true);
+    assert.equal(sozbParsed.items.length, 0);
+    assert.deepEqual(sozbParsed.nextCursor, { start: 76, end: 83 });
+
+    const startOnlyZeroExhausted = runCli(["transcript", "query", "--id", convHuge, "--summary", "--start", "399", "--include-tools", "--full-args", "--json", "--max-chars", String(outlineZeroBudget)]);
+    assertBounded(startOnlyZeroExhausted, outlineZeroBudget);
+    const sozeParsed = JSON.parse(startOnlyZeroExhausted.stdout);
+    assert.equal(sozeParsed.items.length, 0);
+    assert.equal(sozeParsed.nextCursor, undefined, "exhausted single-step backward range must omit nextCursor");
+
+    // 10.3 PR7-RUN-003 & PR7-DOC-001: unified sanitized export limits across stdout, --full, --max-chars, and --out
+    const writeConvLines = (rootBrain, cid, steps) => {
+      const dir = path.join(rootBrain, cid, ".system_generated", "logs");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "transcript.jsonl"), steps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf8");
+    };
+    const expCoordId = "coord-l46-export-10";
+    const expChildIds = [];
+    for (let c = 1; c <= 9; c++) {
+      const cid = `l46-exp-child-${c}`;
+      expChildIds.push(cid);
+      const childSteps = [
+        {
+          step_index: 0,
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          created_at: "2026-11-18T01:00:00Z",
+          content: `[Message] timestamp=2026-11-18T01:00:00Z sender=${expCoordId} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #${c} for @worker-${c}):\n[agy-transcript-access: deny]\nRun analysis ${c}`
+        }
+      ];
+      for (let s = 1; s <= 18; s++) {
+        childSteps.push({
+          step_index: s,
+          type: s % 2 === 1 ? "PLANNER_RESPONSE" : "GENERIC",
+          status: "DONE",
+          created_at: `2026-11-18T01:${String(s).padStart(2, "0")}:00Z`,
+          thinking: "SECRET_EXPORT_THINKING_NEVER_LEAK",
+          content: `Worker ${c} step ${s} 🚀🔥€— ` + "L".repeat(2500) + " TAIL_CONTENT_BODY_NEVER_LEAK",
+          tool_calls: s % 2 === 1
+            ? [{ name: "run_command", args: { CommandLine: `echo worker_${c}_step_${s} Bearer secret_tok_999` } }]
+            : undefined
+        });
+      }
+      writeConvLines(brainDir, cid, childSteps);
+    }
+
+    // (a) Markdown --out > 24 KB (< 524,288 B) retains ALL 9 child sessions instead of pretty-JSON-pruning at 64,000
+    const prevExpBrain = process.env.AGY_BRAIN_DIR;
+    process.env.AGY_BRAIN_DIR = brainDir;
+    try {
+      const cohortMdOut = path.join(ergOutDir, "cohort-index.md");
+      const cohortMdCli = runCli(["transcript", "export", "--parent", expCoordId, "--sanitized", "--out", cohortMdOut]);
+      assert.equal(cohortMdCli.status, 0, cohortMdCli.stderr);
+      const cohortMdDisk = fs.readFileSync(cohortMdOut, "utf8");
+      const cohortMdBytes = fs.statSync(cohortMdOut).size;
+      assert.ok(cohortMdBytes > 24000 && cohortMdBytes <= 524288, `expected ~25-45 KB index, got ${cohortMdBytes}`);
+      for (let c = 1; c <= 9; c++) {
+        assert.ok(cohortMdDisk.includes(`@worker-${c}`), `Markdown --out must retain session ${c} well below 512 KB`);
+      }
+      assert.ok(!cohortMdDisk.includes("SECRET_EXPORT_THINKING_NEVER_LEAK"));
+      assert.ok(!cohortMdDisk.includes("TAIL_CONTENT_BODY_NEVER_LEAK"));
+      assert.ok(!cohortMdDisk.includes("secret_tok_999"));
+      assert.ok(!cohortMdDisk.includes("\uFFFD"));
+
+      // (b) Explicit --max-chars 32000 on Markdown --out honors Markdown bytes even though pretty JSON would be ~70 KB
+      const cohortMdCapOut = path.join(ergOutDir, "cohort-md-32k.md");
+      const cohortMdCapCli = runCli([
+        "transcript", "export", "--parent", expCoordId, "--sanitized", "--max-chars", "35000", "--out", cohortMdCapOut
+      ]);
+      assert.equal(cohortMdCapCli.status, 0, cohortMdCapCli.stderr);
+      const cohortMdCapBytes = fs.statSync(cohortMdCapOut).size;
+      assert.ok(cohortMdCapBytes <= 35000);
+      assert.ok(fs.readFileSync(cohortMdCapOut, "utf8").includes("@worker-9"), "Markdown budget must not shrink by pretty-JSON overhead");
+
+      // (c) Stdout export --sanitized --json and Markdown both strictly obey 9,200 UTF-8 inline ceiling
+      const inlineExpJsonCli = runCli(["transcript", "export", "--parent", expCoordId, "--sanitized", "--json"]);
+      assertBounded(inlineExpJsonCli, 9200);
+      const inlineExpJsonParsed = JSON.parse(inlineExpJsonCli.stdout);
+      assert.equal(inlineExpJsonParsed.jsonTruncated, true);
+      assert.equal(inlineExpJsonParsed.jsonSessionsTotal, 9);
+      assert.ok(inlineExpJsonParsed.exportedCount >= 2 && inlineExpJsonParsed.exportedCount === inlineExpJsonParsed.sessions.length);
+
+      const inlineExpMdCli = runCli(["transcript", "export", "--parent", expCoordId, "--sanitized"]);
+      assertBounded(inlineExpMdCli, 9200);
+
+      // (d) --full expands stdout JSON/Markdown to 524,288 B deep tier
+      const fullExpJsonCli = runCli(["transcript", "export", "--parent", expCoordId, "--sanitized", "--full", "--json"]);
+      assertBounded(fullExpJsonCli, 524288);
+      assert.equal(JSON.parse(fullExpJsonCli.stdout).exportedCount, 9);
+
+      // (e) Explicit --max-chars on export JSON (stdout & --out) + impossibly small budget preservation
+      const cappedExpJsonOut = path.join(ergOutDir, "cohort-json-5k.json");
+      const cappedExpJsonCli = runCli([
+        "transcript", "export", "--parent", expCoordId, "--sanitized", "--max-chars", "5000", "--out", cappedExpJsonOut, "--json"
+      ]);
+      assert.equal(cappedExpJsonCli.status, 0, cappedExpJsonCli.stderr);
+      const cappedExpBytes = fs.statSync(cappedExpJsonOut).size;
+      assert.ok(cappedExpBytes <= 5000, `export JSON --out exceeded 5000 bytes: ${cappedExpBytes}`);
+      const cappedExpParsed = JSON.parse(fs.readFileSync(cappedExpJsonOut, "utf8"));
+      assert.equal(cappedExpParsed.jsonTruncated, true);
+      assert.equal(cappedExpParsed.jsonSessionsIncluded, cappedExpParsed.sessions.length);
+      const cappedExpStdout = JSON.parse(cappedExpJsonCli.stdout);
+      assert.equal(cappedExpStdout.bytesWritten, cappedExpBytes);
+      assert.equal(cappedExpStdout.sessions, undefined);
+
+      // Impossibly small --max-chars must fail nonzero and leave existing artifact untouched
+      const sentinelExportPath = path.join(ergOutDir, "preserve-export.json");
+      fs.writeFileSync(sentinelExportPath, "keep-export-sentinel", "utf8");
+      for (const fmtFlags of [[], ["--json"]]) {
+        const tinyFail = runCli([
+          "transcript", "export", "--parent", expCoordId, "--sanitized", "--max-chars", "80", "--out", sentinelExportPath, ...fmtFlags
+        ]);
+        assert.notEqual(tinyFail.status, 0, "impossibly small export budget must exit nonzero");
+        assert.equal(tinyFail.stdout, "");
+        assert.equal(fs.readFileSync(sentinelExportPath, "utf8"), "keep-export-sentinel");
+      }
+      const tooBigMax = runCli(["transcript", "export", "--id", expChildIds[0], "--sanitized", "--max-chars", "999999"]);
+      assert.notEqual(tooBigMax.status, 0);
+
+      // (f) Single-session export tail vs --start head cursor consistency + multi-session trimmed-row cursor honesty
+      const singleExportTailFit = runCli([
+        "transcript", "export", "--id", convHuge, "--sanitized", "--limit", "50", "--max-chars", "50000", "--json"
+      ]);
+      assert.equal(singleExportTailFit.status, 0, singleExportTailFit.stderr);
+      const setf = JSON.parse(singleExportTailFit.stdout);
+      assert.equal(setf.clamped, true);
+      assert.equal(setf.sessions[0].rows[0].step, 350);
+      assert.equal(setf.sessions[0].rows.at(-1).step, 399);
+      assert.deepEqual(setf.nextCursor, { end: 349 });
+
+      const singleExportTailClamp = runCli([
+        "transcript", "export", "--id", convHuge, "--sanitized", "--limit", "50", "--max-chars", "3500", "--json"
+      ]);
+      assertBounded(singleExportTailClamp, 3500);
+      const setc = JSON.parse(singleExportTailClamp.stdout);
+      assert.equal(setc.sessions[0].rows.at(-1).step, 399, "single-session export byte-clamp without --start must retain tail rows");
+      assert.deepEqual(setc.nextCursor, { end: setc.sessions[0].rows[0].step - 1 });
+
+      const singleExportHeadClamp = runCli([
+        "transcript", "export", "--id", convHuge, "--sanitized", "--start", "0", "--limit", "50", "--max-chars", "3500", "--json"
+      ]);
+      assertBounded(singleExportHeadClamp, 3500);
+      const sehc = JSON.parse(singleExportHeadClamp.stdout);
+      assert.equal(sehc.sessions[0].rows[0].step, 0, "single-session export with --start 0 must collect from head");
+      assert.deepEqual(sehc.nextCursor, { start: sehc.sessions[0].rows.at(-1).step + 1 });
+
+      // Multi-session export that trims rows across multiple sessions omits misleading single-session nextCursor
+      assert.equal(cappedExpParsed.nextCursor, undefined, "multi-session export with trimmed retained rows must not skip trimmed rows via nextCursor");
+      assert.match(cappedExpParsed.jsonTruncatedReason, /trimmed rows across multiple sessions/);
+
+      // P2 regression: 2-session export (no --start) where A fits completely and B trims retains B's tail rows with exact cursor
+      const convP2Small = "conv-p2-small-5";
+      const convP2Large = "conv-p2-large-200";
+      writeConvLines(brainDir, convP2Small, Array.from({ length: 5 }, (_, s) => ({
+        step_index: s,
+        type: s === 0 ? "USER_INPUT" : "PLANNER_RESPONSE",
+        created_at: `2026-11-18T02:30:0${s}Z`,
+        content: `Small session step ${s}`
+      })));
+      writeConvLines(brainDir, convP2Large, Array.from({ length: 200 }, (_, s) => ({
+        step_index: s,
+        type: s % 2 === 0 ? "USER_INPUT" : "PLANNER_RESPONSE",
+        created_at: "2026-11-18T02:31:00Z",
+        content: `Large session step ${s} ` + "M".repeat(90)
+      })));
+
+      const p2MultiTailClamp = runCli([
+        "transcript", "export", "--id", `${convP2Small},${convP2Large}`, "--sanitized", "--limit", "160", "--max-chars", "6000", "--json"
+      ]);
+      assertBounded(p2MultiTailClamp, 6000);
+      const p2Parsed = JSON.parse(p2MultiTailClamp.stdout);
+      assert.equal(p2Parsed.jsonTruncated, true);
+      assert.equal(p2Parsed.exportedCount, 2);
+      assert.deepEqual(p2Parsed.sessions[0].rows.map((r) => r.step), [0, 1, 2, 3, 4]);
+      assert.equal(p2Parsed.sessions[0].truncatedSteps, false);
+      assert.equal(p2Parsed.sessions[1].convId, convP2Large);
+      assert.equal(p2Parsed.sessions[1].truncatedSteps, true);
+      assert.equal(p2Parsed.sessions[1].rows.at(-1).step, 199, "multi-session omitted-start export must tail-slice retained rows");
+      const p2FirstKept = p2Parsed.sessions[1].rows[0].step;
+      assert.ok(p2FirstKept > 40 && p2FirstKept < 199);
+      assert.deepEqual(p2Parsed.nextCursor, { id: convP2Large, end: p2FirstKept - 1 });
+
+      const p2FollowUp = runCli([
+        "transcript", "export", "--id", p2Parsed.nextCursor.id, "--end", String(p2Parsed.nextCursor.end), "--sanitized", "--limit", "200", "--max-chars", "50000", "--json"
+      ]);
+      assert.equal(p2FollowUp.status, 0, p2FollowUp.stderr);
+      const p2FollowParsed = JSON.parse(p2FollowUp.stdout);
+      assert.equal(p2FollowParsed.sessions[0].rows[0].step, 0);
+      assert.equal(p2FollowParsed.sessions[0].rows.at(-1).step, p2FirstKept - 1);
+      assert.equal(p2FollowParsed.sessions[0].truncatedSteps, false);
+
+      // Multi-session --limit truncation on 1 session without JSON byte overflow also emits exact single-incomplete nextCursor
+      const p2MultiLimitOnly = runCli([
+        "transcript", "export", "--id", `${convP2Small},${convP2Large}`, "--sanitized", "--limit", "50", "--max-chars", "50000", "--json"
+      ]);
+      assert.equal(p2MultiLimitOnly.status, 0, p2MultiLimitOnly.stderr);
+      const p2LimParsed = JSON.parse(p2MultiLimitOnly.stdout);
+      assert.equal(p2LimParsed.clamped, true);
+      assert.equal(p2LimParsed.jsonTruncated, undefined);
+      assert.equal(p2LimParsed.sessions[1].rows[0].step, 150);
+      assert.equal(p2LimParsed.sessions[1].rows.at(-1).step, 199);
+      assert.deepEqual(p2LimParsed.nextCursor, { id: convP2Large, end: 149 });
+    } finally {
+      if (prevExpBrain !== undefined) process.env.AGY_BRAIN_DIR = prevExpBrain;
+      else delete process.env.AGY_BRAIN_DIR;
+    }
+
+    // 10.4 PR7-RUN-004: Worker-turn logical anchor (userTurns === 0) & Step 0 recovery without skips/duplicates
+    const convWorker = "conv-worker-turns-22";
+    const workerSteps = [
+      {
+        step_index: 0,
+        type: "SYSTEM_MESSAGE",
+        source: "SYSTEM",
+        created_at: "2026-11-18T02:00:00Z",
+        content: "[Message] sender=coord priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #1 for @worker-p3):\nInitial stage"
+      },
+      { step_index: 1, type: "PLANNER_RESPONSE", created_at: "2026-11-18T02:00:05Z", content: "Stage A started " + "A".repeat(300) },
+      { step_index: 2, type: "GENERIC", created_at: "2026-11-18T02:00:06Z", content: "STEP_02_OK " + "B".repeat(250) },
+      {
+        step_index: 3,
+        type: "SYSTEM_MESSAGE",
+        source: "SYSTEM",
+        created_at: "2026-11-18T02:00:07Z",
+        content: "[Message] sender=coord priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #2"
+      },
+      {
+        step_index: 4,
+        type: "SYSTEM_MESSAGE",
+        source: "SYSTEM",
+        created_at: "2026-11-18T02:01:00Z",
+        content: "[Message] sender=coord priority=MESSAGE_PRIORITY_HIGH content=@worker-p3 Stage C wakeup prompt"
+      }
+    ];
+    for (let s = 5; s <= 13; s++) {
+      workerSteps.push({ step_index: s, type: "GENERIC", created_at: `2026-11-18T02:01:${String(s).padStart(2, "0")}Z`, content: `Step ${s} output ` + "C".repeat(120) });
+    }
+    workerSteps.push({
+      step_index: 14,
+      type: "PLANNER_RESPONSE",
+      created_at: "2026-11-18T02:02:14Z",
+      content: "Writing UTF8 note",
+      tool_calls: [{ name: "write_file", args: { Content: "WORKER_UTF8_🚀🔥€—_MARKER", Path: "scratch/utf8.txt" } }]
+    });
+    for (let s = 15; s <= 20; s++) {
+      workerSteps.push({ step_index: s, type: "GENERIC", created_at: `2026-11-18T02:02:${String(s).padStart(2, "0")}Z`, content: `Post write step ${s} ` + "D".repeat(90) });
+    }
+    workerSteps.push({ step_index: 21, type: "PLANNER_RESPONSE", created_at: "2026-11-18T02:03:00Z", content: "Final short ASCII wrap-up" });
+    writeConvLines(brainDir, convWorker, workerSteps);
+
+    // Inline --last-turns 1 anchors on Step 4 (latest substantive wakeup SYSTEM_MESSAGE), NOT final Step 21 PLANNER_RESPONSE!
+    const workerLast1 = runCli(["transcript", "read", convWorker, "--last-turns", "1"]);
+    assert.equal(workerLast1.status, 0, workerLast1.stderr);
+    assert.match(workerLast1.stdout, /WORKER_UTF8_🚀🔥€—_MARKER/, "promptless worker --last-turns 1 must keep tool step 14 in the current turn");
+    assert.match(workerLast1.stdout, /Final short ASCII wrap-up/);
+    assert.equal(workerLast1.stdout.includes("STEP_02_OK"), false, "earlier worker turn before Step 4 wakeup stays scoped out of last-turns 1");
+
+    // When clamped at firstOrd = 21 (--max-chars 520), backward nextCursor reaches Step 0 with zero skips/duplicates!
+    const clampedWorker520 = runCli(["transcript", "read", convWorker, "--last-turns", "1", "--max-chars", "520", "--json"]);
+    assertBounded(clampedWorker520, 520);
+    const cwParsed = JSON.parse(clampedWorker520.stdout);
+    assert.equal(cwParsed.clamped, true);
+    assert.equal(cwParsed.steps[0].step_index, 21);
+    assert.ok(cwParsed.nextCursor && cwParsed.nextCursor.offset === 0, `expected offset 0 when firstOrd=21, got ${JSON.stringify(cwParsed.nextCursor)}`);
+    assert.ok(cwParsed.nextCursor.limit <= 21 && cwParsed.nextCursor.limit > 0);
+
+    // Walk explicitly from nextCursor forward and confirm every step 0..20 is visited with zero skips/duplicates
+    const seenOrdinals = new Set();
+    const collectedOrder = [];
+    let cur = cwParsed.nextCursor;
+    for (let hop = 0; hop < 30 && cur && cur.offset < 21; hop++) {
+      const pageRes = await readTranscript({ conversationId: convWorker, offset: cur.offset, limit: cur.limit });
+      assert.equal(pageRes.isError, undefined);
+      for (const st of pageRes.steps) {
+        assert.equal(seenOrdinals.has(st.step_index), false, `duplicate step ${st.step_index} during pagination`);
+        seenOrdinals.add(st.step_index);
+        collectedOrder.push(st.step_index);
+      }
+      cur = pageRes.nextCursor;
+    }
+    assert.equal(collectedOrder[0], 0, "pagination continuation must reach Step 0 first");
+    assert.deepEqual(collectedOrder, Array.from({ length: 21 }, (_, idx) => idx), "every step 0..20 must be covered without skips or duplicates");
+
+    console.log("✓ PR #7 L46 remediations verified (Option A status disclosure, compact summary JSON, unified sanitized export & worker cursors)");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

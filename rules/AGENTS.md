@@ -2,7 +2,7 @@
 
 ## Architectural Boundary
 - **RTK (`>= 1.1.0`)**: Rewrites shell commands via `rtk hook antigravity`, compresses command output, and provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`, `rtk read`, `rtk err`, `rtk summary`).
-- **Agy-Context-Saver (`v2.0.3`)**: Governs background task polling and Reactive Wakeup, bounds `read_file` slices, protects `.system_generated/` and the state directory, and provides transcript inspection and access control via `agy-context transcript`.
+- **Agy-Context-Saver (`v2.0.4`)**: Governs background task polling and Reactive Wakeup, bounds `read_file` slices, protects `.system_generated/` and the state directory, and provides two-tier transcript inspection (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode) and access control via `agy-context transcript`.
 
 ---
 
@@ -44,15 +44,15 @@
      - **Command diagnostics**: Use `rtk err <cmd>` (errors and warnings only) and `rtk summary <cmd>` (2-line summary).
 - **Safe harbor files**: Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/` files) are allowed via `read_file` without slice bounds.
 - **Transcript forensics (`agy-context transcript`)**: Direct file or shell access to `.system_generated/` transcripts, task logs, progress files, or `getStateDir()` (`~/.local/state/agy-context-saver` on POSIX, `%LOCALAPPDATA%\agy-context-saver` on Windows) is blocked across `antigravity`, `antigravity-cli`, and `antigravity-ide` brain roots. Run `agy-context transcript` as a single unchained `run_command` (no `&&`, `||`, `;`, `|`, redirects, or `..` traversal; prefer batch step ranges `step <N,M|N-M>` and `query --start N --end M` over single-step loops):
-  - `agy-context transcript read [<id>] [--id <uuid>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--outline] [--include-thinking] [--json]`
-  - `agy-context transcript query [<pattern>] [<id>] [--id <uuid>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:Key|all] [--include-thinking] [--json]` (aliases: `grep`, `search`, `find`, `tools`, `outline`, `summary`)
-  - `agy-context transcript step [<N|N,M|N-M|N..M>] [<id>] [--id <uuid>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:Key|all] [--head N] [--tail N] [--full] [--json]`
+  - `agy-context transcript read [<id>] [--id <uuid>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--outline] [--include-thinking] [--full] [--max-chars N] [--out <path>] [--json]`
+  - `agy-context transcript query [<pattern>] [<id>] [--id <uuid>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:Key|all] [--include-thinking] [--full] [--max-chars N] [--out <path>] [--json]` (aliases: `grep`, `search`, `find`, `tools`, `outline`, `summary`)
+  - `agy-context transcript step [<N|N,M|N-M|N..M>] [<id>] [--id <uuid>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:Key|all] [--head N] [--tail N] [--line-start N] [--line-end N] [--full] [--max-chars N] [--out <path>] [--json]`
   - `agy-context transcript health [<id>] [--id <uuid>] [--json]` (aliases: `stats`, `info`)
   - `agy-context transcript list [--limit N] [--parent <uuid>] [--lineage] [--json]` (alias: `ls`)
-  - `agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out|--output <path>] [--file <path>] [--json]` (alias: `dump`)
+  - `agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--full] [--max-chars N] [--out|--output <path>] [--file <path>] [--json]` (alias: `dump`)
   - `agy-context transcript access [status|off|on|reset|self-only] [--status | --off (--deny-children) | --on (--reset) | --self-only | --mode <open|allowlist|self-only|deny> | --allow <id,@roster*...> | --deny <id,@roster*...> | --ttl <sec>] [--json]` (alias: `policy`)
 - **Parent transcript access control**:
-  - **CLI policy**: Parents can restrict or scope child transcript access mid-session via `agy-context transcript access` (`policy`), using `--off` (`--deny-children`), `--self-only`, `--mode <open|allowlist|self-only|deny>`, `--allow <id,@roster*...>`, `--deny <id,@roster*...>`, `--ttl <sec>`, and `--on` (`--reset`).
+  - **CLI policy**: Parents can restrict or scope child transcript access mid-session via `agy-context transcript access` (`policy`), using `--off` (`--deny-children`), `--self-only`, `--mode <open|allowlist|self-only|deny>`, `--allow <id,@roster*...>`, `--deny <id,@roster*...>`, `--ttl <sec>`, and `--on` (`--reset`, clearing `policies[ownerId]` only while Tier 4 child launch locks remain enforced and disclosed under `launchRestrictions`).
   - **First-line launch directives**: Place `[agy-transcript-access: deny]`, `[agy-transcript-access: self-only]`, or `[agy-transcript-access: allow]` on the first non-empty line of a `define_subagent` `SystemPrompt`, `invoke_subagent` `Prompt`, or `/swarm` worker `brief` (later lines and code blocks are ignored).
   - **Precedence**: `1. Policy Owner` -> `2. Explicit CLI --deny` -> `3. Explicit CLI --allow` (supports `@roster*` prefix globs such as `@audit-squad*`) -> `4. First-Line Launch Directive` -> `5. Cohort Default Mode`.
   - **When restricted**: If transcript access is denied for a child agent, do not retry `agy-context transcript` or probe `.system_generated` / `getStateDir()`; 5 blocked attempts trigger the `force_ask` circuit breaker.

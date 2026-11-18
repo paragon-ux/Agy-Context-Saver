@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver CLI (v2.0.3)
+ * Agy-Context-Saver CLI (v2.0.4)
  *
  * Local-first CLI for streaming transcript inspection, forensic querying,
  * context health diagnostics, and lifecycle management.
@@ -22,7 +22,12 @@ import {
   listTranscriptConversations,
   exportSanitizedTranscript,
   manageTranscriptAccessPolicy,
-  consumeTranscriptAccessGrant
+  consumeTranscriptAccessGrant,
+  INLINE_SAFE_CHARS,
+  MAX_BOUNDED_READ_STEPS,
+  MAX_DEEP_OUTPUT_CHARS,
+  MAX_FIELD_CHARS,
+  utf8SliceToBytes
 } from "../lib/transcript-core.mjs";
 import { getStateDir } from "../scripts/state-dir.mjs";
 import {
@@ -39,9 +44,9 @@ const pkgPath = path.resolve(__dirname, "../package.json");
 function getVersion() {
   try {
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-    return pkg.version || "2.0.3";
+    return pkg.version || "2.0.4";
   } catch {
-    return "2.0.3";
+    return "2.0.4";
   }
 }
 
@@ -53,12 +58,12 @@ Usage:
   agy-context <command> [options]
 
 Transcript Commands:
-  agy-context transcript read   [--id <conv>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--outline] [--include-thinking] [--json] [--file <path>]
-  agy-context transcript query  [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--json] [--file <path>]
-  agy-context transcript step   [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--head N] [--tail N] [--full] [--json] [--file <path>]
+  agy-context transcript read   [--id <conv>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--outline] [--include-thinking] [--full] [--max-chars N] [--out <path>] [--json] [--file <path>]
+  agy-context transcript query  [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--full] [--max-chars N] [--out <path>] [--json] [--file <path>]
+  agy-context transcript step   [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--head N] [--tail N] [--line-start N] [--line-end N] [--full] [--max-chars N] [--out <path>] [--json] [--file <path>]
   agy-context transcript health [--id <conv>] [--json] [--file <path>]
   agy-context transcript list   [--limit N] [--parent <id>] [--lineage] [--json]
-  agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--out|--output <path>] [--file <path>] [--json]
+  agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--full] [--max-chars N] [--out|--output <path>] [--file <path>] [--json]
   agy-context transcript access [--status | --off | --on | --reset | --self-only | --mode <open|allowlist|self-only|deny> | --allow <id,@roster*...> | --deny <id,@roster*...> | --ttl <sec>] [--json]
   Aliases: grep/search/find -> query | stats/info -> health | tools -> query --roles assistant --field tool_args | outline/summary -> query --summary --include-tools | ls -> list | dump -> export | policy -> access
 
@@ -107,10 +112,16 @@ function parseFlags(argv, spec) {
     const inlineVal = eqIdx === -1 ? null : token.slice(eqIdx + 1);
 
     if (key === "help") {
+      if (inlineVal !== null) {
+        throw new Error(`Boolean flag '--help' does not accept value '${inlineVal}'.`);
+      }
       opts.help = true;
       continue;
     }
     if (key === "version") {
+      if (inlineVal !== null) {
+        throw new Error(`Boolean flag '--version' does not accept value '${inlineVal}'.`);
+      }
       opts.version = true;
       continue;
     }
@@ -167,9 +178,28 @@ function assertCleanHelp(opts, positional) {
 
 function parseOptionalInt(val, flagName) {
   if (val === undefined) return undefined;
+  if (typeof val === "boolean" || (typeof val === "string" && val.trim() === "")) {
+    throw new Error(`Flag '--${flagName}' must be an integer (received: '${val}').`);
+  }
   const num = Number(val);
   if (!Number.isFinite(num) || !Number.isInteger(num)) {
     throw new Error(`Flag '--${flagName}' must be an integer (received: '${val}').`);
+  }
+  return num;
+}
+
+function parseNonNegInt(val, flagName) {
+  const num = parseOptionalInt(val, flagName);
+  if (num !== undefined && num < 0) {
+    throw new Error(`Flag '--${flagName}' must be a non-negative integer (received: '${val}').`);
+  }
+  return num;
+}
+
+function parsePositiveInt(val, flagName) {
+  const num = parseOptionalInt(val, flagName);
+  if (num !== undefined && num <= 0) {
+    throw new Error(`Flag '--${flagName}' must be a positive integer (received: '${val}').`);
   }
   return num;
 }
@@ -191,9 +221,30 @@ function validateExplicitFileFlag(fileArg) {
   return real;
 }
 
+function normalizeWinDevicePath(p) {
+  let s = String(p || "");
+  if (/^\\\\\?\\UNC\\/i.test(s)) {
+    return "\\\\" + s.slice(8);
+  }
+  if (/^\\\\[?.]\\/.test(s)) {
+    return s.slice(4);
+  }
+  return s;
+}
+
+function hasUncOrDevicePrefix(p) {
+  const s = String(p || "").trim();
+  return /^(?:\\\\|\/\/)/.test(s) || /^[\\/]{2}[?.][\\/]/.test(s);
+}
+
 function isInsideDirCaseAware(targetPath, baseDir) {
+  const cleanTarget = normalizeWinDevicePath(targetPath);
+  const cleanBase = normalizeWinDevicePath(baseDir);
+  if (hasUncOrDevicePrefix(cleanTarget) || hasUncOrDevicePrefix(cleanBase)) {
+    return false;
+  }
   const norm = (p) => (process.platform === "win32" || process.platform === "darwin" ? p.toLowerCase() : p);
-  const rel = path.relative(norm(baseDir), norm(targetPath));
+  const rel = path.relative(norm(cleanBase), norm(cleanTarget));
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
@@ -212,6 +263,9 @@ function isProtectedInternalOutPath(targetPath) {
   return (
     /(?:^|\/)\.system_generated(?:\/|$)/i.test(normalized) ||
     /(?:^|\/)\.git(?:\/|$)/i.test(normalized) ||
+    /\/\.gemini\/(?:config|antigravity(?:-cli|-ide)?)\/(?:hooks\.json(?:\.bak)?|mcp_config\.json|config\.json)$/i.test(normalized) ||
+    /\/\.gemini\/config\/scripts\/execution-guard-hook\.mjs$/i.test(normalized) ||
+    /(?:^|\/)hooks\.json$/i.test(normalized) ||
     isProtectedBenchmarkOutPath(normalized)
   );
 }
@@ -242,6 +296,9 @@ function validateSafeExportOutPath(outArg) {
   if (!trimmed || trimmed.includes("\0")) {
     throw new Error(`Invalid --out path '${outArg}'.`);
   }
+  if (hasUncOrDevicePrefix(trimmed)) {
+    throw new Error(`Invalid --out path '${outArg}': UNC and device paths are prohibited.`);
+  }
   const segments = trimmed.split(/[\\/]/);
   if (segments.includes("..")) {
     throw new Error(`Invalid --out path '${outArg}': '..' traversal is prohibited.`);
@@ -250,8 +307,11 @@ function validateSafeExportOutPath(outArg) {
     throw new Error(`Invalid --out path '${outArg}': must end with .md, .json, or .txt.`);
   }
   const abs = path.resolve(trimmed);
+  if (hasUncOrDevicePrefix(abs)) {
+    throw new Error(`Invalid --out path '${outArg}': UNC and device paths are prohibited.`);
+  }
   if (isProtectedInternalOutPath(abs)) {
-    throw new Error(`Refusing '--out' inside protected internal or benchmark directory: '${abs}'.`);
+    throw new Error(`Refusing '--out' inside protected internal, governance, or benchmark directory: '${abs}'.`);
   }
 
   const profileHome = getProfileHomeDir();
@@ -259,7 +319,11 @@ function validateSafeExportOutPath(outArg) {
     getStateDir(),
     path.join(profileHome, ".gemini", "config"),
     path.join(profileHome, ".gemini", "antigravity", "bin"),
-    path.join(profileHome, ".gemini", "antigravity", "mcp")
+    path.join(profileHome, ".gemini", "antigravity", "mcp"),
+    path.join(profileHome, ".gemini", "antigravity-cli", "bin"),
+    path.join(profileHome, ".gemini", "antigravity-cli", "mcp"),
+    path.join(profileHome, ".gemini", "antigravity-ide", "bin"),
+    path.join(profileHome, ".gemini", "antigravity-ide", "mcp")
   ].map((p) => resolveWithExistingAncestor(p));
 
   let absLst = null;
@@ -272,8 +336,8 @@ function validateSafeExportOutPath(outArg) {
       throw new Error(`Invalid --out path '${abs}': refusing symlink or non-regular file.`);
     }
     const realTarget = fs.realpathSync(abs);
-    if (isProtectedInternalOutPath(realTarget)) {
-      throw new Error(`Refusing '--out' inside protected internal or benchmark directory: '${realTarget}'.`);
+    if (hasUncOrDevicePrefix(realTarget) || isProtectedInternalOutPath(realTarget)) {
+      throw new Error(`Refusing '--out' inside protected internal, governance, or benchmark directory: '${realTarget}'.`);
     }
     for (const pr of protectedRoots) {
       if (isInsideDirCaseAware(realTarget, pr)) {
@@ -282,8 +346,8 @@ function validateSafeExportOutPath(outArg) {
     }
   } else {
     const resolvedTarget = resolveWithExistingAncestor(abs);
-    if (isProtectedInternalOutPath(resolvedTarget)) {
-      throw new Error(`Refusing '--out' inside protected internal or benchmark directory: '${resolvedTarget}'.`);
+    if (hasUncOrDevicePrefix(resolvedTarget) || isProtectedInternalOutPath(resolvedTarget)) {
+      throw new Error(`Refusing '--out' inside protected internal, governance, or benchmark directory: '${resolvedTarget}'.`);
     }
     for (const pr of protectedRoots) {
       if (isInsideDirCaseAware(resolvedTarget, pr)) {
@@ -294,14 +358,244 @@ function validateSafeExportOutPath(outArg) {
   return abs;
 }
 
+let pendingErrorGrantContext = null;
+
 function emitError(message, asJson = false, extra = {}) {
-  consumeTranscriptAccessGrant();
+  consumeTranscriptAccessGrant(pendingErrorGrantContext || undefined);
   if (asJson) {
     console.error(JSON.stringify({ isError: true, error: message, ...extra }, null, 2));
   } else {
     console.error(`Error: ${message}`);
   }
   process.exit(1);
+}
+
+function resolveOutFlag(opts) {
+  if (opts.out !== undefined && opts.output !== undefined && opts.out !== opts.output) {
+    throw new Error("Conflicting '--out' and '--output' values provided.");
+  }
+  const rawOut = opts.out !== undefined ? opts.out : opts.output;
+  const safeOutPath = validateSafeExportOutPath(rawOut);
+  return { rawOut, safeOutPath };
+}
+
+function parseMaxCharsFlag(opts) {
+  const raw = opts["max-chars"];
+  if (raw === undefined) return undefined;
+  const parsed = parsePositiveInt(raw, "max-chars");
+  if (parsed > MAX_DEEP_OUTPUT_CHARS) {
+    throw new Error(`Flag '--max-chars' exceeds 512 KB ceiling (${MAX_DEEP_OUTPUT_CHARS} bytes; received: '${raw}').`);
+  }
+  return parsed;
+}
+
+function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryStart, summaryEnd, summaryDirection } = {}) {
+  const encode = (obj, indent) => JSON.stringify(obj, null, indent) + "\n";
+  const fits = (text) => Buffer.byteLength(text, "utf8") <= maxBytes;
+  const pretty = encode(payload, 2);
+  if (fits(pretty)) return { content: pretty };
+  const compact = encode(payload);
+  if (fits(compact)) return { content: compact };
+
+  const key = Array.isArray(payload.items) ? "items" : "steps";
+  const entries = payload[key];
+  const total = entries?.length || (payload.stepIndex !== undefined ? 1 : 0);
+  const meta = (included) => ({
+    jsonTruncated: true,
+    jsonItemsIncluded: included,
+    jsonItemsTotal: total,
+    jsonTruncatedReason: "Output exceeds the byte budget. Use a larger budget or a narrower selection."
+  });
+
+  if (entries?.length) {
+    const isBatch = Array.isArray(payload.stepIndices);
+    const isRead = payload.displayedSteps !== undefined;
+    const hasBackwardSummaryCursor =
+      summaryDirection === "backward" ||
+      Boolean(payload.nextCursor && payload.nextCursor.end !== undefined && payload.nextCursor.start === undefined);
+    const forward = isBatch || readPageSize !== undefined ||
+      (!hasBackwardSummaryCursor && (summaryEnd !== undefined || payload.nextCursor?.start !== undefined));
+    const stepNumber = (entry) => Number(entry.step_index ?? entry._ordinal ?? 0);
+
+    const build = (count) => {
+      const retained = forward ? entries.slice(0, count) : entries.slice(entries.length - count);
+      const page = { ...payload, [key]: retained, clamped: true, ...meta(count) };
+      if (count < total) {
+        if (isBatch) {
+          const skipIdx = count > 0 ? count : 1;
+          const pending = entries.slice(skipIdx).map((entry) => entry.stepIndex);
+          if (payload.nextCursor) pending.push(payload.nextCursor.step);
+          if (pending.length > 0) {
+            page.nextCursor = { step: pending.join(",") };
+          } else {
+            delete page.nextCursor;
+          }
+        } else if (isRead && forward) {
+          if (count > 0) {
+            page.nextCursor = {
+              offset: retained.at(-1)._fileOrd + 1,
+              limit: readPageSize
+            };
+          } else if (entries.length > 1 || payload.nextCursor) {
+            page.nextCursor = {
+              offset: entries[0]._fileOrd + 1,
+              limit: readPageSize
+            };
+          } else {
+            delete page.nextCursor;
+          }
+        } else if (isRead && count) {
+          const first = retained[0]._fileOrd;
+          if (first > 0) {
+            const limit = Math.min(MAX_BOUNDED_READ_STEPS, first);
+            page.nextCursor = { offset: 0, limit };
+          } else {
+            delete page.nextCursor;
+          }
+        } else if (isRead) {
+          const lastOrd = entries.at(-1)._fileOrd;
+          if (lastOrd > 0) {
+            page.nextCursor = { offset: 0, limit: Math.min(MAX_BOUNDED_READ_STEPS, lastOrd) };
+          } else {
+            delete page.nextCursor;
+          }
+        } else if (forward) {
+          if (count > 0 || entries.length > 1) {
+            const nextIdx = count > 0 ? count : 1;
+            page.nextCursor = {
+              start: stepNumber(entries[nextIdx]),
+              end: payload.nextCursor?.start !== undefined ? payload.nextCursor.end : summaryEnd
+            };
+          } else if (payload.nextCursor?.start !== undefined) {
+            page.nextCursor = { ...payload.nextCursor };
+          } else {
+            delete page.nextCursor;
+          }
+        } else {
+          const nextEnd = count ? stepNumber(retained[0]) - 1 : stepNumber(entries.at(-1)) - 1;
+          const minStart = payload.nextCursor?.start ?? summaryStart ?? 0;
+          if (nextEnd >= minStart) {
+            page.nextCursor = minStart > 0 ? { start: minStart, end: nextEnd } : { end: nextEnd };
+          } else {
+            delete page.nextCursor;
+          }
+        }
+      }
+      if (isBatch) {
+        page.data = payload.data.slice(0, count);
+        page.stepIndices = retained.map((entry) => entry.stepIndex);
+        page.stepIndex = retained[0]?.stepIndex ?? null;
+      } else if (isRead) {
+        page.displayedSteps = count;
+      } else {
+        page.displayedCount = count;
+      }
+      return page;
+    };
+
+    let lo = 0;
+    let hi = total;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi + 1) / 2);
+      if (fits(encode(build(mid)))) lo = mid;
+      else hi = mid - 1;
+    }
+    const page = build(lo);
+    const content = encode(page);
+    if (fits(content)) return { content, metadata: page };
+  } else if (payload.stepIndex !== undefined) {
+    // A single step can carry its selected field without duplicating the entire raw step.
+    const { step, data, ...header } = payload;
+    const selected = { ...header, data, clamped: true, ...meta(1) };
+    const content = encode(selected);
+    if (fits(content)) return { content, metadata: selected };
+    const summary = { ...header, clamped: true, ...meta(0) };
+    const summaryContent = encode(summary);
+    if (fits(summaryContent)) return { content: summaryContent, metadata: summary };
+  }
+
+  throw new Error(`The ${maxBytes}-byte budget is too small for transcript JSON metadata. Increase --max-chars or narrow the selection.`);
+}
+
+function serializeTranscriptResult(res, asJson, maxBytes, pageOptions) {
+  if (asJson) {
+    if (typeof res._serializedJson === "string") {
+      const { text, _serializedJson, _serializedMarkdown, _summaryDirection, ...payload } = res;
+      return { content: _serializedJson, metadata: payload };
+    }
+    const { text, _serializedJson, _serializedMarkdown, _summaryDirection, ...payload } = res;
+    return serializeBoundedJsonPayload(payload, maxBytes, { ...pageOptions, summaryDirection: _summaryDirection });
+  }
+
+  if (typeof res._serializedMarkdown === "string") {
+    return { content: res._serializedMarkdown };
+  }
+  const content = res.text + "\n";
+  if (Buffer.byteLength(content, "utf8") <= maxBytes) return { content };
+  const next = Object.entries(res.nextCursor ?? {}).map(([flag, value]) => `--${flag} ${value}`).join(" ");
+  const nextHint = next ? `; next: ${next}` : "";
+  const notice = `\n\n[Output clamped at ${maxBytes} bytes${nextHint}; use a larger --max-chars or narrow the selection.]\n`;
+  const available = maxBytes - Buffer.byteLength(notice, "utf8");
+  const heading = res.text.split("\n", 1)[0];
+  if (available <= Buffer.byteLength(heading, "utf8")) {
+    throw new Error(`The ${maxBytes}-byte budget is too small for transcript Markdown metadata. Increase --max-chars or narrow the selection.`);
+  }
+  return { content: utf8SliceToBytes(res.text, available).trimEnd() + notice };
+}
+
+function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, {
+  label = "transcript output",
+  customMessage = null,
+  maxBytes = MAX_DEEP_OUTPUT_CHARS,
+  ...pageOptions
+} = {}) {
+  const { content, metadata } = serializeTranscriptResult(res, asJson, maxBytes, pageOptions);
+  validateSafeExportOutPath(rawOut);
+  fs.mkdirSync(path.dirname(safeOutPath), { recursive: true });
+  validateSafeExportOutPath(rawOut);
+  const tmpOut = `${safeOutPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tmpOut, content, { encoding: "utf8", flag: "wx" });
+    fs.renameSync(tmpOut, safeOutPath);
+  } catch (err) {
+    try { fs.unlinkSync(tmpOut); } catch {}
+    throw err;
+  }
+
+  const bytesWritten = Buffer.byteLength(content, "utf8");
+  if (asJson) {
+    const {
+      text,
+      steps,
+      items,
+      sessions,
+      step,
+      data,
+      _serializedJson,
+      _serializedMarkdown,
+      _summaryDirection,
+      ...compactMeta
+    } = metadata ?? res;
+    console.log(JSON.stringify({
+      ...compactMeta,
+      outputPath: safeOutPath,
+      bytesWritten,
+      charsWritten: content.length
+    }, null, 2));
+  } else {
+    console.log(customMessage || `[OK] Wrote ${label} (${bytesWritten} bytes) to: ${safeOutPath}`);
+  }
+}
+
+function emitTranscriptResult(res, asJson, rawOut, safeOutPath, options) {
+  if (res.isError) {
+    emitError(res.text, asJson, res.candidates ? { candidates: res.candidates } : {});
+  }
+  if (safeOutPath) {
+    writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson, options);
+  } else {
+    process.stdout.write(serializeTranscriptResult(res, asJson, options.maxBytes, options).content);
+  }
 }
 
 async function handleTranscriptCommand(argv) {
@@ -315,51 +609,61 @@ async function handleTranscriptCommand(argv) {
   }
 
   const rest = argv.slice(1);
+  pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
 
   if (sub === "read" || sub === "outline" || sub === "summary") {
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
     const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["include-thinking", "outline", "summary", "include-tools", "full-args", "json"]),
-      values: new Set(["id", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "file"])
+      booleans: new Set(["include-thinking", "outline", "summary", "include-tools", "full-args", "full", "json"]),
+      values: new Set(["id", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "max-chars", "out", "output", "file"])
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
+      consumeTranscriptAccessGrant({ subcommand: sub });
       printHelp();
       process.exit(0);
     }
     if (opts.id === undefined && positional.length === 1) {
       opts.id = positional.shift();
     }
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
     }
     const explicitFile = validateExplicitFileFlag(opts.file);
-    const limit = parseOptionalInt(opts.limit, "limit");
+    const { rawOut, safeOutPath } = resolveOutFlag(opts);
+    const parsedMaxChars = parseMaxCharsFlag(opts);
+    const isFull = Boolean(opts.full);
+    const effectiveMaxChars = parsedMaxChars ?? (safeOutPath || isFull ? MAX_DEEP_OUTPUT_CHARS : INLINE_SAFE_CHARS);
+    const limit = parsePositiveInt(opts.limit, "limit");
 
     if (sub === "outline" || sub === "summary" || opts.outline || opts.summary) {
-      const startStep = parseOptionalInt(opts.start, "start");
-      const endStep = parseOptionalInt(opts.end, "end");
+      const startStep = parseNonNegInt(opts.start, "start");
+      const endStep = parseNonNegInt(opts.end, "end");
+      if (startStep !== undefined && endStep !== undefined && endStep < startStep) {
+        throw new Error(`Invalid step range '--start ${startStep} --end ${endStep}': '--end' must be >= '--start'.`);
+      }
       const res = await queryTranscript({
         conversationId: opts.id,
         filePath: explicitFile,
         startStep: startStep !== undefined ? startStep : 0,
         endStep: endStep !== undefined ? endStep : 999999,
-        maxResults: limit !== undefined ? limit : 500,
+        maxResults: limit !== undefined ? limit : ((isFull || safeOutPath) ? 2000 : 500),
         summaryOnly: true,
         includeToolCalls: true,
         fullArgs: Boolean(opts["full-args"]),
+        full: isFull,
+        maxOutputChars: effectiveMaxChars,
         includeThinking: Boolean(opts["include-thinking"]),
         allowExternalPaths: false,
         subcommand: sub
       });
-      if (res.isError) {
-        emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
-      }
-      if (opts.json) {
-        const { text, ...payload } = res;
-        console.log(JSON.stringify(payload, null, 2));
-      } else {
-        console.log(res.text);
-      }
+      emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
+        label: `transcript ${sub}`,
+        maxBytes: effectiveMaxChars,
+        summaryStart: startStep ?? 0,
+        summaryEnd: endStep ?? 999999
+      });
       return;
     }
 
@@ -368,8 +672,8 @@ async function handleTranscriptCommand(argv) {
       throw new Error(`Invalid --mode '${mode}' for 'transcript read' (expected 'compact' or 'full').`);
     }
     const rawLastTurns = opts["last-turns"] !== undefined ? opts["last-turns"] : (opts.last !== undefined ? opts.last : opts.tail);
-    const lastTurns = parseOptionalInt(rawLastTurns, "last-turns");
-    const offset = parseOptionalInt(opts.offset, "offset");
+    const lastTurns = parseNonNegInt(rawLastTurns, "last-turns");
+    const offset = parseNonNegInt(opts.offset, "offset");
 
     const res = await readTranscript({
       conversationId: opts.id,
@@ -379,28 +683,28 @@ async function handleTranscriptCommand(argv) {
       offset,
       limit,
       includeThinking: Boolean(opts["include-thinking"]),
+      full: isFull,
+      maxOutputChars: effectiveMaxChars,
       allowExternalPaths: false
     });
 
-    if (res.isError) {
-      emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
-    }
-    if (opts.json) {
-      const { text, ...payload } = res;
-      console.log(JSON.stringify(payload, null, 2));
-    } else {
-      console.log(res.text);
-    }
+    emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
+      label: `transcript read (${res.mode})`,
+      maxBytes: effectiveMaxChars,
+      readPageSize: offset !== undefined || limit !== undefined ? Math.min(MAX_BOUNDED_READ_STEPS, limit ?? 50) : undefined
+    });
     return;
   }
 
   if (sub === "query" || sub === "grep" || sub === "search" || sub === "find" || sub === "tools") {
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
     const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["summary", "outline", "include-tools", "full-args", "include-thinking", "json"]),
-      values: new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "last", "tail", "limit", "field", "file"])
+      booleans: new Set(["summary", "outline", "include-tools", "full-args", "include-thinking", "full", "json"]),
+      values: new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "last", "tail", "limit", "field", "max-chars", "out", "output", "file"])
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
+      consumeTranscriptAccessGrant({ subcommand: sub });
       printHelp();
       process.exit(0);
     }
@@ -411,7 +715,7 @@ async function handleTranscriptCommand(argv) {
       if (!opts.roles) opts.roles = "assistant";
       if (!opts.field) opts.field = "tool_args";
       opts["include-tools"] = true;
-      if (opts.limit === undefined) opts.limit = "500";
+      if (opts.limit === undefined) opts.limit = (Boolean(opts.full) || opts.out !== undefined || opts.output !== undefined) ? "2000" : "500";
       if (opts.start === undefined && opts.last === undefined && opts["last-turns"] === undefined && opts.tail === undefined) {
         opts.start = "0";
         if (opts.end === undefined) opts.end = "999999";
@@ -423,6 +727,11 @@ async function handleTranscriptCommand(argv) {
     if (opts.id === undefined && positional.length >= 1) {
       opts.id = positional.shift();
     }
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
+    const isFull = Boolean(opts.full);
+    const { rawOut, safeOutPath } = resolveOutFlag(opts);
+    const parsedMaxChars = parseMaxCharsFlag(opts);
+    const effectiveMaxChars = parsedMaxChars ?? (safeOutPath || isFull ? MAX_DEEP_OUTPUT_CHARS : INLINE_SAFE_CHARS);
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
     }
@@ -431,11 +740,14 @@ async function handleTranscriptCommand(argv) {
       throw new Error(`Invalid --mode '${mode}' for 'transcript query' (expected 'auto', 'compact', or 'full').`);
     }
     const explicitFile = validateExplicitFileFlag(opts.file);
-    const startStep = parseOptionalInt(opts.start, "start");
-    const endStep = parseOptionalInt(opts.end, "end");
+    const startStep = parseNonNegInt(opts.start, "start");
+    const endStep = parseNonNegInt(opts.end, "end");
+    if (startStep !== undefined && endStep !== undefined && endStep < startStep) {
+      throw new Error(`Invalid step range '--start ${startStep} --end ${endStep}': '--end' must be >= '--start'.`);
+    }
     const rawLastTurns = opts["last-turns"] !== undefined ? opts["last-turns"] : (opts.last !== undefined ? opts.last : opts.tail);
-    const lastTurns = parseOptionalInt(rawLastTurns, "last-turns");
-    const maxResults = parseOptionalInt(opts.limit, "limit");
+    const lastTurns = parseNonNegInt(rawLastTurns, "last-turns");
+    const maxResults = parsePositiveInt(opts.limit, "limit");
     const roles = opts.roles
       ? opts.roles.split(",").map((r) => r.trim()).filter(Boolean)
       : ["all"];
@@ -453,31 +765,32 @@ async function handleTranscriptCommand(argv) {
       summaryOnly: Boolean(opts.summary || opts.outline),
       includeToolCalls: Boolean(opts["include-tools"]),
       fullArgs: Boolean(opts["full-args"]),
+      full: isFull,
+      maxOutputChars: effectiveMaxChars,
       field: opts.field,
       includeThinking: Boolean(opts["include-thinking"]),
       allowExternalPaths: false,
       subcommand: sub
     });
 
-    if (res.isError) {
-      emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
-    }
-    if (opts.json) {
-      const { text, ...payload } = res;
-      console.log(JSON.stringify(payload, null, 2));
-    } else {
-      console.log(res.text);
-    }
+    emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
+      label: `transcript ${sub}`,
+      maxBytes: effectiveMaxChars,
+      summaryStart: (opts.summary || opts.outline) ? startStep : undefined,
+      summaryEnd: (opts.summary || opts.outline) && startStep !== undefined ? endStep : undefined
+    });
     return;
   }
 
   if (sub === "step") {
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
     const { opts, positional } = parseFlags(rest, {
       booleans: new Set(["json", "full"]),
-      values: new Set(["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "file"])
+      values: new Set(["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "line-start", "line-end", "max-chars", "out", "output", "file"])
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
+      consumeTranscriptAccessGrant({ subcommand: sub });
       printHelp();
       process.exit(0);
     }
@@ -487,17 +800,30 @@ async function handleTranscriptCommand(argv) {
     if (opts.id === undefined && positional.length >= 1) {
       opts.id = positional.shift();
     }
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript step': ${positional.join(" ")}`);
     }
-    const startStep = parseOptionalInt(opts.start, "start");
-    const endStep = parseOptionalInt(opts.end, "end");
-    const tailLines = parseOptionalInt(opts["tail-lines"] !== undefined ? opts["tail-lines"] : opts.tail, "tail");
-    const headLines = parseOptionalInt(opts["head-lines"] !== undefined ? opts["head-lines"] : opts.head, "head");
+    const startStep = parseNonNegInt(opts.start, "start");
+    const endStep = parseNonNegInt(opts.end, "end");
+    if (startStep !== undefined && endStep !== undefined && endStep < startStep) {
+      throw new Error(`Invalid step range '--start ${startStep} --end ${endStep}': '--end' must be >= '--start'.`);
+    }
+    const tailLines = parsePositiveInt(opts["tail-lines"] !== undefined ? opts["tail-lines"] : opts.tail, "tail");
+    const headLines = parsePositiveInt(opts["head-lines"] !== undefined ? opts["head-lines"] : opts.head, "head");
+    const lineStart = parsePositiveInt(opts["line-start"], "line-start");
+    const lineEnd = parsePositiveInt(opts["line-end"], "line-end");
+    if (lineStart !== undefined && lineEnd !== undefined && lineEnd < lineStart) {
+      throw new Error(`Invalid line slice '--line-start ${lineStart} --line-end ${lineEnd}': '--line-end' must be >= '--line-start'.`);
+    }
     if (opts.step === undefined && startStep === undefined && endStep === undefined) {
       throw new Error(`Missing required flag '--step <N|N,M|N-M>' (or '--start N --end M') for 'transcript step'.`);
     }
     const explicitFile = validateExplicitFileFlag(opts.file);
+    const { rawOut, safeOutPath } = resolveOutFlag(opts);
+    const parsedMaxChars = parseMaxCharsFlag(opts);
+    const isFull = Boolean(opts.full);
+    const effectiveMaxChars = parsedMaxChars ?? (safeOutPath && !isFull ? MAX_DEEP_OUTPUT_CHARS : undefined);
 
     const res = await getStepDetail({
       conversationId: opts.id,
@@ -508,18 +834,17 @@ async function handleTranscriptCommand(argv) {
       field: opts.field || "all",
       headLines,
       tailLines,
+      lineStart,
+      lineEnd,
+      full: isFull,
+      maxOutputChars: effectiveMaxChars,
       allowExternalPaths: false
     });
 
-    if (res.isError) {
-      emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
-    }
-    if (opts.json) {
-      const { text, ...payload } = res;
-      console.log(JSON.stringify(payload, null, 2));
-    } else {
-      console.log(res.text);
-    }
+    emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
+      label: "transcript step",
+      maxBytes: effectiveMaxChars ?? (isFull ? MAX_DEEP_OUTPUT_CHARS : MAX_FIELD_CHARS)
+    });
     return;
   }
 
@@ -622,31 +947,44 @@ async function handleTranscriptCommand(argv) {
   }
 
   if (sub === "export" || sub === "dump") {
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
     const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["sanitized", "json"]),
-      values: new Set(["parent", "start", "end", "limit", "out", "output", "file"]),
+      booleans: new Set(["sanitized", "full", "json"]),
+      values: new Set(["parent", "start", "end", "limit", "max-chars", "out", "output", "file"]),
       multiValues: new Set(["id"])
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
+      consumeTranscriptAccessGrant({ subcommand: sub });
       printHelp();
       process.exit(0);
     }
     if ((!opts.id || opts.id.length === 0) && !opts.parent && !opts.file && positional.length >= 1) {
       opts.id = [positional.shift()];
     }
+    const exportIdsForGrant = (opts.id || [])
+      .flatMap((id) => String(id || "").split(","))
+      .map((id) => id.trim())
+      .filter(Boolean);
+    const exportTargetConvId = opts.parent
+      ? `parent:${String(opts.parent).trim()}`
+      : exportIdsForGrant.length === 1
+        ? exportIdsForGrant[0]
+        : exportIdsForGrant.length > 1
+          ? `multi:${[...new Set(exportIdsForGrant)].sort().join(",")}`
+          : null;
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: exportTargetConvId };
     if (positional.length > 0) {
       throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
     }
     if (opts.parent !== undefined && !String(opts.parent).trim()) {
       throw new Error("Flag '--parent' must be a non-empty conversation ID or 'current'.");
     }
-    if (opts.out !== undefined && opts.output !== undefined && opts.out !== opts.output) {
-      throw new Error("Conflicting '--out' and '--output' values provided.");
-    }
-    const rawOut = opts.out !== undefined ? opts.out : opts.output;
-    const safeOutPath = validateSafeExportOutPath(rawOut);
+    const { rawOut, safeOutPath } = resolveOutFlag(opts);
     const explicitFile = validateExplicitFileFlag(opts.file);
+    const parsedMaxChars = parseMaxCharsFlag(opts);
+    const isFull = Boolean(opts.full);
+    const effectiveMaxChars = parsedMaxChars ?? (safeOutPath || isFull ? MAX_DEEP_OUTPUT_CHARS : INLINE_SAFE_CHARS);
     const startStep = parseOptionalInt(opts.start, "start");
     const endStep = parseOptionalInt(opts.end, "end");
     if (startStep !== undefined && startStep < 0) {
@@ -663,6 +1001,7 @@ async function handleTranscriptCommand(argv) {
       throw new Error(`Flag '--limit' must be a positive integer (received: '${opts.limit}').`);
     }
 
+    const asJson = Boolean(opts.json);
     const res = await exportSanitizedTranscript({
       conversationIds: opts.id || [],
       parentId: opts.parent,
@@ -671,42 +1010,18 @@ async function handleTranscriptCommand(argv) {
       startStep,
       endStep,
       limit,
-      maxOutputChars: safeOutPath ? 64000 : undefined,
+      maxOutputChars: effectiveMaxChars,
+      outputFormat: asJson ? "json" : "markdown",
       allowExternalPaths: false
     });
 
-    if (res.isError) {
-      emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
-    }
-
-    if (safeOutPath) {
-      validateSafeExportOutPath(rawOut);
-      fs.mkdirSync(path.dirname(safeOutPath), { recursive: true });
-      validateSafeExportOutPath(rawOut);
-      const { text, ...payload } = res;
-      const fileContent = opts.json ? JSON.stringify(payload, null, 2) + "\n" : text + "\n";
-      const tmpOut = `${safeOutPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-      try {
-        fs.writeFileSync(tmpOut, fileContent, { encoding: "utf8", flag: "wx" });
-        fs.renameSync(tmpOut, safeOutPath);
-      } catch (err) {
-        try { fs.unlinkSync(tmpOut); } catch {}
-        throw err;
-      }
-      if (opts.json) {
-        console.log(JSON.stringify({ ...payload, outputPath: safeOutPath }, null, 2));
-      } else {
-        console.log(`[OK] Exported sanitized L6 transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}`);
-      }
-      return;
-    }
-
-    if (opts.json) {
-      const { text, ...payload } = res;
-      console.log(JSON.stringify(payload, null, 2));
-    } else {
-      console.log(res.text);
-    }
+    emitTranscriptResult(res, asJson, rawOut, safeOutPath, {
+      label: "sanitized transcript export",
+      customMessage: safeOutPath
+        ? `[OK] Exported sanitized L6 transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}`
+        : undefined,
+      maxBytes: effectiveMaxChars
+    });
     return;
   }
 

@@ -1909,11 +1909,221 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
     );
     assert.equal(boundedHeadLargeSpill.decision, "allow");
 
+    // Two-tier ergonomics hook regressions: --line-start/--line-end/--max-chars/--out value flags & path guards across read/query/outline/step
+    for (const validErgoCmd of [
+      `agy-context transcript read --id ${pA} --full --max-chars 16000 --out scratch/read_ergo.md`,
+      `agy-context transcript outline --id ${pA} --full --out scratch/outline_ergo.md`,
+      `agy-context transcript query --id ${pA} "verdict" --max-chars 12000 --out scratch/query_ergo.json`,
+      `agy-context transcript tools --id ${pA} --full --out scratch/tools_ergo.md`,
+      `agy-context transcript step --id ${pA} --step 1 --field tool_args:CommandLine --line-start 1 --line-end 30 --max-chars 8000`,
+      `agy-context transcript step --id ${pA} --step 1 --full --out scratch/step_ergo.txt`
+    ]) {
+      const okErgoHook = runHook(
+        {
+          conversationId: pA,
+          cwd: wsDir,
+          transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+          toolCall: { name: "run_command", args: { CommandLine: validErgoCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(okErgoHook.decision, "allow", `Valid new transcript flags must be allowed by hook: ${validErgoCmd} (${okErgoHook.reason || ""})`);
+    }
+
+    for (const badOutErgoCmd of [
+      `agy-context transcript read --id ${pA} --out scripts/evil.mjs`,
+      `agy-context transcript outline --id ${pA} --out benchmarks/evil.json`,
+      `agy-context transcript query --id ${pA} "x" --out .system_generated/evil.txt`,
+      `agy-context transcript step --id ${pA} --step 1 --out eval_data.exe`
+    ]) {
+      const denyOutHook = runHook(
+        {
+          conversationId: pA,
+          cwd: wsDir,
+          transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"),
+          toolCall: { name: "run_command", args: { CommandLine: badOutErgoCmd } }
+        },
+        cliEnv
+      );
+      assert.equal(denyOutHook.decision, "deny", `Protected/unsafe --out path must be denied by hook: ${badOutErgoCmd}`);
+    }
+
+    const ergoRestricted = "cli-self-ergo-child";
+    const ergoRestrictedLogs = path.join(cliBrainRoot, ergoRestricted, ".system_generated", "logs");
+    fs.mkdirSync(ergoRestrictedLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(ergoRestrictedLogs, "transcript.jsonl"),
+      JSON.stringify({
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] timestamp=2026-11-17T00:00:05Z sender=${pA} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: self-only]\nErgo CLI task`
+      }) + "\n"
+    );
+
+    const selfStepSliceOut = runHook(
+      {
+        conversationId: ergoRestricted,
+        cwd: wsDir,
+        transcriptPath: path.join(ergoRestrictedLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: "agy-context transcript step --step 1 --field tool_args:CommandLine --line-start 1 --line-end 10 --out scratch/self_step.md" }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(selfStepSliceOut.decision, "allow", "self-only caller using --line-start/--line-end/--out on own transcript must be allowed");
+    assert.match(selfStepSliceOut.overwrite?.CommandLine || "", new RegExp(`--id ${ergoRestricted}`));
+
+    const selfStepOtherDeny = runHook(
+      {
+        conversationId: ergoRestricted,
+        cwd: wsDir,
+        transcriptPath: path.join(ergoRestrictedLogs, "transcript.jsonl"),
+        toolCall: {
+          name: "run_command",
+          args: { CommandLine: `agy-context transcript step --id ${pA} --step 1 --line-start 1 --line-end 10 --out scratch/other.md` }
+        }
+      },
+      cliEnv
+    );
+    assert.equal(selfStepOtherDeny.decision, "deny", "self-only caller passing --id <other> with new step flags must be denied");
+
+    // PR #7 audit regressions: self-only --out confinement, unexpanded shell tokens, hooks.json, UNC, quoted `current`
+    for (const badSelfOut of [
+      `agy-context transcript read --out ${path.join(cliBrainRoot, pA, "notes.md")}`,
+      "agy-context transcript read --out AGENTS.md",
+      "agy-context transcript read --out $HOME/scratch/x.md",
+      "agy-context transcript read --out ~/scratch/x.md",
+      "agy-context transcript read --out scratch/hooks.json",
+      "agy-context transcript read --out //server/share/leak.md"
+    ]) {
+      const deniedSelfOut = runHook(
+        {
+          conversationId: ergoRestricted,
+          cwd: wsDir,
+          transcriptPath: path.join(ergoRestrictedLogs, "transcript.jsonl"),
+          toolCall: { name: "run_command", args: { CommandLine: badSelfOut } }
+        },
+        cliEnv
+      );
+      assert.equal(deniedSelfOut.decision, "deny", `Unsafe self-only --out must be denied: ${badSelfOut}`);
+    }
+
+    const quotedCurrent = runHook(
+      {
+        conversationId: ergoRestricted,
+        cwd: wsDir,
+        transcriptPath: path.join(ergoRestrictedLogs, "transcript.jsonl"),
+        toolCall: { name: "run_command", args: { CommandLine: 'agy-context transcript read --id="current"' } }
+      },
+      cliEnv
+    );
+    assert.equal(quotedCurrent.decision, "allow");
+    assert.match(quotedCurrent.overwrite?.CommandLine || "", new RegExp(`--id ${ergoRestricted}$`), "quoted current must be rewritten without a dangling quote");
+
+    const queryLiteralId = runHook(
+      {
+        conversationId: ergoRestricted,
+        cwd: wsDir,
+        transcriptPath: path.join(ergoRestrictedLogs, "transcript.jsonl"),
+        toolCall: { name: "run_command", args: { CommandLine: 'agy-context transcript query "--id current"' } }
+      },
+      cliEnv
+    );
+    if (queryLiteralId.decision === "allow") {
+      assert.match(queryLiteralId.overwrite?.CommandLine || "", /"--id current"/, "query literal must not be rewritten");
+      assert.match(queryLiteralId.overwrite?.CommandLine || "", new RegExp(`--id ${ergoRestricted}`));
+    }
+
     console.log("✓ Group H regression checks passed (payload.cwd, 2>/dev/null, antigravity-cli, swarm_view, Step0>16KiB, cross-swarm isolation, query current, Wave 2 regressions)");
   } finally {
     fs.rmSync(wsDir, { recursive: true, force: true });
     fs.rmSync(cliProfile, { recursive: true, force: true });
   }
+}
+
+// ============================================================================
+// GROUP I: PR #7 L46 Remediations (Tier 4 Option A Reset Parity & Export Flags)
+// ============================================================================
+console.log("\n--- Group I: Tier 4 Immutability After Reset & Export Flag Parsing ---");
+{
+  resetState();
+  const brainI = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain");
+  const writeTrI = (id, steps) => {
+    const dir = path.join(brainI, id, ".system_generated", "logs");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "transcript.jsonl"), steps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+  };
+  const coordI = "coord-group-i";
+  const specDenyI = "spec-deny-group-i";
+  writeTrI(coordI, [{ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "Coord I" }]);
+  writeTrI(specDenyI, [{
+    step_index: 0,
+    source: "SYSTEM",
+    type: "SYSTEM_MESSAGE",
+    content: `[Message] timestamp=2026-11-18T00:00:00Z sender=${coordI} priority=MESSAGE_PRIORITY_HIGH content=Your assignment (recorded on the board as #1 for @i-spec1):\n[agy-transcript-access: deny]\nDo work`
+  }]);
+
+  // 1. Denied at baseline
+  assert.equal(
+    runHook({ conversationId: specDenyI, toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list --limit 1" } } }).decision,
+    "deny"
+  );
+
+  // 2. Temporary Tier 3 --allow permits read + export with --full and --max-chars before/after flags
+  assert.equal(
+    runHook({ conversationId: coordI, toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --mode allowlist --allow @i-spec*" } } }).decision,
+    "allow"
+  );
+  spawnSync(process.execPath, [path.resolve(repoRoot, "bin/agy-context.mjs"), "transcript", "access", "--mode", "allowlist", "--allow", "@i-spec*"], { encoding: "utf-8", env: process.env });
+
+  const exportWithMaxCharsHook = runHook({
+    conversationId: specDenyI,
+    cwd: process.cwd(),
+    toolCall: {
+      name: "run_command",
+      args: { CommandLine: `agy-context transcript export --max-chars 50000 ${specDenyI} --sanitized --full --json` }
+    }
+  });
+  assert.equal(exportWithMaxCharsHook.decision, "allow", "Allowlisted child running export with --max-chars before <id> and --full must be parsed & allowed");
+
+  // 3. Coordinator resets policy: status discloses remaining Tier 4 deny child, and child immediately drops back to Tier 4 deny
+  assert.equal(
+    runHook({ conversationId: coordI, toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --reset --json" } } }).decision,
+    "allow"
+  );
+  const resetExecI = spawnSync(
+    process.execPath,
+    [path.resolve(repoRoot, "bin/agy-context.mjs"), "transcript", "access", "--reset", "--json"],
+    { encoding: "utf-8", env: { ...process.env, GEMINI_CONVERSATION_ID: coordI } }
+  );
+  assert.equal(resetExecI.status, 0, resetExecI.stderr);
+  const resetPayloadI = JSON.parse(resetExecI.stdout);
+  assert.equal(resetPayloadI.mode, "open");
+  assert.equal(resetPayloadI.launchRestrictions.restrictedCount, 1);
+  assert.equal(resetPayloadI.launchRestrictions.sessions[0].conversationId, specDenyI);
+
+  const deniedAfterResetHook = runHook({
+    conversationId: specDenyI,
+    toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript export --max-chars 50000 ${specDenyI} --sanitized` } }
+  });
+  assert.equal(deniedAfterResetHook.decision, "deny", "Tier 4 launch-directive deny must remain immutable after parent access --reset");
+  assert.match(deniedAfterResetHook.reason || "", /source=launch-directive/);
+
+  const badExportExtraPos = runHook({
+    conversationId: coordI,
+    toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript export --parent ${coordI} extra-pos --sanitized` } }
+  });
+  assert.equal(badExportExtraPos.decision, "deny", "export --parent with unexpected positional arg must fail hook validation");
+  const badTildeUserOut = runHook({
+    conversationId: coordI,
+    toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${coordI} --out ~otheruser/leak.md` } }
+  });
+  assert.equal(badTildeUserOut.decision, "deny", "--out ~user/... tilde expansion must be blocked by hook");
+
+  console.log("✓ Group I Tier 4 reset immutability + export --max-chars/--full hook checks passed");
 }
 
 hermetic.cleanup();

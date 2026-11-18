@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver Registration & Installation Engine (v2.0.3)
+ * Agy-Context-Saver Registration & Installation Engine (v2.0.4)
  * Zero-delay cross-platform installer with CLI-first shim provisioning,
  * unified hook registration, and legacy MCP retirement/sweep.
  *
@@ -25,9 +25,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const PACKAGE_VERSION = (() => {
   try {
-    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.0.3";
+    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.0.4";
   } catch {
-    return "2.0.3";
+    return "2.0.4";
   }
 })();
 
@@ -515,13 +515,13 @@ export function formatWindowsCmdShim(targetCliPath) {
     "@echo off",
     "chcp 65001 >nul",
     "setlocal",
-    "where node >nul 2>nul",
+    "where node.exe >nul 2>nul",
     "if errorlevel 1 goto :fallback",
-    `node "${targetCliPath}" %*`,
-    "exit /b %errorlevel%",
+    // A label-less GOTO ends the batch context. The queued executable can
+    // delete this shim (and any managed node.cmd) and return its own status.
+    `(goto) 2>nul & node.exe "${targetCliPath}" %*`,
     ":fallback",
-    `"${process.execPath}" "${targetCliPath}" %*`,
-    "exit /b %errorlevel%",
+    `(goto) 2>nul & "${process.execPath}" "${targetCliPath}" %*`,
     ""
   ].join("\r\n");
 }
@@ -698,8 +698,14 @@ export async function runInstall(options = {}) {
 
   let pluginLst = null;
   try {
-    pluginLst = fs.lstatSync(pluginDest);
-  } catch {}
+    pluginLst = fs.lstatSync(pluginDest, { bigint: true });
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  const sourceStat = fs.statSync(repoRoot, { bigint: true });
+  // A shim installed from an npm tarball runs directly from the plugin copy.
+  const installedSource = pluginLst?.isDirectory() &&
+    pluginLst.dev === sourceStat.dev && pluginLst.ino === sourceStat.ino;
   const pluginExists = fs.existsSync(pluginDest);
   let pluginPointsElsewhere = false;
   if (pluginLst && pluginExists && pluginLst.isSymbolicLink()) {
@@ -716,7 +722,7 @@ export async function runInstall(options = {}) {
   }
 
   if (
-    pluginLst &&
+    pluginLst && !installedSource &&
     (!pluginExists || isTempOrNpx || options.forceCopyFallback || !pluginLst.isSymbolicLink() || pluginPointsElsewhere)
   ) {
     if (pluginLst.isSymbolicLink()) {
@@ -861,36 +867,32 @@ export async function runUninstall(options = {}) {
   let pluginStat = null;
   try {
     pluginStat = fs.lstatSync(pluginDest);
-  } catch {}
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
   if (pluginStat) {
-    try {
-      if (pluginStat.isSymbolicLink()) {
-        await fsPromises.unlink(pluginDest);
-      } else {
-        await fsPromises.rm(pluginDest, { recursive: true, force: true });
-      }
-      log(`[OK] Removed plugin link: ${pluginDest}`);
-    } catch (err) {
-      warn(`[WARN] Could not remove plugin link: ${err.message}`);
+    if (pluginStat.isSymbolicLink()) {
+      await fsPromises.unlink(pluginDest);
+    } else {
+      await fsPromises.rm(pluginDest, { recursive: true, force: true });
     }
+    log(`[OK] Removed plugin link: ${pluginDest}`);
   }
 
   // 2. Remove mirrored hook script (including dangling symlinks via lstatSync, S2-SCRIPT-011)
   let destHookStat = null;
   try {
     destHookStat = fs.lstatSync(destHook);
-  } catch {}
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
   if (destHookStat) {
-    try {
-      if (destHookStat.isDirectory() && !destHookStat.isSymbolicLink()) {
-        await fsPromises.rm(destHook, { recursive: true, force: true });
-      } else {
-        await fsPromises.unlink(destHook);
-      }
-      log(`[OK] Removed mirrored hook script: ${destHook}`);
-    } catch (err) {
-      warn(`[WARN] Could not remove mirrored hook script: ${err.message}`);
+    if (destHookStat.isDirectory() && !destHookStat.isSymbolicLink()) {
+      await fsPromises.rm(destHook, { recursive: true, force: true });
+    } else {
+      await fsPromises.unlink(destHook);
     }
+    log(`[OK] Removed mirrored hook script: ${destHook}`);
   }
 
   // 3. Remove both current and legacy hook keys from hooks.json, and plugin toggle from config.json
@@ -928,21 +930,16 @@ export async function runUninstall(options = {}) {
   for (const name of CLI_SHIM_NAMES) {
     for (const candidate of [name, `${name}.cmd`]) {
       const shimPath = path.join(antigravityBinDir, candidate);
-      let shimStat = null;
       try {
-        shimStat = fs.lstatSync(shimPath);
-      } catch {}
-      if (shimStat) {
-        try {
-          if (shimStat.isDirectory() && !shimStat.isSymbolicLink()) {
-            await fsPromises.rm(shimPath, { recursive: true, force: true });
-          } else {
-            await fsPromises.unlink(shimPath);
-          }
-          log(`[OK] Removed CLI shim: ${shimPath}`);
-        } catch (err) {
-          warn(`[WARN] Could not remove CLI shim ${shimPath}: ${err.message}`);
+        const shimStat = fs.lstatSync(shimPath);
+        if (shimStat.isDirectory() && !shimStat.isSymbolicLink()) {
+          await fsPromises.rm(shimPath, { recursive: true, force: true });
+        } else {
+          await fsPromises.unlink(shimPath);
         }
+        log(`[OK] Removed CLI shim: ${shimPath}`);
+      } catch (err) {
+        if (err.code !== "ENOENT") throw err;
       }
     }
   }
@@ -1095,8 +1092,16 @@ export function runStatus(options = {}) {
     }`
   );
   const ta = existing.details.transcriptAccess || formatTranscriptAccessStatus();
+  const lr = ta.launchRestrictions;
+  const lrNote = lr && lr.restrictedCount > 0
+    ? ` | Recent launch-restricted children: ${lr.restrictedCount} (${lr.denyCount} deny, ${lr.selfOnlyCount} self-only; launch directives remain in effect)`
+    : "";
   log(
-    `- Transcript Access Policy: ${ta.active ? `${ta.mode.toUpperCase()} (owner: ${ta.ownerId})` : "OPEN (default)"}`
+    `- Transcript Access Policy: ${
+      ta.active
+        ? `${ta.mode.toUpperCase()} (owner: ${ta.ownerId})`
+        : (lr && lr.restrictedCount > 0 ? "OPEN (parent CLI policy)" : "OPEN (default)")
+    }${lrNote}`
   );
 
   const hasCorruption =
