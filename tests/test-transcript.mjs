@@ -17,6 +17,8 @@ import {
   exportSanitizedTranscript,
   stripSummaryStepBoilerplate,
   inspectTranscriptLineageFromFile,
+  formatTranscriptItem,
+  formatSingleStepDetail,
   formatTranscriptAccessStatus,
   scanRecentLaunchRestrictions,
   manageTranscriptAccessPolicy,
@@ -2364,6 +2366,481 @@ try {
     assert.deepEqual(collectedOrder, Array.from({ length: 21 }, (_, idx) => idx), "every step 0..20 must be covered without skips or duplicates");
 
     console.log("✓ PR #7 L46 remediations verified (Option A status disclosure, compact summary JSON, unified sanitized export & worker cursors)");
+
+    // 11. PR #8 L54 Output Normalization & Readable Bounded JSON
+    console.log("\n--- 11. PR #8 L54 Output Normalization & Readable Bounded JSON ---");
+    const convNorm = "conv-pr8-normalization";
+    const normLogs = path.join(brainDir, convNorm, ".system_generated", "logs");
+    fs.mkdirSync(normLogs, { recursive: true });
+    const bigSingleLineJson = JSON.stringify({
+      status: "ok",
+      items: Array.from({ length: 18 }, (_, i) => ({
+        step_index: i + 1,
+        role: "generic",
+        summary: `Item ${i + 1} verification payload with structured fields cleanly serialized`
+      }))
+    });
+    assert.ok(bigSingleLineJson.length > 1300, "test fixture JSON must exceed MAX_LINE_CHARS (1000)");
+
+    const normCompactSteps = [
+      {
+        step_index: 0,
+        type: "USER_INPUT",
+        source: "USER",
+        created_at: "2026-11-18T03:00:00Z",
+        content: "<USER_REQUEST>\r\nInspect normalized output\r\n\r\n\r\nPlease.\r\n</USER_REQUEST>"
+      },
+      {
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        source: "MODEL",
+        status: "DONE",
+        created_at: "2026-11-18T03:00:05Z",
+        thinking: "Paragraph one.\r\n\r\n\r\nParagraph two.\r\n\r\n\r\n",
+        content: "Checking tool execution.\r\n\r\n\r\nDone.",
+        tool_calls: [
+          {
+            name: "run_command",
+            args: {
+              CommandLine: "\"echo hi\\r\\n\"",
+              WaitMsBeforeAsync: "5000",
+              IsDaemon: "false"
+            }
+          },
+          {
+            name: "write_file",
+            args: {
+              Content: "\"# Report\\nLine 2 \\\"quoted\\\" \\u0041\\\\tail\\u00\n<truncated 500 bytes>",
+              Overwrite: "true",
+              Path: "\"scratch/out.md\""
+            }
+          },
+          {
+            name: "replace_file_content",
+            args: {
+              CommandQuoted: "\"\\\"C:/Program Files/app.exe\\\" --flag1 --flag2\n<truncated 500 bytes>",
+              WinQuoted: "\"\\\"C:\\\\temp\\\\run.exe\\\"\"",
+              ReplacementChunks: "[{\"AllowMultiple\":\"false\",\"StartLine\":\"10\",\"TargetContent\":\"\\\"foo\\\\r\\\\nbar\\\"\"}]"
+            }
+          }
+        ],
+        truncated_fields: ["tool_calls"]
+      },
+      {
+        step_index: 2,
+        type: "GENERIC",
+        source: "MODEL",
+        status: "DONE",
+        created_at: "2026-11-18T03:00:10Z",
+        content: [
+          "A pre-tool hook changed the arguments of this tool call before it ran. Changed: CommandLine.\r",
+          "\r",
+          "The tool's output was truncated due to being too long. You can find the full output in a file at file:///x/.system_generated/steps/42/output.txt.\r",
+          "\r",
+          "Here is a preview with the middle of the output truncated:\r",
+          "Created At: 2026-11-17T22:00:10-05:00\r",
+          "Completed At: 2026-11-17T22:00:12-05:00\r",
+          "Created At: 2026-11-17T22:00:10-05:00\r",
+          "Completed At: 2026-11-17T22:00:12-05:00\r",
+          "Command exited with code 7.\r",
+          "\r",
+          "Command output:\r",
+          bigSingleLineJson,
+          "\r",
+          "Body literal Created At: keep me\r",
+          "NonJsonBlob:",
+          "Q".repeat(1300)
+        ].join("\n")
+      },
+      {
+        step_index: 3,
+        type: "GENERIC",
+        source: "MODEL",
+        status: "DONE",
+        created_at: "2026-11-18T03:00:15Z",
+        content: "Created At: 2026-11-17T22:00:15-05:00\r\nCompleted At: 2026-11-17T22:00:16-05:00\r\n"
+      }
+    ];
+    for (let s = 4; s <= 12; s++) {
+      normCompactSteps.push({
+        step_index: s,
+        type: "GENERIC",
+        source: "MODEL",
+        status: "DONE",
+        created_at: `2026-11-18T03:01:${String(s).padStart(2, "0")}Z`,
+        content: `Created At: 2026-11-17T22:01:00-05:00\r\nCompleted At: 2026-11-17T22:01:01-05:00\r\nTrailing step ${s} ` + "N".repeat(260)
+      });
+    }
+    const normFullSteps = normCompactSteps.map((s) => ({ ...s }));
+    normFullSteps[1] = {
+      ...normCompactSteps[1],
+      truncated_fields: [],
+      tool_calls: [
+        {
+          name: "write_file",
+          args: {
+            Content: "[1, 2, 3]\r\nLine 2\r\n\r\n\r\nLine 3",
+            FlagText: "true",
+            NullText: "null",
+            JsonText: "[1,2]",
+            WinNative: "\"C:\\temp\\run.exe\"",
+            Overwrite: true,
+            WaitMsBeforeAsync: 5000
+          }
+        }
+      ]
+    };
+    fs.writeFileSync(path.join(normLogs, "transcript.jsonl"), normCompactSteps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf8");
+    fs.writeFileSync(path.join(normLogs, "transcript_full.jsonl"), normFullSteps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf8");
+
+    // 11.1 cleanMessageContent & Markdown rendering: CRLF, <thinking>, Created At deduping, single-line JSON pretty-print
+    const cleanedCrlf = cleanMessageContent("a\r\nb\rc\r\n\r\n\r\nd", 500);
+    assert.equal(cleanedCrlf.includes("\r"), false);
+    assert.equal(cleanedCrlf, "a\nb\nc\n\nd");
+
+    const step2Detail = runCli(["transcript", "step", "2", convNorm]);
+    assert.equal(step2Detail.status, 0, step2Detail.stderr);
+    assert.equal(step2Detail.stdout.includes("\r"), false, "step Markdown must strip CR characters");
+    assert.equal(step2Detail.stdout.includes("Created At: 2026-11-17"), false, "step Markdown must strip duplicate leading Created At headers even after hook/spillover prefixes");
+    assert.equal(step2Detail.stdout.includes("Completed At: 2026-11-17"), false, "step Markdown must strip duplicate leading Completed At headers even after hook/spillover prefixes");
+    assert.match(step2Detail.stdout, /A pre-tool hook changed/, "step must preserve hook-changed notice");
+    assert.match(step2Detail.stdout, /Here is a preview/, "step must preserve spillover preview notice");
+    assert.match(step2Detail.stdout, /Command exited with code 7\./, "step must preserve exit code line");
+    assert.match(step2Detail.stdout, /steps\/42\/output\.txt/, "step must preserve spillover URL");
+    assert.match(step2Detail.stdout, /Body literal Created At: keep me/, "body Created At inside Command output must be preserved");
+    assert.match(step2Detail.stdout, /"step_index": 18/, "single-line JSON output must pretty-print instead of mid-line clamping");
+    assert.match(step2Detail.stdout, /\[line clamped\]/, "non-JSON single-line blob must still clamp at MAX_LINE_CHARS");
+
+    const step2Full = runCli(["transcript", "step", "2", convNorm, "--full"]);
+    assert.equal(step2Full.status, 0, step2Full.stderr);
+    assert.match(step2Full.stdout, /"step_index": 18/, "step --full must also pretty-print bounded single-line JSON");
+    assert.equal(step2Full.stdout.includes("[line clamped]"), false, "step --full must not line-clamp non-JSON lines");
+    assert.equal(step2Full.stdout.includes("Created At: 2026-11-17"), false, "step --full must strip leading Created At headers after prefixes");
+
+    const step1Read = runCli(["transcript", "read", convNorm, "--mode", "compact", "--offset", "1", "--limit", "1", "--include-thinking"]);
+    assert.equal(step1Read.status, 0, step1Read.stderr);
+    assert.equal(step1Read.stdout.includes("\r"), false);
+    assert.ok(step1Read.stdout.includes("> Paragraph one.\n> \n> Paragraph two.\n> </thinking>"), "thinking block must collapse extra blank lines and trim trailing newlines before </thinking>");
+    assert.ok(!step1Read.stdout.includes("> </thinking>".replace("</thinking>", "\n> </thinking>")));
+    assert.ok(!step1Read.stdout.includes('Content="\\"# Report\\\\n'), "truncated compact Content must unwrap without double-escaping");
+    assert.match(step1Read.stdout, /Content="# Report Line 2/, "unwrapped compact Content preview should be readable plain text");
+
+    // 11.2 --field content and --field thinking on step normalize CRLF, headers, pretty JSON, and whitespace
+    const step2Content = runCli(["transcript", "step", "2", convNorm, "--field", "content"]);
+    assert.equal(step2Content.status, 0);
+    assert.equal(step2Content.stdout.includes("\r"), false);
+    assert.equal(step2Content.stdout.includes("Created At: 2026-11-17"), false);
+    assert.match(step2Content.stdout, /"step_index": 18/, "step --field content must pretty-print bounded single-line JSON");
+    const step2ContentSliced = runCli(["transcript", "step", "2", convNorm, "--field", "content", "--line-start", "6", "--line-end", "14"]);
+    assert.equal(step2ContentSliced.status, 0);
+    assert.match(step2ContentSliced.stdout, /"status": "ok"/);
+
+    const step3EmptyHeaders = runCli(["transcript", "step", "3", convNorm, "--field", "content"]);
+    assert.equal(step3EmptyHeaders.status, 0);
+    assert.match(step3EmptyHeaders.stdout, /\(No content in step\)/);
+
+    const step1Thinking = runCli(["transcript", "step", "1", convNorm, "--field", "thinking"]);
+    assert.equal(step1Thinking.status, 0);
+    assert.equal(step1Thinking.stdout.includes("\r"), false);
+    assert.match(step1Thinking.stdout, /Paragraph one\.\n\nParagraph two\.$/m);
+
+    // 11.3 Compact --json normalization decodes 1-layer compact args & containers + keeps _fileOrd, while full-source native literals stay intact
+    const compactStep1Json = runCli(["transcript", "read", convNorm, "--mode", "compact", "--offset", "1", "--limit", "1", "--json"]);
+    assert.equal(compactStep1Json.status, 0, compactStep1Json.stderr);
+    const cs1 = JSON.parse(compactStep1Json.stdout);
+    assert.equal(cs1.steps[0]._fileOrd, 1);
+    assert.equal(cs1.steps[0].tool_calls[0].args.WaitMsBeforeAsync, 5000);
+    assert.equal(cs1.steps[0].tool_calls[0].args.IsDaemon, false);
+    assert.equal(cs1.steps[0].tool_calls[0].args.CommandLine, "echo hi\n");
+    assert.equal(cs1.steps[0].tool_calls[1].args.Overwrite, true);
+    assert.equal(cs1.steps[0].tool_calls[1].args.Path, "scratch/out.md");
+    assert.match(cs1.steps[0].tool_calls[1].args.Content, /^# Report\nLine 2 "quoted" A\\tail\n<truncated 500 bytes>$/);
+    assert.equal(
+      cs1.steps[0].tool_calls[2].args.CommandQuoted,
+      "\"C:/Program Files/app.exe\" --flag1 --flag2\n<truncated 500 bytes>",
+      "truncated compact arg starting with quote must retain trailing --flag1 --flag2"
+    );
+    assert.equal(
+      cs1.steps[0].tool_calls[2].args.WinQuoted,
+      "\"C:\\temp\\run.exe\"",
+      "compact quoted Windows path must decode 1 layer and preserve outer quotes + literal \\t/\\r backslashes"
+    );
+    assert.deepEqual(
+      cs1.steps[0].tool_calls[2].args.ReplacementChunks,
+      [{ AllowMultiple: false, StartLine: 10, TargetContent: "foo\nbar" }],
+      "nested compact JSON containers must decode recursively"
+    );
+
+    const fullStep1Json = runCli(["transcript", "step", "1", convNorm, "--full", "--json"]);
+    assert.equal(fullStep1Json.status, 0, fullStep1Json.stderr);
+    const fs1 = JSON.parse(fullStep1Json.stdout);
+    assert.equal(fs1.step.tool_calls[0].args.Content, "[1, 2, 3]\nLine 2\n\n\nLine 3");
+    assert.equal(fs1.step.tool_calls[0].args.FlagText, "true", "native string 'true' in transcript_full.jsonl must remain string");
+    assert.equal(fs1.step.tool_calls[0].args.NullText, "null", "native string 'null' in transcript_full.jsonl must remain string");
+    assert.equal(fs1.step.tool_calls[0].args.JsonText, "[1,2]", "native string '[1,2]' in transcript_full.jsonl must remain string");
+    assert.equal(fs1.step.tool_calls[0].args.WinNative, "\"C:\\temp\\run.exe\"", "native quoted Windows path in transcript_full.jsonl must keep outer quotes and backslashes");
+    assert.equal(fs1.step.tool_calls[0].args.Overwrite, true);
+
+    // Batch step (indices >= 3) on transcript_full.jsonl must also preserve native quoted Windows paths
+    const fullBatchStep = runCli(["transcript", "step", "0,1,2", convNorm, "--field", "tool_args"]);
+    assert.equal(fullBatchStep.status, 0, fullBatchStep.stderr);
+    assert.ok(fullBatchStep.stdout.includes('\\"C:\\\\temp\\\\run.exe\\"'), "batch step on transcript_full.jsonl must preserve native outer quotes and backslashes");
+
+    // 11.4 read file-fallback & query/tools Markdown parity across compact/auto/full
+    const convOnlyFull = "conv-pr8-only-full";
+    const onlyFullLogs = path.join(brainDir, convOnlyFull, ".system_generated", "logs");
+    fs.mkdirSync(onlyFullLogs, { recursive: true });
+    fs.writeFileSync(path.join(onlyFullLogs, "transcript_full.jsonl"), normFullSteps.slice(0, 2).map((s) => JSON.stringify(s)).join("\n") + "\n", "utf8");
+    const fallbackFullRead = runCli(["transcript", "read", convOnlyFull, "--offset", "1", "--limit", "1", "--json"]);
+    assert.equal(fallbackFullRead.status, 0, fallbackFullRead.stderr);
+    const ffr = JSON.parse(fallbackFullRead.stdout);
+    assert.equal(ffr.steps[0].tool_calls[0].args.FlagText, "true", "read falling back to transcript_full.jsonl in compact mode must not coerce native strings");
+    assert.equal(ffr.steps[0].tool_calls[0].args.WinNative, "\"C:\\temp\\run.exe\"");
+
+    const convOnlyCompact = "conv-pr8-only-compact";
+    const onlyCompactLogs = path.join(brainDir, convOnlyCompact, ".system_generated", "logs");
+    fs.mkdirSync(onlyCompactLogs, { recursive: true });
+    fs.writeFileSync(path.join(onlyCompactLogs, "transcript.jsonl"), normCompactSteps.slice(0, 2).map((s) => JSON.stringify(s)).join("\n") + "\n", "utf8");
+    const fallbackCompactRead = runCli(["transcript", "read", convOnlyCompact, "--mode", "full", "--offset", "1", "--limit", "1", "--json"]);
+    assert.equal(fallbackCompactRead.status, 0, fallbackCompactRead.stderr);
+    const fcr = JSON.parse(fallbackCompactRead.stdout);
+    assert.equal(fcr.steps[0].tool_calls[0].args.WaitMsBeforeAsync, 5000, "read --mode full falling back to transcript.jsonl must decode compact args");
+    assert.equal(fcr.steps[0].tool_calls[0].args.CommandLine, "echo hi\n");
+
+    for (const qArgs of [
+      ["transcript", "query", "echo hi", convNorm, "--mode", "compact", "--include-tools", "--field", "tool_calls"],
+      ["transcript", "query", "echo hi", convNorm, "--mode", "compact", "--include-tools", "--field", "tool_args", "--full-args"],
+      ["transcript", "query", "echo hi", convNorm, "--mode", "compact", "--include-tools", "--field", "tool_args:CommandLine"]
+    ]) {
+      const qFieldMd = runCli(qArgs);
+      assert.equal(qFieldMd.status, 0, qFieldMd.stderr);
+      assert.equal(qFieldMd.stdout.includes("\r"), false);
+      assert.ok(!qFieldMd.stdout.includes('\\"echo hi\\\\r\\\\n\\"'), `compact query Markdown (${qArgs.join(" ")}) must unwrap compact args`);
+      assert.match(qFieldMd.stdout, /echo hi/, "compact query Markdown must contain unwrapped CommandLine");
+    }
+
+    const toolsFullAutoMd = runCli(["transcript", "tools", "--id", convNorm, "--field", "tool_args:Content", "--full-args"]);
+    assert.equal(toolsFullAutoMd.status, 0, toolsFullAutoMd.stderr);
+    assert.equal(toolsFullAutoMd.stdout.includes("\r"), false, "auto query/tools on transcript_full.jsonl must normalize CRLF in Markdown --field output");
+
+    const queryNormJson = runCli(["transcript", "query", "Command exited with code 7", convNorm, "--json"]);
+    assert.equal(queryNormJson.status, 0);
+    const qnj = JSON.parse(queryNormJson.stdout);
+    assert.equal(qnj.items[0].content.includes("\r"), false);
+    assert.equal(qnj.items[0].content.includes("Created At: 2026-11-17"), false);
+
+    // 11.5 serializeBoundedJsonPayload emits 2-space pretty JSON when clamped page / single-step / batch / query / 0-item fits budget
+    const clampedPrettyJson = runCli(["transcript", "read", convNorm, "--offset", "4", "--limit", "9", "--max-chars", "2200", "--json"]);
+    assertBounded(clampedPrettyJson, 2200);
+    assert.ok(clampedPrettyJson.stdout.includes("\n  \"steps\": [\n"), "clamped JSON page fitting within budget must remain 2-space indented");
+    const cpParsed = JSON.parse(clampedPrettyJson.stdout);
+    assert.equal(cpParsed.jsonTruncated, true);
+    assert.ok(cpParsed.steps.length >= 2 && cpParsed.steps.length < 9);
+    assert.equal(cpParsed.steps[0].content.includes("Created At: 2026-11-17"), false);
+
+    const zeroItemPrettyJson = runCli(["transcript", "read", convNorm, "--offset", "2", "--limit", "5", "--max-chars", "780", "--json"]);
+    assertBounded(zeroItemPrettyJson, 780);
+    const zip = JSON.parse(zeroItemPrettyJson.stdout);
+    assert.equal(zip.steps.length, 0, "oversized step 2 must force 0-item fallback under 780 bytes");
+    assert.ok(zeroItemPrettyJson.stdout.includes("\n  \"steps\": []"), "0-item JSON fallback fitting budget should use 2-space indentation");
+
+    const singleStepPrettySelected = runCli(["transcript", "step", String(richAsstStep), convErg, "--field", "content", "--json", "--max-chars", "850"]);
+    assertBounded(singleStepPrettySelected, 850);
+    const ssps = JSON.parse(singleStepPrettySelected.stdout);
+    assert.equal(ssps.jsonTruncated, true);
+    assert.equal(ssps.jsonItemsIncluded, 1);
+    assert.equal(typeof ssps.data, "string");
+    assert.ok(singleStepPrettySelected.stdout.includes("\n  \"stepIndex\":"), "single-step prettySelected must use 2-space indentation when it fits");
+
+    const singleStepPrettySummary = runCli(["transcript", "step", String(richAsstStep), convErg, "--field", "thinking", "--json", "--max-chars", "750"]);
+    assertBounded(singleStepPrettySummary, 750);
+    const sspsum = JSON.parse(singleStepPrettySummary.stdout);
+    assert.equal(sspsum.jsonTruncated, true);
+    assert.equal(sspsum.jsonItemsIncluded, 0);
+    assert.equal(sspsum.data, undefined);
+    assert.ok(singleStepPrettySummary.stdout.includes("\n  \"stepIndex\":"), "single-step prettySummary must use 2-space indentation when it fits");
+
+    const batchStepPrettyClamp = runCli(["transcript", "step", "4,5,6,7,8", convNorm, "--field", "content", "--json", "--max-chars", "2200"]);
+    assertBounded(batchStepPrettyClamp, 2200);
+    const bspc = JSON.parse(batchStepPrettyClamp.stdout);
+    assert.equal(bspc.jsonTruncated, true);
+    assert.ok(bspc.steps.length >= 1 && bspc.steps.length < 5);
+    assert.ok(batchStepPrettyClamp.stdout.includes("\n  \"steps\": ["), "batch step clamped JSON must prefer 2-space pretty indentation when it fits");
+
+    const queryPrettyClamp = runCli(["transcript", "query", "Trailing step", convNorm, "--json", "--max-chars", "1800"]);
+    assertBounded(queryPrettyClamp, 1800);
+    assert.ok(queryPrettyClamp.stdout.includes("\n  \"items\": ["), "query clamped JSON must prefer 2-space pretty indentation when it fits");
+
+    // 11.6 outline/export compact decoding, mixed compactMatchIndices fallback, tc.arguments, truncated native quoted strings, and direct ESM fromCompact
+    const outlineNormJson = runCli(["transcript", "outline", convNorm, "--json"]);
+    assert.equal(outlineNormJson.status, 0, outlineNormJson.stderr);
+    const onj = JSON.parse(outlineNormJson.stdout);
+    const onjStep1 = onj.items.find((it) => it.step_index === 1);
+    assert.ok(onjStep1);
+    assert.ok(!onjStep1.summary.includes('\\"scratch/out.md\\"'), "outline default must decode compact tool args without hydrating transcript_full.jsonl");
+    assert.match(onjStep1.summary, /Path="scratch\/out\.md"/);
+    assert.match(onjStep1.summary, /CommandLine="echo hi"/);
+
+    const outlineNormMd = runCli(["transcript", "outline", convNorm]);
+    assert.equal(outlineNormMd.status, 0, outlineNormMd.stderr);
+    assert.equal(outlineNormMd.stdout.includes("\r"), false);
+    assert.match(outlineNormMd.stdout, /Path="scratch\/out\.md"/);
+
+    const outlineNormFullArgs = runCli(["transcript", "outline", convNorm, "--full-args", "--json"]);
+    assert.equal(outlineNormFullArgs.status, 0, outlineNormFullArgs.stderr);
+    const onfaStep1 = JSON.parse(outlineNormFullArgs.stdout).items.find((it) => it.step_index === 1);
+    assert.match(onfaStep1.summary, /FlagText="true"/, "outline --full-args must hydrate transcript_full.jsonl and preserve native strings");
+    assert.match(onfaStep1.summary, /WinNative=/);
+
+    const exportCompactOnly = runCli(["transcript", "export", "--id", convOnlyCompact, "--sanitized", "--json"]);
+    assert.equal(exportCompactOnly.status, 0, exportCompactOnly.stderr);
+    const eco = JSON.parse(exportCompactOnly.stdout);
+    assert.ok(!eco.sessions[0].rows[1].tools.includes('\\"echo hi\\\\r\\\\n\\"'), "export on compact-only session must decode compact args");
+    assert.match(eco.sessions[0].rows[1].tools, /run_command\(CommandLine="echo hi"\)/);
+
+    const exportNormHydrated = runCli(["transcript", "export", "--id", convNorm, "--sanitized", "--json"]);
+    assert.equal(exportNormHydrated.status, 0, exportNormHydrated.stderr);
+    const enh = JSON.parse(exportNormHydrated.stdout);
+    assert.match(enh.sessions[0].rows[1].tools, /^write_file\(/, "export must hydrate truncated_fields tool_calls from transcript_full.jsonl");
+
+    // Mixed compactMatchIndices fallback + tc.arguments + truncated native "-prefixed string
+    const convMixed = "conv-pr8-mixed-fallback";
+    const mixedLogs = path.join(brainDir, convMixed, ".system_generated", "logs");
+    fs.mkdirSync(mixedLogs, { recursive: true });
+    const mixedCompactSteps = [
+      {
+        step_index: 0,
+        type: "USER_INPUT",
+        source: "USER",
+        created_at: "2026-11-18T03:05:00Z",
+        content: "Mixed fallback check"
+      },
+      {
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        source: "MODEL",
+        status: "DONE",
+        created_at: "2026-11-18T03:05:01Z",
+        content: "Compact fallback step\r\n",
+        tool_calls: [
+          {
+            name: "custom_arg_tool",
+            arguments: {
+              CommandLine: "\"mixed cmd\\r\\n\"",
+              WaitMsBeforeAsync: "1234",
+              NativeQuotedTail: "\"foo\" bar\n<truncated 10 bytes>"
+            }
+          }
+        ]
+      },
+      {
+        step_index: 2,
+        type: "PLANNER_RESPONSE",
+        source: "MODEL",
+        status: "DONE",
+        created_at: "2026-11-18T03:05:02Z",
+        content: "Compact stub",
+        tool_calls: [
+          {
+            name: "write_file",
+            arguments: { FlagText: "\"true\"", WinNative: "\"\\\"C:\\\\temp\\\\run.exe\\\"\"" }
+          }
+        ],
+        truncated_fields: ["tool_calls"]
+      }
+    ];
+    const mixedFullSteps = [
+      mixedCompactSteps[0],
+      {
+        step_index: 2,
+        type: "PLANNER_RESPONSE",
+        source: "MODEL",
+        status: "DONE",
+        created_at: "2026-11-18T03:05:02Z",
+        content: "Full step 2\r\n\r\n\r\nEnd.",
+        tool_calls: [
+          {
+            name: "write_file",
+            arguments: {
+              FlagText: "true",
+              WinNative: "\"C:\\temp\\run.exe\""
+            }
+          }
+        ]
+      }
+    ];
+    fs.writeFileSync(path.join(mixedLogs, "transcript.jsonl"), mixedCompactSteps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf8");
+    fs.writeFileSync(path.join(mixedLogs, "transcript_full.jsonl"), mixedFullSteps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf8");
+
+    const mixedBatchStep = runCli(["transcript", "step", "1,2", convMixed, "--json"]);
+    assert.equal(mixedBatchStep.status, 0, mixedBatchStep.stderr);
+    const mbs = JSON.parse(mixedBatchStep.stdout);
+    assert.equal(mbs.steps[0].step.tool_calls[0].arguments.CommandLine, "mixed cmd\n", "mixed batch step 1 must fall back to compact decoding");
+    assert.equal(mbs.steps[0].step.tool_calls[0].arguments.WaitMsBeforeAsync, 1234);
+    assert.equal(
+      mbs.steps[0].step.tool_calls[0].arguments.NativeQuotedTail,
+      "\"foo\" bar\n<truncated 10 bytes>",
+      "truncated native string starting with quote must remain untouched when tail is not a valid escape fragment"
+    );
+    assert.equal(mbs.steps[1].step.tool_calls[0].arguments.FlagText, "true", "mixed batch step 2 from transcript_full.jsonl must keep native string");
+    assert.equal(mbs.steps[1].step.tool_calls[0].arguments.WinNative, "\"C:\\temp\\run.exe\"");
+    assert.equal(mbs.steps[1].step.content, "Full step 2\n\nEnd.");
+
+    const mixedSingleStep1 = runCli(["transcript", "step", "1", convMixed, "--json"]);
+    assert.equal(mixedSingleStep1.status, 0, mixedSingleStep1.stderr);
+    const ms1 = JSON.parse(mixedSingleStep1.stdout);
+    assert.equal(ms1.step.tool_calls[0].arguments.WaitMsBeforeAsync, 1234);
+    assert.equal(ms1.step.tool_calls[0].arguments.NativeQuotedTail, "\"foo\" bar\n<truncated 10 bytes>");
+
+    // Direct ESM fromCompact consistency across formatSingleStepDetail and formatTranscriptItem
+    const directToolCalls = formatSingleStepDetail(normCompactSteps[1], 1, "tool_calls", { fromCompact: true });
+    assert.equal(directToolCalls.data[0].args.WaitMsBeforeAsync, 5000);
+    assert.equal(directToolCalls.data[0].args.CommandLine, "echo hi\n");
+    assert.equal(directToolCalls.data[2].args.WinQuoted, "\"C:\\temp\\run.exe\"");
+    assert.match(directToolCalls.text, /"WaitMsBeforeAsync": 5000/);
+
+    for (const capBodies of [true, false]) {
+      const directToolArgs = formatSingleStepDetail(normCompactSteps[1], 1, "tool_args", {
+        fromCompact: true,
+        capLargeFileBodies: capBodies
+      });
+      assert.equal(directToolArgs.data[0].args.WaitMsBeforeAsync, 5000);
+      assert.equal(directToolArgs.data[2].args.WinQuoted, "\"C:\\temp\\run.exe\"", `capLargeFileBodies=${capBodies} must decode WinQuoted once without double-decoding`);
+      assert.deepEqual(directToolArgs.data[2].args.ReplacementChunks, [{ AllowMultiple: false, StartLine: 10, TargetContent: "foo\nbar" }]);
+      assert.match(directToolArgs.text, /"WaitMsBeforeAsync": 5000/);
+    }
+
+    const directArgKey = formatSingleStepDetail(normCompactSteps[1], 1, "tool_args:CommandLine", { fromCompact: true });
+    assert.equal(directArgKey.data[0].value, "echo hi\n");
+    assert.match(directArgKey.text, /echo hi/);
+
+    const directAll = formatSingleStepDetail(normCompactSteps[1], 1, "all", { fromCompact: true });
+    assert.equal(directAll.data.tool_calls[0].args.WaitMsBeforeAsync, 5000);
+    assert.equal(directAll.step.content, "Checking tool execution.\n\nDone.");
+    assert.match(directAll.text, /WaitMsBeforeAsync=5000/);
+    assert.match(directAll.text, /> Paragraph one\./);
+
+    const directItem = formatTranscriptItem(normCompactSteps[1], {
+      includeThinking: true,
+      includeToolCalls: true,
+      fromCompact: true
+    });
+    assert.equal(directItem.includes("\r"), false);
+    assert.match(directItem, /WaitMsBeforeAsync=5000/);
+    assert.match(directItem, /Path="scratch\/out\.md"/);
+    assert.ok(directItem.includes("> Paragraph one.\n> \n> Paragraph two.\n> </thinking>"));
+
+    const directItemField = formatTranscriptItem(normCompactSteps[1], { field: "tool_args:CommandLine", fromCompact: true });
+    assert.match(directItemField, /echo hi/);
+    assert.equal(directItemField.includes('\\"echo hi\\\\r\\\\n\\"'), false);
+
+    const directFullPreserved = formatSingleStepDetail(normFullSteps[1], 1, "tool_args", { fromCompact: false });
+    assert.equal(directFullPreserved.data[0].args.FlagText, "true");
+    assert.equal(directFullPreserved.data[0].args.WinNative, "\"C:\\temp\\run.exe\"");
+    const directItemFullPreserved = formatTranscriptItem(normFullSteps[1], { includeToolCalls: true, fromCompact: false });
+    assert.match(directItemFullPreserved, /FlagText="true"/);
+
+    console.log("✓ PR #8 L54 normalization, JSON pretty-printing, compact arg decoding & pretty clamped pages verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

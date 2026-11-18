@@ -81,7 +81,7 @@ agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --mode full --f
 
 `read`, `outline`, `query`, `tools`, and `export --sanitized` default to 9,200 UTF-8 bytes. `step` defaults to 24,000 bytes. The deep tier (`--full`, `--out`) allows up to 524,288 bytes. An explicit `--max-chars` budget includes serialization and the trailing newline. With `--out`, stdout reports the write and the limit applies to the file.
 
-Bounded JSON stays parseable. When serialization omits records or raw fields, `jsonTruncated` and the included/total counts describe the reduction (`jsonSessionsIncluded` / `jsonSessionsTotal` and `jsonRowsIncluded` / `jsonRowsTotal` for `export --json`). `nextCursor` describes the serialized page (`export` drops truncated rows/sessions rather than splitting inside individual cells, omitting `nextCursor` when multiple sessions trim rows on the same page). If an individual record is too large for a JSON page, use a larger budget or inspect the step in Markdown with a field or line slice. A budget that cannot fit the required metadata returns a nonzero exit code and a diagnostic. Existing output files are preserved on that error.
+Bounded JSON stays parseable (using 2-space indentation whenever the serialized page or clamped subset fits inside the budget before falling back to compact single-line JSON). When serialization omits records or raw fields, `jsonTruncated` and the included/total counts describe the reduction (`jsonSessionsIncluded` / `jsonSessionsTotal` and `jsonRowsIncluded` / `jsonRowsTotal` for `export --json`). `nextCursor` describes the serialized page (`export` drops truncated rows/sessions rather than splitting inside individual cells, omitting `nextCursor` when multiple sessions trim rows on the same page). If an individual record is too large for a JSON page, use a larger budget or inspect the step in Markdown with a field or line slice. A budget that cannot fit the required metadata returns a nonzero exit code and a diagnostic. Existing output files are preserved on that error.
 
 ## 3. `agy-context transcript query`
 
@@ -127,7 +127,7 @@ agy-context transcript outline 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --full --out
 
 **Usage:** `agy-context transcript step [<N|N,M|N-M|N..M>] [<id>] [options]`
 
-Extracts untruncated fields from `transcript_full.jsonl` for a single step, a comma-separated list of steps, or a step range, with optional line slicing across every `--field` mode.
+Extracts untruncated fields from `transcript_full.jsonl` (falling back to normalized `transcript.jsonl` records when needed) for a single step, a comma-separated list of steps, or a step range, with optional line slicing across every `--field` mode. Rendered Markdown and JSON outputs normalize `\r\n`/`\r` line endings and collapse excess blank lines, trim `<thinking>` trailing newlines before `>` quoting, strip leading duplicate `Created At:`/`Completed At:` headers on non-dialogue steps (including immediately after hook-rewrite or spillover truncation notices while preserving those notices, exit-code lines, and spillover URLs), pretty-print bounded (`<= 64 KB`) single-line JSON outputs in Markdown content renders (including `--field content` and `--full`), and decode compact `transcript.jsonl` `tool_calls[].args` encodings (gated strictly on compact-sourced steps).
 
 | Flag / Argument | Value | Default | Description |
 | :--- | :---: | :---: | :--- |
