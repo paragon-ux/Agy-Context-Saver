@@ -1736,13 +1736,47 @@ try {
     assert.match(tailOutlineMd.stdout, /--end \d+/);
 
     // count === 0 in serializeBoundedJsonPayload must not emit nextCursor pointing back at the un-fittable item
-    const tinyZeroItemJson = runCli(["transcript", "read", "--id", convHuge, "--json", "--max-chars", "280"]);
-    if (tinyZeroItemJson.status === 0) {
-      const parsedZero = JSON.parse(tinyZeroItemJson.stdout);
-      if (parsedZero.steps.length === 0 && parsedZero.nextCursor) {
-        assert.ok(parsedZero.nextCursor.offset < 399, "count === 0 backward read must advance past un-fittable last item");
-      }
-    }
+    const jsonTruncMetaReason = "Output exceeds the byte budget. Use a larger budget or a narrower selection.";
+    const readZeroBudget = Buffer.byteLength(JSON.stringify({
+      ...page,
+      steps: [],
+      displayedSteps: 0,
+      nextCursor: { offset: 0, limit: 399 },
+      jsonTruncated: true,
+      jsonItemsIncluded: 0,
+      jsonItemsTotal: page.steps.length,
+      jsonTruncatedReason: jsonTruncMetaReason
+    }) + "\n", "utf8") + 32;
+    const tinyZeroItemJson = runCli(["transcript", "read", "--id", convHuge, "--json", "--max-chars", String(readZeroBudget)]);
+    assertBounded(tinyZeroItemJson, readZeroBudget);
+    const parsedZero = JSON.parse(tinyZeroItemJson.stdout);
+    assert.equal(parsedZero.jsonTruncated, true);
+    assert.equal(parsedZero.steps.length, 0, "zero-item read budget on 3.8KB steps must force 0-item read fallback");
+    assert.ok(parsedZero.nextCursor && parsedZero.nextCursor.offset === 0 && parsedZero.nextCursor.limit > 0 && parsedZero.nextCursor.limit < 399,
+      `count === 0 backward read must advance past un-fittable last item (got ${JSON.stringify(parsedZero.nextCursor)})`);
+
+    const tinyForwardReadZero = runCli(["transcript", "read", "--id", convHuge, "--offset", "10", "--limit", "5", "--json", "--max-chars", String(readZeroBudget)]);
+    assertBounded(tinyForwardReadZero, readZeroBudget);
+    const parsedFwdZero = JSON.parse(tinyForwardReadZero.stdout);
+    assert.equal(parsedFwdZero.steps.length, 0);
+    assert.deepEqual(parsedFwdZero.nextCursor, { offset: 11, limit: 5 }, "count === 0 forward read must advance past un-fittable first item");
+
+    const outlineZeroBudget = Buffer.byteLength(JSON.stringify({
+      ...outlinePage,
+      items: [],
+      displayedCount: 0,
+      nextCursor: { start: 11, end: 30 },
+      jsonTruncated: true,
+      jsonItemsIncluded: 0,
+      jsonItemsTotal: 21,
+      jsonTruncatedReason: jsonTruncMetaReason
+    }) + "\n", "utf8") + 16;
+    const tinyForwardOutlineZero = runCli(["transcript", "outline", "--id", convHuge, "--start", "10", "--end", "30", "--json", "--max-chars", String(outlineZeroBudget)]);
+    assertBounded(tinyForwardOutlineZero, outlineZeroBudget);
+    const parsedFwdOutlineZero = JSON.parse(tinyForwardOutlineZero.stdout);
+    assert.equal(parsedFwdOutlineZero.jsonTruncated, true);
+    assert.equal(parsedFwdOutlineZero.items.length, 0, "zero-item outline budget must force 0-item forward outline fallback");
+    assert.deepEqual(parsedFwdOutlineZero.nextCursor, { start: 11, end: 30 }, "count === 0 forward outline must advance to next step");
 
     const batchSteps = ["0", "2", "4", "8"];
     const batch = runCli(["transcript", "step", "--id", convHuge, "--step", batchSteps.join(","), "--field", "content", "--json", "--max-chars", "15000"]);
@@ -1992,6 +2026,70 @@ try {
     assert.equal(tightParsed.displayedCount, tightParsed.items.length);
     assert.equal(tightParsed.jsonItemsIncluded, tightParsed.items.length);
 
+    // P3 regression: query --summary --start <N> (without --end) must preserve --start <N> in nextCursor & Markdown footer
+    const startOnlySumMd = runCli(["transcript", "query", "STAGE_", convSum, "--summary", "--start", "76", "--limit", "4"]);
+    assert.equal(startOnlySumMd.status, 0, startOnlySumMd.stderr);
+    assert.match(startOnlySumMd.stdout, /Step 81 \|/);
+    assert.match(startOnlySumMd.stdout, /Step 84 \|/);
+    assert.equal(startOnlySumMd.stdout.includes("Step 80 |"), false);
+    assert.match(startOnlySumMd.stdout, /--start 76 --end 80/, "non-clamped --start-only summary footer must preserve --start bound");
+
+    const startOnlySumJson = runCli(["transcript", "query", "STAGE_", convSum, "--summary", "--start", "76", "--limit", "4", "--json"]);
+    assert.equal(startOnlySumJson.status, 0, startOnlySumJson.stderr);
+    const sosParsed = JSON.parse(startOnlySumJson.stdout);
+    assert.deepEqual(sosParsed.items.map((it) => it.step_index), [81, 82, 83, 84]);
+    assert.deepEqual(sosParsed.nextCursor, { start: 76, end: 80 });
+
+    const startOnlyHop2 = runCli([
+      "transcript", "query", "STAGE_", convSum, "--summary",
+      "--start", String(sosParsed.nextCursor.start), "--end", String(sosParsed.nextCursor.end), "--limit", "4", "--json"
+    ]);
+    assert.equal(startOnlyHop2.status, 0, startOnlyHop2.stderr);
+    const sosHop2 = JSON.parse(startOnlyHop2.stdout);
+    assert.deepEqual(sosHop2.items.map((it) => it.step_index), [77, 78, 79, 80]);
+    assert.deepEqual(sosHop2.nextCursor, { start: 76, end: 76 });
+
+    const startOnlyHop3 = runCli([
+      "transcript", "query", "STAGE_", convSum, "--summary",
+      "--start", String(sosHop2.nextCursor.start), "--end", String(sosHop2.nextCursor.end), "--limit", "4", "--json"
+    ]);
+    assert.equal(startOnlyHop3.status, 0, startOnlyHop3.stderr);
+    const sosHop3 = JSON.parse(startOnlyHop3.stdout);
+    assert.deepEqual(sosHop3.items.map((it) => it.step_index), [76]);
+    assert.equal(sosHop3.nextCursor, null);
+
+    // P3 + summaryStart: when Markdown fits (maxResultsTruncated === false) and JSON overflows, serializeBoundedJsonPayload preserves --start
+    const startOnlyJsonOverflow = runCli(["transcript", "query", "STAGE_", convSum, "--summary", "--start", "76", "--limit", "500", "--json", "--max-chars", "1200"]);
+    assertBounded(startOnlyJsonOverflow, 1200);
+    const sojoParsed = JSON.parse(startOnlyJsonOverflow.stdout);
+    assert.equal(sojoParsed.jsonTruncated, true);
+    assert.equal(sojoParsed.items.at(-1).step_index, 84);
+    assert.deepEqual(sojoParsed.nextCursor, { start: 76, end: sojoParsed.items[0].step_index - 1 });
+
+    // count === 0 backward !forward summary cursor preserves --start bound and drops cursor when exhausted (nextEnd < minStart)
+    const sumZeroBudget = Buffer.byteLength(JSON.stringify({
+      ...sosParsed,
+      items: [],
+      displayedCount: 0,
+      nextCursor: { start: 76, end: 83 },
+      jsonTruncated: true,
+      jsonItemsIncluded: 0,
+      jsonItemsTotal: 4,
+      jsonTruncatedReason: jsonTruncMetaReason
+    }) + "\n", "utf8") + 16;
+    const startOnlyZeroBackward = runCli(["transcript", "query", "STAGE_", convSum, "--summary", "--start", "76", "--limit", "4", "--json", "--max-chars", String(sumZeroBudget)]);
+    assertBounded(startOnlyZeroBackward, sumZeroBudget);
+    const sozbParsed = JSON.parse(startOnlyZeroBackward.stdout);
+    assert.equal(sozbParsed.jsonTruncated, true);
+    assert.equal(sozbParsed.items.length, 0);
+    assert.deepEqual(sozbParsed.nextCursor, { start: 76, end: 83 });
+
+    const startOnlyZeroExhausted = runCli(["transcript", "query", "--id", convHuge, "--summary", "--start", "399", "--include-tools", "--full-args", "--json", "--max-chars", String(outlineZeroBudget)]);
+    assertBounded(startOnlyZeroExhausted, outlineZeroBudget);
+    const sozeParsed = JSON.parse(startOnlyZeroExhausted.stdout);
+    assert.equal(sozeParsed.items.length, 0);
+    assert.equal(sozeParsed.nextCursor, undefined, "exhausted single-step backward range must omit nextCursor");
+
     // 10.3 PR7-RUN-003 & PR7-DOC-001: unified sanitized export limits across stdout, --full, --max-chars, and --out
     const writeConvLines = (rootBrain, cid, steps) => {
       const dir = path.join(rootBrain, cid, ".system_generated", "logs");
@@ -2131,6 +2229,59 @@ try {
       // Multi-session export that trims rows across multiple sessions omits misleading single-session nextCursor
       assert.equal(cappedExpParsed.nextCursor, undefined, "multi-session export with trimmed retained rows must not skip trimmed rows via nextCursor");
       assert.match(cappedExpParsed.jsonTruncatedReason, /trimmed rows across multiple sessions/);
+
+      // P2 regression: 2-session export (no --start) where A fits completely and B trims retains B's tail rows with exact cursor
+      const convP2Small = "conv-p2-small-5";
+      const convP2Large = "conv-p2-large-200";
+      writeConvLines(brainDir, convP2Small, Array.from({ length: 5 }, (_, s) => ({
+        step_index: s,
+        type: s === 0 ? "USER_INPUT" : "PLANNER_RESPONSE",
+        created_at: `2026-11-18T02:30:0${s}Z`,
+        content: `Small session step ${s}`
+      })));
+      writeConvLines(brainDir, convP2Large, Array.from({ length: 200 }, (_, s) => ({
+        step_index: s,
+        type: s % 2 === 0 ? "USER_INPUT" : "PLANNER_RESPONSE",
+        created_at: "2026-11-18T02:31:00Z",
+        content: `Large session step ${s} ` + "M".repeat(90)
+      })));
+
+      const p2MultiTailClamp = runCli([
+        "transcript", "export", "--id", `${convP2Small},${convP2Large}`, "--sanitized", "--limit", "160", "--max-chars", "6000", "--json"
+      ]);
+      assertBounded(p2MultiTailClamp, 6000);
+      const p2Parsed = JSON.parse(p2MultiTailClamp.stdout);
+      assert.equal(p2Parsed.jsonTruncated, true);
+      assert.equal(p2Parsed.exportedCount, 2);
+      assert.deepEqual(p2Parsed.sessions[0].rows.map((r) => r.step), [0, 1, 2, 3, 4]);
+      assert.equal(p2Parsed.sessions[0].truncatedSteps, false);
+      assert.equal(p2Parsed.sessions[1].convId, convP2Large);
+      assert.equal(p2Parsed.sessions[1].truncatedSteps, true);
+      assert.equal(p2Parsed.sessions[1].rows.at(-1).step, 199, "multi-session omitted-start export must tail-slice retained rows");
+      const p2FirstKept = p2Parsed.sessions[1].rows[0].step;
+      assert.ok(p2FirstKept > 40 && p2FirstKept < 199);
+      assert.deepEqual(p2Parsed.nextCursor, { id: convP2Large, end: p2FirstKept - 1 });
+
+      const p2FollowUp = runCli([
+        "transcript", "export", "--id", p2Parsed.nextCursor.id, "--end", String(p2Parsed.nextCursor.end), "--sanitized", "--limit", "200", "--max-chars", "50000", "--json"
+      ]);
+      assert.equal(p2FollowUp.status, 0, p2FollowUp.stderr);
+      const p2FollowParsed = JSON.parse(p2FollowUp.stdout);
+      assert.equal(p2FollowParsed.sessions[0].rows[0].step, 0);
+      assert.equal(p2FollowParsed.sessions[0].rows.at(-1).step, p2FirstKept - 1);
+      assert.equal(p2FollowParsed.sessions[0].truncatedSteps, false);
+
+      // Multi-session --limit truncation on 1 session without JSON byte overflow also emits exact single-incomplete nextCursor
+      const p2MultiLimitOnly = runCli([
+        "transcript", "export", "--id", `${convP2Small},${convP2Large}`, "--sanitized", "--limit", "50", "--max-chars", "50000", "--json"
+      ]);
+      assert.equal(p2MultiLimitOnly.status, 0, p2MultiLimitOnly.stderr);
+      const p2LimParsed = JSON.parse(p2MultiLimitOnly.stdout);
+      assert.equal(p2LimParsed.clamped, true);
+      assert.equal(p2LimParsed.jsonTruncated, undefined);
+      assert.equal(p2LimParsed.sessions[1].rows[0].step, 150);
+      assert.equal(p2LimParsed.sessions[1].rows.at(-1).step, 199);
+      assert.deepEqual(p2LimParsed.nextCursor, { id: convP2Large, end: 149 });
     } finally {
       if (prevExpBrain !== undefined) process.env.AGY_BRAIN_DIR = prevExpBrain;
       else delete process.env.AGY_BRAIN_DIR;

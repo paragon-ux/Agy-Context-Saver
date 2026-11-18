@@ -389,7 +389,7 @@ function parseMaxCharsFlag(opts) {
   return parsed;
 }
 
-function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryEnd, summaryDirection } = {}) {
+function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryStart, summaryEnd, summaryDirection } = {}) {
   const encode = (obj, indent) => JSON.stringify(obj, null, indent) + "\n";
   const fits = (text) => Buffer.byteLength(text, "utf8") <= maxBytes;
   const pretty = encode(payload, 2);
@@ -436,7 +436,7 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryE
               offset: retained.at(-1)._fileOrd + 1,
               limit: readPageSize
             };
-          } else if (entries.length > 1) {
+          } else if (entries.length > 1 || payload.nextCursor) {
             page.nextCursor = {
               offset: entries[0]._fileOrd + 1,
               limit: readPageSize
@@ -466,14 +466,14 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryE
               start: stepNumber(entries[nextIdx]),
               end: payload.nextCursor?.start !== undefined ? payload.nextCursor.end : summaryEnd
             };
+          } else if (payload.nextCursor?.start !== undefined) {
+            page.nextCursor = { ...payload.nextCursor };
           } else {
             delete page.nextCursor;
           }
         } else {
           const nextEnd = count ? stepNumber(retained[0]) - 1 : stepNumber(entries.at(-1)) - 1;
-          const minStart = summaryDirection === "backward" && payload.nextCursor?.start !== undefined
-            ? Number(payload.nextCursor.start)
-            : 0;
+          const minStart = payload.nextCursor?.start ?? summaryStart ?? 0;
           if (nextEnd >= minStart) {
             page.nextCursor = minStart > 0 ? { start: minStart, end: nextEnd } : { end: nextEnd };
           } else {
@@ -661,6 +661,7 @@ async function handleTranscriptCommand(argv) {
       emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
         label: `transcript ${sub}`,
         maxBytes: effectiveMaxChars,
+        summaryStart: startStep ?? 0,
         summaryEnd: endStep ?? 999999
       });
       return;
@@ -775,6 +776,7 @@ async function handleTranscriptCommand(argv) {
     emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
       label: `transcript ${sub}`,
       maxBytes: effectiveMaxChars,
+      summaryStart: (opts.summary || opts.outline) ? startStep : undefined,
       summaryEnd: (opts.summary || opts.outline) && startStep !== undefined ? endStep : undefined
     });
     return;
