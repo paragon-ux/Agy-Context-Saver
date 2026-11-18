@@ -254,11 +254,13 @@ console.log("\n--- Group C: read_file & view_file Safe Harbor + Hybrid Slice ---
   });
   assert.equal(unboundedRead.decision, "deny", "Unbounded workspace read_file must be denied");
   assert.equal(unboundedRead.reason.includes("waymark_ask"), false, "Must NOT reference ghost waymark_ask tool");
+  assert.equal(unboundedRead.reason.includes("rtk read"), false, "Workspace unbounded read_file denial must NOT suggest rtk read");
 
   const byteOffsetOnly = runHook({
     toolCall: { name: "read_file", args: { Path: "/home/user/repo/src/app.js", ByteOffset: 46080 } }
   });
   assert.equal(byteOffsetOnly.decision, "deny", "ByteOffset-only unbounded read_file must be denied");
+  assert.equal(byteOffsetOnly.reason.includes("rtk read"), false, "Workspace ByteOffset-only read_file denial must NOT suggest rtk read");
 
   // Guarded full-file audit (<= 800 lines, <= 45 KiB) using explicit StartLine=1..TotalLines
   const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-audit-file-"));
@@ -274,6 +276,15 @@ console.log("\n--- Group C: read_file & view_file Safe Harbor + Hybrid Slice ---
       toolCall: { name: "read_file", args: { Path: smallFile, StartLine: 1, EndLine: 180 } }
     });
     assert.equal(partialOver.decision, "deny", "Partial slice 1..180 of 220-line file must be denied");
+    assert.equal(partialOver.reason.includes("rtk read"), false, "Workspace partial read_file denial must NOT suggest rtk read");
+
+    const bigWorkspaceFile = path.join(auditDir, "big.js");
+    fs.writeFileSync(bigWorkspaceFile, Array.from({ length: 850 }, (_, i) => `const y${i} = ${i};`).join("\n"), "utf-8");
+    const fullTooBigAudit = runHook({
+      toolCall: { name: "read_file", args: { Path: bigWorkspaceFile, StartLine: 1, EndLine: 850 } }
+    });
+    assert.equal(fullTooBigAudit.decision, "deny", "Oversized >800-line full-file read_file must be denied");
+    assert.equal(fullTooBigAudit.reason.includes("rtk read"), false, "Workspace oversized read_file denial must NOT suggest rtk read");
 
     // Step spillover bounded read_file <= 150 lines allowed, > 150 or unbounded denied
     const boundedSpillover = runHook({
@@ -303,11 +314,9 @@ console.log("\n--- Group C: read_file & view_file Safe Harbor + Hybrid Slice ---
       "allow",
       "view_file 150-line slice must be allowed"
     );
-    assert.equal(
-      runHook({ toolCall: { name: "view_file", args: { AbsolutePath: "/home/user/repo/src/app.js" } } }).decision,
-      "deny",
-      "view_file unbounded read must be denied"
-    );
+    const viewUnbounded = runHook({ toolCall: { name: "view_file", args: { AbsolutePath: "/home/user/repo/src/app.js" } } });
+    assert.equal(viewUnbounded.decision, "deny", "view_file unbounded read must be denied");
+    assert.equal(viewUnbounded.reason.includes("rtk read"), false, "Workspace unbounded view_file denial must NOT suggest rtk read");
     assert.equal(
       runHook({
         toolCall: {
@@ -321,6 +330,12 @@ console.log("\n--- Group C: read_file & view_file Safe Harbor + Hybrid Slice ---
   } finally {
     fs.rmSync(auditDir, { recursive: true, force: true });
   }
+
+  const readManyOut = runHook({
+    toolCall: { name: "read_many_files", args: { paths: ["src/a.js", "src/b.js"] } }
+  });
+  assert.equal(readManyOut.decision, "deny", "Native read_many_files must be denied");
+  assert.match(readManyOut.reason, /rtk read/, "read_many_files denial must still suggest rtk read");
   console.log("✓ Symmetrical read_file / view_file Safe Harbor, Hybrid Slice, and spillover bounds verified");
 }
 

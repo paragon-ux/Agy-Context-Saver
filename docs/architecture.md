@@ -10,8 +10,8 @@
 
 ### RTK (`>= 1.1.0`)
 - Rewrites supported shell commands via `rtk hook antigravity` (`git`, `pytest`, `cargo`, `npm`, `tsc`, `docker`, and linters).
-- Searches and lists workspace files (`rtk grep`, `rtk find`, `rtk ls`, `rtk tree`, `rtk read`).
-- Filters command output to errors or summaries (`rtk err`, `rtk summary`).
+- Searches and lists workspace files (`rtk grep`, `rtk find`, `rtk ls`, `rtk tree`).
+- Reads step spillovers and completed task logs (`rtk read`, including `cat`/`head`/`tail` auto-rewrites) and filters command output to errors or summaries (`rtk err`, `rtk summary`).
 
 ### Agy-Context-Saver (`v2.0.x`)
 - Enforces Reactive Wakeup backoff on `manage_task` and `schedule`, backed by a 5-strike `force_ask` circuit breaker.
@@ -36,7 +36,7 @@ The `PreToolUse` hook intercepts `run_command`. After running internal state, tr
 To prevent multi-thousand-line file dumps while keeping exact 1-indexed line numbers for `edit_file` and `write_file`:
 1. **Tier 1 (Search and discovery):** `rtk grep`, `rtk find`, and `rtk ls` locate target files and `[StartLine, EndLine]` ranges.
 2. **Tier 2 (Bounded `read_file` slices):** `read_file` calls pass `StartLine` and `EndLine` (`1-150` lines, or `1..TotalLines` when a file is `<= 800` lines and `<= 45 KiB`). Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass through Safe Harbor without slice bounds.
-3. **Tier 3 (Spillovers and task logs):** Step output spillovers (`.system_generated/steps/<step>/output.txt`) allow bounded `read_file` (`<= 150` lines) or single unchained `rtk read <path>` calls. Completed background task logs (`tasks/<taskId>.log`) allow single unchained `rtk read` calls once the task has finished.
+3. **Tier 3 (Spillovers and completed task logs only):** Step output spillovers (`.system_generated/steps/<step>/output.txt`) allow bounded `read_file` (`<= 150` lines) or single unchained `rtk read <path>` calls. Completed background task logs (`tasks/<taskId>.log`) allow single unchained `rtk read` calls once finished (`cat`, `head`, and `tail` auto-rewrite via `rtk`, with `--head-lines 150` / `--tail-lines 150` required above `45 KiB`; unknown-state logs require explicit `rtk read`). Editable workspace files remain on Tier 2 bounded `read_file` slices so 1-indexed line numbers stay exact.
 
 ### 3. Internal State, State Directory & Script Scanning
 Segment-, quote-, and heredoc-aware shell parsing protects `.system_generated/` and `getStateDir()`:

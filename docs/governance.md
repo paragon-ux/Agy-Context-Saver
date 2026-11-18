@@ -30,7 +30,7 @@ $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5
 - **5-strike circuit breaker:** At 5 cumulative denials across polling, internal state, or transcript access checks, the hook returns `force_ask` to pause execution and prompt the user.
 - **Task log lifecycle gating:**
   - *While running:* reading `tasks/<taskId>.log` via file tools or shell commands is denied under the backoff curve.
-  - *When completed:* reading `tasks/<taskId>.log` is allowed via a single unchained `rtk read tasks/<taskId>.log` call.
+  - *When completed:* reading `tasks/<taskId>.log` is allowed via a single unchained `rtk read tasks/<taskId>.log` call (`cat`, `head`, and `tail` auto-rewrite via `rtk`, with `--head-lines 150` / `--tail-lines 150` required on `> 45 KiB` logs; unknown-state logs still require explicit `rtk read`).
 
 ---
 
@@ -38,7 +38,7 @@ $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5
 
 1. **Shell command rewriting:** `run_command` calls (`git`, `pytest`, `cargo`, `npm`, etc.) are rewritten via `rtk hook antigravity` (`rtk git`, `rtk pytest`).
 2. **Workspace file slices:** Unbounded `read_file` calls on workspace files are redirected to `rtk grep`, `rtk find`, and `rtk ls` paired with bounded `read_file(StartLine, EndLine <= 150)` slices. Full-file reads (`StartLine: 1, EndLine: <TotalLines>`) are allowed when the file on disk is `<= 800` lines and `<= 45 KiB`. Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass Safe Harbor without slice bounds.
-3. **Step output spillovers:** `.system_generated/steps/<step>/output.txt` files are readable via bounded `read_file(StartLine, EndLine <= 150)` or a single unchained `rtk read <path>` command.
+3. **Step output spillovers:** `.system_generated/steps/<step>/output.txt` files are readable via bounded `read_file(StartLine, EndLine <= 150)` or a single unchained `rtk read <path>` command (`cat`, `head`, and `tail` auto-rewrite via `rtk`; `--head-lines 150` / `--tail-lines 150` required above `45 KiB`).
 4. **Transcript and state protection:** Direct file or shell access to `.system_generated/logs/transcript*` and `getStateDir()` (`~/.local/state/agy-context-saver` on POSIX or `%LOCALAPPDATA%\agy-context-saver` on Windows) is blocked. Authorized sessions inspect transcripts via unchained `agy-context transcript` commands.
 
 ---

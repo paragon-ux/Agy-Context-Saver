@@ -11,7 +11,7 @@ description: >-
 
 ## Architectural Boundary
 
-- **RTK (`>= 1.1.0`)**: Rewrites shell commands (`rtk hook antigravity`), compresses command output, and provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`, `rtk read`, `rtk err`, `rtk summary`).
+- **RTK (`>= 1.1.0`)**: Rewrites shell commands (`rtk hook antigravity`), compresses command output, provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`), reads spillovers and completed task logs (`rtk read`), and filters errors or summaries (`rtk err`, `rtk summary`).
 - **Agy-Context-Saver (`v2.0.4`)**: Enforces Reactive Wakeup backoff, bounds `read_file` slices, protects `.system_generated/` and the state directory, and exposes two-tier `agy-context transcript` (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode).
 
 ---
@@ -26,8 +26,8 @@ Unbounded full-file `read_file` calls on workspace files are blocked by the `Pre
 2. **Tier 2 (Workspace file reading: `read_file` slice policy)**:
    - Pass `StartLine` and `EndLine` into `read_file` in bounded slices of `1-150` lines to preserve 1-indexed line numbers for `edit_file` and `write_file`.
    - Partial slices of `151-800` lines and `ByteOffset`-only unbounded reads are denied. An explicit full-file read (`StartLine: 1, EndLine: <TotalLines>`) is allowed when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
-3. **Tier 3 (Spillovers and diagnostics: `rtk read`, `rtk err`, `rtk summary`)**:
-   - **Spillovers and task logs**: Read `.system_generated/steps/<step>/output.txt` spillovers (via bounded `read_file` $\le 150$ lines or `rtk read <path>`) and completed `tasks/<taskId>.log` files via `rtk read <path>` (`--head-lines 150` / `--tail-lines 150` required explicitly on `>45 KiB` files). Never use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for `edit_file` or `write_file`.
+3. **Tier 3 (Spillovers, completed task logs, and diagnostics: `rtk read`, `rtk err`, `rtk summary`)**:
+   - **Spillovers and completed task logs only**: Read `.system_generated/steps/<step>/output.txt` spillovers (via bounded `read_file` $\le 150$ lines or `rtk read <path>`) and completed `tasks/<taskId>.log` files via `rtk read <path>` (`cat`, `head`, and `tail` auto-rewrite via `rtk`; `--head-lines 150` / `--tail-lines 150` required on `>45 KiB` files). Never use `rtk read` for editable workspace code; always use bounded `read_file` slices so 1-indexed line numbers stay exact for `edit_file`.
    - `rtk err <cmd>`: Runs a command and prints only errors and warnings.
    - `rtk summary <cmd>`: Runs a command and prints a 2-line summary.
 

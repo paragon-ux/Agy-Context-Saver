@@ -62,6 +62,8 @@ function rewriteSingleSegment(seg) {
   if (m) return envPrefix + "rtk read " + m[1].trim();
   m = body.match(/^head\\s+-n\\s+(\\d+)\\s+([\\s\\S]+)$/i);
   if (m) return envPrefix + "rtk read " + m[2].trim() + " --head-lines " + m[1];
+  m = body.match(/^tail\\s+-n\\s+(\\d+)\\s+([\\s\\S]+)$/i);
+  if (m) return envPrefix + "rtk read " + m[2].trim() + " --tail-lines " + m[1];
   m = body.match(/^(?:rg|grep|select-string)\\s+([\\s\\S]+)$/i);
   if (m) return envPrefix + (/^rg\\b/i.test(body) ? "rtk rg " : "rtk grep ") + m[1].trim();
   if (/^(?:git|pytest|cargo|vitest|jest|tsc|eslint|ruff|find|ls|wc|diff)\\b/i.test(body) || /^npm\\s+(?:test|run\\s+test)\\b/i.test(body)) {

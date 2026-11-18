@@ -491,7 +491,10 @@ function scanTaskMarkers(text, taskName) {
   return null;
 }
 
-function getTaskState(match, convId) {
+/**
+ * Resolves the task log name, candidate log path, and transcript path for a matched task token.
+ */
+function resolveTaskPaths(match, convId) {
   const taskName = `task-${match.id}`;
   const token = match.token;
   let logPath = null;
@@ -519,6 +522,56 @@ function getTaskState(match, convId) {
       transcript = transcript || path.join(sysDir, "logs", "transcript.jsonl");
     }
   }
+  return { taskName, logPath, transcript };
+}
+
+/**
+ * Builds deduplicated candidate paths to stat for `>45 KiB` spillover and task-log bounds checks,
+ * resolving relative tokens against active brain dirs when absent from `activeHookCwd`.
+ */
+function resolveInternalReadStatPaths(candidateTok, convId, taskMatch, isSpillover) {
+  let cleanTok = String(candidateTok || "").replace(/^file:\/\//i, "");
+  if (/^\/[A-Za-z]:/.test(cleanTok)) cleanTok = cleanTok.slice(1);
+  const normalizedTok = cleanTok.replace(/\\/g, "/");
+  const results = [];
+  const directPath = resolveHookPath(cleanTok);
+  if (directPath) results.push(directPath);
+
+  const isAbs = path.isAbsolute(cleanTok) || /^(?:[A-Za-z]:)?\//.test(normalizedTok);
+  if (!isAbs) {
+    const brainDirs = getBrainDirs();
+    if (/^[^/]+\/\.system_generated\//i.test(normalizedTok)) {
+      for (const bDir of brainDirs) {
+        results.push(path.join(bDir, normalizedTok));
+      }
+    }
+    if (convId && convId !== "global") {
+      const tokTaskMatch = taskMatch && (cleanTok === taskMatch.token ? taskMatch : getTaskLogMatch(cleanTok));
+      if (tokTaskMatch) {
+        const resolved = resolveTaskPaths(tokTaskMatch, convId);
+        if (resolved.logPath) results.push(resolved.logPath);
+        const baseLog = /\.log$/i.test(normalizedTok) ? path.posix.basename(normalizedTok) : "";
+        if (baseLog) {
+          for (const bDir of brainDirs) {
+            results.push(path.join(bDir, convId, ".system_generated", "tasks", baseLog));
+          }
+        }
+      }
+      if (isSpillover && isStepSpilloverPath(normalizedTok)) {
+        const spillMatch = normalizedTok.match(/(?:^|\/)(\.system_generated\/steps\/\d+\/output\.txt)$/i);
+        if (spillMatch) {
+          for (const bDir of brainDirs) {
+            results.push(path.join(bDir, convId, spillMatch[1]));
+          }
+        }
+      }
+    }
+  }
+  return [...new Set(results.filter(Boolean))];
+}
+
+function getTaskState(match, convId) {
+  const { taskName, logPath, transcript } = resolveTaskPaths(match, convId);
 
   if (transcript) {
     const tail = readTail(transcript, TASK_TAIL_BYTES);
@@ -4402,6 +4455,7 @@ try {
     let isSpillover = false;
     let spilloverTok = null;
     let taskMatch = null;
+    let taskState = null;
     const pendingWrittenSet = collectSegmentWrittenTargets(segments);
     if (!agyTranscriptCheck.allowed) {
       const callerAccess = evaluateCallerTranscriptAccess(convId);
@@ -4453,7 +4507,8 @@ try {
       }
 
       // Check 2: Task Log Inspection (Lifecycle-Gated): RUNNING => Proportional Backoff
-      if (taskMatch && getTaskState(taskMatch, convId) === "RUNNING") {
+      taskState = taskMatch ? getTaskState(taskMatch, convId) : null;
+      if (taskState === "RUNNING") {
         denyRunningTask(taskMatch.id, convId);
       }
     }
@@ -4518,8 +4573,8 @@ try {
       });
     }
 
-    // Check 4: Completed / unknown-state task log: allow only through strictly single unchained `rtk read`
-    if (taskMatch && !isExplicitRtkRead) {
+    // Check 4: Completed task logs allow post-rewrite `rtk read` (`cat`/`head`/`tail`); unknown-state logs require explicit `rtk read`
+    if (taskMatch && (taskState === "COMPLETED" ? !isRtkRead : !isExplicitRtkRead)) {
       respond({
         decision: "deny",
         reason:
@@ -4552,18 +4607,23 @@ try {
           }
         }
         for (const candidateTok of new Set(candidates)) {
-          try {
-            const st = fs.statSync(resolveHookPath(candidateTok));
-            if (st.isFile() && st.size > 46080) {
-              const kib = (st.size / 1024).toFixed(1);
-              respond({
-                decision: "deny",
-                reason:
-                  `Antigravity Execution Governance: Unbounded 'rtk read' on >45 KiB spillover/task log (${kib} KiB) is denied to prevent cascading spillovers. ` +
-                  "Pass '--head-lines 150' or '--tail-lines 150' explicitly (or use bounded 'read_file' <= 150 lines) instead."
-              });
-            }
-          } catch {}
+          for (const statPath of resolveInternalReadStatPaths(candidateTok, convId, taskMatch, isSpillover)) {
+            try {
+              const st = fs.statSync(statPath);
+              if (st.isFile()) {
+                if (st.size > 46080) {
+                  const kib = (st.size / 1024).toFixed(1);
+                  respond({
+                    decision: "deny",
+                    reason:
+                      `Antigravity Execution Governance: Unbounded 'rtk read' on >45 KiB spillover/task log (${kib} KiB) is denied to prevent cascading spillovers. ` +
+                      "Pass '--head-lines 150' or '--tail-lines 150' explicitly (or use bounded 'read_file' <= 150 lines) instead."
+                  });
+                }
+                break;
+              }
+            } catch {}
+          }
         }
       }
     }
@@ -4690,7 +4750,7 @@ try {
       const getDiscoveryGuidance = () => {
         const rgAvailable = isRgAvailableCached();
         const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rnE";
-        return `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}', or run 'rtk read ${target || "<file>"}' via run_command instead`;
+        return `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
       };
 
       if (hasByteOffset && !hasSliceParams) {

@@ -78,7 +78,24 @@ console.log("--- Group 1: Spillover Safe Harbor ---");
     }
   });
   assert.equal(rtkSpill.decision, "allow");
-  console.log("✓ Spillover bounded read_file (<=150L) and unchained `rtk read` verified");
+
+  const rfSpillUnbounded = invokeHook({
+    toolCall: {
+      name: "read_file",
+      args: { Path: "/home/user/.gemini/antigravity/brain/session-123/.system_generated/steps/507/output.txt" }
+    }
+  });
+  assert.equal(rfSpillUnbounded.decision, "deny");
+  assert.match(rfSpillUnbounded.reason, /rtk read/);
+
+  const sedSpill = invokeHook({
+    toolCall: {
+      name: "run_command",
+      args: { CommandLine: "sed -n '1,5p' .system_generated/steps/102/output.txt", WaitMsBeforeAsync: 5000 }
+    }
+  });
+  assert.equal(sedSpill.decision, "deny");
+  console.log("✓ Spillover bounded read_file (<=150L), unchained `rtk read`, and unrewritten deny verified");
 }
 
 // --- Group 2: Lifecycle-Gated Task Output Inspection ---
@@ -158,6 +175,102 @@ try {
     toolCall: { name: "run_command", args: { CommandLine: "rtk read tasks/task-live-1.log", WaitMsBeforeAsync: 5000 } }
   });
   assert.equal(cmdCompleted.decision, "allow");
+
+  // Completed task logs <= 45 KiB allow cat/head/tail auto-rewritten via rtk read; unrewritten sed stays denied
+  const cmdCompletedHead = invokeHook({
+    conversationId: convLive,
+    toolCall: { name: "run_command", args: { CommandLine: "head -n 50 tasks/task-live-1.log", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(cmdCompletedHead.decision, "allow");
+  assert.equal(cmdCompletedHead.overwrite?.CommandLine, "rtk read tasks/task-live-1.log --head-lines 50");
+
+  const cmdCompletedCat = invokeHook({
+    conversationId: convLive,
+    toolCall: { name: "run_command", args: { CommandLine: "cat tasks/task-live-1.log", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(cmdCompletedCat.decision, "allow");
+  assert.equal(cmdCompletedCat.overwrite?.CommandLine, "rtk read tasks/task-live-1.log");
+
+  const cmdCompletedSed = invokeHook({
+    conversationId: convLive,
+    toolCall: { name: "run_command", args: { CommandLine: "sed -n '1,5p' tasks/task-live-1.log", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(cmdCompletedSed.decision, "deny");
+
+  // Completed task logs > 45 KiB require --head-lines/--tail-lines even after rtk rewrite
+  const bigLog = path.join(convDir, "tasks", "task-live-big.log");
+  fs.writeFileSync(bigLog, "x".repeat(48 * 1024), "utf-8");
+  fs.appendFileSync(
+    transcriptFile,
+    JSON.stringify({
+      step_index: 3,
+      type: "SYSTEM_MESSAGE",
+      content: `Task id "${convLive}/task-live-big" finished with result:\nLarge output complete.`
+    }) + "\n",
+    "utf-8"
+  );
+  const bigLogTok = bigLog.replace(/\\/g, "/");
+
+  const cmdBigCat = invokeHook({
+    conversationId: convLive,
+    toolCall: { name: "run_command", args: { CommandLine: `cat ${bigLogTok}`, WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(cmdBigCat.decision, "deny");
+  assert.match(cmdBigCat.reason, /--head-lines 150/);
+  assert.match(cmdBigCat.reason, /--tail-lines 150/);
+
+  const cmdBigHead = invokeHook({
+    conversationId: convLive,
+    toolCall: { name: "run_command", args: { CommandLine: `head -n 150 ${bigLogTok}`, WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(cmdBigHead.decision, "allow");
+  assert.equal(cmdBigHead.overwrite?.CommandLine, `rtk read ${bigLogTok} --head-lines 150`);
+
+  const cmdBigTail = invokeHook({
+    conversationId: convLive,
+    toolCall: { name: "run_command", args: { CommandLine: `tail -n 150 ${bigLogTok}`, WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(cmdBigTail.decision, "allow");
+  assert.equal(cmdBigTail.overwrite?.CommandLine, `rtk read ${bigLogTok} --tail-lines 150`);
+
+  // Relative >45 KiB task logs and step spillovers must resolve against brain dir even from an unrelated workspace cwd
+  const cmdRelBigCat = invokeHook({
+    conversationId: convLive,
+    cwd: os.tmpdir(),
+    toolCall: { name: "run_command", args: { CommandLine: "cat tasks/task-live-big.log", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(cmdRelBigCat.decision, "deny");
+  assert.match(cmdRelBigCat.reason, /--head-lines 150/);
+  assert.match(cmdRelBigCat.reason, /--tail-lines 150/);
+
+  const cmdRelBigHead = invokeHook({
+    conversationId: convLive,
+    cwd: os.tmpdir(),
+    toolCall: { name: "run_command", args: { CommandLine: "head -n 150 tasks/task-live-big.log", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(cmdRelBigHead.decision, "allow");
+  assert.equal(cmdRelBigHead.overwrite?.CommandLine, "rtk read tasks/task-live-big.log --head-lines 150");
+
+  const bigSpillDir = path.join(convDir, "steps", "103");
+  fs.mkdirSync(bigSpillDir, { recursive: true });
+  fs.writeFileSync(path.join(bigSpillDir, "output.txt"), "y".repeat(48 * 1024), "utf-8");
+
+  const cmdRelBigSpillCat = invokeHook({
+    conversationId: convLive,
+    cwd: os.tmpdir(),
+    toolCall: { name: "run_command", args: { CommandLine: "cat .system_generated/steps/103/output.txt", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(cmdRelBigSpillCat.decision, "deny");
+  assert.match(cmdRelBigSpillCat.reason, /--head-lines 150/);
+  assert.match(cmdRelBigSpillCat.reason, /--tail-lines 150/);
+
+  const cmdRelBigSpillTail = invokeHook({
+    conversationId: convLive,
+    cwd: os.tmpdir(),
+    toolCall: { name: "run_command", args: { CommandLine: "tail -n 150 .system_generated/steps/103/output.txt", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(cmdRelBigSpillTail.decision, "allow");
+  assert.equal(cmdRelBigSpillTail.overwrite?.CommandLine, "rtk read .system_generated/steps/103/output.txt --tail-lines 150");
 
   // Legacy task log > 5m quiet without markers falls back to completed
   const legacyLog = path.join(convDir, "tasks", "task-legacy-99.log");

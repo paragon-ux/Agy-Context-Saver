@@ -1,7 +1,7 @@
 # Antigravity Execution & Context Governance (Agy-Context-Saver + RTK)
 
 ## Architectural Boundary
-- **RTK (`>= 1.1.0`)**: Rewrites shell commands via `rtk hook antigravity`, compresses command output, and provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`, `rtk read`, `rtk err`, `rtk summary`).
+- **RTK (`>= 1.1.0`)**: Rewrites shell commands via `rtk hook antigravity`, compresses command output, provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`), reads spillovers and completed task logs (`rtk read`), and filters errors or summaries (`rtk err`, `rtk summary`).
 - **Agy-Context-Saver (`v2.0.4`)**: Governs background task polling and Reactive Wakeup, bounds `read_file` slices, protects `.system_generated/` and the state directory, and provides two-tier transcript inspection (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode) and access control via `agy-context transcript`.
 
 ---
@@ -39,8 +39,8 @@
   2. **Tier 2 (Workspace file reading: `read_file` slice policy)**:
      - Pass `StartLine` and `EndLine` to `read_file` in bounded slices of `1-150` lines to preserve 1-indexed line numbers for `edit_file` and `write_file`.
      - Partial slices of `151-800` lines and `ByteOffset`-only unbounded reads are denied. A single-pass full-file read (`StartLine: 1, EndLine: <TotalLines>`) is permitted when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
-  3. **Tier 3 (Spillovers and diagnostics: `rtk read`, `rtk err`, `rtk summary`)**:
-     - **Spillovers and task logs**: Read `.system_generated/steps/<step>/output.txt` spillovers via bounded `read_file` ($\le 150$ lines) or `rtk read --tail-lines 150 <path>` / `--head-lines 150 <path>` (required explicitly on `>45 KiB` spillovers/task logs), and completed `tasks/<taskId>.log` files via `rtk read <path>`. Do not use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for `edit_file` or `write_file`.
+  3. **Tier 3 (Spillovers, completed task logs, and diagnostics: `rtk read`, `rtk err`, `rtk summary`)**:
+     - **Spillovers and completed task logs only**: Read `.system_generated/steps/<step>/output.txt` spillovers via bounded `read_file` ($\le 150$ lines) or single unchained `rtk read <path>`, and completed `tasks/<taskId>.log` files via `rtk read <path>` (`cat`, `head`, and `tail` auto-rewrite via `rtk`; `--head-lines 150` / `--tail-lines 150` or `head -n 150` / `tail -n 150` are required on `>45 KiB` files). Never use `rtk read` to read or inspect editable workspace files; use bounded `read_file` slices so 1-indexed line numbers stay exact for `edit_file`.
      - **Command diagnostics**: Use `rtk err <cmd>` (errors and warnings only) and `rtk summary <cmd>` (2-line summary).
 - **Safe harbor files**: Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/` files) are allowed via `read_file` without slice bounds.
 - **Transcript forensics (`agy-context transcript`)**: Direct file or shell access to `.system_generated/` transcripts, task logs, progress files, or `getStateDir()` (`~/.local/state/agy-context-saver` on POSIX, `%LOCALAPPDATA%\agy-context-saver` on Windows) is blocked across `antigravity`, `antigravity-cli`, and `antigravity-ide` brain roots. Run `agy-context transcript` as a single unchained `run_command` (no `&&`, `||`, `;`, `|`, redirects, or `..` traversal; prefer batch step ranges `step <N,M|N-M>` and `query --start N --end M` over single-step loops):
