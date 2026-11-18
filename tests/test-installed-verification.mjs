@@ -194,8 +194,174 @@ try {
     env: { ...process.env, AGY_TEST_PROFILE_DIR: emptyProfile }
   });
   assert.notEqual(emptyDirectStatus.status, 0, "install-register.mjs --status on incomplete profile must exit non-zero (ACS-SVC-001-P3-1)");
+
+  // S2-DEP-004 & S2-SCRIPT-012: direct install-register.mjs --status --json works with empty stderr on both complete & incomplete profiles
+  const emptyDirectJson = spawnSync(process.execPath, [installScript, "--status", "--json"], {
+    encoding: "utf-8",
+    env: { ...process.env, AGY_TEST_PROFILE_DIR: emptyProfile }
+  });
+  assert.notEqual(emptyDirectJson.status, 0);
+  assert.equal(emptyDirectJson.stderr.trim(), "", "status --json must not pollute stderr (S2-SCRIPT-012)");
+  assert.equal(JSON.parse(emptyDirectJson.stdout).isComplete, false);
 } finally {
   fs.rmSync(emptyProfile, { recursive: true, force: true });
+}
+
+const completeDirectJson = spawnSync(process.execPath, [installScript, "--status", "--json"], { encoding: "utf-8" });
+assert.equal(completeDirectJson.status, 0, `Direct install-register.mjs --status --json failed: ${completeDirectJson.stderr}`);
+assert.equal(completeDirectJson.stderr.trim(), "");
+assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
+
+// S2-SCRIPT-005, S2-SCRIPT-006, S2-SCRIPT-011, S2-DEP-001, S2-DEP-006 regressions
+{
+  const w3Profile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-w3-parity-"));
+  const w3Env = { ...process.env, AGY_TEST_PROFILE_DIR: w3Profile };
+  try {
+    const setupW3 = spawnSync(process.execPath, [installScript], { encoding: "utf-8", env: w3Env });
+    assert.equal(setupW3.status, 0, setupW3.stderr || setupW3.stdout);
+    const { resolveProfilePaths, runUninstall } = await import("../scripts/install-register.mjs");
+    const prevProfileEnv = process.env.AGY_TEST_PROFILE_DIR;
+    process.env.AGY_TEST_PROFILE_DIR = w3Profile;
+    try {
+      const dynPaths = resolveProfilePaths();
+      assert.ok(dynPaths.pluginDest.startsWith(w3Profile), "resolveProfilePaths() must dynamically reflect AGY_TEST_PROFILE_DIR (S2-DEP-006)");
+
+      // S2-DEP-001: legacy MCP stripping creates namespaced mcp_config.json.agy-context-saver.bak without touching foreign mcp_config.json.agy-squad.bak
+      const agySquadBak = path.join(dynPaths.geminiConfigDir, "mcp_config.json.agy-squad.bak");
+      fs.writeFileSync(agySquadBak, JSON.stringify({ mcpServers: { "agy-squad": { command: "node" } } }), "utf8");
+      fs.writeFileSync(dynPaths.mcpJsonPath, JSON.stringify({ mcpServers: { "agy-context-saver": { command: "node" }, other: { command: "x" } } }), "utf8");
+      const reSync = spawnSync(process.execPath, [installScript], { encoding: "utf-8", env: w3Env });
+      assert.equal(reSync.status, 0, reSync.stderr || reSync.stdout);
+      assert.ok(fs.existsSync(dynPaths.mcpBakPath), "Must create namespaced mcp_config.json.agy-context-saver.bak (S2-DEP-001)");
+      assert.match(dynPaths.mcpBakPath, /mcp_config\.json\.agy-context-saver\.bak$/);
+      assert.ok(fs.existsSync(agySquadBak), "Companion mcp_config.json.agy-squad.bak must remain untouched");
+
+      // S2-SCRIPT-006: malformed hooks.json, mcp_config.json, and config.json all fail closed BEFORE removing pluginDest or destHook
+      for (const [cfgPath, badBody, label] of [
+        [dynPaths.hooksJsonPath, "{ malformed json", "hooks.json"],
+        [dynPaths.mcpJsonPath, "{ malformed mcp", "mcp_config.json"],
+        [dynPaths.configJsonPath, "[]", "config.json"]
+      ]) {
+        const prevExists = fs.existsSync(cfgPath);
+        const savedBody = prevExists ? fs.readFileSync(cfgPath, "utf8") : null;
+        fs.writeFileSync(cfgPath, badBody, "utf8");
+        await assert.rejects(() => runUninstall({ silent: true }), /Configuration error|invalid JSON|must contain a JSON object/i);
+        assert.ok(fs.existsSync(dynPaths.pluginDest), `Fail-closed runUninstall must preserve pluginDest when ${label} is malformed (S2-SCRIPT-006)`);
+        assert.ok(fs.existsSync(dynPaths.destHook), `Fail-closed runUninstall must preserve destHook when ${label} is malformed (S2-SCRIPT-006)`);
+        if (prevExists) fs.writeFileSync(cfgPath, savedBody, "utf8");
+        else fs.rmSync(cfgPath, { force: true });
+      }
+      // Array config.json.plugins must also fail closed in runInstall() without corrupting config.json
+      const { runInstall } = await import("../scripts/install-register.mjs");
+      const savedConfigBody = fs.existsSync(dynPaths.configJsonPath) ? fs.readFileSync(dynPaths.configJsonPath, "utf8") : null;
+      fs.writeFileSync(dynPaths.configJsonPath, JSON.stringify({ plugins: ["antislop"] }), "utf8");
+      await assert.rejects(() => runInstall({ silent: true }), /property "plugins" must be a JSON object/i);
+      assert.deepEqual(JSON.parse(fs.readFileSync(dynPaths.configJsonPath, "utf8")), { plugins: ["antislop"] });
+      if (savedConfigBody !== null) fs.writeFileSync(dynPaths.configJsonPath, savedConfigBody, "utf8");
+      else fs.rmSync(dynPaths.configJsonPath, { force: true });
+
+      // S2-SCRIPT-005 & S2-SCRIPT-011: broken pluginDest, broken destHook, and broken shim symlinks detected & unlinked
+      let madeSymlinks = false;
+      try {
+        await runUninstall({ silent: true });
+        fs.mkdirSync(path.dirname(dynPaths.pluginDest), { recursive: true });
+        fs.mkdirSync(path.dirname(dynPaths.destHook), { recursive: true });
+        fs.mkdirSync(dynPaths.antigravityBinDir, { recursive: true });
+        fs.symlinkSync(path.join(w3Profile, "missing-plugin-target"), dynPaths.pluginDest, os.platform() === "win32" ? "junction" : "dir");
+        fs.symlinkSync(path.join(w3Profile, "missing-hook-target.mjs"), dynPaths.destHook, "file");
+        const shimFile = path.join(dynPaths.antigravityBinDir, os.platform() === "win32" ? "agy-context.cmd" : "agy-context");
+        fs.symlinkSync(path.join(w3Profile, "missing-shim-target"), shimFile, "file");
+        madeSymlinks = true;
+      } catch (err) {
+        if (err?.code !== "EPERM") throw err;
+      }
+      if (madeSymlinks) {
+        const brokenStatus = spawnSync(process.execPath, [installScript, "--status", "--json"], { encoding: "utf-8", env: w3Env });
+        assert.notEqual(brokenStatus.status, 0);
+        const brokenJson = JSON.parse(brokenStatus.stdout);
+        assert.equal(brokenJson.isInstalled, true, "Broken pluginDest symlink must report isInstalled=true (PARTIAL INSTALLATION) (S2-SCRIPT-005)");
+        assert.equal(brokenJson.isComplete, false);
+        assert.equal(brokenJson.details.plugin.brokenSymlink, true);
+
+        const brokenHuman = spawnSync(process.execPath, [installScript, "--status"], { encoding: "utf-8", env: w3Env });
+        assert.match(brokenHuman.stdout, /BROKEN SYMLINK/);
+        assert.match(brokenHuman.stdout, /PARTIAL INSTALLATION/);
+
+        await runUninstall({ silent: true });
+        assert.throws(() => fs.lstatSync(dynPaths.pluginDest), { code: "ENOENT" }, "runUninstall must remove broken pluginDest symlink");
+        assert.throws(() => fs.lstatSync(dynPaths.destHook), { code: "ENOENT" }, "runUninstall must remove broken destHook symlink (S2-SCRIPT-011)");
+        const shimFile = path.join(dynPaths.antigravityBinDir, os.platform() === "win32" ? "agy-context.cmd" : "agy-context");
+        assert.throws(() => fs.lstatSync(shimFile), { code: "ENOENT" }, "runUninstall must remove broken CLI shim symlink (S2-SCRIPT-011)");
+      }
+    } finally {
+      if (prevProfileEnv === undefined) delete process.env.AGY_TEST_PROFILE_DIR;
+      else process.env.AGY_TEST_PROFILE_DIR = prevProfileEnv;
+    }
+
+    // S2R-SCRIPT-001: status and status --json must surface corrupt=true and error details on malformed hooks.json, mcp_config.json, and config.json
+    const { hooksJsonPath, mcpJsonPath: w3McpPath, configJsonPath: w3CfgPath } = (() => {
+      const cfgDir = path.join(w3Profile, ".gemini", "config");
+      return {
+        hooksJsonPath: path.join(cfgDir, "hooks.json"),
+        mcpJsonPath: path.join(cfgDir, "mcp_config.json"),
+        configJsonPath: path.join(cfgDir, "config.json")
+      };
+    })();
+    const reSetupW3 = spawnSync(process.execPath, [installScript], { encoding: "utf-8", env: w3Env });
+    assert.equal(reSetupW3.status, 0, reSetupW3.stderr || reSetupW3.stdout);
+    fs.writeFileSync(w3CfgPath, JSON.stringify({ plugins: { "agy-context-saver": { enabled: true } } }, null, 2), "utf8");
+    for (const [cfgFile, badContent, detailKey] of [
+      [hooksJsonPath, "{ bad hooks json", "hook"],
+      [w3McpPath, "{ bad mcp json", "mcp"],
+      [w3McpPath, JSON.stringify({ mcpServers: [] }), "mcp"],
+      [w3CfgPath, "[]\n", "config"]
+    ]) {
+      const saved = fs.existsSync(cfgFile) ? fs.readFileSync(cfgFile, "utf8") : null;
+      fs.writeFileSync(cfgFile, badContent, "utf8");
+      const corruptHuman = spawnSync(process.execPath, [cliScript, "status"], { encoding: "utf-8", env: w3Env });
+      assert.notEqual(corruptHuman.status, 0, `S2R-SCRIPT-001: corrupt ${detailKey} must fail status`);
+      assert.match(corruptHuman.stdout, /CORRUPT/, `S2R-SCRIPT-001: corrupt ${detailKey} status output must include CORRUPT`);
+      const corruptJsonRes = spawnSync(process.execPath, [cliScript, "status", "--json"], { encoding: "utf-8", env: w3Env });
+      assert.notEqual(corruptJsonRes.status, 0, `S2R-SCRIPT-001: corrupt ${detailKey} must fail status --json`);
+      const corruptJson = JSON.parse(corruptJsonRes.stdout);
+      assert.equal(corruptJson.isComplete, false);
+      assert.equal(corruptJson.details[detailKey].corrupt, true, `S2R-SCRIPT-001: details.${detailKey}.corrupt must be true`);
+      assert.ok(corruptJson.details[detailKey].error, `S2R-SCRIPT-001: details.${detailKey}.error must be populated`);
+      const directStatusJson = spawnSync(process.execPath, [installScript, "--status", "--json"], { encoding: "utf-8", env: w3Env });
+      assert.notEqual(directStatusJson.status, 0, `S2R-SCRIPT-001: direct install-register --status --json must exit non-zero on corrupt ${detailKey}`);
+      assert.equal(JSON.parse(directStatusJson.stdout).details[detailKey].corrupt, true);
+      if (saved !== null) fs.writeFileSync(cfgFile, saved, "utf8");
+      else fs.rmSync(cfgFile, { force: true });
+    }
+    // Also verify malformed plugin hooks.json (inside copy-fallback plugin dir) surfaces hook.corrupt=true
+    const pluginLinkPath = path.join(w3Profile, ".gemini", "config", "plugins", "agy-context-saver");
+    fs.rmSync(pluginLinkPath, { recursive: true, force: true });
+    fs.mkdirSync(pluginLinkPath, { recursive: true });
+    fs.writeFileSync(path.join(pluginLinkPath, "hooks.json"), "{ malformed plugin hooks", "utf8");
+    const pluginCorruptRes = spawnSync(process.execPath, [cliScript, "status", "--json"], { encoding: "utf-8", env: w3Env });
+    assert.notEqual(pluginCorruptRes.status, 0);
+    const pluginCorruptJson = JSON.parse(pluginCorruptRes.stdout);
+    assert.equal(pluginCorruptJson.details.hook.corrupt, true);
+    assert.match(pluginCorruptJson.details.hook.error, /plugin hooks\.json/);
+  } finally {
+    fs.rmSync(w3Profile, { recursive: true, force: true });
+  }
+}
+
+// S2R-DEP-001: release-preflight.mjs package "files" matcher handles ! negation, * / ** globs, literal ?, and ./ prefixes
+{
+  const { isPackageFileCovered } = await import("../scripts/release-preflight.mjs");
+  const sampleFiles = ["bin/agy-context.mjs", "./docs", "!docs/reviews/**", "!docs/*.draft.md", "scripts/*.mjs"];
+  assert.equal(isPackageFileCovered("bin/agy-context.mjs", sampleFiles), true);
+  assert.equal(isPackageFileCovered("docs/tools.md", sampleFiles), true);
+  assert.equal(isPackageFileCovered("docs/reviews/audit.md", sampleFiles), false, "S2R-DEP-001: !docs/reviews/** must exclude nested files");
+  assert.equal(isPackageFileCovered("docs/notes.draft.md", sampleFiles), false, "S2R-DEP-001: !docs/*.draft.md must exclude matching globs");
+  assert.equal(isPackageFileCovered("scripts/install-register.mjs", sampleFiles), true, "S2R-DEP-001: scripts/*.mjs must match .mjs files");
+  assert.equal(isPackageFileCovered("scripts/subdir/other.mjs", sampleFiles), false, "S2R-DEP-001: single * must not cross slashes");
+  assert.equal(isPackageFileCovered("README.md", ["**/*.md"]), true, "S2R-DEP-001: **/*.md must match zero leading directories");
+  assert.equal(isPackageFileCovered("a/b", ["a/**/b"]), true, "S2R-DEP-001: a/**/b must match zero intermediate directories");
+  assert.equal(isPackageFileCovered("docs/b.md", ["docs/a?b*.md"]), false, "S2R-DEP-001: literal ? in pattern must not act as regex quantifier");
+  assert.equal(isPackageFileCovered("docs/a?b1.md", ["docs/a?b*.md"]), true);
 }
 
 hermetic.cleanup();

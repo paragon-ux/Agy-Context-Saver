@@ -12,7 +12,7 @@ description: >-
 ## Architectural Boundary
 
 - **RTK (`>= 1.1.0`)**: Rewrites shell commands (`rtk hook antigravity`), compresses command output, and provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`, `rtk read`, `rtk err`, `rtk summary`).
-- **Agy-Context-Saver (`v2.0.2`)**: Enforces Reactive Wakeup backoff, bounds `read_file` slices, protects `.system_generated/` and the state directory, and exposes `agy-context transcript`.
+- **Agy-Context-Saver (`v2.0.3`)**: Enforces Reactive Wakeup backoff, bounds `read_file` slices, protects `.system_generated/` and the state directory, and exposes `agy-context transcript`.
 
 ---
 
@@ -21,13 +21,13 @@ description: >-
 Unbounded full-file `read_file` calls on workspace files are blocked by the `PreToolUse` hook:
 
 1. **Tier 1 (Search and discovery: `rtk grep`, `rtk find`, `rtk ls`)**:
-   - **Pattern and symbol search**: Run `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate `[StartLine, EndLine]` coordinates. Always pass an explicit target path (such as `.` or `src/`) so `rtk grep` does not wait on stdin.
+   - **Pattern and symbol search**: Run `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate `[StartLine, EndLine]` coordinates (always pass an explicit target path such as `.` or `src/` so `rtk grep` does not wait on stdin). Because `rtk grep` clips lines at `~80` chars and `25` matches/file (emitting ephemeral `rtk recall` hashes unreadable from transcripts), implicit `grep` commands stay unrewritten (`ACS-HOOK-09`); use raw `grep -rnE` whenever untruncated lines or `>25` matches per file are required.
    - **Directory and file listing**: Run `rtk find <path>`, `rtk ls <path>`, or `rtk tree` (or PowerShell `dir` / `Get-ChildItem` on Windows).
 2. **Tier 2 (Workspace file reading: `read_file` slice policy)**:
    - Pass `StartLine` and `EndLine` into `read_file` in bounded slices of `1-150` lines to preserve 1-indexed line numbers for `edit_file` and `write_file`.
    - Partial slices of `151-800` lines and `ByteOffset`-only unbounded reads are denied. An explicit full-file read (`StartLine: 1, EndLine: <TotalLines>`) is allowed when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
 3. **Tier 3 (Spillovers and diagnostics: `rtk read`, `rtk err`, `rtk summary`)**:
-   - **Spillovers and task logs**: Read `.system_generated/steps/<step>/output.txt` spillovers (via bounded `read_file` $\le 150$ lines or `rtk read <path>`) and completed `tasks/<taskId>.log` files via `rtk read <path>` (`--head-lines` / `--tail-lines`). Never use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for `edit_file` or `write_file`.
+   - **Spillovers and task logs**: Read `.system_generated/steps/<step>/output.txt` spillovers (via bounded `read_file` $\le 150$ lines or `rtk read <path>`) and completed `tasks/<taskId>.log` files via `rtk read <path>` (`--head-lines 150` / `--tail-lines 150` required explicitly on `>45 KiB` files). Never use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for `edit_file` or `write_file`.
    - `rtk err <cmd>`: Runs a command and prints only errors and warnings.
    - `rtk summary <cmd>`: Runs a command and prints a 2-line summary.
 

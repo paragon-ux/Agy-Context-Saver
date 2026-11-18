@@ -1,6 +1,6 @@
 # CLI & Hook Reference
 
-`Agy-Context-Saver` (`v2.0.2`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs`), paired with **RTK (`>= 1.1.0`)**.
+`Agy-Context-Saver` (`v2.0.3`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs`), paired with **RTK (`>= 1.1.0`)**.
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
@@ -12,10 +12,10 @@ Unbounded `read_file` calls on workspace files are blocked by the `PreToolUse` h
 
 | Tier | Target | Governed Workflow |
 | :--- | :--- | :--- |
-| **Tier 1: Search & discovery** | Pattern or file discovery | `rtk grep -rnE "<pattern>" <path>` / `rtk find <path>` / `rtk ls <path>` |
+| **Tier 1: Search & discovery** | Pattern or file discovery | `rtk grep -rnE "<pattern>" <path>` (`~80`-char line / `25`-match compact view; implicit `grep` stays unrewritten for lossless output) / `rtk find <path>` / `rtk ls <path>` |
 | **Tier 2: `read_file` (bounded slice)** | `1-150` line slice | Pass `StartLine` and `EndLine` (`<= 150` lines) to preserve 1-indexed line numbers for `edit_file` and `write_file` |
 | **Tier 2: `read_file` (full-file read)** | Files $\le 800$ lines and $\le 45\text{ KiB}$ | Pass explicit `StartLine: 1, EndLine: <TotalLines>`; partial slices of `151-800` lines are denied |
-| **Tier 3: Spillovers & task logs** | `.system_generated/steps/<step>/output.txt` & completed `tasks/<taskId>.log` | Bounded `read_file` ($\le 150\text{L}$) on step spillovers or single unchained `rtk read <path>` |
+| **Tier 3: Spillovers & task logs** | `.system_generated/steps/<step>/output.txt` & completed `tasks/<taskId>.log` | Bounded `read_file` ($\le 150\text{L}$) on step spillovers or single unchained `rtk read <path>` (explicit `--head-lines 150` / `--tail-lines 150` required on `>45 KiB` files) |
 
 Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass through Safe Harbor without slice bounds.
 

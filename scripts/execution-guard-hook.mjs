@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.0.2)
+ * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.0.3)
  *
  * Closed Execution Topology & Governance Invariants:
  * 1. RTK Transparent Command Optimization:
@@ -226,9 +226,9 @@ function isProtectedShellOrScriptOperation(text) {
     return true;
   }
 
-  // Inline interpreter or script execution importing/spawning transcript-core.mjs, bin/agy-context.mjs, or mcp/index.js
+  // Inline interpreter or script execution importing/spawning transcript-core.mjs, bin/agy-context.mjs, or retired Agy-Context-Saver mcp/index.js
   if (
-    /(?:\b(?:import|require|spawn|spawnSync|exec|execSync|execFile|execFileSync|popen|system|subprocess)\b|(?:^|[\s;|&(])(?:node|python[23]?|perl|ruby|php|bash|sh|zsh|dash)\b[^\n;|&]*?(?:\s-[a-z]*[ec]\b|<<))[\s\S]*?(?:\btranscript-core(?:\.m?js)?\b|(?:bin[\/\\]+|\b)agy-context(?:-saver)?\.m?js\b|\bmcp[\/\\]+index\.js\b)/i.test(
+    /(?:\b(?:import|require|spawn|spawnSync|exec|execSync|execFile|execFileSync|popen|system|subprocess)\b|(?:^|[\s;|&(])(?:node|python[23]?|perl|ruby|php|bash|sh|zsh|dash)\b[^\n;|&]*?(?:\s-[a-z]*[ec]\b|<<))[\s\S]*?(?:\btranscript-core(?:\.m?js)?\b|(?:bin[\/\\]+|\b)agy-context(?:-saver)?\.m?js\b|\bagy-context-saver[\/\\]+mcp[\/\\]+index\.js\b)/i.test(
       text
     )
   ) {
@@ -604,6 +604,8 @@ function spawnRtk(bin, args, opts) {
 const ENV_CACHE_TTL_MS = 60000;
 let cachedRtkKey = null;
 let cachedRtkValue = undefined;
+let cachedRgKey = null;
+let cachedRgValue = undefined;
 
 function getFileMtimeMsSafe(p) {
   if (!p) return 0;
@@ -614,51 +616,79 @@ function getFileMtimeMsSafe(p) {
   }
 }
 
-function readRtkEnvCache(key) {
+function readEnvCacheRaw() {
   try {
     const cacheFile = path.join(getStateDir(), "env-cache.json");
-    if (!fs.existsSync(cacheFile)) return undefined;
+    if (!fs.existsSync(cacheFile)) return null;
     const parsed = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
-    if (
-      parsed &&
-      parsed.key === key &&
-      typeof parsed.ts === "number" &&
-      (Date.now() - parsed.ts) < ENV_CACHE_TTL_MS
-    ) {
-      return parsed.resolved ?? null;
+    if (parsed && typeof parsed.ts === "number" && (Date.now() - parsed.ts) < ENV_CACHE_TTL_MS) {
+      return parsed;
     }
   } catch {}
-  return undefined;
+  return null;
 }
 
-function writeRtkEnvCache(key, resolved) {
+function writeEnvCacheRaw(entry) {
   try {
     ensureStateDir();
     const cacheFile = path.join(getStateDir(), "env-cache.json");
     const tmpFile = `${cacheFile}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-    fs.writeFileSync(tmpFile, JSON.stringify({ key, ts: Date.now(), resolved }), "utf-8");
+    fs.writeFileSync(tmpFile, JSON.stringify(entry), "utf-8");
     try {
       fs.renameSync(tmpFile, cacheFile);
     } catch {
-      fs.writeFileSync(cacheFile, JSON.stringify({ key, ts: Date.now(), resolved }), "utf-8");
+      fs.writeFileSync(cacheFile, JSON.stringify(entry), "utf-8");
       try { fs.unlinkSync(tmpFile); } catch {}
     }
   } catch {}
 }
 
-function resolveCompatibleRtk() {
+function resolveCachedHostEnv() {
+  const pathEnv = process.env.PATH || process.env.Path || "";
   const localCandidate = getLocalRtkCandidate();
-  const pathCandidate = findExecutableOnPath("rtk");
-  const key = `${pathCandidate}::${localCandidate}::${getFileMtimeMsSafe(pathCandidate)}::${getFileMtimeMsSafe(localCandidate)}`;
-  if (cachedRtkKey === key && cachedRtkValue !== undefined) {
-    return cachedRtkValue;
+  const parsed = readEnvCacheRaw();
+
+  // Fast-path when cache was written by this hook with full pathEnv + candidate metadata (skips multi-dir PATH stat scans)
+  if (
+    parsed &&
+    typeof parsed.pathEnv === "string" &&
+    parsed.pathEnv === pathEnv &&
+    parsed.localCandidate === localCandidate &&
+    typeof parsed.pathCandidate === "string" &&
+    typeof parsed.rgAvailable === "boolean"
+  ) {
+    const fastKey = `${parsed.pathCandidate}::${localCandidate}::${getFileMtimeMsSafe(parsed.pathCandidate)}::${getFileMtimeMsSafe(localCandidate)}`;
+    const rgValid =
+      !parsed.rgAvailable ||
+      (typeof parsed.rgPath === "string" &&
+        parsed.rgPath.length > 0 &&
+        getFileMtimeMsSafe(parsed.rgPath) === parsed.rgMtime &&
+        parsed.rgMtime > 0);
+    if (parsed.key === fastKey && rgValid) {
+      cachedRtkKey = fastKey;
+      cachedRtkValue = parsed.resolved ?? null;
+      cachedRgKey = pathEnv;
+      cachedRgValue = parsed.rgAvailable;
+      return { rtk: cachedRtkValue, rgAvailable: cachedRgValue };
+    }
   }
 
-  const diskCached = readRtkEnvCache(key);
-  if (diskCached !== undefined) {
+  const pathCandidate = findExecutableOnPath("rtk");
+  const key = `${pathCandidate}::${localCandidate}::${getFileMtimeMsSafe(pathCandidate)}::${getFileMtimeMsSafe(localCandidate)}`;
+  if (cachedRtkKey === key && cachedRtkValue !== undefined && cachedRgKey === pathEnv && cachedRgValue !== undefined) {
+    return { rtk: cachedRtkValue, rgAvailable: cachedRgValue };
+  }
+
+  // Legacy / test-poisoned cache fallback (when env-cache.json only has { key, ts, resolved })
+  if (parsed && parsed.key === key && typeof parsed.pathEnv !== "string") {
     cachedRtkKey = key;
-    cachedRtkValue = diskCached;
-    return diskCached;
+    cachedRtkValue = parsed.resolved ?? null;
+    const rgAvailable = cachedRgKey === pathEnv && cachedRgValue !== undefined
+      ? cachedRgValue
+      : Boolean(findExecutableOnPath("rg"));
+    cachedRgKey = pathEnv;
+    cachedRgValue = rgAvailable;
+    return { rtk: cachedRtkValue, rgAvailable };
   }
 
   const opts = { encoding: "utf-8", timeout: 2000, windowsHide: true };
@@ -681,10 +711,34 @@ function resolveCompatibleRtk() {
     }
   }
 
+  const rgPath = findExecutableOnPath("rg");
+  const rgAvailable = Boolean(rgPath);
+  const rgMtime = getFileMtimeMsSafe(rgPath);
+
   cachedRtkKey = key;
   cachedRtkValue = resolved;
-  writeRtkEnvCache(key, resolved);
-  return resolved;
+  cachedRgKey = pathEnv;
+  cachedRgValue = rgAvailable;
+  writeEnvCacheRaw({
+    key,
+    ts: Date.now(),
+    resolved,
+    pathEnv,
+    pathCandidate,
+    localCandidate,
+    rgAvailable,
+    rgPath,
+    rgMtime
+  });
+  return { rtk: resolved, rgAvailable };
+}
+
+function resolveCompatibleRtk() {
+  return resolveCachedHostEnv().rtk;
+}
+
+function isRgAvailableCached() {
+  return resolveCachedHostEnv().rgAvailable;
 }
 
 // ============================================================================
@@ -3720,8 +3774,8 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
   const rest = rtkMatch[2];
   const subcmd = (rest.match(/^([^\s"']+)/)?.[1] || "").toLowerCase();
 
-  // Revert lossy `rtk wc` / `rtk ls` / `rtk diff` back to raw unless caller explicitly typed it
-  if (subcmd === "wc" || subcmd === "ls" || subcmd === "diff") {
+  // Revert lossy `rtk wc` / `rtk ls` / `rtk diff` / `rtk grep` back to raw unless caller explicitly typed it (ACS-HOOK-09, ACS-HOOK-GREP-CLAMP)
+  if (subcmd === "wc" || subcmd === "ls" || subcmd === "diff" || subcmd === "grep") {
     const explicitPattern = new RegExp(`^(?:["']?[^\\s"']*[/\\\\])?rtk(?:\\.exe|\\.cmd|\\.bat)?["']?\\s+${subcmd}\\b`, "i");
     if (!explicitPattern.test(rawMatchTarget)) {
       return `${effEnvPrefix}${rest}`;
@@ -4235,6 +4289,7 @@ try {
 
     // Raw-command internal state checks (skipping heredoc bodies, echo/printf text, and grep patterns)
     let isSpillover = false;
+    let spilloverTok = null;
     let taskMatch = null;
     const pendingWrittenSet = collectSegmentWrittenTargets(segments);
     if (!agyTranscriptCheck.allowed) {
@@ -4246,7 +4301,7 @@ try {
       });
       const inspectableCombined = inspectableTexts.join("\n");
       const singleTokens = segments.length === 1 ? tokenizeShellWords(segments[0].text) : [];
-      const spilloverTok = findStepSpilloverToken(singleTokens);
+      spilloverTok = findStepSpilloverToken(singleTokens);
       isSpillover = Boolean(spilloverTok);
       taskMatch = getTaskLogMatch(inspectableCombined);
 
@@ -4303,8 +4358,7 @@ try {
     }
 
     // Delegate command rewriting to `rtk hook antigravity` (>= 1.1.0)
-    const rtk = resolveCompatibleRtk();
-    const rgAvailable = Boolean(findExecutableOnPath("rg"));
+    const { rtk, rgAvailable } = resolveCachedHostEnv();
     let effectiveCmd = rawCmd;
 
     if (rtk) {
@@ -4364,17 +4418,39 @@ try {
       });
     }
 
-    // Prevent cascading secondary spillover when `rtk read` is invoked without line bounds on a >45 KiB spillover/task log
+    // Fail loud with explicit guidance instead of silently injecting --tail-lines 150 on >45 KiB spillover/task logs (ACS-HOOK-GREP-CLAMP)
     if (isRtkRead && (isSpillover || taskMatch)) {
-      const hasLineBoundFlag = /(?:^|\s)(?:--head-lines|--tail-lines|--max-lines|-m|--level|-l)(?:=|\s|$)/.test(effectiveCmd);
+      const hasLineBoundFlag = /(?:^|\s)(?:--head-lines|--tail-lines|--max-lines|-m)(?:=|\s|$)/.test(effectiveCmd);
       if (!hasLineBoundFlag) {
         const rtkTokens = tokenizeShellWords(effectiveCmd);
-        const pathTok = rtkTokens.slice(2).find((t) => !t.startsWith("-"));
-        if (pathTok) {
+        const candidates = [];
+        if (spilloverTok) candidates.push(spilloverTok);
+        if (taskMatch?.token) candidates.push(taskMatch.token);
+        for (let i = 2; i < rtkTokens.length; i++) {
+          const tok = rtkTokens[i];
+          if (tok === "--") {
+            for (let j = i + 1; j < rtkTokens.length; j++) candidates.push(rtkTokens[j]);
+            break;
+          }
+          if (tok === "-l" || tok === "--level") {
+            i++;
+            continue;
+          }
+          if (!tok.startsWith("-")) {
+            candidates.push(tok);
+          }
+        }
+        for (const candidateTok of new Set(candidates)) {
           try {
-            const st = fs.statSync(resolveHookPath(pathTok));
+            const st = fs.statSync(resolveHookPath(candidateTok));
             if (st.isFile() && st.size > 46080) {
-              effectiveCmd = effectiveCmd.replace(/^(\S+\s+read\b)/i, "$1 --tail-lines 150");
+              const kib = (st.size / 1024).toFixed(1);
+              respond({
+                decision: "deny",
+                reason:
+                  `Antigravity Execution Governance: Unbounded 'rtk read' on >45 KiB spillover/task log (${kib} KiB) is denied to prevent cascading spillovers. ` +
+                  "Pass '--head-lines 150' or '--tail-lines 150' explicitly (or use bounded 'read_file' <= 150 lines) instead."
+              });
             }
           } catch {}
         }
@@ -4501,7 +4577,7 @@ try {
     // 2e. Symmetrical Hybrid Slice & Guarded Full-File Policy for `read_file` and `view_file`
     if (toolName === "read_file" || toolName === "view_file") {
       const getDiscoveryGuidance = () => {
-        const rgAvailable = Boolean(findExecutableOnPath("rg"));
+        const rgAvailable = isRgAvailableCached();
         const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rnE";
         return `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}', or run 'rtk read ${target || "<file>"}' via run_command instead`;
       };
@@ -4578,13 +4654,13 @@ try {
       const pattern = String(args.Query || args.query || args.Pattern || args.pattern || "").trim();
       const searchTarget = String(args.SearchPath || args.searchPath || args.path || ".").trim() || ".";
       const safePattern = pattern ? escapeDoubleQuotedArg(pattern) : "<pattern>";
-      const rgAvailable = Boolean(findExecutableOnPath("rg"));
+      const rgAvailable = isRgAvailableCached();
       const cmdHint = rgAvailable
         ? `rtk rg -- "${safePattern}" ${searchTarget}`
         : `rtk grep -rnE "${safePattern}" ${searchTarget}`;
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Native grep inspection via 'grep_search' bypasses token optimization. Run '${cmdHint}' via run_command instead.`
+        reason: `Antigravity Governance: Native grep inspection via 'grep_search' bypasses token optimization. Run '${cmdHint}' via run_command instead (or raw 'grep -rnE' when untruncated lines or >25 matches per file are needed).`
       });
     }
 

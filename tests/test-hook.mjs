@@ -1723,8 +1723,15 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
       const envCachePath = path.join(cacheStateDir, "env-cache.json");
       assert.ok(fs.existsSync(envCachePath), "Hook must persist env-cache.json");
       const writtenCache = JSON.parse(fs.readFileSync(envCachePath, "utf8"));
+      assert.equal(typeof writtenCache.pathEnv, "string", "env-cache.json must persist pathEnv for zero-scan warm lookup");
+      assert.equal(typeof writtenCache.rgAvailable, "boolean", "env-cache.json must persist rgAvailable for zero-scan warm lookup");
 
-      // Poison resolved=null with fresh ts: hook trusts valid non-expired cache for matching mtime key
+      // Warm fast-path: trusts cached resolved=null + rgAvailable while pathEnv, TTL, and mtime match
+      fs.writeFileSync(envCachePath, JSON.stringify({ ...writtenCache, ts: Date.now(), resolved: null }));
+      const warmFastPathMiss = runHook({ toolCall: { name: "run_command", args: { CommandLine: "git status" } } }, cacheEnv);
+      assert.equal(warmFastPathMiss.overwrite?.CommandLine, undefined, "Warm env-cache fast-path must serve cached entry while pathEnv/TTL/mtime match");
+
+      // Poison resolved=null with fresh ts (legacy schema without pathEnv): hook trusts valid non-expired cache for matching mtime key
       fs.writeFileSync(envCachePath, JSON.stringify({ key: writtenCache.key, ts: Date.now(), resolved: null }));
       const freshCachedMiss = runHook({ toolCall: { name: "run_command", args: { CommandLine: "git status" } } }, cacheEnv);
       assert.equal(freshCachedMiss.overwrite?.CommandLine, undefined, "Fresh env-cache entry must be served while TTL and mtime match");
@@ -1795,6 +1802,112 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
       );
       assert.equal(watchAllow.decision, "allow", `Non-blocking gh/text command must stay allowed: ${allowedGhCmd}`);
     }
+
+    // LEAD-DEP-001: sibling Agy-Squad mcp/index.js probes allowed while Agy-Context-Saver internal paths stay blocked
+    for (const allowedSiblingProbe of [
+      "node -e \"import('../Agy-Squad/mcp/index.js')\"",
+      "node mcp/index.js --help",
+      "node ../Agy-Squad/mcp/index.js"
+    ]) {
+      const siblingRes = runHook(
+        {
+          conversationId: "lead-dep-allow",
+          cwd: wsDir,
+          toolCall: { name: "run_command", args: { CommandLine: allowedSiblingProbe } }
+        },
+        cliEnv
+      );
+      assert.equal(siblingRes.decision, "allow", `Sibling mcp/index.js probe must be allowed (LEAD-DEP-001): ${allowedSiblingProbe}`);
+    }
+    for (const blockedInternalProbe of [
+      "node -e \"import('./lib/transcript-core.mjs')\"",
+      "node -e \"import('agy-context-saver/mcp/index.js')\"",
+      "node -e \"import('./bin/agy-context.mjs')\"",
+      "node bin/agy-context.mjs transcript health && true"
+    ]) {
+      const internalRes = runHook(
+        {
+          conversationId: "lead-dep-deny",
+          cwd: wsDir,
+          toolCall: { name: "run_command", args: { CommandLine: blockedInternalProbe } }
+        },
+        cliEnv
+      );
+      assert.equal(internalRes.decision, "deny", `Internal Agy-Context-Saver script probe must remain denied: ${blockedInternalProbe}`);
+    }
+
+    // ACS-HOOK-GREP-CLAMP: implicit grep is reverted (lossless), explicit `rtk grep` allowed, >45 KiB spillover rtk read fails loud without silent --tail-lines rewrite
+    const implicitGrepRes = runHook(
+      {
+        conversationId: "grep-clamp-implicit",
+        cwd: wsDir,
+        toolCall: { name: "run_command", args: { CommandLine: 'grep -rn "HOOK_KEY" scripts/', WaitMsBeforeAsync: 5000 } }
+      },
+      cliEnv
+    );
+    assert.equal(implicitGrepRes.decision, "allow");
+    assert.equal(
+      implicitGrepRes.overwrite?.CommandLine,
+      undefined,
+      "Implicit grep must not be silently lossy-rewritten to rtk grep (ACS-HOOK-GREP-CLAMP)"
+    );
+
+    const explicitRtkGrepRes = runHook(
+      {
+        conversationId: "grep-clamp-explicit",
+        cwd: wsDir,
+        toolCall: { name: "run_command", args: { CommandLine: 'rtk grep -rn "HOOK_KEY" scripts/', WaitMsBeforeAsync: 5000 } }
+      },
+      cliEnv
+    );
+    assert.equal(explicitRtkGrepRes.decision, "allow");
+
+    const largeSpillDir = path.join(wsDir, ".system_generated", "steps", "99");
+    fs.mkdirSync(largeSpillDir, { recursive: true });
+    const largeSpillFile = path.join(largeSpillDir, "output.txt");
+    fs.writeFileSync(largeSpillFile, "L".repeat(47000), "utf8");
+    const unboundedLargeSpill = runHook(
+      {
+        conversationId: "spill-clamp-unbounded",
+        cwd: wsDir,
+        toolCall: { name: "run_command", args: { CommandLine: `rtk read "${largeSpillFile}"`, WaitMsBeforeAsync: 5000 } }
+      },
+      cliEnv
+    );
+    assert.equal(
+      unboundedLargeSpill.decision,
+      "deny",
+      "Unbounded rtk read on >45 KiB spillover must deny with explicit --head-lines/--tail-lines guidance rather than silently rewriting to --tail-lines 150 (ACS-HOOK-GREP-CLAMP)"
+    );
+    assert.match(unboundedLargeSpill.reason, /--head-lines 150/);
+    assert.match(unboundedLargeSpill.reason, /--tail-lines 150/);
+
+    // Filter --level/-l does not bound line counts and must not bypass >45 KiB spillover protection
+    for (const nonBoundFlag of ["-l none", "--level minimal", "--level=none", "-n"]) {
+      const levelBypassRes = runHook(
+        {
+          conversationId: "spill-clamp-level",
+          cwd: wsDir,
+          toolCall: { name: "run_command", args: { CommandLine: `rtk read ${nonBoundFlag} "${largeSpillFile}"`, WaitMsBeforeAsync: 5000 } }
+        },
+        cliEnv
+      );
+      assert.equal(
+        levelBypassRes.decision,
+        "deny",
+        `Non-line-bounding 'rtk read ${nonBoundFlag}' on >45 KiB spillover must still deny (ACS-HOOK-GREP-CLAMP)`
+      );
+    }
+
+    const boundedHeadLargeSpill = runHook(
+      {
+        conversationId: "spill-clamp-head",
+        cwd: wsDir,
+        toolCall: { name: "run_command", args: { CommandLine: `rtk read --head-lines 150 "${largeSpillFile}"`, WaitMsBeforeAsync: 5000 } }
+      },
+      cliEnv
+    );
+    assert.equal(boundedHeadLargeSpill.decision, "allow");
 
     console.log("✓ Group H regression checks passed (payload.cwd, 2>/dev/null, antigravity-cli, swarm_view, Step0>16KiB, cross-swarm isolation, query current, Wave 2 regressions)");
   } finally {

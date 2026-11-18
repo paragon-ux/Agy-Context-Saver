@@ -1,7 +1,7 @@
 {
   "name": "agy-context-saver",
   "displayName": "Agy-Context-Saver",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "PreToolUse execution hook, background polling governor, and transcript CLI (agy-context) for Google Antigravity, paired with RTK.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [

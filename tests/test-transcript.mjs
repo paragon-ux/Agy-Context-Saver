@@ -1192,6 +1192,72 @@ try {
       if (prevBrainEnv !== undefined) process.env.AGY_BRAIN_DIR = prevBrainEnv;
     }
 
+    // ACS-RUN-TRANSCRIPT-CLAMP: boilerplate stripping before summary slicing, wider compact tool args, and widened compact read window
+    const clampConv = "acs-run-transcript-clamp";
+    const clampLogs = path.join(brainDir, clampConv, ".system_generated", "logs");
+    fs.mkdirSync(clampLogs, { recursive: true });
+    const longToolArg = "scratch/agy-squad/squad-skill_and_pr_review_audit/specialist-1/report.md";
+    const clampSteps = [
+      {
+        step_index: 1,
+        type: "USER_INPUT",
+        content: "Inspect transcript clamp fixes",
+        created_at: "2026-11-16T03:00:00Z"
+      },
+      {
+        step_index: 2,
+        type: "GENERIC",
+        status: "DONE",
+        content:
+          "A pre-tool hook changed the arguments of this tool call before it ran. Changed: CommandLine.\n\n" +
+          "Created At: 2026-11-16T22:33:25-05:00\n" +
+          "Completed At: 2026-11-16T22:33:29-05:00\n" +
+          "Created At: 2026-11-16T22:33:25-05:00\n" +
+          "Completed At: 2026-11-16T22:33:29-05:00\n" +
+          "Command exited with code 0.\n\n" +
+          "Command output:\n" +
+          "SIGNAL_AFTER_BOILERPLATE_VISIBLE_OK " + "X".repeat(600),
+        tool_calls: [{ name: "read_file", args: { Path: longToolArg } }],
+        created_at: "2026-11-16T03:00:05Z"
+      },
+      ...Array.from({ length: 12 }, (_, idx) => ({
+        step_index: 3 + idx,
+        type: "GENERIC",
+        status: "DONE",
+        content: `Generic step ${3 + idx} ` + "D".repeat(650),
+        created_at: `2026-11-16T03:00:${String(10 + idx).padStart(2, "0")}Z`
+      }))
+    ];
+    fs.writeFileSync(path.join(clampLogs, "transcript.jsonl"), clampSteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+    const clampSummary = await queryTranscript({
+      conversationId: clampConv,
+      summaryOnly: true,
+      includeToolCalls: true
+    });
+    assert.match(
+      clampSummary.text,
+      /SIGNAL_AFTER_BOILERPLATE_VISIBLE_OK/,
+      "query --summary must strip leading Created At / Completed At boilerplate before 120-char preview slice"
+    );
+    assert.ok(
+      clampSummary.text.includes(longToolArg),
+      "formatCompactToolList must preserve full 72-char path arguments without 33-char truncation"
+    );
+    const clampCompactRead = await readTranscript({
+      conversationId: clampConv,
+      mode: "compact",
+      lastTurns: 10
+    });
+    assert.ok(
+      clampCompactRead.text.length > 4500 && clampCompactRead.text.length <= 24500,
+      `read --mode compact window must widen beyond 3800 chars (got ${clampCompactRead.text.length})`
+    );
+    assert.match(
+      clampCompactRead.text,
+      /D{600}/,
+      "read --mode compact non-dialogue GENERIC step cap must widen beyond 300 chars"
+    );
+
     console.log("✓ Parent policy CLI, runtime hook-grant verification, atomic concurrent grants, and ACS-RUN-008..010 + Wave 2 regressions verified");
   }
 } finally {
