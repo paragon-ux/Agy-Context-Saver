@@ -11,7 +11,7 @@
 ### RTK (`>= 1.1.0`)
 - Rewrites supported shell commands via `rtk hook antigravity` (`git`, `pytest`, `cargo`, `npm`, `tsc`, `docker`, and linters).
 - Searches and lists workspace files (`rtk grep`, `rtk find`, `rtk ls`, `rtk tree`).
-- Reads step spillovers and completed task logs (`rtk read`, including `cat`/`head`/`tail` auto-rewrites) and filters command output to errors or summaries (`rtk err`, `rtk summary`).
+- Reads step spillovers and completed task logs (`rtk read`, including `cat` and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrites) and filters command output to errors or summaries (`rtk err`, `rtk summary`).
 
 ### Agy-Context-Saver (`v2.0.x`)
 - Enforces Reactive Wakeup backoff on `manage_task` and `schedule`, backed by a 5-strike `force_ask` circuit breaker.
@@ -29,14 +29,14 @@
 The `PreToolUse` hook intercepts `run_command`. After running internal state, transcript access, and task backoff checks, it passes the command payload to `rtk hook antigravity` over stdin JSON:
 - Supported commands (`git status`, `pytest`, `cargo test`) receive an updated `CommandLine` rewrite (`rtk git`, `rtk pytest`, or `bash -c 'rtk ...'`).
 - Authorized `agy-context transcript` calls under `self-only` governance have `--id <callerConvId>` injected before execution so the child session can only read its own transcript.
-- Implicit `wc`, `ls`, and `diff` rewrites that would alter output format are reverted unless explicitly invoked as `rtk ...`. When host `rg` is absent, `rg` commands fall back to `rtk grep`.
+- Implicit `wc`, `ls`, `diff`, and `grep` rewrites that would alter output format are reverted unless explicitly invoked as `rtk ...`. When host `rg` is absent, `rg` commands fall back to `rtk grep`.
 - Unset `WaitMsBeforeAsync` on non-daemon commands is upgraded to `10,000ms` so short commands finish in-turn.
 
 ### 2. 3-Tier Workspace File Inspection
 To prevent multi-thousand-line file dumps while keeping exact 1-indexed line numbers for `edit_file` and `write_file`:
 1. **Tier 1 (Search and discovery):** `rtk grep`, `rtk find`, and `rtk ls` locate target files and `[StartLine, EndLine]` ranges.
 2. **Tier 2 (Bounded `read_file` slices):** `read_file` calls pass `StartLine` and `EndLine` (`1-150` lines, or `1..TotalLines` when a file is `<= 800` lines and `<= 45 KiB`). Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass through Safe Harbor without slice bounds.
-3. **Tier 3 (Spillovers and completed task logs only):** Step output spillovers (`.system_generated/steps/<step>/output.txt`) allow bounded `read_file` (`<= 150` lines) or single unchained `rtk read <path>` calls. Completed background task logs (`tasks/<taskId>.log`) allow single unchained `rtk read` calls once finished (`cat`, `head`, and `tail` auto-rewrite via `rtk`, with `--head-lines 150` / `--tail-lines 150` required above `45 KiB`; unknown-state logs require explicit `rtk read`). Editable workspace files remain on Tier 2 bounded `read_file` slices so 1-indexed line numbers stay exact.
+3. **Tier 3 (Spillovers and completed task logs only):** Step output spillovers (`.system_generated/steps/<step>/output.txt`) allow bounded `read_file` (`<= 150` lines) or single unchained `rtk read <path>` calls. Completed background task logs (`tasks/<taskId>.log`) allow single unchained `rtk read` calls once finished (`cat`, and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; use explicit `rtk read <path>` for bare `tail`, quoted/spaced paths, Windows backslash `head`/`tail`, or env-prefixed calls, with `--head-lines 150` / `--tail-lines 150` required above `45 KiB`; unknown-state logs require explicit `rtk read`). Editable workspace files remain on Tier 2 bounded `read_file` slices so 1-indexed line numbers stay exact, and `read_many_files` routes editable files to bounded `read_file` while allowing `rtk read` for read-only logs/spillovers.
 
 ### 3. Internal State, State Directory & Script Scanning
 Segment-, quote-, and heredoc-aware shell parsing protects `.system_generated/` and `getStateDir()`:

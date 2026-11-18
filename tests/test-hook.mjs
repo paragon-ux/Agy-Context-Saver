@@ -335,7 +335,8 @@ console.log("\n--- Group C: read_file & view_file Safe Harbor + Hybrid Slice ---
     toolCall: { name: "read_many_files", args: { paths: ["src/a.js", "src/b.js"] } }
   });
   assert.equal(readManyOut.decision, "deny", "Native read_many_files must be denied");
-  assert.match(readManyOut.reason, /rtk read/, "read_many_files denial must still suggest rtk read");
+  assert.match(readManyOut.reason, /read_file/, "read_many_files denial must steer editable code to bounded read_file");
+  assert.match(readManyOut.reason, /rtk read/, "read_many_files denial must still retain rtk read for logs/spillovers");
   console.log("✓ Symmetrical read_file / view_file Safe Harbor, Hybrid Slice, and spillover bounds verified");
 }
 

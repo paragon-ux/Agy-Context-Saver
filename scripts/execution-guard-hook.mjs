@@ -46,6 +46,9 @@ function resolveHookPath(p) {
 
 const HOOK_DEDUP_TTL_MS = 5000;
 const HOOK_SAME_ARG_CROSS_SCRIPT_MS = 500;
+const MAX_SAFE_SLICE_LINES = 150;
+const MAX_FULL_FILE_LINES = 800;
+const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes)
 let dedupRecordCtx = null;
 
 function respond(obj) {
@@ -389,39 +392,120 @@ function isProtectedBenchmarkPath(targetPath) {
 }
 
 /**
+ * Expands a leading `~/` or `~\` prefix against the active Antigravity profile home directory.
+ */
+function expandLeadingTilde(targetPath) {
+  if (!targetPath || typeof targetPath !== "string") return "";
+  const trimmed = targetPath.trim();
+  if (trimmed === "~") return getProfileHomeDir();
+  if (/^~[/\\]/.test(trimmed)) {
+    return path.join(getProfileHomeDir(), trimmed.slice(2));
+  }
+  return trimmed;
+}
+
+/**
+ * Strips optional `file://` scheme and leading `/C:` Windows URI slash from a path token.
+ */
+function cleanFileToken(targetPath) {
+  let tok = String(targetPath || "").trim().replace(/^file:\/\//i, "");
+  if (/^\/[A-Za-z]:/.test(tok)) tok = tok.slice(1);
+  return tok;
+}
+
+/**
  * Checks if target path strictly matches runtime step output spillover:
  * `<prefix>/.system_generated/steps/<digits>/output.txt` (or relative `.system_generated/steps/<digits>/output.txt`).
  */
 function isStepSpilloverPath(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
-  const normalized = targetPath.trim().replace(/\\/g, "/");
+  const normalized = cleanFileToken(targetPath).replace(/\\/g, "/");
   return /(?:^|\/)\.system_generated\/steps\/\d+\/output\.txt$/i.test(normalized);
+}
+
+/**
+ * Returns all step spillover path tokens found in a tokenized command array.
+ */
+function findStepSpilloverTokens(tokens) {
+  const found = [];
+  for (const tok of tokens) {
+    const clean = cleanFileToken(tok);
+    if (isStepSpilloverPath(clean)) found.push(clean);
+  }
+  return found;
 }
 
 /**
  * Checks whether any path token in a command string strictly contains a step spillover path.
  */
 function findStepSpilloverToken(tokens) {
-  for (const tok of tokens) {
-    const clean = tok.replace(/^file:\/\//i, "");
-    if (isStepSpilloverPath(clean)) return clean;
-  }
-  return null;
+  const found = findStepSpilloverTokens(tokens);
+  return found.length > 0 ? found[0] : null;
 }
 
 /**
- * Extracts the task-log reference from a target path or command, or null.
+ * Extracts `{ id, token }` if a single file path token matches a `tasks/*.log` path, or null.
+ * Preserves spaces inside full path tokens.
+ */
+function matchTaskLogToken(targetPath) {
+  if (!targetPath || typeof targetPath !== "string") return null;
+  const clean = cleanFileToken(targetPath);
+  const normalized = clean.replace(/\\/g, "/");
+  const m = normalized.match(/^(?:.+\/)?tasks\/(?:task-)?([a-zA-Z0-9_-]+)\.log$/i);
+  if (!m) return null;
+  return { id: m[1], token: normalized };
+}
+
+/**
+ * Extracts all `{ id, token }` task-log references across command/script text or a single target path,
+ * preserving spaces inside quoted spans and full tokens.
+ */
+function extractTaskLogMatches(text) {
+  if (!text || typeof text !== "string" || !text.includes(".log")) return [];
+  const normalized = text.replace(/\\/g, "/");
+  if (!normalized.includes("tasks/")) return [];
+
+  const matches = [];
+  const pushMatch = (m) => {
+    if (!m) return;
+    if (matches.some((existing) => existing.id === m.id && existing.token.endsWith(m.token))) return;
+    const filtered = matches.filter((existing) => !(existing.id === m.id && m.token.endsWith(existing.token)));
+    if (filtered.length !== matches.length) {
+      matches.length = 0;
+      matches.push(...filtered);
+    }
+    matches.push(m);
+  };
+
+  for (const tok of tokenizeShellWords(text)) {
+    pushMatch(matchTaskLogToken(tok));
+  }
+
+  const spanRe = /"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s"'()=;,\[\]{}]+)/g;
+  let sm;
+  while ((sm = spanRe.exec(normalized)) !== null) {
+    const cand = sm[1] ?? sm[2] ?? sm[3] ?? "";
+    const directCand = matchTaskLogToken(cand);
+    if (directCand) {
+      pushMatch(directCand);
+      continue;
+    }
+    const innerRe = /(?:^|[\s"'(=,;\[{])((?:[^\s"'(=,;\[{]*\/)?tasks\/(?:task-)?([a-zA-Z0-9_-]+)\.log)(?=$|[\s"');,\]}])/gi;
+    let im;
+    while ((im = innerRe.exec(cand)) !== null) {
+      pushMatch({ id: im[2], token: cleanFileToken(im[1]) });
+    }
+  }
+  return matches;
+}
+
+/**
+ * Extracts the first task-log reference from a target path or command, or null.
  * Returns { id, token }: `id` is the bare task id; `token` is the matched path text.
  */
 function getTaskLogMatch(text) {
-  if (!text || typeof text !== "string" || !text.includes(".log")) return null;
-  const normalized = text.replace(/\\/g, "/");
-  if (!normalized.includes("tasks/")) return null;
-  const m = normalized.match(/(?:^|[\s"'])((?:[^\s"']*\/)?tasks\/(?:task-)?([a-zA-Z0-9_-]+)\.log)(?=$|[\s"'])/i);
-  if (!m) return null;
-  let token = m[1].replace(/^file:\/\//i, "");
-  if (/^\/[A-Za-z]:/.test(token)) token = token.slice(1);
-  return { id: m[2], token };
+  const matches = extractTaskLogMatches(text);
+  return matches.length > 0 ? matches[0] : null;
 }
 
 const TASK_TAIL_BYTES = 262144; // transcript tail scanned first (256 KB)
@@ -492,34 +576,70 @@ function scanTaskMarkers(text, taskName) {
 }
 
 /**
+ * Picks candidate log and transcript paths inside one `.system_generated` directory,
+ * checking the exact literal filename (`tasks/custom.log`) before `task-<id>.log`.
+ */
+function pickTaskFilesInSysDir(sysDir, taskName, literalBase) {
+  const candidateTranscript = path.join(sysDir, "logs", "transcript.jsonl");
+  const literalLog = literalBase ? path.join(sysDir, "tasks", literalBase) : "";
+  const prefixedLog = path.join(sysDir, "tasks", `${taskName}.log`);
+  let chosenLog = prefixedLog;
+  if (literalLog && literalBase.toLowerCase() !== `${taskName}.log`.toLowerCase() && fs.existsSync(literalLog)) {
+    chosenLog = literalLog;
+  } else if (fs.existsSync(prefixedLog)) {
+    chosenLog = prefixedLog;
+  } else if (literalLog && literalBase) {
+    chosenLog = literalLog;
+  }
+  return { candidateTranscript, chosenLog };
+}
+
+/**
  * Resolves the task log name, candidate log path, and transcript path for a matched task token.
+ * Expands leading `~/`, resolves relative `<otherConvId>/.system_generated/tasks/...` across brain dirs,
+ * and falls back to non-`task-` literal log filenames when present.
  */
 function resolveTaskPaths(match, convId) {
   const taskName = `task-${match.id}`;
-  const token = match.token;
+  const expandedTok = expandLeadingTilde(cleanFileToken(match.token));
+  const normExpanded = expandedTok.replace(/\\/g, "/");
+  const literalBase = /\.log$/i.test(normExpanded) ? path.posix.basename(normExpanded) : "";
   let logPath = null;
   let transcript = null;
 
-  if (/^(?:[A-Za-z]:)?\//.test(token)) {
-    logPath = token;
-    const sysDir = path.posix.dirname(path.posix.dirname(token));
+  if (/^(?:[A-Za-z]:)?\//.test(normExpanded)) {
+    logPath = normExpanded;
+    const sysDir = path.posix.dirname(path.posix.dirname(normExpanded));
     if (path.posix.basename(sysDir) === ".system_generated") transcript = `${sysDir}/logs/transcript.jsonl`;
+  } else {
+    const relCrossMatch = normExpanded.match(/^([^/]+)\/\.system_generated\/tasks\/([^/]+\.log)$/i);
+    const targetConv = relCrossMatch ? relCrossMatch[1] : (convId && convId !== "global" ? convId : "");
+    if (targetConv) {
+      for (const bDir of getBrainDirs()) {
+        const sysDir = path.join(bDir, targetConv, ".system_generated");
+        const { candidateTranscript, chosenLog } = pickTaskFilesInSysDir(sysDir, taskName, literalBase);
+        if (fs.existsSync(candidateTranscript) || fs.existsSync(chosenLog)) {
+          logPath = chosenLog;
+          transcript = candidateTranscript;
+          break;
+        }
+      }
+      if (!logPath || !transcript) {
+        const sysDir = path.join(getBrainDir(), targetConv, ".system_generated");
+        const { candidateTranscript, chosenLog } = pickTaskFilesInSysDir(sysDir, taskName, literalBase);
+        logPath = logPath || chosenLog;
+        transcript = transcript || candidateTranscript;
+      }
+    }
   }
-  if (convId && convId !== "global") {
+  if (!transcript && convId && convId !== "global" && !/^([^/]+)\/\.system_generated\//i.test(normExpanded)) {
     for (const bDir of getBrainDirs()) {
       const sysDir = path.join(bDir, convId, ".system_generated");
       const candidateTranscript = path.join(sysDir, "logs", "transcript.jsonl");
-      const candidateLog = path.join(sysDir, "tasks", `${taskName}.log`);
-      if (fs.existsSync(candidateTranscript) || fs.existsSync(candidateLog)) {
-        logPath = logPath || candidateLog;
-        transcript = transcript || candidateTranscript;
+      if (fs.existsSync(candidateTranscript)) {
+        transcript = candidateTranscript;
         break;
       }
-    }
-    if (!logPath || !transcript) {
-      const sysDir = path.join(getBrainDir(), convId, ".system_generated");
-      logPath = logPath || path.join(sysDir, "tasks", `${taskName}.log`);
-      transcript = transcript || path.join(sysDir, "logs", "transcript.jsonl");
     }
   }
   return { taskName, logPath, transcript };
@@ -527,17 +647,17 @@ function resolveTaskPaths(match, convId) {
 
 /**
  * Builds deduplicated candidate paths to stat for `>45 KiB` spillover and task-log bounds checks,
- * resolving relative tokens against active brain dirs when absent from `activeHookCwd`.
+ * expanding `~/` and resolving relative tokens against active brain dirs when absent from `activeHookCwd`.
  */
 function resolveInternalReadStatPaths(candidateTok, convId, taskMatch, isSpillover) {
-  let cleanTok = String(candidateTok || "").replace(/^file:\/\//i, "");
-  if (/^\/[A-Za-z]:/.test(cleanTok)) cleanTok = cleanTok.slice(1);
-  const normalizedTok = cleanTok.replace(/\\/g, "/");
+  const cleanTok = cleanFileToken(candidateTok);
+  const expandedTok = expandLeadingTilde(cleanTok);
+  const normalizedTok = expandedTok.replace(/\\/g, "/");
   const results = [];
-  const directPath = resolveHookPath(cleanTok);
+  const directPath = resolveHookPath(expandedTok);
   if (directPath) results.push(directPath);
 
-  const isAbs = path.isAbsolute(cleanTok) || /^(?:[A-Za-z]:)?\//.test(normalizedTok);
+  const isAbs = path.isAbsolute(expandedTok) || /^(?:[A-Za-z]:)?\//.test(normalizedTok);
   if (!isAbs) {
     const brainDirs = getBrainDirs();
     if (/^[^/]+\/\.system_generated\//i.test(normalizedTok)) {
@@ -546,7 +666,9 @@ function resolveInternalReadStatPaths(candidateTok, convId, taskMatch, isSpillov
       }
     }
     if (convId && convId !== "global") {
-      const tokTaskMatch = taskMatch && (cleanTok === taskMatch.token ? taskMatch : getTaskLogMatch(cleanTok));
+      const tokTaskMatch =
+        (taskMatch && cleanTok.replace(/\\/g, "/") === cleanFileToken(taskMatch.token).replace(/\\/g, "/") ? taskMatch : null) ||
+        matchTaskLogToken(expandedTok);
       if (tokTaskMatch) {
         const resolved = resolveTaskPaths(tokTaskMatch, convId);
         if (resolved.logPath) results.push(resolved.logPath);
@@ -568,6 +690,19 @@ function resolveInternalReadStatPaths(candidateTok, convId, taskMatch, isSpillov
     }
   }
   return [...new Set(results.filter(Boolean))];
+}
+
+/**
+ * Returns true if any resolved disk path for an internal spillover or task log exceeds 45 KiB.
+ */
+function isOversizedInternalTarget(target, convId, taskMatchObj, isSpilloverTarget) {
+  for (const statPath of resolveInternalReadStatPaths(target, convId, taskMatchObj, isSpilloverTarget)) {
+    try {
+      const st = fs.statSync(statPath);
+      if (st.isFile()) return st.size > MAX_FULL_FILE_BYTES;
+    } catch {}
+  }
+  return false;
 }
 
 function getTaskState(match, convId) {
@@ -3519,9 +3654,103 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
   return texts;
 }
 
-function isRtkReadCommand(cmd) {
+const RTK_READ_LINE_VALUE_FLAGS = new Set(["--head-lines", "--tail-lines", "--max-lines", "-m"]);
+const RTK_READ_OTHER_VALUE_FLAGS = new Set(["-l", "--level"]);
+const RTK_READ_ALLOWED_LEVELS = new Set(["none", "minimal", "aggressive"]);
+
+/**
+ * Parses an `rtk read ...` invocation (fail-closed on env prefixes: PR9-RUN-007 Closed (By Design)).
+ * Tracks positional operands after `--`, validates line bounds (`1 <= n <= MAX_SAFE_SLICE_LINES`),
+ * and rejects disallowed flags or `-l`/`--level` values.
+ */
+function parseRtkReadCommand(cmd) {
+  if (!cmd || typeof cmd !== "string") return null;
   const tokens = tokenizeShellWords(cmd);
-  return tokens.length >= 2 && normalizeCmdName(tokens[0]) === "rtk" && tokens[1].toLowerCase() === "read";
+  if (tokens.length < 2) return null;
+  if (normalizeCmdName(tokens[0]) !== "rtk" || tokens[1].toLowerCase() !== "read") return null;
+
+  const operands = [];
+  const lineLimits = [];
+  let hasInvalidOrOversizedLineBound = false;
+  let hasDisallowedFlag = false;
+  let afterDoubleDash = false;
+
+  const recordLineLimit = (rawVal) => {
+    if (!/^\d+$/.test(rawVal)) {
+      hasInvalidOrOversizedLineBound = true;
+      return;
+    }
+    const n = Number(rawVal);
+    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SAFE_SLICE_LINES) {
+      hasInvalidOrOversizedLineBound = true;
+      return;
+    }
+    lineLimits.push(n);
+  };
+
+  for (let i = 2; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (!afterDoubleDash && tok === "--") {
+      afterDoubleDash = true;
+      continue;
+    }
+    if (afterDoubleDash || !tok.startsWith("-") || tok === "-") {
+      operands.push(tok);
+      continue;
+    }
+    if (RTK_READ_LINE_VALUE_FLAGS.has(tok)) {
+      if (i + 1 >= tokens.length) {
+        hasInvalidOrOversizedLineBound = true;
+      } else {
+        recordLineLimit(tokens[++i]);
+      }
+      continue;
+    }
+    const eqIdx = tok.indexOf("=");
+    if (eqIdx > 0) {
+      const flagName = tok.slice(0, eqIdx);
+      const flagVal = tok.slice(eqIdx + 1);
+      if (flagName === "--head-lines" || flagName === "--tail-lines" || flagName === "--max-lines") {
+        recordLineLimit(flagVal);
+        continue;
+      }
+      if (flagName === "--level") {
+        if (!RTK_READ_ALLOWED_LEVELS.has(flagVal.toLowerCase())) hasDisallowedFlag = true;
+        continue;
+      }
+      hasDisallowedFlag = true;
+      continue;
+    }
+    if (tok.startsWith("-m") && tok.length > 2) {
+      recordLineLimit(tok.slice(2));
+      continue;
+    }
+    if (RTK_READ_OTHER_VALUE_FLAGS.has(tok)) {
+      const levelVal = i + 1 < tokens.length ? tokens[++i] : "";
+      if (!RTK_READ_ALLOWED_LEVELS.has(levelVal.toLowerCase())) hasDisallowedFlag = true;
+      continue;
+    }
+    if (tok.startsWith("-l") && tok.length > 2) {
+      if (!RTK_READ_ALLOWED_LEVELS.has(tok.slice(2).toLowerCase())) hasDisallowedFlag = true;
+      continue;
+    }
+    if (/^(?:-n|--line-numbers|--skip-env|-h|--help)$/i.test(tok) || /^-[nh]+$/i.test(tok)) {
+      continue;
+    }
+    hasDisallowedFlag = true;
+  }
+
+  return {
+    operands,
+    lineLimits,
+    hasSafeLineBound: lineLimits.length > 0 && !hasInvalidOrOversizedLineBound,
+    hasInvalidOrOversizedLineBound,
+    hasDisallowedFlag
+  };
+}
+
+function isRtkReadCommand(cmd) {
+  return Boolean(parseRtkReadCommand(cmd));
 }
 
 function isSingleUnchainedShellCmd(segments) {
@@ -4466,9 +4695,11 @@ try {
       });
       const inspectableCombined = inspectableTexts.join("\n");
       const singleTokens = segments.length === 1 ? tokenizeShellWords(segments[0].text) : [];
-      spilloverTok = findStepSpilloverToken(singleTokens);
-      isSpillover = Boolean(spilloverTok);
-      taskMatch = getTaskLogMatch(inspectableCombined);
+      const spilloverTokens = findStepSpilloverTokens(singleTokens);
+      spilloverTok = spilloverTokens[0] || null;
+      isSpillover = spilloverTokens.length > 0;
+      const taskMatches = extractTaskLogMatches(inspectableCombined);
+      taskMatch = taskMatches[0] || null;
 
       // Block unwrapped shell/interpreter mutations of governance/hook files
       if (hasGovernanceMutationInText(inspectableCombined, convId)) {
@@ -4488,14 +4719,6 @@ try {
         });
       }
 
-      // Check 1: Other protected internal state (transcripts, governance state, non-canonical agy-context transcript, interpreter imports)
-      if (!isSpillover && !taskMatch && isProtectedShellOrScriptOperation(inspectableCombined)) {
-        respond({
-          decision: "deny",
-          reason: buildInternalStateShellDenial(convId)
-        });
-      }
-
       // If spillover or task log is chained, redirected, uses heredocs, subshells, or `..` traversal -> DENY
       if ((isSpillover || taskMatch) && !isSingleUnchainedShellCmd(segments)) {
         respond({
@@ -4506,10 +4729,43 @@ try {
         });
       }
 
-      // Check 2: Task Log Inspection (Lifecycle-Gated): RUNNING => Proportional Backoff
-      taskState = taskMatch ? getTaskState(taskMatch, convId) : null;
-      if (taskState === "RUNNING") {
-        denyRunningTask(taskMatch.id, convId);
+      // Check 2: Task Log Inspection (Lifecycle-Gated across ALL matched logs): RUNNING => Proportional Backoff
+      if (taskMatches.length > 0) {
+        const taskStates = taskMatches.map((m) => ({ match: m, state: getTaskState(m, convId) }));
+        const runningEntry = taskStates.find((entry) => entry.state === "RUNNING");
+        if (runningEntry) {
+          denyRunningTask(runningEntry.match.id, convId);
+        }
+        taskState = taskStates.some((entry) => entry.state === "UNKNOWN") ? "UNKNOWN" : "COMPLETED";
+      }
+
+      // Check 1: Other protected internal state (strip at most one non-mixed spillover/task token from single-segment tokens so quoted pairs & piggybacked paths never bypass Check 1)
+      let inspectRemainder = inspectableCombined;
+      if ((isSpillover || taskMatch) && inspectableTexts.length === 1 && segments.length === 1) {
+        const singleAllowedTok =
+          isSpillover && !taskMatch && spilloverTokens.length === 1
+            ? spilloverTokens[0]
+            : (!isSpillover && taskMatches.length === 1 ? taskMatches[0].token : "");
+        if (singleAllowedTok) {
+          const normTarget = cleanFileToken(singleAllowedTok).replace(/\\/g, "/");
+          let removed = false;
+          const remainingTokens = singleTokens.filter((tok) => {
+            if (!removed && cleanFileToken(tok).replace(/\\/g, "/") === normTarget) {
+              removed = true;
+              return false;
+            }
+            return true;
+          });
+          if (removed) {
+            inspectRemainder = remainingTokens.join(" ");
+          }
+        }
+      }
+      if (isProtectedShellOrScriptOperation(inspectRemainder)) {
+        respond({
+          decision: "deny",
+          reason: buildInternalStateShellDenial(convId)
+        });
       }
     }
 
@@ -4561,8 +4817,28 @@ try {
       effectiveCmd = effectiveCmd.replace(/(^|\s)--parent(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--parent ${agyTranscriptCheck.injectParentId}`);
     }
 
-    const isRtkRead = isRtkReadCommand(effectiveCmd);
-    const isExplicitRtkRead = isRtkReadCommand(rawCmd) && isRtkRead;
+    const parsedEff = parseRtkReadCommand(effectiveCmd);
+    const parsedRaw = parseRtkReadCommand(rawCmd);
+    const isRtkRead = Boolean(parsedEff);
+    const isExplicitRtkRead = Boolean(parsedRaw && parsedEff);
+
+    // Enforce strict single-operand isolation whenever an internal spillover or task log is present (PR9-RUN-001)
+    if ((isSpillover || taskMatch) && parsedEff) {
+      const opCountOk = parsedEff.operands.length === 1;
+      const cleanOp = opCountOk ? cleanFileToken(parsedEff.operands[0]) : "";
+      const singleOpValid =
+        opCountOk &&
+        !parsedEff.hasDisallowedFlag &&
+        ((isSpillover && !taskMatch && isStepSpilloverPath(cleanOp)) ||
+          (taskMatch && !isSpillover && Boolean(matchTaskLogToken(cleanOp))));
+      if (!singleOpValid) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Internal step spillovers and task logs must be inspected strictly one file at a time using 'rtk read <path>' with valid read flags (multi-file operands and mixed targets are prohibited)."
+        });
+      }
+    }
 
     // Check 3: Step Output Spillover Safe Harbor (strictly single unchained `rtk read` only)
     if (isSpillover && !isRtkRead) {
@@ -4573,7 +4849,7 @@ try {
       });
     }
 
-    // Check 4: Completed task logs allow post-rewrite `rtk read` (`cat`/`head`/`tail`); unknown-state logs require explicit `rtk read`
+    // Check 4: Completed task logs allow post-rewrite `rtk read` (`cat`, unquoted `head -n`/`tail -n`); unknown-state logs require explicit `rtk read`
     if (taskMatch && (taskState === "COMPLETED" ? !isRtkRead : !isExplicitRtkRead)) {
       respond({
         decision: "deny",
@@ -4585,45 +4861,29 @@ try {
     }
 
     // Fail loud with explicit guidance instead of silently injecting --tail-lines 150 on >45 KiB spillover/task logs (ACS-HOOK-GREP-CLAMP)
-    if (isRtkRead && (isSpillover || taskMatch)) {
-      const hasLineBoundFlag = /(?:^|\s)(?:--head-lines|--tail-lines|--max-lines|-m)(?:=|\s|$)/.test(effectiveCmd);
-      if (!hasLineBoundFlag) {
-        const rtkTokens = tokenizeShellWords(effectiveCmd);
-        const candidates = [];
-        if (spilloverTok) candidates.push(spilloverTok);
-        if (taskMatch?.token) candidates.push(taskMatch.token);
-        for (let i = 2; i < rtkTokens.length; i++) {
-          const tok = rtkTokens[i];
-          if (tok === "--") {
-            for (let j = i + 1; j < rtkTokens.length; j++) candidates.push(rtkTokens[j]);
-            break;
-          }
-          if (tok === "-l" || tok === "--level") {
-            i++;
-            continue;
-          }
-          if (!tok.startsWith("-")) {
-            candidates.push(tok);
-          }
-        }
-        for (const candidateTok of new Set(candidates)) {
-          for (const statPath of resolveInternalReadStatPaths(candidateTok, convId, taskMatch, isSpillover)) {
-            try {
-              const st = fs.statSync(statPath);
-              if (st.isFile()) {
-                if (st.size > 46080) {
-                  const kib = (st.size / 1024).toFixed(1);
-                  respond({
-                    decision: "deny",
-                    reason:
-                      `Antigravity Execution Governance: Unbounded 'rtk read' on >45 KiB spillover/task log (${kib} KiB) is denied to prevent cascading spillovers. ` +
-                      "Pass '--head-lines 150' or '--tail-lines 150' explicitly (or use bounded 'read_file' <= 150 lines) instead."
-                  });
-                }
-                break;
+    if (isRtkRead && (isSpillover || taskMatch) && !parsedEff.hasSafeLineBound) {
+      const candidates = [];
+      if (spilloverTok) candidates.push(spilloverTok);
+      if (taskMatch?.token) candidates.push(taskMatch.token);
+      for (const op of parsedEff.operands) candidates.push(op);
+      for (const candidateTok of new Set(candidates)) {
+        for (const statPath of resolveInternalReadStatPaths(candidateTok, convId, taskMatch, isSpillover)) {
+          try {
+            const st = fs.statSync(statPath);
+            if (st.isFile()) {
+              if (st.size > MAX_FULL_FILE_BYTES) {
+                const kib = (st.size / 1024).toFixed(1);
+                const boundedFallback = isSpillover && !taskMatch ? " (or use bounded 'read_file' <= 150 lines)" : "";
+                respond({
+                  decision: "deny",
+                  reason:
+                    `Antigravity Execution Governance: Unbounded 'rtk read' on >45 KiB spillover/task log (${kib} KiB) is denied to prevent cascading spillovers. ` +
+                    `Pass '--head-lines 150' or '--tail-lines 150' explicitly${boundedFallback} instead.`
+                });
               }
-            } catch {}
-          }
+              break;
+            }
+          } catch {}
         }
       }
     }
@@ -4682,10 +4942,6 @@ try {
       "";
     const target = String(rawTarget).trim();
 
-    const MAX_SAFE_SLICE_LINES = 150;
-    const MAX_FULL_FILE_LINES = 800;
-    const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes)
-
     const rawStart = args.StartLine !== undefined ? args.StartLine : (args.startLine !== undefined ? args.startLine : args.start_line);
     const rawEnd = args.EndLine !== undefined ? args.EndLine : (args.endLine !== undefined ? args.endLine : args.end_line);
     const hasByteOffset = args.ByteOffset !== undefined || args.byteOffset !== undefined || args.byte_offset !== undefined;
@@ -4706,23 +4962,29 @@ try {
           respond({ decision: "allow" });
         }
       }
+      const spillCmd = isOversizedInternalTarget(target, convId, null, true)
+        ? `'rtk read --tail-lines 150 ${target}' (or '--head-lines 150')`
+        : `'rtk read ${target}'`;
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Unbounded inspection of step spillover via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'read_file' or run 'rtk read ${target}' via run_command instead.`
+        reason: `Antigravity Governance: Unbounded inspection of step spillover via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'read_file' or run ${spillCmd} via run_command instead.`
       });
     }
 
     // 2b. Task Log Inspection (Lifecycle-Gated)
-    const taskMatch = getTaskLogMatch(target);
+    const taskMatch = matchTaskLogToken(target);
     if (taskMatch) {
       const state = getTaskState(taskMatch, convId);
       if (state === "RUNNING") {
         denyRunningTask(taskMatch.id, convId);
       }
       if (state === "COMPLETED") {
+        const taskCmd = isOversizedInternalTarget(target, convId, taskMatch, false)
+          ? `'rtk read --tail-lines 150 ${target}' (or '--head-lines 150')`
+          : `'rtk read ${target}'`;
         respond({
           decision: "deny",
-          reason: `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run 'rtk read ${target}' via run_command instead.`
+          reason: `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run ${taskCmd} via run_command instead.`
         });
       }
       respond({
@@ -4817,7 +5079,8 @@ try {
     if (toolName === "read_many_files") {
       respond({
         decision: "deny",
-        reason: "Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses token optimization. Run 'rtk read <file>' via run_command instead."
+        reason:
+          "Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses token optimization. Use bounded 'read_file' slices ('<= 150' lines) for editable workspace code, or run 'rtk read <file>' via run_command for read-only logs and spillovers instead."
       });
     }
 

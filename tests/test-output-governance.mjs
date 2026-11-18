@@ -113,8 +113,14 @@ try {
   const transcriptFile = path.join(convDir, "logs", "transcript.jsonl");
 
   const { getStateDir } = await import("../scripts/state-dir.mjs");
-  try { fs.unlinkSync(path.join(getStateDir(), "agy-session-conv-test-live.json")); } catch {}
-  try { fs.unlinkSync(path.join(getStateDir(), "agy-session-conv_test_live.json")); } catch {}
+  const clearTestSessionStates = () => {
+    for (const id of ["conv-test-live", "conv-test-multi", "conv-other-caller-1", "conv-other-caller-2", "conv-test-custom", "Jane Doe Conv"]) {
+      for (const norm of [id, id.replace(/[^a-zA-Z0-9_-]/g, "_"), id.replace(/-/g, "_")]) {
+        try { fs.unlinkSync(path.join(getStateDir(), `agy-session-${norm}.json`)); } catch {}
+      }
+    }
+  };
+  clearTestSessionStates();
 
   fs.writeFileSync(liveLog, "Running output in progress...\n", "utf-8");
   fs.writeFileSync(
@@ -271,6 +277,216 @@ try {
   });
   assert.equal(cmdRelBigSpillTail.decision, "allow");
   assert.equal(cmdRelBigSpillTail.overwrite?.CommandLine, "rtk read .system_generated/steps/103/output.txt --tail-lines 150");
+
+  // PR9-RUN-002: Bounce-loop suppression (no read_file mention on task-log denial; read_file on >45 KiB includes --head-lines/--tail-lines)
+  assert.equal(cmdBigCat.reason.includes("read_file"), false, ">45 KiB task-log denial must not suggest read_file");
+  const rfBigCompleted = invokeHook({
+    conversationId: convLive,
+    toolCall: { name: "read_file", args: { Path: bigLogTok, StartLine: 1, EndLine: 150 } }
+  });
+  assert.equal(rfBigCompleted.decision, "deny");
+  assert.match(rfBigCompleted.reason, /--tail-lines 150/);
+  assert.match(rfBigCompleted.reason, /--head-lines 150/);
+
+  const rfBigSpillUnbounded = invokeHook({
+    conversationId: convLive,
+    cwd: os.tmpdir(),
+    toolCall: { name: "read_file", args: { Path: ".system_generated/steps/103/output.txt" } }
+  });
+  assert.equal(rfBigSpillUnbounded.decision, "deny");
+  assert.match(rfBigSpillUnbounded.reason, /--tail-lines 150/);
+  assert.match(rfBigSpillUnbounded.reason, /--head-lines 150/);
+
+  // PR9-TEST-001: tail -n 50 on <=45 KiB completed log allowed; UNKNOWN task logs deny auto-rewrites and allow explicit rtk read
+  const cmdCompletedTail = invokeHook({
+    conversationId: convLive,
+    toolCall: { name: "run_command", args: { CommandLine: "tail -n 50 tasks/task-live-1.log", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(cmdCompletedTail.decision, "allow");
+  assert.equal(cmdCompletedTail.overwrite?.CommandLine, "rtk read tasks/task-live-1.log --tail-lines 50");
+
+  for (const unknownAutoCmd of [
+    "cat tasks/task-unknown-99.log",
+    "head -n 50 tasks/task-unknown-99.log",
+    "tail -n 50 tasks/task-unknown-99.log"
+  ]) {
+    const outUnk = invokeHook({
+      conversationId: convLive,
+      toolCall: { name: "run_command", args: { CommandLine: unknownAutoCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(outUnk.decision, "deny", `UNKNOWN task log must deny auto-rewrite: ${unknownAutoCmd}`);
+  }
+  const outUnkExplicit = invokeHook({
+    conversationId: convLive,
+    toolCall: { name: "run_command", args: { CommandLine: "rtk read tasks/task-unknown-99.log", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(outUnkExplicit.decision, "allow", "Explicit rtk read on UNKNOWN task log stays allowed");
+
+  // PR9-RUN-003 + PR9-RUN-007: Line-bound parsing (-- -m, 0, 999999, -m150, =150) & fail-closed env prefixes
+  for (const badBoundCmd of [
+    `rtk read ${bigLogTok} -- -m`,
+    `rtk read --head-lines 999999 ${bigLogTok}`,
+    `rtk read --head-lines 0 ${bigLogTok}`,
+    `head -n 999999 ${bigLogTok}`,
+    `rtk read --head-lines 150 --tail-lines 999999 ${bigLogTok}`,
+    "FOO=1 cat tasks/task-live-1.log",
+    "AGY_BRAIN_DIR=/tmp cat tasks/task-live-1.log",
+    "rtk read -l .system_generated/steps/102/output.txt package.json"
+  ]) {
+    const outBad = invokeHook({
+      conversationId: convLive,
+      toolCall: { name: "run_command", args: { CommandLine: badBoundCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(outBad.decision, "deny", `Oversized/bypass/env-prefixed command must be denied: ${badBoundCmd}`);
+  }
+
+  for (const okBoundCmd of [
+    `rtk read -m150 ${bigLogTok}`,
+    `rtk read --head-lines=150 ${bigLogTok}`,
+    `rtk read --level minimal --head-lines 150 ${bigLogTok}`
+  ]) {
+    const outOk = invokeHook({
+      conversationId: convLive,
+      toolCall: { name: "run_command", args: { CommandLine: okBoundCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(outOk.decision, "allow", `Valid bounded rtk read must be allowed: ${okBoundCmd} (${outOk.reason || ""})`);
+  }
+
+  // PR9-RUN-001: Multi-operand smuggling vectors blocked (using fresh convId so RUNNING strikes do not hit 5-strike force_ask)
+  const convMulti = "conv-test-multi";
+  const multiDir = path.join(tempBrainDir, convMulti, ".system_generated");
+  fs.mkdirSync(path.join(multiDir, "logs"), { recursive: true });
+  fs.mkdirSync(path.join(multiDir, "tasks"), { recursive: true });
+  fs.writeFileSync(path.join(multiDir, "tasks", "task-done-m.log"), "done\n", "utf-8");
+  fs.writeFileSync(path.join(multiDir, "tasks", "task-run-m.log"), "running\n", "utf-8");
+  fs.writeFileSync(
+    path.join(multiDir, "logs", "transcript.jsonl"),
+    [
+      JSON.stringify({ step_index: 1, type: "SYSTEM_MESSAGE", content: `Task id "${convMulti}/task-done-m" finished with result:\nok` }),
+      JSON.stringify({ step_index: 2, type: "SYSTEM_MESSAGE", content: `Tool is running as a background task with task id: ${convMulti}/task-run-m` })
+    ].join("\n") + "\n",
+    "utf-8"
+  );
+
+  for (const smuggleCmd of [
+    "cat .system_generated/steps/1/output.txt .system_generated/logs/transcript.jsonl",
+    "cat tasks/task-done-m.log ~/.local/state/agy-context-saver/transcript-access.json",
+    "cat tasks/task-done-m.log tasks/task-unknown-m.log",
+    "cat tasks/task-done-m.log package.json",
+    "cat .system_generated/steps/102/output.txt tasks/task-done-m.log",
+    "rtk read tasks/nonexistent-m.log ~/.local/state/agy-context-saver/transcript-access.json",
+    "rtk read --head-lines 150 .system_generated/steps/103/output.txt package.json"
+  ]) {
+    const outSmuggle = invokeHook({
+      conversationId: convMulti,
+      toolCall: { name: "run_command", args: { CommandLine: smuggleCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(outSmuggle.decision, "deny", `Multi-operand smuggling must be denied: ${smuggleCmd}`);
+  }
+
+  const runningPiggyback = invokeHook({
+    conversationId: convMulti,
+    toolCall: { name: "run_command", args: { CommandLine: "cat tasks/task-done-m.log tasks/task-run-m.log", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(runningPiggyback.decision, "deny");
+  assert.match(runningPiggyback.reason, /actively RUNNING/, "Piggybacked running task log must trigger Check 2 backoff");
+
+  const runningPiggybackFirst = invokeHook({
+    conversationId: convMulti,
+    toolCall: { name: "run_command", args: { CommandLine: "cat tasks/task-run-m.log tasks/task-done-m.log", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(runningPiggybackFirst.decision, "deny");
+  assert.match(runningPiggybackFirst.reason, /actively RUNNING/, "Running task log before completed log must still trigger Check 2 backoff");
+
+  // PR9-RUN-004, PR9-RUN-005, PR9-RUN-006: ~/ expansion, cross-session relative, custom basename, and quoted space paths
+  const convTilde = "conv-test-tilde";
+  const tildeDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", convTilde, ".system_generated");
+  fs.mkdirSync(path.join(tildeDir, "logs"), { recursive: true });
+  fs.mkdirSync(path.join(tildeDir, "tasks"), { recursive: true });
+  fs.writeFileSync(path.join(tildeDir, "tasks", "task-run-til.log"), "running\n", "utf-8");
+  fs.writeFileSync(path.join(tildeDir, "tasks", "task-big-til.log"), "z".repeat(48 * 1024), "utf-8");
+  fs.writeFileSync(
+    path.join(tildeDir, "logs", "transcript.jsonl"),
+    [
+      JSON.stringify({ step_index: 1, type: "SYSTEM_MESSAGE", content: `Tool is running as a background task with task id: ${convTilde}/task-run-til` }),
+      JSON.stringify({ step_index: 2, type: "SYSTEM_MESSAGE", content: `Task id "${convTilde}/task-big-til" finished with result:\nok` })
+    ].join("\n") + "\n",
+    "utf-8"
+  );
+
+  const tildeRunOut = invokeHook({
+    conversationId: "conv-other-caller-1",
+    toolCall: { name: "run_command", args: { CommandLine: `rtk read ~/.gemini/antigravity/brain/${convTilde}/.system_generated/tasks/task-run-til.log`, WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(tildeRunOut.decision, "deny");
+  assert.match(tildeRunOut.reason, /actively RUNNING/);
+
+  const tildeBigCat = invokeHook({
+    conversationId: "global",
+    toolCall: { name: "run_command", args: { CommandLine: `cat ~/.gemini/antigravity/brain/${convTilde}/.system_generated/tasks/task-big-til.log`, WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(tildeBigCat.decision, "deny");
+  assert.match(tildeBigCat.reason, /--head-lines 150/);
+
+  const relCrossRun = invokeHook({
+    conversationId: "conv-other-caller-2",
+    cwd: os.tmpdir(),
+    toolCall: { name: "run_command", args: { CommandLine: `rtk read ${convMulti}/.system_generated/tasks/task-run-m.log`, WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(relCrossRun.decision, "deny");
+  assert.match(relCrossRun.reason, /actively RUNNING/);
+
+  // Non-task-prefixed filename (tasks/custom.log)
+  const customConv = "conv-test-custom";
+  const customDir = path.join(tempBrainDir, customConv, ".system_generated");
+  fs.mkdirSync(path.join(customDir, "tasks"), { recursive: true });
+  fs.writeFileSync(path.join(customDir, "tasks", "custom.log"), "active custom log\n", "utf-8");
+  const customRunOut = invokeHook({
+    conversationId: customConv,
+    toolCall: { name: "run_command", args: { CommandLine: "rtk read tasks/custom.log", WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(customRunOut.decision, "deny");
+  assert.match(customRunOut.reason, /actively RUNNING/);
+
+  // Quoted paths containing spaces
+  const spaceConv = "Jane Doe Conv";
+  const spaceSysDir = path.join(tempBrainDir, spaceConv, ".system_generated");
+  fs.mkdirSync(path.join(spaceSysDir, "logs"), { recursive: true });
+  fs.mkdirSync(path.join(spaceSysDir, "tasks"), { recursive: true });
+  const spaceLog = path.join(spaceSysDir, "tasks", "task-space-1.log").replace(/\\/g, "/");
+  fs.writeFileSync(spaceLog, "q".repeat(48 * 1024), "utf-8");
+  fs.writeFileSync(
+    path.join(spaceSysDir, "logs", "transcript.jsonl"),
+    JSON.stringify({ step_index: 1, type: "SYSTEM_MESSAGE", content: `Task id "${spaceConv}/task-space-1" finished with result:\nok` }) + "\n",
+    "utf-8"
+  );
+  assert.equal(
+    invokeHook({
+      conversationId: spaceConv,
+      toolCall: { name: "run_command", args: { CommandLine: `cat "${spaceLog}"`, WaitMsBeforeAsync: 5000 } }
+    }).decision,
+    "deny"
+  );
+  assert.equal(
+    invokeHook({
+      conversationId: spaceConv,
+      toolCall: { name: "run_command", args: { CommandLine: `head -n 150 "${spaceLog}"`, WaitMsBeforeAsync: 5000 } }
+    }).decision,
+    "deny"
+  );
+  assert.equal(
+    invokeHook({
+      conversationId: spaceConv,
+      toolCall: { name: "run_command", args: { CommandLine: `rtk read --tail-lines 150 "${spaceLog}"`, WaitMsBeforeAsync: 5000 } }
+    }).decision,
+    "allow"
+  );
+  const rfSpaceCompleted = invokeHook({
+    conversationId: spaceConv,
+    toolCall: { name: "read_file", args: { Path: spaceLog } }
+  });
+  assert.equal(rfSpaceCompleted.decision, "deny");
+  assert.match(rfSpaceCompleted.reason, /--tail-lines 150/);
 
   // Legacy task log > 5m quiet without markers falls back to completed
   const legacyLog = path.join(convDir, "tasks", "task-legacy-99.log");

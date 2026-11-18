@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { findExistingRtk } from "../scripts/provision-rtk.mjs";
-import { createRtkShim, prependToPath, withEnvPath } from "./helpers/hermetic-fixture.mjs";
+import { createRtkShim, prependToPath, runRtkCli, withEnvPath } from "./helpers/hermetic-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const hookScript = path.resolve(__dirname, "../scripts/execution-guard-hook.mjs");
@@ -108,6 +108,73 @@ try {
     assert.equal((envRgFallback.overwrite?.CommandLine || "").includes("rtk rg"), false);
     console.log(`✓ Env-prefixed absent 'rg' guarded -> '${envRgFallback.overwrite?.CommandLine}'`);
   }
+
+  // 5. Real `rtk 1.1.0` / shim `cat`/`head`/`tail` rewrite parity + Check 3/4 operand enforcement
+  const convRtk = "conv-rtk-int-read";
+  const sysDirRtk = path.join(tempDir, ".gemini", "antigravity", "brain", convRtk, ".system_generated");
+  fs.mkdirSync(path.join(sysDirRtk, "logs"), { recursive: true });
+  fs.mkdirSync(path.join(sysDirRtk, "tasks"), { recursive: true });
+  fs.mkdirSync(path.join(sysDirRtk, "steps", "1"), { recursive: true });
+  fs.mkdirSync(path.join(sysDirRtk, "steps", "2"), { recursive: true });
+  fs.writeFileSync(path.join(sysDirRtk, "tasks", "task-comp-1.log"), "done\n", "utf-8");
+  fs.writeFileSync(
+    path.join(sysDirRtk, "logs", "transcript.jsonl"),
+    JSON.stringify({
+      step_index: 1,
+      type: "SYSTEM_MESSAGE",
+      content: `Task id "${convRtk}/task-comp-1" finished with result:\nOK`
+    }) + "\n",
+    "utf-8"
+  );
+  fs.writeFileSync(path.join(sysDirRtk, "steps", "1", "output.txt"), "small spill\n", "utf-8");
+  fs.writeFileSync(path.join(sysDirRtk, "steps", "2", "output.txt"), "z".repeat(48 * 1024), "utf-8");
+
+  for (const [cmd, expectedRewrite] of [
+    ["cat tasks/task-comp-1.log", "rtk read tasks/task-comp-1.log"],
+    ["head tasks/task-comp-1.log", "rtk read tasks/task-comp-1.log --head-lines 10"],
+    ["head -50 tasks/task-comp-1.log", "rtk read tasks/task-comp-1.log --head-lines 50"],
+    ["head -n 50 tasks/task-comp-1.log", "rtk read tasks/task-comp-1.log --head-lines 50"],
+    ["head --lines=50 tasks/task-comp-1.log", "rtk read tasks/task-comp-1.log --head-lines 50"],
+    ["tail -50 tasks/task-comp-1.log", "rtk read tasks/task-comp-1.log --tail-lines 50"],
+    ["tail -n 50 tasks/task-comp-1.log", "rtk read tasks/task-comp-1.log --tail-lines 50"],
+    ["tail --lines=50 tasks/task-comp-1.log", "rtk read tasks/task-comp-1.log --tail-lines 50"]
+  ]) {
+    const out = runHook(
+      { conversationId: convRtk, cwd: tempDir, toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } },
+      testEnv
+    );
+    assert.equal(out.decision, "allow", `Expected allow for '${cmd}' (${out.reason || ""})`);
+    assert.equal(out.overwrite?.CommandLine, expectedRewrite, `Unexpected rewrite for '${cmd}'`);
+  }
+
+  for (const unrewrittenDeny of [
+    "tail tasks/task-comp-1.log",
+    'head -n 50 "tasks/task-comp-1.log"',
+    'tail -n 50 "tasks/task-comp-1.log"',
+    "type tasks/task-comp-1.log",
+    "Get-Content tasks/task-comp-1.log",
+    "cat tasks/task-comp-1.log package.json",
+    "cat .system_generated/steps/1/output.txt package.json",
+    "rtk read .system_generated/steps/2/output.txt -- -m"
+  ]) {
+    const out = runHook(
+      { conversationId: convRtk, cwd: tempDir, toolCall: { name: "run_command", args: { CommandLine: unrewrittenDeny, WaitMsBeforeAsync: 5000 } } },
+      testEnv
+    );
+    assert.equal(out.decision, "deny", `Expected deny for '${unrewrittenDeny}' under live/aligned RTK`);
+  }
+
+  const m150Out = runHook(
+    { conversationId: convRtk, cwd: tempDir, toolCall: { name: "run_command", args: { CommandLine: "rtk read -m150 .system_generated/steps/2/output.txt", WaitMsBeforeAsync: 5000 } } },
+    testEnv
+  );
+  assert.equal(m150Out.decision, "allow", "Attached -m150 must pass >45 KiB spillover guard");
+
+  if (hostRtk) {
+    const cliM150 = runRtkCli(["read", "-m150", path.resolve(__dirname, "../package.json")], { env: testEnv });
+    assert.equal(cliM150.status, 0, `Host rtk read -m150 failed: ${cliM150.stderr}`);
+  }
+  console.log(`✓ cat/head/tail rewrite parity, -m150 support, and single-operand enforcement verified against ${modeLabel}`);
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

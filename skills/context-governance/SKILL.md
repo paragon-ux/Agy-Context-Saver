@@ -27,7 +27,7 @@ Unbounded full-file `read_file` calls on workspace files are blocked by the `Pre
    - Pass `StartLine` and `EndLine` into `read_file` in bounded slices of `1-150` lines to preserve 1-indexed line numbers for `edit_file` and `write_file`.
    - Partial slices of `151-800` lines and `ByteOffset`-only unbounded reads are denied. An explicit full-file read (`StartLine: 1, EndLine: <TotalLines>`) is allowed when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
 3. **Tier 3 (Spillovers, completed task logs, and diagnostics: `rtk read`, `rtk err`, `rtk summary`)**:
-   - **Spillovers and completed task logs only**: Read `.system_generated/steps/<step>/output.txt` spillovers (via bounded `read_file` $\le 150$ lines or `rtk read <path>`) and completed `tasks/<taskId>.log` files via `rtk read <path>` (`cat`, `head`, and `tail` auto-rewrite via `rtk`; `--head-lines 150` / `--tail-lines 150` required on `>45 KiB` files). Never use `rtk read` for editable workspace code; always use bounded `read_file` slices so 1-indexed line numbers stay exact for `edit_file`.
+   - **Spillovers and completed task logs only**: Read `.system_generated/steps/<step>/output.txt` spillovers (via bounded `read_file` $\le 150$ lines or `rtk read <path>`) and completed `tasks/<taskId>.log` files via `rtk read <path>` (`cat`, and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; use explicit `rtk read <path>` for bare `tail`, quoted/spaced paths, Windows backslash `head`/`tail`, or env prefixes, and `--head-lines 150` / `--tail-lines 150` required on `>45 KiB` files). Never use `rtk read` for editable workspace code; use bounded `read_file` slices so 1-indexed line numbers stay exact for `edit_file` (when denied on `read_many_files`, use bounded `read_file` for editable code or `rtk read` for read-only logs/spillovers).
    - `rtk err <cmd>`: Runs a command and prints only errors and warnings.
    - `rtk summary <cmd>`: Runs a command and prints a 2-line summary.
 
@@ -105,7 +105,7 @@ agy-context restore-backups
    - Do not busy-wait on `manage_task(Action='status')` or short polling timers; end the turn and wait for Reactive Wakeup (`<SYSTEM_MESSAGE>`).
    - Do not run blocking CI watch loops (`gh pr checks --watch`, `gh run watch`) inside `run_command`; use one-shot snapshots (`gh pr checks`, `gh run list`) instead.
    - Status checks follow exponential backoff: $\min(600, \text{round}(30 \times 2.5^{\text{pollCount}-1}))$. 5 cumulative denials trigger the `force_ask` circuit breaker.
-   - For background shell tasks $>15\text{s}$, schedule `schedule(DurationSeconds=45, TimerCondition="task-X")` and output a Pre-Yield Status Card. Never pair `swarm_wait` or subagents with a one-shot `schedule` timer.
+   - For background shell tasks $>15\text{s}$, schedule `schedule(DurationSeconds=45, TimerCondition="<convId>/task-X")` and output a Pre-Yield Status Card. Never pair `swarm_wait` or subagents with a one-shot `schedule` timer.
 2. **Layer 2 (Shell rewriting, file slices, and transcript access)**:
    - Shell commands rewrite via `rtk hook antigravity`.
    - Workspace inspection uses `rtk grep` / `rtk find` -> bounded `read_file(StartLine, EndLine)` -> `edit_file` / `write_file`, while `rtk read` reads step spillovers and completed task logs.
