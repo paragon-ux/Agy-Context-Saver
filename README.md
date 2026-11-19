@@ -5,92 +5,39 @@
 [![Docs](https://img.shields.io/badge/docs-Zensical-purple.svg)](https://paragon-ux.github.io/Agy-Context-Saver/)
 [![Tests](https://img.shields.io/badge/tests-100%25%20passing-brightgreen.svg)](https://github.com/paragon-ux/Agy-Context-Saver/actions)
 
-`Agy-Context-Saver` is a `PreToolUse` execution hook and transcript CLI (`agy-context`) for **Google Antigravity** (`agy`) on Linux, macOS, and Windows (`Node.js >= 22`, zero external npm dependencies). It pairs with **RTK (`>= 1.1.0`)** to compress shell output, bound workspace file reads, stop background-task busy-polling, and govern transcript inspection across parent sessions, subagents, and `/swarm` workers.
-
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
-The repository ships four components:
-
-- **`PreToolUse` execution hook ([`hooks.json`](hooks.json), [`scripts/execution-guard-hook.mjs`](scripts/execution-guard-hook.mjs)):** Delegates `run_command` rewriting to `rtk hook antigravity`, requires bounded `read_file` line slices (`<= 150` lines, or explicit `1..TotalLines` reads on files `<= 800` lines and `<= 45 KiB`), upgrades unset `WaitMsBeforeAsync` to `10s`, enforces exponential backoff on `manage_task` and `schedule` with a 5-strike `force_ask` circuit breaker, and blocks direct file or shell access to `.system_generated/` and the state directory.
-- **Transcript forensics CLI ([`bin/agy-context.mjs`](bin/agy-context.mjs), [`lib/transcript-core.mjs`](lib/transcript-core.mjs)):** Streams conversation turns in Markdown, searches compact and full logs by regex or role, extracts single steps or step ranges with `--head`/`--tail` slicing, lists parent/child lineage, exports sanitized transcripts, and audits session turn budgets (`read`, `query`, `step`, `health`, `list`, `export`, `access`).
-- **Parent transcript access control (`agy-context transcript access`):** Lets parent sessions restrict or scope child subagent and `/swarm` worker transcript access on demand (`open`, `allowlist`, `self-only`, `deny`) via CLI flags (`--off`, `--self-only`, `--allow @audit-squad*`) or first-line launch directives (`[agy-transcript-access: deny|self-only|allow]`), backed by 10-second single-use capability grants.
-- **Agent rules and skill ([`rules/AGENTS.md`](rules/AGENTS.md), [`skills/context-governance/SKILL.md`](skills/context-governance/SKILL.md)):** Installed into `~/.gemini/config/plugins/agy-context-saver` so Antigravity sessions inherit the inspection and Reactive Wakeup rules automatically. Multi-agent cohort planning and SHA-256 evidence bundling live in the companion [Agy-Squad](https://github.com/paragon-ux/Agy-Squad) repository.
+Agy-Context-Saver is a PreToolUse execution hook and transcript CLI for Google Antigravity on Linux, macOS, and Windows (Node.js 22 or newer, zero external npm dependencies). Paired with RTK 1.1.0 or newer, it compresses shell output, keeps workspace file reads bounded, stops background-task polling loops, and lets parent sessions govern child subagent and swarm transcript access.
 
 ## Quickstart
 
-### Prerequisites
-
-- **Node.js:** `>= 22.0.0`
-- **Google Antigravity:** Antigravity 2.0+ (Desktop IDE or `agy` CLI)
-- **RTK:** `>= 1.1.0` (`brew install rtk`, `cargo install --locked rtk`, or downloaded automatically into `bin/` during `agy-context setup` with pinned SHA-256 verification)
-
-### Install and verify
+Requires Node.js 22 or newer and Google Antigravity 2.0+. Setup uses an existing RTK 1.1.0+ installation or downloads a SHA-256-verified binary automatically.
 
 ```bash
-# Install via npx
+# Install the plugin, PreToolUse hook, and agy-context CLI
 npx --package=agy-context-saver agy-context setup
 
-# Or from a local checkout
-npm run setup
-
-# Add ~/.gemini/antigravity/bin to PATH (POSIX bash/zsh) so `agy-context` works directly:
-export PATH="$HOME/.gemini/antigravity/bin:$PATH"
-# Windows PowerShell (current session):
-# $env:Path += ";$env:USERPROFILE\.gemini\antigravity\bin"
-
-# Check installation and active policy status (or use npx without editing PATH)
-agy-context status
-# Zero-PATH fallback:
+# Verify installation and active policy status
 npx --package=agy-context-saver agy-context status
 ```
 
-After setup finishes, reload Antigravity Desktop IDE or start a new session so the plugin hook, rules, and skill activate.
-
-> **Upgrading from v1.x:** Running `agy-context setup` automatically removes legacy `mcp_config.json` entries, sweeps stale `~/.gemini/antigravity/mcp/agy-context-saver*` schema caches, and replaces the retired v1.x MCP server with the on-demand `agy-context` CLI and updated `PreToolUse` hook.
-
-To remove the plugin link, hook entries, and CLI shims:
-
-```bash
-agy-context uninstall
-# Or restore pre-install .bak configuration files:
-agy-context uninstall --restore-backups
-
-# Zero-PATH fallback via npx:
-npx --package=agy-context-saver agy-context uninstall --restore-backups
-```
-
-## CLI and hook summary
-
-| Surface | Purpose | Common usage |
-| :--- | :--- | :--- |
-| `agy-context transcript health` (`stats`, `info`) | Check turn counts, transcript byte size, RTK status, and polling events | `agy-context transcript health [<id>] [--json]` |
-| `agy-context transcript read` | Read recent turns in Markdown (`--outline` delegates to `query` summary); defaults stay under a ~9.2 KB inline ceiling, `--full` / `--max-chars N` / `--out <path>` opt into the 512 KB deep tier | `agy-context transcript read [<id>] --last-turns 3` |
-| `agy-context transcript query` (`grep`, `search`, `find`, `tools`, `outline`, `summary`) | Search compact and truncated full steps by regex, role, tool call arguments, or print a 1-line-per-step outline | `agy-context transcript grep "<pattern>" [<id>] --summary` / `agy-context transcript outline [<id>]` |
-| `agy-context transcript step` | Extract untruncated fields for a step, comma list, or range (`N..M`) | `agy-context transcript step 10..15 [<id>] --field content --tail 40` |
-| `agy-context transcript list` (`ls`) | List recent conversation transcripts in the Antigravity brain directory (supports `--parent` and `--lineage`) | `agy-context transcript ls --parent <uuid> --lineage --limit 5` |
-| `agy-context transcript export` (`dump`) | Export a sanitized (`--sanitized`) transcript summary index to stdout or `--out` (`--sanitized` required) | `agy-context transcript export [<id>] --sanitized --out ./transcript-export.md` |
-| `agy-context transcript access` (`policy`) | View or update child subagent and `/swarm` worker transcript access | `agy-context transcript access --status` / `--off` / `--self-only` / `--allow @audit-squad*` / `--on` |
-| `agy-context status` / `setup` / `uninstall` | Audit, synchronize, or remove plugin link, hook, CLI shims, and RTK config | `agy-context status` / `agy-context setup --check` |
-
-> **`--out` file paths:** `--out` accepts any safe workspace-relative `.md`, `.json`, or `.txt` path outside protected state, governance, and benchmark directories. If you write artifacts under a `scratch/` folder, add `scratch/` to `.gitignore` or `.git/info/exclude` so exports stay untracked.
+Reload Antigravity Desktop IDE or start a new session after setup finishes so the hook, rules, and skill activate. For shell PATH configuration, local checkout setup, v1.x upgrades, and clean uninstallation, see the [Installation and setup guide](https://paragon-ux.github.io/Agy-Context-Saver/installation/).
 
 ## Documentation
 
-Full documentation is hosted at [paragon-ux.github.io/Agy-Context-Saver](https://paragon-ux.github.io/Agy-Context-Saver/) and in [`docs/`](docs/):
+Read the full documentation at [paragon-ux.github.io/Agy-Context-Saver](https://paragon-ux.github.io/Agy-Context-Saver/):
 
-- [Overview](docs/index.md)
-- [Installation and setup](docs/installation.md)
-- [CLI and hook reference](docs/tools.md)
-- [Lifecycle governance and transcript access control](docs/governance.md)
-- [Architecture and internals](docs/architecture.md)
-- [Installer hardening policy](docs/INSTALLER-HARDENING.md)
-- [RTK support matrix](docs/RTK-SUPPORT-MATRIX.md)
-- [Publishing and verification](docs/publishing.md)
-- [Product roadmap](docs/roadmap.md)
+- [Overview](https://paragon-ux.github.io/Agy-Context-Saver/)
+- [Installation and setup](https://paragon-ux.github.io/Agy-Context-Saver/installation/)
+- [CLI and hook reference](https://paragon-ux.github.io/Agy-Context-Saver/tools/)
+- [Lifecycle governance and transcript access control](https://paragon-ux.github.io/Agy-Context-Saver/governance/)
+- [Architecture and internals](https://paragon-ux.github.io/Agy-Context-Saver/architecture/)
+- [Installer hardening policy](https://paragon-ux.github.io/Agy-Context-Saver/INSTALLER-HARDENING/)
+- [RTK support matrix](https://paragon-ux.github.io/Agy-Context-Saver/RTK-SUPPORT-MATRIX/)
+- [Publishing and verification](https://paragon-ux.github.io/Agy-Context-Saver/publishing/)
+- [Product roadmap](https://paragon-ux.github.io/Agy-Context-Saver/roadmap/)
 
-## Development
-
-Run `node scripts/release-preflight.mjs` and `npm test` with Node.js `>= 22`. Runs all 12 test suites (`tests/test-hook.mjs`, `tests/test-transcript.mjs`, `tests/test-rtk-integration.mjs`, `tests/test-output-governance.mjs`, `tests/test-e2e-probes.mjs`, `tests/test-performance-probes.mjs`, `tests/test-installed-verification.mjs`, `tests/test-lifecycle-rollback.mjs`, `tests/test-check-only-readonly.mjs`, `tests/test-malformed-config-preservation.mjs`, `tests/test-rtk-ledger-fresh-install.mjs`, and `tests/verify-package.mjs`) in isolated temporary profiles without mutating your live `~/.gemini` directory.
+For multi-agent cohort planning and SHA-256 proof bundling, see the companion [Agy-Squad](https://paragon-ux.github.io/Agy-Squad/) plugin.
 
 ## License
 

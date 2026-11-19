@@ -32,6 +32,8 @@ This command performs five steps:
 
 After setup finishes, reload Antigravity Desktop IDE or start a new session so the plugin hook, rules, and skill activate.
 
+> **Upgrading from v1.x:** Running `agy-context setup` automatically removes legacy `mcp_config.json` entries, sweeps stale `~/.gemini/antigravity/mcp/agy-context-saver*` schema caches, and replaces the retired v1.x MCP server with the on-demand `agy-context` CLI and updated `PreToolUse` hook.
+
 ### Add `~/.gemini/antigravity/bin` to `PATH` (or use `npx`)
 
 `agy-context setup` checks whether `~/.gemini/antigravity/bin` is already on your shell `PATH`. Inside Antigravity, the `PreToolUse` hook automatically resolves bare `agy-context` and `rtk` commands to the installed shims even if your shell `PATH` has not been updated yet. To run `agy-context` directly in your terminal, add `~/.gemini/antigravity/bin` to `PATH`:
