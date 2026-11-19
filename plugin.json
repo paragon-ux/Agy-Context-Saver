@@ -2,7 +2,7 @@
   "name": "agy-context-saver",
   "displayName": "Agy-Context-Saver",
   "version": "2.0.4",
-  "description": "PreToolUse execution hook, background polling governor, and transcript CLI (agy-context) for Google Antigravity, paired with RTK.",
+  "description": "Save tokens and prevent context bloat in Google Antigravity with RTK shell compression, bounded file reads, background polling protection, and fast CLI transcript search.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Run agy-context transcript health to audit context health and token consumption for this session",
