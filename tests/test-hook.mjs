@@ -2540,7 +2540,7 @@ console.log("\n--- Group K: Day-1 Launch Remediation Regressions (RUN-001, RUN-0
             "echo rtk 1.1.0",
             "exit /b 0",
             ":hook",
-            `"${process.execPath}" -e "const fs=require('fs');const d=JSON.parse(fs.readFileSync(0,'utf8'));const c=d.toolCall.args.CommandLine;let rw=c;if(c==='git status')rw='rtk git status';else if(c==='cmd /c \"git status\"')rw='cmd /c \"rtk git status\"';else if(c==='bash -c \"git status\"')rw='bash -c \"rtk git status\"';else if(c.startsWith('cat '))rw='rtk read '+c.slice(4);console.log(JSON.stringify({decision:'allow',overwrite:{CommandLine:rw}}));"`,
+            `"${process.execPath}" -e "const fs=require('fs');const d=JSON.parse(fs.readFileSync(0,'utf8'));const c=d.toolCall.args.CommandLine;let rw=c;if(c==='git status')rw='rtk git status';else if(c==='cmd /c \\x22git status\\x22')rw='cmd /c \\x22rtk git status\\x22';else if(c==='bash -c \\x22git status\\x22')rw='bash -c \\x22rtk git status\\x22';else if(c.startsWith('cat '))rw='rtk read '+c.slice(4);console.log(JSON.stringify({decision:'allow',overwrite:{CommandLine:rw}}));"`,
             "exit /b 0",
             ""
           ].join("\r\n"),
