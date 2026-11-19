@@ -46,15 +46,27 @@ After setup finishes, reload Antigravity Desktop IDE or start a new session so t
 
 === "Windows (PowerShell)"
     ```powershell
-    # Current session
-    $env:Path += ";$env:USERPROFILE\.gemini\antigravity\bin"
+    # Current session (idempotent)
+    $bin = "$env:USERPROFILE\.gemini\antigravity\bin"
+    $parts = @($env:Path -split ';' | Where-Object { $_.Trim() })
+    if (@($parts | ForEach-Object { $_.TrimEnd('\') }) -notcontains $bin) {
+      $env:Path = ($parts + $bin) -join ';'
+    }
 
-    # Persistent user PATH
-    [Environment]::SetEnvironmentVariable(
-      "Path",
-      [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:USERPROFILE\.gemini\antigravity\bin",
-      "User"
-    )
+    # Persistent user PATH (idempotent, preserves REG_EXPAND_SZ)
+    $bin = "$env:USERPROFILE\.gemini\antigravity\bin"
+    $raw = '%USERPROFILE%\.gemini\antigravity\bin'
+    $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try {
+      $cur = [string]$k.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+      $parts = @($cur -split ';' | Where-Object { $_.Trim() })
+      $norm = @($parts | ForEach-Object { $_.TrimEnd('\') })
+      if ($norm -notcontains $bin -and $norm -notcontains $raw) {
+        $k.SetValue('Path', (($parts + $raw) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+      }
+    } finally {
+      $k.Close()
+    }
     ```
 
 If you prefer not to edit `PATH`, run commands directly through `npx`:
@@ -65,7 +77,7 @@ npx --package=agy-context-saver agy-context uninstall
 ```
 
 > [!NOTE]
-> **RTK Default Configuration Notice**: To protect agent context and prevent shell command corruption, `Agy-Context-Saver` sets `suppress_hook_warning = true` in RTK's user configuration (`%APPDATA%\rtk\config.toml` on Windows or `~/.config/rtk/config.toml` on POSIX). This silences upstream promotional banners while preserving all existing user settings. See [RTK Support Matrix](RTK-SUPPORT-MATRIX.md) for full details.
+> **RTK Default Configuration Notice**: To protect agent context and prevent shell command corruption, `Agy-Context-Saver` sets `suppress_hook_warning = true` in RTK's user configuration (`%APPDATA%\rtk\config.toml` on Windows, `~/Library/Application Support/rtk/config.toml` on macOS, or `~/.config/rtk/config.toml` on Linux). This silences upstream promotional banners while preserving all existing user settings. See [RTK Support Matrix](RTK-SUPPORT-MATRIX.md) for full details.
 
 ### Option 2: Local Repository Setup
 

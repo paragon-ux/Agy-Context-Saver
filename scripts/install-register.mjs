@@ -16,9 +16,35 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureRtkInstalled, findExistingRtk, MANAGED_SHIM_MARKER, verifyLocalRtkBinary } from "./provision-rtk.mjs";
+import {
+  ensureRtkInstalled,
+  findExistingRtk,
+  isDirectoryWritable,
+  MANAGED_SHIM_MARKER,
+  verifyLocalRtkBinary
+} from "./provision-rtk.mjs";
 import { getStateDir, removeLegacyTmpState } from "./state-dir.mjs";
 import { formatTranscriptAccessStatus } from "../lib/transcript-core.mjs";
+
+export const MIN_NODE_MAJOR = 22;
+
+export function parseNodeMajorVersion(versionStr = process.versions.node) {
+  const m = String(versionStr || "").trim().replace(/^v/i, "").match(/^(\d+)(?:\.\d+)?(?:\.\d+)?/);
+  return m ? Number.parseInt(m[1], 10) : NaN;
+}
+
+export function assertSupportedNodeVersion(versionStr = process.versions.node) {
+  const raw = String(versionStr || "").trim();
+  const major = parseNodeMajorVersion(raw);
+  if (!Number.isInteger(major) || major < MIN_NODE_MAJOR) {
+    const display = raw ? (raw.startsWith("v") ? raw : `v${raw}`) : "unknown";
+    throw new Error(
+      `Unsupported Node.js version ${display}. Agy-Context-Saver requires Node.js >= ${MIN_NODE_MAJOR}.0.0.\n` +
+      `Please upgrade Node.js (https://nodejs.org/ or via nvm/fnm/volta) and re-run setup.`
+    );
+  }
+  return major;
+}
 
 const fsPromises = fs.promises;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -153,9 +179,9 @@ export function formatPathOnboardingLines(antigravityBinDir, { platform = os.pla
     return [
       `[NEXT STEP] CLI bin directory is not on your PATH: ${antigravityBinDir}`,
       "  PowerShell (current session):",
-      '    $env:Path += ";$env:USERPROFILE\\.gemini\\antigravity\\bin"',
-      "  PowerShell (persistent user PATH):",
-      '    [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:USERPROFILE\\.gemini\\antigravity\\bin", "User")',
+      '    $bin = "$env:USERPROFILE\\.gemini\\antigravity\\bin"; $parts = @($env:Path -split ";" | Where-Object { $_.Trim() }); if (@($parts | ForEach-Object { $_.TrimEnd("\\") }) -notcontains $bin) { $env:Path = ($parts + $bin) -join ";" }',
+      "  PowerShell (persistent user PATH, preserves REG_EXPAND_SZ):",
+      '    $bin = "$env:USERPROFILE\\.gemini\\antigravity\\bin"; $raw = "%USERPROFILE%\\.gemini\\antigravity\\bin"; $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Environment"); try { $cur = [string]$k.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); $parts = @($cur -split ";" | Where-Object { $_.Trim() }); $norm = @($parts | ForEach-Object { $_.TrimEnd("\\") }); if ($norm -notcontains $bin -and $norm -notcontains $raw) { $k.SetValue("Path", (($parts + $raw) -join ";"), [Microsoft.Win32.RegistryValueKind]::ExpandString) } } finally { $k.Close() }',
       "  Or run without modifying PATH:",
       "    npx --package=agy-context-saver agy-context status",
       "    npx --package=agy-context-saver agy-context uninstall"
@@ -267,6 +293,40 @@ export async function safeWriteFileIfChanged(targetPath, newContent) {
 }
 
 /**
+ * Recursively ensures copied plugin directories and files are user-writable on POSIX
+ * so installs from read-only package stores (0o555 dirs / 0o444 files) can be upgraded
+ * or uninstalled cleanly without EACCES. Never follows symlinks.
+ */
+function ensureTreeWritablePosix(rootPath) {
+  if (os.platform() === "win32") return;
+  const stack = [rootPath];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let st;
+    try {
+      st = fs.lstatSync(current);
+    } catch {
+      continue;
+    }
+    if (st.isSymbolicLink()) continue;
+    if (st.isDirectory()) {
+      try {
+        fs.chmodSync(current, st.mode | 0o700);
+      } catch {}
+      try {
+        for (const entry of fs.readdirSync(current)) {
+          stack.push(path.join(current, entry));
+        }
+      } catch {}
+    } else if (st.isFile()) {
+      try {
+        fs.chmodSync(current, st.mode | 0o200);
+      } catch {}
+    }
+  }
+}
+
+/**
  * Copy file only if content differs.
  */
 export async function safeCopyFileIfChanged(sourcePath, targetPath) {
@@ -281,7 +341,19 @@ export async function safeCopyFileIfChanged(sourcePath, targetPath) {
       }
     }
   } catch {}
+  if (os.platform() !== "win32" && fs.existsSync(targetPath)) {
+    try {
+      const st = fs.lstatSync(targetPath);
+      if (st.isFile()) fs.chmodSync(targetPath, st.mode | 0o200);
+    } catch {}
+  }
   await fsPromises.copyFile(sourcePath, targetPath);
+  if (os.platform() !== "win32") {
+    try {
+      const st = fs.lstatSync(targetPath);
+      if (st.isFile()) fs.chmodSync(targetPath, st.mode | 0o200);
+    } catch {}
+  }
   return true;
 }
 
@@ -698,17 +770,12 @@ async function installManagedRtkShim({ log, rtkResult }) {
   if (!localRtkTarget && rtkResult?.isLocal && rtkResult.path && verifyLocalRtkBinary(rtkResult.path)) {
     localRtkTarget = rtkResult.path;
   }
-  if (!rtkResult || !localRtkTarget) {
+  // Only install/refresh a managed rtk shim when local plugin RTK is the active binary.
+  // When an external system rtk on PATH supersedes bundled RTK (or in degraded mode), remove
+  // any Agy-managed shim so it never shadows system rtk (never touching unmanaged user binaries).
+  if (!rtkResult || !rtkResult.isLocal || !localRtkTarget) {
     const removed = await removeStaleManagedRtkShims();
     return { installed: false, removed };
-  }
-
-  const hasExistingManagedShim = isManagedAgyShimFile(posixShimPath) || isManagedAgyShimFile(winShimPath);
-
-  // Only install/refresh a managed rtk shim when no compatible external rtk was found on PATH
-  // (or when refreshing a previously installed managed shim on re-run)
-  if (!rtkResult.isLocal && !hasExistingManagedShim) {
-    return { installed: false };
   }
 
   await fsPromises.mkdir(antigravityBinDir, { recursive: true });
@@ -807,6 +874,7 @@ async function installCliShims({ log }) {
 }
 
 export async function runInstall(options = {}) {
+  assertSupportedNodeVersion(options.nodeVersion);
   const {
     geminiConfigDir,
     pluginsDir,
@@ -898,33 +966,8 @@ export async function runInstall(options = {}) {
     );
   }
 
-  // 0a. Ensure RTK (>= 1.1.0) is provisioned and available
-  let rtkResult = null;
-  try {
-    rtkResult = await ensureRtkInstalled({ silent: options.silent, existingRtk: existing.details.rtk });
-    log(`[OK] RTK Command Optimizer verified: ${rtkResult.version} (${rtkResult.path})`);
-  } catch (err) {
-    if (options.allowDegraded) {
-      warn(`[WARN] RTK provisioning check encountered an issue: ${err.message}. Continuing in degraded mode.`);
-    } else {
-      throw new Error(
-        `RTK provisioning failed: ${err.message}. To install without RTK (degraded mode), re-run with --allow-degraded.`
-      );
-    }
-  }
-
-  // 1. Native Plugin Junction / Symlink or Permanent Copy
-  await fsPromises.mkdir(pluginsDir, { recursive: true });
-  const isGitRepo = fs.existsSync(path.join(repoRoot, ".git"));
-  const isTempOrNpx =
-    !isGitRepo || repoRoot.includes("_npx") || repoRoot.includes("npm-cache") || repoRoot.includes("node_modules");
-  const copyFilter = (src) => {
-    const rel = path.relative(repoRoot, src);
-    if (!rel) return true;
-    const topSegment = rel.split(path.sep)[0];
-    return ![".git", "node_modules", ".venv", "scratch", "site"].includes(topSegment);
-  };
-
+  // 0a. Inspect existing pluginDest BEFORE RTK provisioning so we never write through a symlink
+  //     to a read-only/shared repoRoot or leave an orphan pluginDest/bin directory on failure.
   let pluginLst = null;
   try {
     pluginLst = fs.lstatSync(pluginDest, { bigint: true });
@@ -950,17 +993,91 @@ export async function runInstall(options = {}) {
     }
   }
 
+  // Ensure RTK (>= 1.1.0) is provisioned and available into a user-writable target bin dir
+  const repoBinDir = path.join(repoRoot, "bin");
+  const repoBinWritable = isDirectoryWritable(repoBinDir);
+  const isGitRepo = fs.existsSync(path.join(repoRoot, ".git"));
+  const isTempOrNpx =
+    !isGitRepo || repoRoot.includes("_npx") || repoRoot.includes("npm-cache") || repoRoot.includes("node_modules");
+  const forceCopyMode = Boolean(isTempOrNpx || options.forceCopyFallback || !repoBinWritable);
+  const pluginBinDir = path.join(pluginDest, "bin");
+  const wantsPluginBin = forceCopyMode || Boolean(process.env.AGY_TEST_PROFILE_DIR);
+  const shouldStagePluginRtk = wantsPluginBin && !installedSource && !options.rtkOptions?.targetBinDir;
+  let stagedRtkBinDir = null;
+  let stagedPluginRtk = null;
+  let rtkResult = null;
+  try {
+    if (shouldStagePluginRtk) {
+      stagedRtkBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-rtk-stage-bin-"));
+    }
+    const targetBinDir = stagedRtkBinDir || (wantsPluginBin ? pluginBinDir : repoBinDir);
+    try {
+      rtkResult = await ensureRtkInstalled({
+        silent: options.silent,
+        existingRtk: existing.details.rtk,
+        targetBinDir,
+        ...(options.rtkOptions || {})
+      });
+      if (
+        stagedRtkBinDir &&
+        rtkResult?.isLocal &&
+        rtkResult.path &&
+        path.resolve(path.dirname(rtkResult.path)).toLowerCase() === path.resolve(stagedRtkBinDir).toLowerCase()
+      ) {
+        const exeName = path.basename(rtkResult.path);
+        stagedPluginRtk = {
+          name: exeName,
+          data: await fsPromises.readFile(rtkResult.path),
+          mode: fs.statSync(rtkResult.path).mode
+        };
+        rtkResult = { ...rtkResult, path: path.join(pluginBinDir, exeName) };
+      }
+      log(`[OK] RTK Command Optimizer verified: ${rtkResult.version} (${rtkResult.path})`);
+    } catch (err) {
+      if (options.allowDegraded) {
+        warn(`[WARN] RTK provisioning check encountered an issue: ${err.message}. Continuing in degraded mode.`);
+      } else {
+        throw new Error(
+          `RTK provisioning failed: ${err.message}. To install without RTK (degraded mode), re-run with --allow-degraded.`
+        );
+      }
+    }
+  } finally {
+    if (stagedRtkBinDir) {
+      try {
+        fs.rmSync(stagedRtkBinDir, { recursive: true, force: true });
+      } catch {}
+    }
+  }
+
+  const provisionedInPluginBin = Boolean(
+    stagedPluginRtk ||
+      (rtkResult?.isLocal &&
+        rtkResult.path &&
+        path.resolve(path.dirname(rtkResult.path)).toLowerCase() === path.resolve(pluginBinDir).toLowerCase())
+  );
+  const mustCopyPlugin = forceCopyMode || provisionedInPluginBin;
+
+  // 1. Native Plugin Junction / Symlink or Permanent Copy
+  await fsPromises.mkdir(pluginsDir, { recursive: true });
+  const copyFilter = (src) => {
+    const rel = path.relative(repoRoot, src);
+    if (!rel) return true;
+    const topSegment = rel.split(path.sep)[0];
+    return ![".git", "node_modules", ".venv", "scratch", "site"].includes(topSegment);
+  };
+
   // Preserve a previously bundled local RTK binary inside pluginDest/bin if pluginDest is being replaced by a copy
   let preservedPluginRtk = null;
   if (
     pluginLst && !installedSource &&
-    (!pluginExists || isTempOrNpx || options.forceCopyFallback || !pluginLst.isSymbolicLink() || pluginPointsElsewhere)
+    (!pluginExists || mustCopyPlugin || !pluginLst.isSymbolicLink() || pluginPointsElsewhere)
   ) {
-    if (pluginExists) {
+    if (pluginExists && !stagedPluginRtk) {
       const candidateNames = os.platform() === "win32" ? ["rtk.exe", "rtk.cmd", "rtk"] : ["rtk", "rtk.exe", "rtk.cmd"];
       for (const candidateName of candidateNames) {
         const candidatePath = path.join(pluginDest, "bin", candidateName);
-        if (verifyLocalRtkBinary(candidatePath)) {
+        if (verifyLocalRtkBinary(candidatePath, options.rtkOptions)) {
           try {
             preservedPluginRtk = {
               name: candidateName,
@@ -975,14 +1092,16 @@ export async function runInstall(options = {}) {
     if (pluginLst.isSymbolicLink()) {
       await fsPromises.unlink(pluginDest);
     } else {
+      ensureTreeWritablePosix(pluginDest);
       await fsPromises.rm(pluginDest, { recursive: true, force: true });
     }
     pluginLst = null;
   }
 
   if (!pluginLst) {
-    if (isTempOrNpx || options.forceCopyFallback) {
+    if (mustCopyPlugin) {
       await fsPromises.cp(repoRoot, pluginDest, { recursive: true, filter: copyFilter });
+      ensureTreeWritablePosix(pluginDest);
       log(`[OK] Native Antigravity Plugin installed to: ${pluginDest}`);
     } else {
       try {
@@ -991,6 +1110,7 @@ export async function runInstall(options = {}) {
         log(`[OK] Native Antigravity Plugin linked: ${pluginDest} -> ${repoRoot}`);
       } catch {
         await fsPromises.cp(repoRoot, pluginDest, { recursive: true, filter: copyFilter });
+        ensureTreeWritablePosix(pluginDest);
         log(`[OK] Native Antigravity Plugin copied to: ${pluginDest}`);
       }
     }
@@ -998,16 +1118,18 @@ export async function runInstall(options = {}) {
     log(`[OK] Native Antigravity Plugin verified: ${pluginDest}`);
   }
 
-  if (preservedPluginRtk) {
+  const rtkToRestore = stagedPluginRtk || preservedPluginRtk;
+  if (rtkToRestore) {
     let destIsSymlink = false;
     try { destIsSymlink = fs.lstatSync(pluginDest).isSymbolicLink(); } catch {}
     if (!destIsSymlink) {
-      const restoredRtkPath = path.join(pluginDest, "bin", preservedPluginRtk.name);
-      if (!verifyLocalRtkBinary(restoredRtkPath)) {
+      const restoredRtkPath = path.join(pluginDest, "bin", rtkToRestore.name);
+      if (stagedPluginRtk || !verifyLocalRtkBinary(restoredRtkPath, options.rtkOptions)) {
         await fsPromises.mkdir(path.dirname(restoredRtkPath), { recursive: true });
-        await fsPromises.writeFile(restoredRtkPath, preservedPluginRtk.data);
+        ensureTreeWritablePosix(path.dirname(restoredRtkPath));
+        await fsPromises.writeFile(restoredRtkPath, rtkToRestore.data);
         if (os.platform() !== "win32") {
-          try { fs.chmodSync(restoredRtkPath, preservedPluginRtk.mode || 0o755); } catch {}
+          try { fs.chmodSync(restoredRtkPath, rtkToRestore.mode || 0o755); } catch {}
         }
       }
     }
@@ -1152,6 +1274,7 @@ export async function runUninstall(options = {}) {
     if (pluginStat.isSymbolicLink()) {
       await fsPromises.unlink(pluginDest);
     } else {
+      ensureTreeWritablePosix(pluginDest);
       await fsPromises.rm(pluginDest, { recursive: true, force: true });
     }
     log(`[OK] Removed plugin link: ${pluginDest}`);
@@ -1407,8 +1530,30 @@ export function runStatus(options = {}) {
       : existing.isInstalled
         ? (!existing.details.config.enabled ? "DISABLED" : "PARTIAL INSTALLATION")
         : "NOT INSTALLED";
+  const onlyMissingRtk =
+    !existing.isComplete &&
+    !hasCorruption &&
+    !existing.details.rtk &&
+    existing.details.plugin.exists &&
+    !existing.details.plugin.pointsElsewhere &&
+    !existing.details.plugin.versionMismatch &&
+    existing.details.hook.registered &&
+    !existing.details.hook.mirroredHookStale &&
+    !existing.details.hook.legacyHookPresent &&
+    existing.details.cliShim.exists &&
+    existing.details.mcp.clean &&
+    existing.details.config.enabled;
+
   log(`\nOverall Status: ${overallLabel}\n`);
-  if (!existing.isInstalled || overallLabel === "PARTIAL INSTALLATION") {
+  if (onlyMissingRtk) {
+    log(
+      "Next step (degraded mode: RTK >= 1.1.0 is the only missing component):\n" +
+      "  - Hook governance and the agy-context transcript CLI are active.\n" +
+      "  - To enable RTK command compression, install RTK >= 1.1.0 manually on PATH:\n" +
+      "      brew install rtk | cargo install --locked rtk | https://github.com/rtk-ai/rtk/releases/tag/v1.1.0\n" +
+      "    then re-run 'agy-context setup', or run 'agy-context setup --allow-degraded' to stay in hook-only degraded mode.\n"
+    );
+  } else if (!existing.isInstalled || overallLabel === "PARTIAL INSTALLATION") {
     log("Next step: run 'npx --package=agy-context-saver agy-context setup' (or 'agy-context setup') to install/repair.\n");
   }
   if (existing.details.cliShim.exists && !existing.details.cliShim.onPath) {

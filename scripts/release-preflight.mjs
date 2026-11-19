@@ -132,6 +132,7 @@ export function runReleasePreflight() {
       'bin/agy-context.mjs',
       'scripts/install-register.mjs',
       'scripts/provision-rtk.mjs',
+      'scripts/rtk-run.mjs',
       'plugin.json',
       'hooks.json',
       'README.md',

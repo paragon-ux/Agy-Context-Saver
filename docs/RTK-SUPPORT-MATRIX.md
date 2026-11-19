@@ -38,7 +38,7 @@ To prevent diagnostic noise and promotional banners from polluting model context
 
 | Config File | Section | Parameter | Default Upstream Value | Agy-Context-Saver Standardized Value | Rationale & Forensic Justification |
 |---|---|---|---|---|---|
-| `%APPDATA%\rtk\config.toml` *(Win)*<br>`~/.config/rtk/config.toml` *(POSIX)* | `[hooks]` | `suppress_hook_warning` | `false` (or unconfigured) | `true` | **Context & Command Protection**:<br>Upstream RTK emits an unsolicited promotional banner (`[rtk] /!\ No hook installed - run rtk init -g for automatic token savings`) to `stdout` whenever Claude Code hooks are uninitialized. In autonomous agent environments, this banner pollutes context tokens and corrupts shell command rewrites (`[rtk] warning ... rtk git status`). Setting `suppress_hook_warning = true` silences this banner natively without requiring a fork of upstream RTK. |
+| `%APPDATA%\rtk\config.toml` *(Windows)*<br>`~/Library/Application Support/rtk/config.toml` *(macOS)*<br>`~/.config/rtk/config.toml` *(Linux)* | `[hooks]` | `suppress_hook_warning` | `false` (or unconfigured) | `true` | **Context & Command Protection**:<br>Upstream RTK emits an unsolicited promotional banner (`[rtk] /!\ No hook installed - run rtk init -g for automatic token savings`) to `stdout` whenever Claude Code hooks are uninitialized. In autonomous agent environments, this banner pollutes context tokens and corrupts shell command rewrites (`[rtk] warning ... rtk git status`). Setting `suppress_hook_warning = true` silences this banner natively without requiring a fork of upstream RTK. |
 
 ### Configuration lifecycle and preservation guarantee
 

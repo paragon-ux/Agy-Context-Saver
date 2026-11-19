@@ -42,6 +42,7 @@ try {
   }
 
   const {
+    assertSupportedNodeVersion,
     runInstall,
     runUninstall,
     detectExistingInstallation,
@@ -424,12 +425,25 @@ try {
           "Stale/dangling managed rtk shim must be removed on --allow-degraded when no local RTK binary exists (UX-ACS-R2-001)"
         );
 
-        // Case B: Transition to external system rtk later on PATH removes dangling managed shim and resolves system rtk
+        // SVC-003: When RTK is the sole missing component after --allow-degraded, status prints manual RTK install + --allow-degraded guidance
+        const degradedOnlyStatus = spawnSync(process.execPath, [installScriptPath, "--status"], {
+          env: degradedOnlyShimEnv,
+          encoding: "utf-8"
+        });
+        assert.notEqual(degradedOnlyStatus.status, 0);
+        assert.match(degradedOnlyStatus.stdout, /Overall Status:\s*PARTIAL INSTALLATION/);
+        assert.match(degradedOnlyStatus.stdout, /degraded mode/i);
+        assert.match(degradedOnlyStatus.stdout, /brew install rtk/);
+        assert.match(degradedOnlyStatus.stdout, /cargo install --locked rtk/);
+        assert.match(degradedOnlyStatus.stdout, /--allow-degraded/);
+
+        // Case B (SVC-002 / TEST-001): Transition to external system rtk later on PATH supersedes bundled pluginDest/bin/rtk
+        // WITHOUT manually unlinking pluginLocalRtk, removes the stale managed shim, and reports system rtk 1.2.0
         writeStandaloneFakeRtk(uxPluginBin);
         const seedSysRes = runCopySetup(emptyPathEnv);
         assert.equal(seedSysRes.status, 0, seedSysRes.stderr || seedSysRes.stdout);
         assert.equal(isManagedAgyShimFile(managedRtkShim), true);
-        fs.unlinkSync(pluginLocalRtk);
+        assert.equal(fs.existsSync(pluginLocalRtk), true, "Bundled pluginLocalRtk stays on disk to test realistic system-RTK upgrade");
 
         const sysRtkDir = path.join(uxProfile, "system-rtk-bin");
         fs.mkdirSync(sysRtkDir, { recursive: true });
@@ -450,7 +464,7 @@ try {
         assert.equal(
           fs.existsSync(managedRtkShim),
           false,
-          "Stale/dangling managed rtk shim must be removed when transitioning to an external system rtk on PATH (UX-ACS-R2-001)"
+          "Stale managed rtk shim must be removed when external system rtk supersedes bundled pluginDest/bin/rtk (SVC-002)"
         );
         const statusSysJson = spawnSync(process.execPath, [installScriptPath, "--status", "--json"], {
           env: sysTransitionEnv,
@@ -524,7 +538,7 @@ try {
       assert.equal(fs.existsSync(managedRtkShim), true, "Uninstall must NEVER remove a user's unmanaged rtk binary");
       assert.equal(fs.readFileSync(managedRtkShim, "utf-8"), userRtkBody);
 
-      // UX-ACS-003: Unit checks for isDirOnPath and formatPathOnboardingLines across POSIX & Windows
+      // UX-ACS-003 / DOC-001: Unit checks for isDirOnPath and safe idempotent REG_EXPAND_SZ-preserving Windows PATH snippet
       assert.equal(isDirOnPath(uxBinDir, `${uxBinDir}${path.delimiter}/usr/bin`), true);
       assert.equal(isDirOnPath(uxBinDir, `${uxBinDir}${path.sep}${path.delimiter}/usr/bin`), true);
       assert.equal(isDirOnPath(uxBinDir, "/usr/bin:/bin", "linux"), false);
@@ -533,9 +547,221 @@ try {
         true
       );
       const winPathLines = formatPathOnboardingLines("C:\\Users\\Dev\\.gemini\\antigravity\\bin", { platform: "win32" }).join("\n");
-      assert.match(winPathLines, /\$env:Path \+=/);
-      assert.match(winPathLines, /SetEnvironmentVariable/);
+      assert.match(winPathLines, /\$env:Path/);
+      assert.match(winPathLines, /CreateSubKey\("Environment"\)/);
+      assert.match(winPathLines, /DoNotExpandEnvironmentNames/);
+      assert.match(winPathLines, /RegistryValueKind\]::ExpandString/);
+      assert.match(winPathLines, /-notcontains/);
+      assert.equal(winPathLines.includes('SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable'), false, "Unsafe REG_SZ flattening snippet must not be emitted (DOC-001)");
       assert.match(winPathLines, /npx --package=agy-context-saver agy-context status/);
+
+      if (process.platform === "win32") {
+        // Verify the pure PowerShell PATH normalization logic handles $null, trailing ';', REG_EXPAND_SZ vars, and idempotent re-run
+        const psPathCheckScript = [
+          "$bin = 'C:\\Users\\Dev\\.gemini\\antigravity\\bin'",
+          "$raw = '%USERPROFILE%\\.gemini\\antigravity\\bin'",
+          "function Add-AgyPath($cur) {",
+          "  $parts = @(([string]$cur) -split ';' | Where-Object { $_ })",
+          "  $norm = @($parts | ForEach-Object { $_.TrimEnd('\\') })",
+          "  if ($norm -notcontains $bin -and $norm -notcontains $raw) { return (($parts + $raw) -join ';') }",
+          "  return ($parts -join ';')",
+          "}",
+          "$rNull = Add-AgyPath $null",
+          "$rTrail = Add-AgyPath '%LOCALAPPDATA%\\Programs\\Python;'",
+          "$rDup = Add-AgyPath $rTrail",
+          "$rExpand = Add-AgyPath 'C:\\Users\\Dev\\.gemini\\antigravity\\bin\\;C:\\Windows'",
+          "Write-Output \"NULL=$rNull\"",
+          "Write-Output \"TRAIL=$rTrail\"",
+          "Write-Output \"DUP=$rDup\"",
+          "Write-Output \"EXP=$rExpand\""
+        ].join("\n");
+        const psRes = spawnSync("powershell", ["-NoProfile", "-Command", psPathCheckScript], { encoding: "utf-8" });
+        assert.equal(psRes.status, 0, `PowerShell PATH helper test failed: ${psRes.stderr}`);
+        assert.match(psRes.stdout, /NULL=%USERPROFILE%\\\.gemini\\antigravity\\bin\r?\n/);
+        assert.match(psRes.stdout, /TRAIL=%LOCALAPPDATA%\\Programs\\Python;%USERPROFILE%\\\.gemini\\antigravity\\bin\r?\n/);
+        assert.match(psRes.stdout, /DUP=%LOCALAPPDATA%\\Programs\\Python;%USERPROFILE%\\\.gemini\\antigravity\\bin\r?\n/);
+        assert.match(psRes.stdout, /EXP=C:\\Users\\Dev\\\.gemini\\antigravity\\bin\\;C:\\Windows\r?\n/);
+      }
+
+      // DEP-001: Runtime Node.js >= 22 version preflight assertions
+      for (const badNode of ["v18.20.0", "20.18.0", "v16.0.0", "0.0.0", ""]) {
+        assert.throws(
+          () => assertSupportedNodeVersion(badNode),
+          /Unsupported Node\.js version.*requires Node\.js >= 22\.0\.0/i,
+          `Node version '${badNode}' must be rejected (DEP-001)`
+        );
+      }
+      assert.equal(assertSupportedNodeVersion("v22.0.0"), 22);
+      assert.equal(assertSupportedNodeVersion("22.14.0"), 22);
+      assert.equal(assertSupportedNodeVersion("v24.1.0"), 24);
+      if (process.platform !== "win32") {
+        const fakeOldNodeDir = path.join(uxProfile, "fake-node20-bin");
+        fs.mkdirSync(fakeOldNodeDir, { recursive: true });
+        const fakeOldNode = path.join(fakeOldNodeDir, "node");
+        fs.writeFileSync(fakeOldNode, '#!/bin/sh\nif [ "$1" = "-v" ]; then echo "v20.18.0"; exit 0; fi\nexit 0\n', "utf-8");
+        fs.chmodSync(fakeOldNode, 0o755);
+        const installShPath = path.resolve(fileURLToPath(import.meta.url), "../../install.sh");
+        const oldNodeShRes = spawnSync("bash", [installShPath, "--check"], {
+          env: { ...process.env, PATH: `${fakeOldNodeDir}:/usr/bin:/bin` },
+          encoding: "utf-8"
+        });
+        assert.notEqual(oldNodeShRes.status, 0, "install.sh must reject Node.js v20.x (DEP-001)");
+        assert.match(oldNodeShRes.stderr, /Unsupported Node\.js version v20\.18\.0.*>= 22\.0\.0/i);
+      }
+
+      // SCRIPT-002: Copy-mode provisioning with read-only (0o555) repoRoot/bin targets pluginDest/bin without EACCES
+      if (process.platform !== "win32") {
+        const cryptoMod = await import("node:crypto");
+        const roRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agy-ro-repo-"));
+        const roProfile = path.join(roRoot, "profile");
+        const roRepo = path.join(roRoot, "readonly-pkg");
+        const roRepoBin = path.join(roRepo, "bin");
+        const archiveStage = path.join(roRoot, "archive-src");
+        try {
+          const srcRepoRoot = path.resolve(fileURLToPath(import.meta.url), "../..");
+          for (const entry of [
+            "package.json",
+            "plugin.json",
+            "hooks.json",
+            "README.md",
+            "CHANGELOG.md",
+            "LICENSE",
+            "install.sh",
+            "install.ps1",
+            "assets",
+            "bin",
+            "lib",
+            "scripts",
+            "rules",
+            "skills"
+          ]) {
+            const srcPath = path.join(srcRepoRoot, entry);
+            if (fs.existsSync(srcPath)) {
+              fs.cpSync(srcPath, path.join(roRepo, entry), { recursive: true });
+            }
+          }
+          // Build a real .tar.gz archive containing a fake executable rtk (v1.1.0)
+          fs.mkdirSync(archiveStage, { recursive: true });
+          const fakeRtkInArchive = path.join(archiveStage, "rtk");
+          fs.writeFileSync(fakeRtkInArchive, '#!/bin/sh\necho "rtk 1.1.0"\n', "utf-8");
+          fs.chmodSync(fakeRtkInArchive, 0o755);
+          const archiveFile = path.join(roRoot, "rtk-test.tar.gz");
+          const tarRes = spawnSync("tar", ["-czf", archiveFile, "-C", archiveStage, "rtk"], { encoding: "utf-8" });
+          assert.equal(tarRes.status, 0, `tar archive creation failed: ${tarRes.stderr}`);
+          const archiveBuf = fs.readFileSync(archiveFile);
+          const archiveSha = cryptoMod.createHash("sha256").update(archiveBuf).digest("hex");
+
+          // Remove any developer-local rtk binary copied from checkout so roRepo mirrors a clean npm tarball
+          for (const staleRtk of ["rtk", "rtk.exe", "rtk.cmd"]) {
+            const p = path.join(roRepoBin, staleRtk);
+            if (fs.existsSync(p)) fs.unlinkSync(p);
+          }
+
+          // Lock down ENTIRE roRepo tree to immutable Nix/npm-store permissions (0o555 dirs, 0o444 files)
+          const lockReadOnlyTree = (dirPath) => {
+            for (const entry of fs.readdirSync(dirPath)) {
+              const p = path.join(dirPath, entry);
+              const st = fs.lstatSync(p);
+              if (st.isDirectory()) {
+                lockReadOnlyTree(p);
+                fs.chmodSync(p, 0o555);
+              } else if (st.isFile()) {
+                fs.chmodSync(p, 0o444);
+              }
+            }
+          };
+
+          lockReadOnlyTree(roRepo);
+          fs.chmodSync(roRepo, 0o555);
+          const roInstallModuleUrl = `file://${path.join(roRepo, "scripts", "install-register.mjs")}`;
+          const roEnv = {
+            ...process.env,
+            AGY_TEST_PROFILE_DIR: roProfile,
+            PATH: path.dirname(process.execPath) + ":/usr/bin:/bin"
+          };
+
+          // 1) Initial install + 2) Re-install/upgrade + 3) Uninstall from fully immutable 0o555/0o444 package store
+          const roRunRes = spawnSync(
+            process.execPath,
+            [
+              "-e",
+              `import fs from "node:fs";
+               import { runInstall, runUninstall } from ${JSON.stringify(roInstallModuleUrl)};
+               const archiveBuf = fs.readFileSync(${JSON.stringify(archiveFile)});
+               const installOpts = {
+                 silent: true,
+                 forceCopyFallback: true,
+                 rtkOptions: {
+                   platform: "linux",
+                   arch: "x64",
+                   pathEnv: "",
+                   platformAsset: { asset: "rtk-test.tar.gz", exeName: "rtk", isZip: false },
+                   checksums: { "rtk-test.tar.gz": ${JSON.stringify(archiveSha)} },
+                   fetch: async () => ({ ok: true, arrayBuffer: async () => archiveBuf })
+                 }
+               };
+               await runInstall(installOpts);
+               await runInstall(installOpts);
+               await runUninstall({ silent: true });
+               // 4) Re-install when pluginDest is an existing symlink -> immutable roRepo must NOT write through symlink
+               const pluginDest = ${JSON.stringify(path.join(roProfile, ".gemini", "config", "plugins", "agy-context-saver"))};
+               fs.mkdirSync(${JSON.stringify(path.join(roProfile, ".gemini", "config", "plugins"))}, { recursive: true });
+               fs.symlinkSync(${JSON.stringify(roRepo)}, pluginDest, "dir");
+               await runInstall(installOpts);`
+            ],
+            { env: roEnv, encoding: "utf-8" }
+          );
+          assert.equal(roRunRes.status, 0, `Immutable 0o555/0o444 install/re-install/uninstall/symlink-replace failed (SCRIPT-002): ${roRunRes.stderr || roRunRes.stdout}`);
+          const installedPluginRtk = path.join(roProfile, ".gemini", "config", "plugins", "agy-context-saver", "bin", "rtk");
+          assert.equal(fs.existsSync(installedPluginRtk), true, "RTK must be provisioned into user-writable pluginDest/bin (SCRIPT-002)");
+          assert.equal(fs.lstatSync(path.join(roProfile, ".gemini", "config", "plugins", "agy-context-saver")).isSymbolicLink(), false, "Symlink to read-only repo must be replaced by copy");
+          assert.equal(fs.existsSync(path.join(roRepoBin, "rtk")), false, "Read-only repoRoot/bin must never be mutated (SCRIPT-002)");
+
+          // 5) Failed RTK download on a fresh profile (no --allow-degraded) must NOT leave an orphan pluginDest directory
+          const failProfile = path.join(roRoot, "fail-profile");
+          const failRes = spawnSync(
+            process.execPath,
+            [
+              "-e",
+              `import { runInstall } from ${JSON.stringify(roInstallModuleUrl)};
+               await runInstall({
+                 silent: true,
+                 forceCopyFallback: true,
+                 rtkOptions: {
+                   platform: "linux",
+                   arch: "x64",
+                   pathEnv: "",
+                   fetch: async () => ({ ok: false, status: 503, statusText: "Offline" })
+                 }
+               });`
+            ],
+            {
+              env: { ...roEnv, AGY_TEST_PROFILE_DIR: failProfile },
+              encoding: "utf-8"
+            }
+          );
+          assert.notEqual(failRes.status, 0, "Failed RTK download without --allow-degraded must fail");
+          assert.equal(
+            fs.existsSync(path.join(failProfile, ".gemini", "config", "plugins", "agy-context-saver")),
+            false,
+            "Failed RTK provisioning must NOT leave an orphan pluginDest/bin directory behind"
+          );
+        } finally {
+          const restoreWritable = (p) => {
+            if (!fs.existsSync(p)) return;
+            const st = fs.lstatSync(p);
+            if (st.isSymbolicLink()) return;
+            if (st.isDirectory()) {
+              try { fs.chmodSync(p, 0o755); } catch {}
+              for (const entry of fs.readdirSync(p)) restoreWritable(path.join(p, entry));
+            } else if (st.isFile()) {
+              try { fs.chmodSync(p, 0o644); } catch {}
+            }
+          };
+          restoreWritable(roRoot);
+          fs.rmSync(roRoot, { recursive: true, force: true });
+        }
+      }
 
       // UX-ACS-006: Cross-platform unit verification of Windows node.cmd wrapper parity & backup preservation
       const winNodeWrapText = formatWindowsNodeCmdWrapper("C:\\Program Files\\nodejs\\node.exe", "C:\\Users\\Dev\\.gemini\\config\\scripts\\execution-guard-hook.mjs");

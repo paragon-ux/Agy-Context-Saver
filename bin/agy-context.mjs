@@ -31,6 +31,7 @@ import {
 } from "../lib/transcript-core.mjs";
 import { getStateDir } from "../scripts/state-dir.mjs";
 import {
+  assertSupportedNodeVersion,
   runInstall,
   runUninstall,
   runStatus,
@@ -157,7 +158,7 @@ Usage:
 Options:
   --query <regex>        Case-insensitive regex or substring pattern (or positional #1)
   --id <uuid>            Conversation UUID (or positional #2)
-  --roles <csv>          Filter roles: user,assistant,subagent,tool,error,all
+  --roles <csv>          Filter roles: user,assistant,subagent,tool,system,generic,error,all
   --mode <mode>          auto (default), compact, or full
   --start <N> / --end <N> Inclusive step_index bounds
   --last-turns <N>       Restrict search to last N turns (aliases: --last, --tail)
@@ -1369,6 +1370,8 @@ async function main() {
     console.log(getVersion());
     process.exit(0);
   }
+
+  assertSupportedNodeVersion();
 
   const cmd = argv[0];
   const rest = argv.slice(1);

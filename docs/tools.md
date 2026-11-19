@@ -42,8 +42,8 @@ agy-context transcript info --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --json
 
 | Status | Condition | Action |
 | :--- | :--- | :--- |
-| **`HEALTHY`** | Polling $= 0$, User turns $< 35$ | Proceed normally. |
-| **`WARNING`** | User turns $\ge 35$ | Summarize progress and continue in a new conversation. |
+| **`HEALTHY`** | Polling $= 0$, User turns $\le 40$ (advisory reminder from $35\text{--}40$ turns) | Proceed normally (summarize and start a fresh conversation when turns reach $35+$). |
+| **`WARNING`** | User turns $> 40$ or $1\text{--}3$ polling violations | Stop polling violations immediately and/or summarize progress in a fresh conversation. |
 | **`CRITICAL`** | Busy-polling events $> 3$ | Stop polling `manage_task(Action='status')` and wait for Reactive Wakeup (`<SYSTEM_MESSAGE>`). |
 
 ---
@@ -100,7 +100,7 @@ Searches conversation transcripts by regex or substring, hydrating truncated fie
 | :--- | :---: | :---: | :--- |
 | `<pattern>` / `--query` | `<regex>` | `""` | Case-insensitive regex or substring pattern (first positional arg or `--query`). |
 | `[<id>]` / `--id` | `<uuid>` | Active / auto | Conversation UUID (second positional arg or `--id`). |
-| `--roles` | `<csv>` | `all` | Comma-separated filter: `user`, `assistant`, `subagent`, `tool`, `error`, or `all`. |
+| `--roles` | `<csv>` | `all` | Comma-separated filter: `user`, `assistant`, `subagent`, `tool`, `system`, `generic`, `error`, or `all`. |
 | `--mode` | `auto \| compact \| full` | `auto` | `auto` scans `transcript.jsonl` and hydrates `truncated_fields` from `transcript_full.jsonl` when matched. |
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive `step_index` bounds. |
 | `--last-turns` | `<N>` | `(none)` | Restrict search to the last `N` turns (aliases: `--last`, `--tail`). |

@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/agy-context-saver.svg)](https://www.npmjs.com/package/agy-context-saver)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-Zensical-purple.svg)](https://paragon-ux.github.io/Agy-Context-Saver/)
-[![Tests](https://img.shields.io/badge/tests-100%25%20passing-brightgreen.svg)](https://github.com/paragon-ux/Agy-Context-Saver/actions)
+[![CI](https://github.com/paragon-ux/Agy-Context-Saver/actions/workflows/ci-matrix.yml/badge.svg)](https://github.com/paragon-ux/Agy-Context-Saver/actions/workflows/ci-matrix.yml)
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 

@@ -72,7 +72,7 @@ Runs all 12 test suites in isolated temporary profiles:
 ```bash
 npm run verify:package
 ```
-Runs `node tests/verify-package.mjs --self-test` and validates `npm pack --dry-run --json` against the whitelisted files in `package.json` (`32` files).
+Runs `node tests/verify-package.mjs --self-test` and validates `npm pack --dry-run --json` against the whitelisted files in `package.json` (`33` files).
 
 ### Stage 4: Documentation build
 ```bash

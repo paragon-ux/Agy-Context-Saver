@@ -2502,6 +2502,356 @@ console.log("\n--- Group J: Launch UX Day-One Regressions (Local RTK, Degraded M
   }
 }
 
+// ============================================================================
+// GROUP K: Day-1 Launch Remediation Regressions (RUN-001, RUN-003, SVC-001, RUN-004, TEST-001)
+// ============================================================================
+console.log("\n--- Group K: Day-1 Launch Remediation Regressions (RUN-001, RUN-003, SVC-001, RUN-004) ---");
+{
+  // K.1: RUN-001 / TEST-001 - Windows spaced-profile local RTK launcher (scripts/rtk-run.mjs) & parseRtkReadCommand
+  {
+    const { resolveLocalRtkExecutable, runRtkPassthrough } = await import("../scripts/rtk-run.mjs");
+    const spacedRtkRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agy-run001-spaced-"));
+    try {
+      const spacedProfile = path.join(spacedRtkRoot, "Jane Doe Profile");
+      const emptyBin = path.join(spacedRtkRoot, "empty-bin");
+      const pluginRoot = path.join(spacedProfile, ".gemini", "config", "plugins", "agy-context-saver");
+      const pluginBin = path.join(pluginRoot, "bin");
+      const pluginScripts = path.join(pluginRoot, "scripts");
+      fs.mkdirSync(emptyBin, { recursive: true });
+      fs.mkdirSync(pluginBin, { recursive: true });
+      fs.mkdirSync(pluginScripts, { recursive: true });
+      fs.copyFileSync(path.resolve(path.dirname(hookScript), "rtk-run.mjs"), path.join(pluginScripts, "rtk-run.mjs"));
+
+      const fakeLocalRtk = path.join(pluginBin, process.platform === "win32" ? "rtk.cmd" : "rtk");
+      if (process.platform === "win32") {
+        fs.writeFileSync(
+          fakeLocalRtk,
+          [
+            "@echo off",
+            'if "%1"=="--version" goto :ver',
+            'if "%1"=="hook" goto :hook',
+            'echo rtk-ok:%RTK_SUPPRESS_HOOK_WARNING%:%*',
+            "exit /b 0",
+            ":ver",
+            "echo rtk 1.1.0",
+            "exit /b 0",
+            ":hook",
+            `"${process.execPath}" -e "const fs=require('fs');const d=JSON.parse(fs.readFileSync(0,'utf8'));const c=d.toolCall.args.CommandLine;let rw=c;if(c==='git status')rw='rtk git status';else if(c==='cmd /c \"git status\"')rw='cmd /c \"rtk git status\"';else if(c==='bash -c \"git status\"')rw='bash -c \"rtk git status\"';else if(c.startsWith('cat '))rw='rtk read '+c.slice(4);console.log(JSON.stringify({decision:'allow',overwrite:{CommandLine:rw}}));"`,
+            "exit /b 0",
+            ""
+          ].join("\r\n"),
+          "utf-8"
+        );
+      } else {
+        fs.writeFileSync(
+          fakeLocalRtk,
+          [
+            "#!/bin/sh",
+            'if [ "$1" = "--version" ]; then echo "rtk 1.1.0"; exit 0; fi',
+            'if [ "$1" = "hook" ]; then',
+            `  "${process.execPath}" -e "const fs=require('fs');const d=JSON.parse(fs.readFileSync(0,'utf8'));const c=d.toolCall.args.CommandLine;let rw=c;if(c==='git status')rw='rtk git status';else if(c==='cmd /c \\\"git status\\\"')rw='cmd /c \\\"rtk git status\\\"';else if(c==='bash -c \\\"git status\\\"')rw='bash -c \\\"rtk git status\\\"';else if(c.startsWith('cat '))rw='rtk read '+c.slice(4);console.log(JSON.stringify({decision:'allow',overwrite:{CommandLine:rw}}));"`,
+            "  exit 0",
+            "fi",
+            'echo "rtk-ok:$RTK_SUPPRESS_HOOK_WARNING:$*"',
+            ""
+          ].join("\n"),
+          "utf-8"
+        );
+        fs.chmodSync(fakeLocalRtk, 0o755);
+      }
+
+      // Direct unit & passthrough verification of scripts/rtk-run.mjs on all platforms
+      const resolvedExe = resolveLocalRtkExecutable({
+        env: { ...process.env, AGY_TEST_PROFILE_DIR: spacedProfile },
+        scriptDir: pluginScripts
+      });
+      assert.equal(path.resolve(resolvedExe), path.resolve(fakeLocalRtk));
+      const emptyTestProfile = path.join(spacedRtkRoot, "empty-profile");
+      fs.mkdirSync(emptyTestProfile, { recursive: true });
+      assert.equal(
+        resolveLocalRtkExecutable({
+          env: { ...process.env, AGY_TEST_PROFILE_DIR: emptyTestProfile },
+          scriptDir: pluginScripts
+        }),
+        "rtk",
+        "rtk-run.mjs must NOT leak sibling/repo bin when AGY_TEST_PROFILE_DIR has no local rtk"
+      );
+      const directPass = runRtkPassthrough(["git", "status"], {
+        env: { ...process.env, AGY_TEST_PROFILE_DIR: spacedProfile },
+        stdio: "pipe"
+      });
+      assert.equal(directPass.status, 0, directPass.stderr);
+      assert.match(directPass.stdout.toString("utf-8"), /rtk-ok:1:git status/);
+
+      const spacedOffPathEnv = withEnvPath(emptyBin, { ...process.env, AGY_TEST_PROFILE_DIR: spacedProfile });
+      const gitRewrite = runHook(
+        { toolCall: { name: "run_command", args: { CommandLine: "git status", WaitMsBeforeAsync: 5000 } } },
+        spacedOffPathEnv
+      );
+      assert.equal(gitRewrite.decision, "allow");
+      const catRewrite = runHook(
+        { toolCall: { name: "run_command", args: { CommandLine: "cat package.json", WaitMsBeforeAsync: 5000 } } },
+        spacedOffPathEnv
+      );
+      assert.equal(catRewrite.decision, "allow");
+      const grepRewrite = runHook(
+        { toolCall: { name: "run_command", args: { CommandLine: 'rtk grep -rnE "foo" src/', WaitMsBeforeAsync: 5000 } } },
+        spacedOffPathEnv
+      );
+      assert.equal(grepRewrite.decision, "allow");
+
+      // Shell wrapper quoting safety with spaced local RTK:
+      // `cmd /c "git status"` must NEVER emit single-quoted `node '...'` (cmd.exe ignores single quotes)
+      const cmdWrapRewrite = runHook(
+        { toolCall: { name: "run_command", args: { CommandLine: 'cmd /c "git status"', WaitMsBeforeAsync: 5000 } } },
+        spacedOffPathEnv
+      );
+      assert.equal(cmdWrapRewrite.decision, "allow");
+      assert.equal(
+        cmdWrapRewrite.overwrite?.CommandLine,
+        undefined,
+        `cmd /c wrapper with spaced local RTK must preserve raw command instead of emitting broken single quotes: ${cmdWrapRewrite.overwrite?.CommandLine}`
+      );
+
+      // `bash -c "git status"` with spaced local RTK must convert inner quotes cleanly (no unescaped `"` inside `"..."`)
+      const bashWrapRewrite = runHook(
+        { toolCall: { name: "run_command", args: { CommandLine: 'bash -c "git status"', WaitMsBeforeAsync: 5000 } } },
+        spacedOffPathEnv
+      );
+      assert.equal(bashWrapRewrite.decision, "allow");
+      const bashWrapCmd = bashWrapRewrite.overwrite?.CommandLine || "";
+      assert.match(bashWrapCmd, /^bash -c "[^"]*'[^']*Jane Doe Profile[^']*'[^"]*git status"$/);
+      if (process.platform !== "win32") {
+        const bashExec = spawnSync("bash", ["-c", bashWrapCmd], {
+          env: { ...process.env, AGY_TEST_PROFILE_DIR: spacedProfile },
+          encoding: "utf-8"
+        });
+        assert.equal(bashExec.status, 0, `Rewritten bash -c wrapper failed: ${bashExec.stderr || bashExec.error?.message}`);
+        assert.match(bashExec.stdout, /rtk-ok:.*:git status/);
+      }
+
+      if (process.platform === "win32") {
+        for (const [label, res] of [
+          ["git status", gitRewrite],
+          ["cat package.json", catRewrite],
+          ["rtk grep", grepRewrite]
+        ]) {
+          const cmdLine = res.overwrite?.CommandLine || "";
+          assert.equal(cmdLine.startsWith('"'), false, `Windows ${label} rewrite must NEVER start with double quote: ${cmdLine}`);
+          assert.match(cmdLine, /^node ".*\/scripts\/rtk-run\.mjs"\s+/, `Windows ${label} rewrite must use node "<rtk-run.mjs>"`);
+          const psEnv = { ...process.env, AGY_TEST_PROFILE_DIR: spacedProfile };
+          prependToPath(path.dirname(process.execPath), psEnv);
+          const psExec = spawnSync("powershell", ["-NoProfile", "-Command", cmdLine], { env: psEnv, encoding: "utf-8" });
+          assert.equal(psExec.status, 0, `PowerShell execution failed for ${label} (${cmdLine}): ${psExec.stderr}`);
+          assert.match(psExec.stdout, /rtk-ok:1:/);
+        }
+      }
+
+      // Verify parseRtkReadCommand accepts trusted `node "<plugin>/scripts/rtk-run.mjs" read` on spillover
+      // while rejecting an untrusted `/tmp/evil/rtk-run.mjs` script
+      const trustedLauncher = path.join(pluginScripts, "rtk-run.mjs").replace(/\\/g, "/");
+      const trustedSpill = runHook(
+        {
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: `node "${trustedLauncher}" read .system_generated/steps/1/output.txt`, WaitMsBeforeAsync: 5000 }
+          }
+        },
+        spacedOffPathEnv
+      );
+      assert.equal(trustedSpill.decision, "allow", `Trusted rtk-run.mjs read on spillover must be allowed (${trustedSpill.reason || ""})`);
+
+      const evilLauncher = path.join(spacedRtkRoot, "evil", "rtk-run.mjs").replace(/\\/g, "/");
+      const evilSpill = runHook(
+        {
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: `node "${evilLauncher}" read .system_generated/steps/1/output.txt`, WaitMsBeforeAsync: 5000 }
+          }
+        },
+        spacedOffPathEnv
+      );
+      assert.equal(evilSpill.decision, "deny", "Untrusted rtk-run.mjs path must NEVER bypass spillover guard");
+    } finally {
+      fs.rmSync(spacedRtkRoot, { recursive: true, force: true });
+    }
+    console.log("✓ RUN-001 / TEST-001: Spaced-profile local RTK launcher (rtk-run.mjs) and trusted parseRtkReadCommand verified");
+  }
+
+  // K.2: RUN-003 - Unprefixed `system_generated` workspace files & `git commit -m` / `git tag -m`
+  {
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: "models/system_generated.py", StartLine: 1, EndLine: 50 } } }).decision,
+      "allow",
+      "Bounded read_file on models/system_generated.py must be allowed (RUN-003)"
+    );
+    assert.equal(
+      runHook({ toolCall: { name: "edit_file", args: { Path: "src/system_generated/report.ts", Target: "a", Replacement: "b" } } }).decision,
+      "allow",
+      "edit_file on src/system_generated/report.ts must be allowed (RUN-003)"
+    );
+    assert.equal(
+      runHook({ toolCall: { name: "run_command", args: { CommandLine: "git commit -m 'Add system_generated column'", WaitMsBeforeAsync: 5000 } } }).decision,
+      "allow",
+      "git commit -m referencing system_generated must be allowed (RUN-003)"
+    );
+    assert.equal(
+      runHook({ toolCall: { name: "run_command", args: { CommandLine: "git -c core.safecrlf=false commit -m 'Harden .system_generated guard'", WaitMsBeforeAsync: 5000 } } }).decision,
+      "allow",
+      "git commit -m mentioning .system_generated prose must be allowed (RUN-003)"
+    );
+    assert.equal(
+      runHook({ toolCall: { name: "run_command", args: { CommandLine: "git tag -a v2.0.4 -m 'Release .system_generated fix'", WaitMsBeforeAsync: 5000 } } }).decision,
+      "allow",
+      "git tag -m mentioning .system_generated prose must be allowed (RUN-003)"
+    );
+    assert.equal(
+      runHook({ toolCall: { name: "run_command", args: { CommandLine: "git commit -am 'Fix .system_generated handling'", WaitMsBeforeAsync: 5000 } } }).decision,
+      "allow",
+      "git commit -am mentioning .system_generated prose must be allowed (RUN-003)"
+    );
+    assert.equal(
+      runHook({ toolCall: { name: "run_command", args: { CommandLine: "git tag -am 'Release .system_generated fix' v2.0.5", WaitMsBeforeAsync: 5000 } } }).decision,
+      "allow",
+      "git tag -am mentioning .system_generated prose must be allowed (RUN-003)"
+    );
+    assert.equal(
+      runHook({ toolCall: { name: "run_command", args: { CommandLine: "rtk git commit -m 'Fix .system_generated handling'", WaitMsBeforeAsync: 5000 } } }).decision,
+      "allow",
+      "rtk git commit -m mentioning .system_generated prose must be allowed (RUN-003)"
+    );
+
+    // Obfuscated & real `.system_generated` smuggling vectors MUST remain denied
+    for (const smugglingCmd of [
+      'cat .system_""generated/foo',
+      'cat .""system_generated/logs/transcript.jsonl',
+      "node -e \"fs.readFileSync('.system_'+'generated/foo')\"",
+      "node -e \"fs.readFileSync('.'+'system_generated/foo')\"",
+      "git commit -F .system_generated/logs/transcript.jsonl",
+      "git commit -aF .system_generated/logs/transcript.jsonl",
+      "git commit -m <.system_generated/logs/transcript.jsonl",
+      "AGY_BRAIN_DIR=/tmp git commit -m 'harmless message'",
+      'git commit -m "$(cat .system_generated/logs/transcript.jsonl)"'
+    ]) {
+      assert.equal(
+        runHook({ toolCall: { name: "run_command", args: { CommandLine: smugglingCmd, WaitMsBeforeAsync: 5000 } } }).decision,
+        "deny",
+        `Real/obfuscated .system_generated smuggling must stay denied: ${smugglingCmd}`
+      );
+    }
+    console.log("✓ RUN-003: Unprefixed system_generated files & git commit/tag -m allowed while .system_generated smuggling stays denied");
+  }
+
+  // K.3: SVC-001 - Backoff & schedule denials must NOT overwrite session.lastPollTime or break 0s Check #1
+  {
+    resetState();
+    const convSvc = "conv-svc001-backoff";
+    const sessionFile = path.join(stateDir, `agy-session-${convSvc}.json`);
+
+    // Part A: Fresh session -> denied schedule call -> lastPollTime stays 0 -> Check #1 manage_task(status) STILL succeeds immediately (0s)
+    const schedDeny = runHook({
+      conversationId: convSvc,
+      toolCall: { name: "schedule", args: { DurationSeconds: 5, Prompt: "Check status of task-1", TimerCondition: "task-1" } }
+    });
+    assert.equal(schedDeny.decision, "deny");
+    const afterSchedDeny = JSON.parse(fs.readFileSync(sessionFile, "utf-8"));
+    assert.equal(afterSchedDeny.lastPollTime, 0, "Denied task schedule must NOT overwrite lastPollTime (SVC-001)");
+
+    const swarmDeny = runHook({
+      conversationId: convSvc,
+      toolCall: { name: "schedule", args: { DurationSeconds: 60, Prompt: "Check status of swarm workers", TimerCondition: "any" } }
+    });
+    assert.equal(swarmDeny.decision, "deny");
+    const afterSwarmDeny = JSON.parse(fs.readFileSync(sessionFile, "utf-8"));
+    assert.equal(afterSwarmDeny.lastPollTime, 0, "Denied swarm schedule must NOT overwrite lastPollTime (SVC-001)");
+
+    const checkOne = runHook({
+      conversationId: convSvc,
+      toolCall: { name: "manage_task", args: { Action: "status", TaskId: "t1" } }
+    });
+    assert.equal(checkOne.decision, "allow", "Check #1 manage_task(status) must remain immediate (0s) even after prior schedule denials (SVC-001)");
+
+    // Part B: Premature manage_task denial at t=25s must NOT reset lastPollTime; retrying at t=31s must succeed
+    const stateAfterCheck1 = JSON.parse(fs.readFileSync(sessionFile, "utf-8"));
+    const fixedT0 = Date.now() - 25000;
+    stateAfterCheck1.lastPollTime = fixedT0;
+    fs.writeFileSync(sessionFile, JSON.stringify(stateAfterCheck1), "utf-8");
+
+    const prematureDeny = runHook({
+      conversationId: convSvc,
+      toolCall: { name: "manage_task", args: { Action: "status", TaskId: "t1" } }
+    });
+    assert.equal(prematureDeny.decision, "deny");
+    const stateAfterDeny = JSON.parse(fs.readFileSync(sessionFile, "utf-8"));
+    assert.equal(stateAfterDeny.lastPollTime, fixedT0, "Premature manage_task denial must NOT advance lastPollTime (SVC-001)");
+
+    // Advance elapsed time past 30s (t=31s) -> diagnostic check #2 must now be allowed
+    stateAfterDeny.lastPollTime = Date.now() - 31000;
+    fs.writeFileSync(sessionFile, JSON.stringify(stateAfterDeny), "utf-8");
+    const checkTwo = runHook({
+      conversationId: convSvc,
+      toolCall: { name: "manage_task", args: { Action: "status", TaskId: "t1" } }
+    });
+    assert.equal(checkTwo.decision, "allow", "Diagnostic check #2 must succeed once original cooldown elapses (SVC-001)");
+
+    // Part C: denyRunningTask must NOT advance lastPollTime (nor emit Infinitys)
+    const convRunTask = "conv-svc001-runtask";
+    const runTaskBrain = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", convRunTask, ".system_generated");
+    fs.mkdirSync(path.join(runTaskBrain, "tasks"), { recursive: true });
+    fs.writeFileSync(path.join(runTaskBrain, "tasks", "task-live-svc.log"), "running...\n", "utf-8");
+    const runTaskDeny = runHook({
+      conversationId: convRunTask,
+      toolCall: { name: "run_command", args: { CommandLine: "rtk read tasks/task-live-svc.log", WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(runTaskDeny.decision, "deny");
+    assert.equal(runTaskDeny.reason.includes("Infinity"), false, "denyRunningTask must never print Infinitys elapsed");
+    const runTaskState = JSON.parse(fs.readFileSync(path.join(stateDir, `agy-session-${convRunTask}.json`), "utf-8"));
+    assert.equal(runTaskState.lastPollTime, 0, "denyRunningTask must NOT overwrite lastPollTime (SVC-001)");
+    console.log("✓ SVC-001: Backoff/schedule/running-task denials preserve lastPollTime and keep Check #1 immediate (0s)");
+  }
+
+  // K.4: RUN-004 - Read-only sed, perl, and cp source operands must NOT trigger benchmark force_ask
+  {
+    for (const readOnlyBenchCmd of [
+      "sed -n '1,20p' benchmarks/suite.json",
+      "sed 's/foo/bar/g' benchmarks/suite.json",
+      "sed 's/new benchmarks\\/suite.json/old/g' src/a.txt",
+      "perl -ne 'print if /score/' benchmarks/suite.json",
+      "cp benchmarks/suite.json /tmp/suite-copy.json",
+      "cp --backup benchmarks/suite.json /tmp/suite-copy.json",
+      "cp -t /tmp benchmarks/suite.json"
+    ]) {
+      const res = runHook({
+        toolCall: { name: "run_command", args: { CommandLine: readOnlyBenchCmd, WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(res.decision, "allow", `Read-only benchmark inspection/copy source must be allowed: ${readOnlyBenchCmd}`);
+    }
+
+    for (const mutatingBenchCmd of [
+      "sed -i 's/a/b/' benchmarks/suite.json",
+      "sed --in-place 's/a/b/' benchmarks/suite.json",
+      "sed -n 'w benchmarks/suite.json' /tmp/evil.json",
+      "sed 's/a/b/w benchmarks/suite.json' /tmp/evil.json",
+      "perl -pi -e 's/a/b/' benchmarks/suite.json",
+      `perl -e 'open(my $f, ">", "benchmarks/suite.json"); print $f "x"'`,
+      `perl -e 'open my $f, ">", "benchmarks/suite.json"; print $f "x"'`,
+      `perl -e'unlink("benchmarks/suite.json")'`,
+      "cp /tmp/fake.json benchmarks/suite.json",
+      "cp --backup /tmp/fake.json benchmarks/suite.json",
+      "cp --preserve /tmp/fake.json benchmarks/suite.json",
+      "cp -t benchmarks /tmp/fake.json",
+      "cp -rt benchmarks /tmp/fake.json",
+      "sed 's/a/b/' src/data.json > benchmarks/suite.json"
+    ]) {
+      const res = runHook({
+        toolCall: { name: "run_command", args: { CommandLine: mutatingBenchCmd, WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(res.decision, "force_ask", `Mutating benchmark command must still trigger force_ask: ${mutatingBenchCmd}`);
+    }
+    console.log("✓ RUN-004: Read-only sed/perl and cp sources allowed while in-place sed/perl and cp destinations stay guarded");
+  }
+}
+
 hermetic.cleanup();
 console.log("\n=================================================");
 console.log("ALL 2.0 PRETOOLUSE HOOK GOVERNANCE TESTS PASSED!");
