@@ -1,6 +1,6 @@
 # Agy-Context-Saver
 
-`Agy-Context-Saver` (`v2.0.4`) is a `PreToolUse` execution hook and transcript CLI (`agy-context`) for **Google Antigravity** (`agy`) on Linux, macOS, and Windows (`Node.js >= 22`, zero external npm dependencies). It pairs with **RTK (`>= 1.1.0`)** to compress shell command output, enforce bounded workspace file reads, stop background-task busy-polling, and govern transcript inspection across parent sessions, subagents, and `/swarm` workers.
+`Agy-Context-Saver` (`v2.0.4`) is a `PreToolUse` execution hook and transcript CLI (`agy-context`) for **Google Antigravity** (`agy`) on Linux, macOS, and Windows (`Node.js >= 22`, zero external npm dependencies). It pairs with **RTK (`>= 1.1.0`)**, a CLI proxy that compresses noisy shell and test output, to shrink command logs, enforce bounded workspace file reads, stop background-task busy-polling, and govern transcript inspection across parent sessions, subagents, and `/swarm` workers.
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
@@ -20,6 +20,12 @@
 2. **Bounded workspace file inspection:** Unbounded `read_file` calls on workspace files are redirected to `rtk grep`, `rtk find`, and `rtk ls` paired with bounded `read_file(StartLine, EndLine <= 150)` slices (or explicit `1..TotalLines` reads for files `<= 800` lines and `<= 45 KiB`). Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass through without slice bounds.
 3. **Reactive Wakeup and polling backoff:** Premature `manage_task(Action='status')` checks and short polling timers are blocked along an exponential backoff curve (`0s -> 30s -> 75s -> 188s -> 469s -> 600s`), tripping a `force_ask` circuit breaker at 5 cumulative denials.
 4. **CLI transcript forensics and parent access control:** `agy-context transcript` streams Markdown turns, searches compact and truncated steps, and extracts step ranges without MCP schema overhead. Parents can restrict or allowlist child subagents and `/swarm` workers on demand via `agy-context transcript access` or first-line `[agy-transcript-access: deny|self-only|allow]` launch directives.
+
+## How Agy-Context-Saver guards a default session
+
+Agy-Context-Saver layers a pre-tool hook on top of Google Antigravity's native shell, file, and task tools rather than replacing them (see [Architecture and internals](architecture.md)):
+
+![Default Antigravity session vs. Antigravity with Agy-Context-Saver](assets/default-vs-context-saver.svg)
 
 ## Quickstart
 

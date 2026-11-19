@@ -1,39 +1,156 @@
-<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-flowchart" viewBox="0 0 804 702" width="804" height="702" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_r:var(--pele-radius,4px);--_fm:var(--pele-font-mono,monospace);font:16px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,sans-serif)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="flowchart">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 584" width="860" height="584" style="max-width:100%;height:auto" role="img" aria-labelledby="tx-gov-title tx-gov-desc">
+  <title id="tx-gov-title">Parent Transcript Access Precedence and Enforcement</title>
+  <desc id="tx-gov-desc">Three-stage overview of how Agy-Context-Saver identifies top-level vs. child sessions, resolves five-tier transcript access precedence, and enforces authorized reads with short-lived single-use tokens.</desc>
   <style>
     :root {
-      --pele-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
-      --pele-bg: #ffffff;
-      --pele-fg: #1f2328;
-      --pele-muted: #656d76;
-      --pele-line: #57606a;
-      --pele-surface: #f6f8fa;
-      --pele-surface-alt: #eaeef2;
-      --pele-border: #d0d7de;
-      --pele-accent: #0969da;
-      --pele-series-1: #0969da;
-      --pele-series-2: #1a7f37;
-      --pele-series-3: #9a6700;
-      --pele-series-4: #8250df;
-      --pele-series-5: #cf222e;
-      --pele-series-6: #bf3989;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+      --bg: #ffffff;
+      --fg: #1f2328;
+      --muted: #57606a;
+      --line: #57606a;
+      --card: #ffffff;
+      --band-neutral: #f6f8fa;
+      --band-neutral-border: #d0d7de;
+      --band-tiers: #f2f7fd;
+      --band-tiers-border: #80b3f2;
+      --allow-bg: #eef8f0;
+      --allow-border: #52a868;
+      --deny-bg: #fdf2f2;
+      --deny-border: #d9757c;
+      --card-border: #d0d7de;
+      --accent: #0969da;
+      --green: #1a7f37;
+      --red: #b4232c;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --pele-bg: #0d1117;
-        --pele-fg: #e6edf3;
-        --pele-muted: #8b949e;
-        --pele-line: #8b949e;
-        --pele-surface: #161b22;
-        --pele-surface-alt: #21262d;
-        --pele-border: #30363d;
-        --pele-accent: #2f81f7;
-        --pele-series-1: #2f81f7;
-        --pele-series-2: #3fb950;
-        --pele-series-3: #d29922;
-        --pele-series-4: #a371f7;
-        --pele-series-5: #f85149;
-        --pele-series-6: #db61a2;
+        --bg: #0d1117;
+        --fg: #e6edf3;
+        --muted: #9ea7b3;
+        --line: #8b949e;
+        --card: #161b22;
+        --band-neutral: #161b22;
+        --band-neutral-border: #30363d;
+        --band-tiers: #121d2b;
+        --band-tiers-border: #2f5d96;
+        --allow-bg: #122117;
+        --allow-border: #2d7a43;
+        --deny-bg: #261417;
+        --deny-border: #913d43;
+        --card-border: #30363d;
+        --accent: #58a6ff;
+        --green: #3fb950;
+        --red: #ff7b72;
       }
     }
+    text { font-family: var(--font); fill: var(--fg); }
+    .band-title { font-size: 13px; font-weight: 600; }
+    .band-sub { font-size: 12px; font-weight: 400; fill: var(--muted); }
+    .node-title { font-size: 13.5px; font-weight: 600; text-anchor: middle; }
+    .node-sub { font-size: 11.5px; fill: var(--muted); text-anchor: middle; }
+    .tier-title { font-size: 13px; font-weight: 600; }
+    .tier-item { font-size: 11.5px; fill: var(--fg); }
+    .tier-note { font-size: 11px; fill: var(--muted); }
+    .edge-label { font-size: 12px; font-weight: 500; fill: var(--muted); text-anchor: middle; }
+    .arrow-line { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-linecap: round; }
+    .arrow-head { fill: var(--line); }
   </style>
-<g class="pele-clusters"><g class="pele-cluster" data-id="Enforcement"><rect x="160.7" y="526" width="481.87" height="168" fill="var(--_a)" fill-opacity="0.5" stroke="var(--_b)" style="rx:var(--_r)"/></g><g class="pele-cluster" data-id="Precedence"><rect x="8" y="264" width="787.28" height="189" fill="var(--_a)" fill-opacity="0.5" stroke="var(--_b)" style="rx:var(--_r)"/></g><g class="pele-cluster" data-id="Input"><rect x="143.93" y="8" width="515.42" height="168" fill="var(--_a)" fill-opacity="0.5" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-cluster-label" fill="var(--_m)" x="316.23" y="33.6" text-anchor="middle">1. Caller Context &amp; Lineage (Step 0 / Step 1)</text></g></g><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge" data-id="L_Input_Precedence_0"><path d="M401.64,176L401.64,257"/><path class="pele-marker" d="M401.64,264L398.28,256L405,256Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_Precedence_Enforcement_0"><path d="M401.64,453L401.64,519"/><path class="pele-marker" d="M401.64,526L398.28,518L405,518Z" fill="var(--_l)" stroke="none"/></g></g><g class="pele-cluster-titles"><g class="pele-cluster-title" data-id="Enforcement"><text fill="none" stroke="color-mix(in srgb,var(--_a) 50%,var(--_bg))" stroke-width="5" stroke-linejoin="round" x="317.87" y="551.6" text-anchor="middle">3. Runtime Decision &amp; Defense in Depth</text><text class="pele-cluster-label" fill="var(--_m)" x="317.87" y="551.6" text-anchor="middle">3. Runtime Decision &amp; Defense in Depth</text></g><g class="pele-cluster-title" data-id="Precedence"><text fill="none" stroke="color-mix(in srgb,var(--_a) 50%,var(--_bg))" stroke-width="5" stroke-linejoin="round" x="233.85" y="289.6" text-anchor="middle">2. 5-Tier Precedence Engine (PreToolUse + transcript-core)</text><text class="pele-cluster-label" fill="var(--_m)" x="233.85" y="289.6" text-anchor="middle">2. 5-Tier Precedence Engine (PreToolUse + transcript-core)</text></g></g><g class="pele-edge-labels" font-size="14"><g class="pele-edge-label" data-id="L_Input_Precedence_0"><rect x="309.71" y="198.5" width="183.85" height="36" rx="3" fill="var(--_bg)"/><text text-anchor="middle" xml:space="preserve"><tspan x="401.64" y="212.4">agy-context transcript / state</tspan><tspan x="401.64" y="230.4">check</tspan></text></g><g class="pele-edge-label" data-id="L_Precedence_Enforcement_0"><rect x="311.67" y="475.5" width="179.95" height="21" rx="3" fill="var(--_bg)"/><text x="401.64" y="490.9" text-anchor="middle">verify &amp; consume disk grant</text></g></g><g class="pele-nodes"><g class="pele-node pele-shape-rect" data-id="I1" transform="translate(270.18,102)"><rect x="-106.25" y="-43.5" width="212.5" height="87" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-15.4">Top-Level User Session</tspan><tspan x="0" y="5.6">(Step 0 USER_INPUT -&gt;</tspan><tspan x="0" y="26.6">bypass)</tspan></text></g><g class="pele-node pele-shape-rect" data-id="I2" transform="translate(527.89,102)"><rect x="-111.46" y="-54" width="222.93" height="108" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-25.9">Child Subagent or /swarm</tspan><tspan x="0" y="-4.9">Worker</tspan><tspan x="0" y="16.1">(sender=&lt;parentConvId&gt; |</tspan><tspan x="0" y="37.1">@roster)</tspan></text></g><g class="pele-node pele-shape-rect" data-id="T1" transform="translate(134.02,368.5)"><rect x="-106.02" y="-43.5" width="212.05" height="87" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-15.4">Tiers 1-2: Owner &amp; Deny</tspan><tspan x="0" y="5.6">1. Policy Owner (parent)</tspan><tspan x="0" y="26.6">2. Explicit CLI --deny</tspan></text></g><g class="pele-node pele-shape-rect" data-id="T2" transform="translate(394.06,368.5)"><rect x="-114.02" y="-64.5" width="228.03" height="129" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-36.4">Tiers 3-4: Allow &amp; Directive</tspan><tspan x="0" y="-15.4">3. Explicit CLI --allow</tspan><tspan x="0" y="5.6">(@roster*)</tspan><tspan x="0" y="26.6">4. First-Line Launch</tspan><tspan x="0" y="47.6">Directive</tspan></text></g><g class="pele-node pele-shape-rect" data-id="T3" transform="translate(661.68,368.5)"><rect x="-113.6" y="-54" width="227.2" height="108" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-25.9">Tier 5: Cohort Mode</tspan><tspan x="0" y="-4.9">5. Default Mode</tspan><tspan x="0" y="16.1">(open | allowlist | self-only |</tspan><tspan x="0" y="37.1">deny)</tspan></text></g><g class="pele-node pele-shape-rect" data-id="E1" transform="translate(281.18,620)"><rect x="-100.47" y="-54" width="200.94" height="108" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-25.9">Allow + 10s Single-Use</tspan><tspan x="0" y="-4.9">Disk Grant</tspan><tspan x="0" y="16.1">(pins --id &lt;convId&gt; in</tspan><tspan x="0" y="37.1">self-only mode)</tspan></text></g><g class="pele-node pele-shape-rect" data-id="E2" transform="translate(522.11,620)"><rect x="-100.46" y="-54" width="200.93" height="108" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-25.9">Deny + Context-Aware</tspan><tspan x="0" y="-4.9">Rejection</tspan><tspan x="0" y="16.1">(5 cumulative strikes -&gt;</tspan><tspan x="0" y="37.1">force_ask)</tspan></text></g></g></svg>
+
+  <!-- Self-contained adaptive canvas background (seamless on GitHub/Zensical light and dark) -->
+  <rect x="0" y="0" width="860" height="584" rx="12" fill="var(--bg)"/>
+
+  <!-- Stage 1: Caller Identity and Session Lineage -->
+  <g id="stage-caller">
+    <rect x="16" y="16" width="828" height="132" rx="10" fill="var(--band-neutral)" stroke="var(--band-neutral-border)" stroke-width="1.25"/>
+    <text class="band-title" x="32" y="40">1. Caller Identity &amp; Session Lineage<tspan class="band-sub" dx="10">Checked automatically on every transcript request</tspan></text>
+
+    <!-- Top-Level Session -->
+    <rect x="32" y="54" width="382" height="78" rx="6" fill="var(--card)" stroke="var(--allow-border)" stroke-width="1"/>
+    <text class="node-title" x="223" y="78" style="fill:var(--green)">Top-Level User Session</text>
+    <text class="node-sub" x="223" y="98">Direct user conversation</text>
+    <text class="node-sub" x="223" y="116">Never locked out by another session's policy</text>
+
+    <!-- Child Session -->
+    <rect x="446" y="54" width="382" height="78" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="node-title" x="637" y="78">Child Subagent or Swarm Worker</text>
+    <text class="node-sub" x="637" y="98">Spawned by a parent coordinator</text>
+    <text class="node-sub" x="637" y="116">Bound to its parent's policy &amp; worker roster name</text>
+  </g>
+
+  <!-- Stage 1 to Stage 2 Connector -->
+  <g id="connector-1-2">
+    <line class="arrow-line" x1="430" y1="148" x2="430" y2="192"/>
+    <polygon class="arrow-head" points="430,200 425.5,191 434.5,191"/>
+    <rect x="298" y="162" width="264" height="22" rx="4" fill="var(--bg)"/>
+    <text class="edge-label" x="430" y="177">evaluates request in strict priority order</text>
+  </g>
+
+  <!-- Stage 2: Five-Tier Access Precedence -->
+  <g id="stage-precedence">
+    <rect x="16" y="200" width="828" height="186" rx="10" fill="var(--band-tiers)" stroke="var(--band-tiers-border)" stroke-width="1.25"/>
+    <text class="band-title" x="32" y="224" style="fill:var(--accent)">2. Five-Tier Access Precedence<tspan class="band-sub" dx="10">First matching rule decides (highest priority left to right)</tspan></text>
+
+    <!-- Card 1: Tiers 1-2 -->
+    <rect x="32" y="240" width="244" height="130" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="tier-title" x="46" y="264">Tiers 1-2: Owner &amp; Deny</text>
+    <text class="tier-item" x="46" y="290">1. Parent session owner</text>
+    <text class="tier-note" x="58" y="307">Always retains full access</text>
+    <text class="tier-item" x="46" y="331">2. Explicit CLI deny list</text>
+    <text class="tier-note" x="58" y="348">Blocks matching worker or ID</text>
+
+    <!-- Arrow 1 -> 2 -->
+    <line class="arrow-line" x1="276" y1="305" x2="300" y2="305"/>
+    <polygon class="arrow-head" points="308,305 299,300.5 299,309.5"/>
+
+    <!-- Card 2: Tiers 3-4 -->
+    <rect x="308" y="240" width="244" height="130" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="tier-title" x="322" y="264">Tiers 3-4: Allow &amp; Launch</text>
+    <text class="tier-item" x="322" y="290">3. Explicit CLI allow list</text>
+    <text class="tier-note" x="334" y="307">Grants auditors or named roles</text>
+    <text class="tier-item" x="322" y="331">4. First-line launch rule</text>
+    <text class="tier-note" x="334" y="348">Sets deny, self-only, or allow</text>
+
+    <!-- Arrow 2 -> 3 -->
+    <line class="arrow-line" x1="552" y1="305" x2="576" y2="305"/>
+    <polygon class="arrow-head" points="584,305 575,300.5 575,309.5"/>
+
+    <!-- Card 3: Tier 5 -->
+    <rect x="584" y="240" width="244" height="130" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="tier-title" x="598" y="264">Tier 5: Cohort Default</text>
+    <text class="tier-item" x="598" y="290">5. Parent default mode</text>
+    <text class="tier-note" x="610" y="307">open, allowlist, self-only,</text>
+    <text class="tier-note" x="610" y="324">or deny for child workers</text>
+    <text class="tier-note" x="610" y="348">Auto-expires via policy TTL</text>
+  </g>
+
+  <!-- Stage 2 to Stage 3 Connectors -->
+  <g id="connector-2-3">
+    <line class="arrow-line" x1="223" y1="386" x2="223" y2="428" style="stroke:var(--green)"/>
+    <polygon points="223,436 218.5,427 227.5,427" style="fill:var(--green)"/>
+    <rect x="165" y="399" width="116" height="22" rx="4" fill="var(--bg)"/>
+    <text class="edge-label" x="223" y="414" style="fill:var(--green)">access granted</text>
+
+    <line class="arrow-line" x1="637" y1="386" x2="637" y2="428" style="stroke:var(--red)"/>
+    <polygon points="637,436 632.5,427 641.5,427" style="fill:var(--red)"/>
+    <rect x="577" y="399" width="120" height="22" rx="4" fill="var(--bg)"/>
+    <text class="edge-label" x="637" y="414" style="fill:var(--red)">access blocked</text>
+  </g>
+
+  <!-- Stage 3: Enforcement and Defense in Depth -->
+  <g id="stage-enforcement">
+    <rect x="16" y="436" width="828" height="132" rx="10" fill="var(--band-neutral)" stroke="var(--band-neutral-border)" stroke-width="1.25"/>
+    <text class="band-title" x="32" y="460">3. Enforcement &amp; Defense in Depth<tspan class="band-sub" dx="10">Verified by both the hook and the agy-context CLI</tspan></text>
+
+    <!-- Allow Outcome -->
+    <rect x="32" y="474" width="382" height="78" rx="6" fill="var(--allow-bg)" stroke="var(--allow-border)" stroke-width="1.25"/>
+    <text class="node-title" x="223" y="498" style="fill:var(--green)">Allow with Short-Lived Token</text>
+    <text class="node-sub" x="223" y="518">Hook issues a single-use read token verified by CLI</text>
+    <text class="node-sub" x="223" y="536">Pins worker to its own transcript in self-only mode</text>
+
+    <!-- Block Outcome -->
+    <rect x="446" y="474" width="382" height="78" rx="6" fill="var(--deny-bg)" stroke="var(--deny-border)" stroke-width="1.25"/>
+    <text class="node-title" x="637" y="498" style="fill:var(--red)">Block &amp; Prevent Bypass</text>
+    <text class="node-sub" x="637" y="518">Rejects raw log reads and unauthorized CLI queries</text>
+    <text class="node-sub" x="637" y="536">Pauses for user confirmation after repeated strikes</text>
+  </g>
+</svg>

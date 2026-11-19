@@ -1,39 +1,141 @@
-<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-flowchart" viewBox="0 0 793 582" width="793" height="582" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_r:var(--pele-radius,4px);--_fm:var(--pele-font-mono,monospace);font:16px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,sans-serif)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="flowchart">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 548" width="820" height="548" style="max-width:100%;height:auto" role="img" aria-labelledby="acs-arch-title acs-arch-desc">
+  <title id="acs-arch-title">Agy-Context-Saver and RTK Execution Architecture</title>
+  <desc id="acs-arch-desc">Three-layer overview showing Google Antigravity agent tool calls intercepted by Agy-Context-Saver before execution and routed through RTK shell output compression, the agy-context transcript CLI, and event-driven wakeups.</desc>
   <style>
     :root {
-      --pele-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
-      --pele-bg: #ffffff;
-      --pele-fg: #1f2328;
-      --pele-muted: #656d76;
-      --pele-line: #57606a;
-      --pele-surface: #f6f8fa;
-      --pele-surface-alt: #eaeef2;
-      --pele-border: #d0d7de;
-      --pele-accent: #0969da;
-      --pele-series-1: #0969da;
-      --pele-series-2: #1a7f37;
-      --pele-series-3: #9a6700;
-      --pele-series-4: #8250df;
-      --pele-series-5: #cf222e;
-      --pele-series-6: #bf3989;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+      --bg: #ffffff;
+      --fg: #1f2328;
+      --muted: #57606a;
+      --line: #57606a;
+      --card: #ffffff;
+      --band-runtime: #f6f8fa;
+      --band-runtime-border: #d0d7de;
+      --band-acs: #f2f7fd;
+      --band-acs-border: #80b3f2;
+      --band-engine: #f7f4fc;
+      --band-engine-border: #c2a8f0;
+      --card-border: #d0d7de;
+      --accent: #0969da;
+      --purple: #6639ba;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --pele-bg: #0d1117;
-        --pele-fg: #e6edf3;
-        --pele-muted: #8b949e;
-        --pele-line: #8b949e;
-        --pele-surface: #161b22;
-        --pele-surface-alt: #21262d;
-        --pele-border: #30363d;
-        --pele-accent: #2f81f7;
-        --pele-series-1: #2f81f7;
-        --pele-series-2: #3fb950;
-        --pele-series-3: #d29922;
-        --pele-series-4: #a371f7;
-        --pele-series-5: #f85149;
-        --pele-series-6: #db61a2;
+        --bg: #0d1117;
+        --fg: #e6edf3;
+        --muted: #9ea7b3;
+        --line: #8b949e;
+        --card: #161b22;
+        --band-runtime: #161b22;
+        --band-runtime-border: #30363d;
+        --band-acs: #121d2b;
+        --band-acs-border: #2f5d96;
+        --band-engine: #1b1726;
+        --band-engine-border: #55407d;
+        --card-border: #30363d;
+        --accent: #58a6ff;
+        --purple: #bc8cff;
       }
     }
+    text { font-family: var(--font); fill: var(--fg); }
+    .band-title { font-size: 13px; font-weight: 600; }
+    .band-sub { font-size: 12px; font-weight: 400; fill: var(--muted); }
+    .node-title { font-size: 14px; font-weight: 600; text-anchor: middle; }
+    .node-sub { font-size: 12px; font-weight: 400; fill: var(--muted); text-anchor: middle; }
+    .edge-label { font-size: 12px; font-weight: 500; fill: var(--muted); text-anchor: middle; }
+    .arrow-line { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-linecap: round; }
+    .arrow-head { fill: var(--line); }
   </style>
-<g class="pele-clusters"><g class="pele-cluster" data-id="L3"><rect x="8" y="427" width="776.45" height="147" fill="var(--_a)" fill-opacity="0.5" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-cluster-label" fill="var(--_m)" x="193.18" y="452.6" text-anchor="middle">RTK (&gt;= 1.1.0), agy-context CLI &amp; Host Wakeup</text></g><g class="pele-cluster" data-id="L2"><rect x="59.9" y="228" width="672.64" height="126" fill="var(--_a)" fill-opacity="0.5" stroke="var(--_b)" style="rx:var(--_r)"/></g><g class="pele-cluster" data-id="L1"><rect x="25.72" y="8" width="741.01" height="147" fill="var(--_a)" fill-opacity="0.5" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-cluster-label" fill="var(--_m)" x="109.07" y="33.6" text-anchor="middle">Antigravity Runtime</text></g></g><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge" data-id="L_L1_L2_0"><path d="M396.22,155L396.22,221"/><path class="pele-marker" d="M396.22,228L392.86,220L399.58,220Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_L2_L3_0"><path d="M396.22,354L396.22,420"/><path class="pele-marker" d="M396.22,427L392.86,419L399.58,419Z" fill="var(--_l)" stroke="none"/></g></g><g class="pele-cluster-titles"><g class="pele-cluster-title" data-id="L2"><text fill="none" stroke="color-mix(in srgb,var(--_a) 50%,var(--_bg))" stroke-width="5" stroke-linejoin="round" x="254.85" y="253.6" text-anchor="middle">Agy-Context-Saver: PreToolUse Hook (hooks.json)</text><text class="pele-cluster-label" fill="var(--_m)" x="254.85" y="253.6" text-anchor="middle">Agy-Context-Saver: PreToolUse Hook (hooks.json)</text></g></g><g class="pele-edge-labels" font-size="14"><g class="pele-edge-label" data-id="L_L1_L2_0"><rect x="328.81" y="177.5" width="134.83" height="21" rx="3" fill="var(--_bg)"/><text x="396.22" y="192.9" text-anchor="middle">PreToolUse payload</text></g><g class="pele-edge-label" data-id="L_L2_L3_0"><rect x="312.09" y="376.5" width="168.27" height="21" rx="3" fill="var(--_bg)"/><text x="396.22" y="391.9" text-anchor="middle">rewrite, slice, or 10s grant</text></g></g><g class="pele-nodes"><g class="pele-node pele-shape-rect" data-id="A1" transform="translate(125.95,91.5)"><rect x="-80.23" y="-33" width="160.46" height="66" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.9">run_command</tspan><tspan x="0" y="16.1">(shell &amp; CLI calls)</tspan></text></g><g class="pele-node pele-shape-rect" data-id="A2" transform="translate(358.87,91.5)"><rect x="-112.69" y="-43.5" width="225.38" height="87" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-15.4">read_file / edit_file /</tspan><tspan x="0" y="5.6">write_file</tspan><tspan x="0" y="26.6">(workspace &amp; special files)</tspan></text></g><g class="pele-node pele-shape-rect" data-id="A3" transform="translate(629.14,91.5)"><rect x="-117.58" y="-33" width="235.17" height="66" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.9">manage_task / schedule</tspan><tspan x="0" y="16.1">(background tasks &amp; timers)</tspan></text></g><g class="pele-node pele-shape-rect" data-id="B1" transform="translate(168.61,301)"><rect x="-88.7" y="-33" width="177.41" height="66" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.9">Shell &amp; State Guard</tspan><tspan x="0" y="16.1">+ 10s Sync Window</tspan></text></g><g class="pele-node pele-shape-rect" data-id="B2" transform="translate(394.9,301)"><rect x="-97.58" y="-33" width="195.17" height="66" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.9">Hybrid Slice (&lt;= 150L)</tspan><tspan x="0" y="16.1">&amp; Safe Harbor</tspan></text></g><g class="pele-node pele-shape-rect" data-id="B3" transform="translate(622.51,301)"><rect x="-90.03" y="-33" width="180.06" height="66" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.9">Proportional Backoff</tspan><tspan x="0" y="16.1">&amp; 5-Strike Breaker</tspan></text></g><g class="pele-node pele-shape-rect" data-id="C1" transform="translate(135.38,510.5)"><rect x="-107.38" y="-33" width="214.75" height="66" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.9">rtk hook antigravity</tspan><tspan x="0" y="16.1">&amp; rtk grep / find / ls / read</tspan></text></g><g class="pele-node pele-shape-rect" data-id="C2" transform="translate(397.57,510.5)"><rect x="-114.82" y="-43.5" width="229.63" height="87" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-15.4">agy-context transcript</tspan><tspan x="0" y="5.6">read | query | step | health |</tspan><tspan x="0" y="26.6">list | export | access</tspan></text></g><g class="pele-node pele-shape-rect" data-id="C3" transform="translate(658.42,510.5)"><rect x="-106.03" y="-33" width="212.06" height="66" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.9">Reactive Wakeup</tspan><tspan x="0" y="16.1">&amp; 10s Single-Use Grants</tspan></text></g></g></svg>
+
+  <!-- Self-contained adaptive canvas background (seamless on GitHub/Zensical light and dark) -->
+  <rect x="0" y="0" width="820" height="548" rx="12" fill="var(--bg)"/>
+
+  <!-- Layer 1: Google Antigravity Agent Tool Calls -->
+  <g id="layer-runtime">
+    <rect x="12" y="12" width="796" height="136" rx="10" fill="var(--band-runtime)" stroke="var(--band-runtime-border)" stroke-width="1.25"/>
+    <text class="band-title" x="28" y="36">Google Antigravity<tspan class="band-sub" dx="10">Native Agent Tool Calls</tspan></text>
+
+    <!-- Node A1 -->
+    <rect x="28" y="52" width="232" height="78" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="node-title" x="144" y="84">Shell &amp; CLI Commands</text>
+    <text class="node-sub" x="144" y="105">Git, tests, builds &amp; search</text>
+
+    <!-- Node A2 -->
+    <rect x="294" y="52" width="232" height="78" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="node-title" x="410" y="84">File Reads &amp; Edits</text>
+    <text class="node-sub" x="410" y="105">Workspace code &amp; skill docs</text>
+
+    <!-- Node A3 -->
+    <rect x="560" y="52" width="232" height="78" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="node-title" x="676" y="84">Background Tasks &amp; Timers</text>
+    <text class="node-sub" x="676" y="105">Async checks &amp; schedules</text>
+  </g>
+
+  <!-- Layer 1 to Layer 2 Connectors -->
+  <g id="connectors-1-2">
+    <line class="arrow-line" x1="240" y1="148" x2="240" y2="198"/>
+    <polygon class="arrow-head" points="240,206 235.5,197 244.5,197"/>
+    <rect x="140" y="165" width="200" height="22" rx="4" fill="var(--bg)"/>
+    <text class="edge-label" x="240" y="180">inspects calls before execution</text>
+
+    <line class="arrow-line" x1="580" y1="206" x2="580" y2="156"/>
+    <polygon class="arrow-head" points="580,148 575.5,157 584.5,157"/>
+    <rect x="478" y="165" width="204" height="22" rx="4" fill="var(--bg)"/>
+    <text class="edge-label" x="580" y="180">compact output &amp; safe guidance</text>
+  </g>
+
+  <!-- Layer 2: Agy-Context-Saver Guard Hook -->
+  <g id="layer-guard">
+    <rect x="12" y="206" width="796" height="136" rx="10" fill="var(--band-acs)" stroke="var(--band-acs-border)" stroke-width="1.25"/>
+    <text class="band-title" x="28" y="230" style="fill:var(--accent)">Agy-Context-Saver<tspan class="band-sub" dx="10">Pre-Tool Execution Guard Hook</tspan></text>
+
+    <!-- Node B1 -->
+    <rect x="28" y="246" width="232" height="78" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="node-title" x="144" y="278">Command &amp; Log Guard</text>
+    <text class="node-sub" x="144" y="299">Routes shell; blocks raw logs</text>
+
+    <!-- Node B2 -->
+    <rect x="294" y="246" width="232" height="78" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="node-title" x="410" y="278">Focused File Reads</text>
+    <text class="node-sub" x="410" y="299">Caps huge files; allows skills</text>
+
+    <!-- Node B3 -->
+    <rect x="560" y="246" width="232" height="78" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="node-title" x="676" y="278">Poll Loop Protection</text>
+    <text class="node-sub" x="676" y="299">Stops busy checks; favors wait</text>
+  </g>
+
+  <!-- Layer 2 to Layer 3 Connectors -->
+  <g id="connectors-2-3">
+    <line class="arrow-line" x1="240" y1="342" x2="240" y2="392"/>
+    <polygon class="arrow-head" points="240,400 235.5,391 244.5,391"/>
+    <rect x="144" y="359" width="192" height="22" rx="4" fill="var(--bg)"/>
+    <text class="edge-label" x="240" y="374">rewrites commands &amp; scopes CLI</text>
+
+    <line class="arrow-line" x1="580" y1="400" x2="580" y2="350"/>
+    <polygon class="arrow-head" points="580,342 575.5,351 584.5,351"/>
+    <rect x="478" y="359" width="204" height="22" rx="4" fill="var(--bg)"/>
+    <text class="edge-label" x="580" y="374">trimmed logs &amp; wakeup signals</text>
+  </g>
+
+  <!-- Layer 3: Compression, Transcript CLI and Host Wakeups -->
+  <g id="layer-engines">
+    <rect x="12" y="400" width="796" height="136" rx="10" fill="var(--band-engine)" stroke="var(--band-engine-border)" stroke-width="1.25"/>
+    <text class="band-title" x="28" y="424" style="fill:var(--purple)">Companion Tools &amp; Runtime<tspan class="band-sub" dx="10">Output Compression, Transcript CLI &amp; Wakeups</tspan></text>
+
+    <!-- Node C1 -->
+    <rect x="28" y="440" width="232" height="78" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="node-title" x="144" y="472">RTK Output Compressor</text>
+    <text class="node-sub" x="144" y="493">Shrinks noisy shell &amp; test logs</text>
+
+    <!-- Node C2 -->
+    <rect x="294" y="440" width="232" height="78" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="node-title" x="410" y="472">agy-context CLI</text>
+    <text class="node-sub" x="410" y="493">Safe transcript search &amp; access</text>
+
+    <!-- Node C3 -->
+    <rect x="560" y="440" width="232" height="78" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
+    <text class="node-title" x="676" y="472">Event-Driven Wakeups</text>
+    <text class="node-sub" x="676" y="493">Sleep idle, resume on finish</text>
+  </g>
+</svg>

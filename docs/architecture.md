@@ -1,8 +1,14 @@
 # Architecture & Internals
 
-`Agy-Context-Saver` (`v2.0.x`) pairs a `PreToolUse` hook (`scripts/execution-guard-hook.mjs`) with a streaming transcript engine (`lib/transcript-core.mjs`, `bin/agy-context.mjs`) and **RTK (`>= 1.1.0`)**.
+`Agy-Context-Saver` (`v2.0.x`) pairs a `PreToolUse` hook (`scripts/execution-guard-hook.mjs`) with a streaming transcript engine (`lib/transcript-core.mjs`, `bin/agy-context.mjs`) and **RTK (`>= 1.1.0`)**, a CLI proxy that compresses noisy shell and test output.
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
+
+---
+
+## Default Session vs. Agy-Context-Saver
+
+![Default Antigravity session vs. Antigravity with Agy-Context-Saver](assets/default-vs-context-saver.svg)
 
 ---
 

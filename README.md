@@ -7,7 +7,7 @@
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
-Agy-Context-Saver is a PreToolUse execution hook and transcript CLI for Google Antigravity on Linux, macOS, and Windows (Node.js 22 or newer, zero external npm dependencies). Paired with RTK 1.1.0 or newer, it compresses shell output, keeps workspace file reads bounded, stops background-task polling loops, and lets parent sessions govern child subagent and swarm transcript access.
+Agy-Context-Saver is a PreToolUse execution hook and transcript CLI for Google Antigravity on Linux, macOS, and Windows (Node.js 22 or newer, zero external npm dependencies). Paired with RTK (1.1.0 or newer), a CLI proxy that compresses noisy shell and test output, it shrinks command logs, keeps workspace file reads bounded, stops background-task polling loops, and lets parent sessions govern child subagent and swarm transcript access.
 
 ## Quickstart
 
