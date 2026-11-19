@@ -2866,7 +2866,7 @@ try {
       [["transcript", "--help"], /Subcommands:/, /agy-context transcript <subcommand> --help/],
       [["transcript", "read", "--help"], /--last-turns/, /--outline/],
       [["transcript", "outline", "--help"], /--outline/, /--start/],
-      [["transcript", "query", "--help"], /--roles/, /--full-args/],
+      [["transcript", "query", "--help"], /--roles.*system.*generic/s, /--full-args/],
       [["transcript", "grep", "--help"], /--query/, /--include-tools/],
       [["transcript", "step", "--help"], /--line-start/, /--tail/],
       [["transcript", "health", "--help"], /--json/, /agy-context transcript health/],
@@ -2899,6 +2899,45 @@ try {
       assert.notEqual(badRes.status, 0, `Conflicting --help args must fail: ${badArgs.join(" ")}`);
     }
     console.log("✓ Top-level --help (<= 105 cols + examples) and all 14 subcommand --help topics verified");
+  }
+
+  // --- RUN-005 & RUN-006: Clean health --json stderr & darwin case-insensitive path containment ---
+  console.log("\n--- 12. Health --json Stderr Hygiene (RUN-005) & Darwin Path Casing (RUN-006) ---");
+  {
+    const convRun005 = "conv-run005-silent-health";
+    const run005Logs = path.join(brainDir, convRun005, ".system_generated", "logs");
+    fs.mkdirSync(run005Logs, { recursive: true });
+    fs.writeFileSync(
+      path.join(run005Logs, "transcript.jsonl"),
+      JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "Health check" }) + "\n",
+      "utf-8"
+    );
+    const legacyRtkDir = path.join(tempHome, "legacy-rtk-090");
+    createRtkShim(legacyRtkDir, "0.9.0");
+    const legacyEnv = { ...testEnv, PATH: legacyRtkDir };
+    if (process.platform === "win32") legacyEnv.Path = legacyRtkDir;
+    const healthJsonRes = spawnSync(process.execPath, [cliScript, "transcript", "health", "--id", convRun005, "--json"], {
+      env: legacyEnv,
+      encoding: "utf-8"
+    });
+    assert.equal(healthJsonRes.status, 0, healthJsonRes.stderr);
+    assert.equal(healthJsonRes.stderr.trim(), "", `health --json must emit zero stderr warnings even with legacy RTK (<1.1.0), got: ${healthJsonRes.stderr}`);
+    const parsedHealth = JSON.parse(healthJsonRes.stdout);
+    assert.equal(parsedHealth.rtkInfo, null);
+
+    // RUN-006: extractConvId must fold path casing on both darwin and win32
+    const mixedCaseBrainFile = path.join(brainDir.toUpperCase(), "Conv-Darwin-Case", ".system_generated", "logs", "transcript.jsonl");
+    assert.equal(
+      extractConvId(mixedCaseBrainFile, { strictBrainContainment: true, platform: "darwin" }),
+      "Conv-Darwin-Case",
+      "extractConvId must match mixed-case brain root on darwin (RUN-006)"
+    );
+    assert.equal(
+      extractConvId(mixedCaseBrainFile, { strictBrainContainment: true, platform: "win32" }),
+      "Conv-Darwin-Case",
+      "extractConvId must match mixed-case brain root on win32 (RUN-006)"
+    );
+    console.log("✓ RUN-005 (silent health --json with legacy RTK) and RUN-006 (darwin/win32 case folding) verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

@@ -592,6 +592,50 @@ try {
       assert.equal(degradedRfDone.decision, "deny");
       assert.equal(degradedRfDone.reason.includes("rtk read"), false, "Degraded read_file denial must not recommend rtk read");
       assert.match(degradedRfDone.reason, /tail -n 150/);
+      assert.match(degradedRfDone.reason, /bounded slice.*read_file/i, "Degraded unbounded read_file denial must recommend bounded read_file (UX-ACS-R2-002)");
+
+      // UX-ACS-R2-002: Degraded mode allows bounded read_file (<= 150 lines) on COMPLETED task logs (Windows ARM64 safe harbor)
+      // while strictly denying oversized slices (> 150 lines), RUNNING logs, and UNKNOWN logs
+      const degradedRfBoundedDone = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "read_file", args: { Path: legacyLog, StartLine: 1, EndLine: 150 } }
+      });
+      assert.equal(
+        degradedRfBoundedDone.decision,
+        "allow",
+        "Degraded mode must allow bounded read_file (<= 150 lines) on completed task log (UX-ACS-R2-002)"
+      );
+
+      const degradedRfOversizedDone = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "read_file", args: { Path: legacyLog, StartLine: 1, EndLine: 200 } }
+      });
+      assert.equal(
+        degradedRfOversizedDone.decision,
+        "deny",
+        "Degraded mode must deny read_file slices > 150 lines on completed task log (UX-ACS-R2-002)"
+      );
+
+      const degradedRfRunning = invokeDegraded({
+        conversationId: customConv,
+        toolCall: { name: "read_file", args: { Path: path.join(customDir, "tasks", "custom.log"), StartLine: 1, EndLine: 150 } }
+      });
+      assert.equal(
+        degradedRfRunning.decision,
+        "deny",
+        "Degraded mode must strictly deny bounded read_file on RUNNING task logs (UX-ACS-R2-002)"
+      );
+      assert.match(degradedRfRunning.reason, /actively RUNNING/);
+
+      const degradedRfUnknown = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "read_file", args: { Path: path.join(convDir, "tasks", "task-missing-unknown.log"), StartLine: 1, EndLine: 150 } }
+      });
+      assert.equal(
+        degradedRfUnknown.decision,
+        "deny",
+        "Degraded mode must strictly deny bounded read_file on UNKNOWN task logs (UX-ACS-R2-002)"
+      );
 
       const degradedTranscript = invokeDegraded({
         conversationId: convLive,
@@ -602,7 +646,103 @@ try {
       fs.rmSync(degradedProfile, { recursive: true, force: true });
     }
   }
-  console.log("✓ Lifecycle-gated task log backoff, completion handling, and degraded-mode bounds verified");
+
+  // RUN-002: Ordinary workspace `tasks/*.log` files must NOT be falsely jailed as Antigravity internal task logs
+  {
+    const wsTasksDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-ws-tasks-"));
+    try {
+      const nestedLog = path.join(wsTasksDir, "logs", "tasks", "worker.log");
+      const topTaskLog = path.join(wsTasksDir, "tasks", "deploy.log");
+      fs.mkdirSync(path.dirname(nestedLog), { recursive: true });
+      fs.mkdirSync(path.dirname(topTaskLog), { recursive: true });
+      fs.writeFileSync(nestedLog, "INFO boot\nERROR timeout\n", "utf-8");
+      fs.writeFileSync(topTaskLog, "deploy step 1\ndeploy ok\n", "utf-8");
+
+      const rfNestedAbs = invokeHook({
+        conversationId: convLive,
+        cwd: wsTasksDir,
+        toolCall: { name: "read_file", args: { Path: nestedLog, StartLine: 1, EndLine: 50 } }
+      });
+      assert.equal(rfNestedAbs.decision, "allow", `Workspace abs logs/tasks/worker.log must be allowed (${rfNestedAbs.reason || ""})`);
+
+      const rfNestedRel = invokeHook({
+        conversationId: convLive,
+        cwd: wsTasksDir,
+        toolCall: { name: "read_file", args: { Path: "logs/tasks/worker.log", StartLine: 1, EndLine: 50 } }
+      });
+      assert.equal(rfNestedRel.decision, "allow", `Workspace rel logs/tasks/worker.log must be allowed (${rfNestedRel.reason || ""})`);
+
+      const rfTopAbs = invokeHook({
+        conversationId: convLive,
+        cwd: wsTasksDir,
+        toolCall: { name: "read_file", args: { Path: topTaskLog, StartLine: 1, EndLine: 50 } }
+      });
+      assert.equal(rfTopAbs.decision, "allow", `Freshly written workspace abs tasks/deploy.log must be allowed (${rfTopAbs.reason || ""})`);
+
+      const rfTopRel = invokeHook({
+        conversationId: convLive,
+        cwd: wsTasksDir,
+        toolCall: { name: "read_file", args: { Path: "tasks/deploy.log", StartLine: 1, EndLine: 50 } }
+      });
+      assert.equal(rfTopRel.decision, "allow", `Existing workspace rel tasks/deploy.log must be allowed (${rfTopRel.reason || ""})`);
+
+      const pipeNestedAbs = invokeHook({
+        conversationId: convLive,
+        cwd: wsTasksDir,
+        toolCall: { name: "run_command", args: { CommandLine: `cat "${nestedLog.replace(/\\/g, "/")}" | grep ERROR`, WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(pipeNestedAbs.decision, "allow", `Piped cat on workspace logs/tasks/worker.log must be allowed (${pipeNestedAbs.reason || ""})`);
+
+      const pipeNestedRel = invokeHook({
+        conversationId: convLive,
+        cwd: wsTasksDir,
+        toolCall: { name: "run_command", args: { CommandLine: "cat logs/tasks/worker.log | grep ERROR", WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(pipeNestedRel.decision, "allow", `Piped cat on relative logs/tasks/worker.log must be allowed (${pipeNestedRel.reason || ""})`);
+
+      // Meanwhile real internal `.system_generated/tasks/` and brain-relative `tasks/task-live-1.log` stay gated
+      const stillGatedBrain = invokeHook({
+        conversationId: convLive,
+        cwd: wsTasksDir,
+        toolCall: { name: "run_command", args: { CommandLine: "cat tasks/task-live-1.log | grep ok", WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(stillGatedBrain.decision, "deny", "Piped cat on real brain-relative tasks/task-live-1.log must stay denied");
+
+      // Workspace symlinks pointing into `.system_generated/tasks/` MUST remain gated (no symlink bypass)
+      if (process.platform !== "win32") {
+        const realBrainTasksDir = path.join(tempBrainDir, convLive, ".system_generated", "tasks");
+        const symlinkedTasksDir = path.join(wsTasksDir, "sym", "tasks");
+        fs.mkdirSync(path.dirname(symlinkedTasksDir), { recursive: true });
+        fs.symlinkSync(realBrainTasksDir, symlinkedTasksDir);
+
+        const rfSymlinkDir = invokeHook({
+          conversationId: convLive,
+          cwd: wsTasksDir,
+          toolCall: { name: "read_file", args: { Path: "sym/tasks/task-live-1.log", StartLine: 1, EndLine: 50 } }
+        });
+        assert.equal(rfSymlinkDir.decision, "deny", "Symlinked workspace dir pointing to .system_generated/tasks must be denied on read_file");
+
+        const catSymlinkDir = invokeHook({
+          conversationId: convLive,
+          cwd: wsTasksDir,
+          toolCall: { name: "run_command", args: { CommandLine: "cat sym/tasks/task-live-1.log | grep ok", WaitMsBeforeAsync: 5000 } }
+        });
+        assert.equal(catSymlinkDir.decision, "deny", "Symlinked workspace dir pointing to .system_generated/tasks must be denied on piped cat");
+
+        const symlinkedFile = path.join(wsTasksDir, "tasks", "alias-live.log");
+        fs.symlinkSync(path.join(realBrainTasksDir, "task-live-1.log"), symlinkedFile);
+        const rfSymlinkFile = invokeHook({
+          conversationId: convLive,
+          cwd: wsTasksDir,
+          toolCall: { name: "read_file", args: { Path: "tasks/alias-live.log", StartLine: 1, EndLine: 50 } }
+        });
+        assert.equal(rfSymlinkFile.decision, "deny", "Symlinked workspace tasks/alias-live.log -> running brain task log must be denied");
+      }
+    } finally {
+      fs.rmSync(wsTasksDir, { recursive: true, force: true });
+    }
+  }
+  console.log("✓ Lifecycle-gated task log backoff, completion handling, workspace tasks/*.log exemption (RUN-002), and degraded-mode bounds verified");
 } finally {
   if (oldBrain) process.env.AGY_BRAIN_DIR = oldBrain;
   else delete process.env.AGY_BRAIN_DIR;

@@ -7,10 +7,12 @@ import { fileURLToPath } from "node:url";
 import { setupHermeticTestEnv, withEnvPath } from "./helpers/hermetic-fixture.mjs";
 import {
   ensureRtkConfigured,
+  ensureRtkInstalled,
   findExistingRtk,
   formatWindowsExpandArchiveCommand,
   getRtkConfigPath,
-  RTK_CHECKSUMS
+  RTK_CHECKSUMS,
+  updateRtkConfigToml
 } from "../scripts/provision-rtk.mjs";
 
 console.log("=================================================");
@@ -88,6 +90,90 @@ assert.match(updatedContent, /\[general\]/, "[general] section preserved");
 assert.match(updatedContent, /log_level\s*=\s*"debug"/, "log_level setting preserved");
 assert.match(updatedContent, /other_flag\s*=\s*"preserved"/, "other_flag preserved");
 console.log("✓ Existing user sections, comments, and flags preserved");
+
+// --- TEST 2b: SCRIPT-001 & TEST-001 Explicit Cross-OS Config Path Assertions ---
+console.log("\n--- 2b. SCRIPT-001 / TEST-001: Cross-OS RTK Config Path Resolution ---");
+{
+  const normSlash = (p) => String(p).replace(/\\/g, "/");
+  const darwinPath = normSlash(getRtkConfigPath({ platform: "darwin", homeDir: "/Users/dev", profileHome: "" }));
+  assert.equal(darwinPath, "/Users/dev/Library/Application Support/rtk/config.toml");
+
+  const darwinProfilePath = normSlash(getRtkConfigPath({ platform: "darwin", profileHome: "/tmp/mac-prof" }));
+  assert.equal(darwinProfilePath, "/tmp/mac-prof/Library/Application Support/rtk/config.toml");
+
+  const linuxPath = normSlash(getRtkConfigPath({ platform: "linux", homeDir: "/home/dev", env: {}, profileHome: "" }));
+  assert.equal(linuxPath, "/home/dev/.config/rtk/config.toml");
+
+  const linuxXdgPath = normSlash(
+    getRtkConfigPath({ platform: "linux", homeDir: "/home/dev", env: { XDG_CONFIG_HOME: "/xdg" }, profileHome: "" })
+  );
+  assert.equal(linuxXdgPath, "/xdg/rtk/config.toml");
+
+  const winDefaultPath = normSlash(getRtkConfigPath({ platform: "win32", homeDir: "C:/Users/Dev", env: {}, profileHome: "" }));
+  assert.ok(winDefaultPath.endsWith("AppData/Roaming/rtk/config.toml"), `Unexpected win32 default path: ${winDefaultPath}`);
+
+  const winAppDataPath = normSlash(
+    getRtkConfigPath({ platform: "win32", homeDir: "C:/Users/Dev", env: { APPDATA: "C:/Users/Dev/AppData/Roaming" }, profileHome: "" })
+  );
+  assert.ok(winAppDataPath.endsWith("AppData/Roaming/rtk/config.toml"), `Unexpected win32 APPDATA path: ${winAppDataPath}`);
+
+  const winProfilePath = normSlash(getRtkConfigPath({ platform: "win32", profileHome: "/tmp/win-prof" }));
+  assert.ok(winProfilePath.endsWith("AppData/Roaming/rtk/config.toml"), `Unexpected win32 profile path: ${winProfilePath}`);
+  console.log("✓ Explicit darwin/linux/win32 RTK config.toml paths verified");
+}
+
+// --- TEST 2c: SCRIPT-003 Non-Comment TOML Editing ---
+console.log("\n--- 2c. SCRIPT-003: Comment-Safe TOML Editing in updateRtkConfigToml() ---");
+{
+  const commentedFalse = "[hooks]\n# suppress_hook_warning = false\nother = 1\n";
+  const r1 = updateRtkConfigToml(commentedFalse);
+  assert.equal(r1.changed, true);
+  assert.match(r1.content, /^\[hooks\]\nsuppress_hook_warning = true\n# suppress_hook_warning = false/m);
+
+  const commentedTrueOnly = "# suppress_hook_warning = true\n[general]\nfoo = 1\n";
+  const r2 = updateRtkConfigToml(commentedTrueOnly);
+  assert.equal(r2.changed, true);
+  assert.match(r2.content, /\[hooks\]\nsuppress_hook_warning = true\n$/);
+
+  const wrongSection = "[other]\nsuppress_hook_warning = true\n";
+  const r3 = updateRtkConfigToml(wrongSection);
+  assert.equal(r3.changed, true);
+  assert.match(r3.content, /\[hooks\]\nsuppress_hook_warning = true\n$/);
+
+  const inlineComment = "[hooks]\nsuppress_hook_warning = false # user note\n";
+  const r4 = updateRtkConfigToml(inlineComment);
+  assert.equal(r4.changed, true);
+  assert.equal(r4.content, "[hooks]\nsuppress_hook_warning = true # user note\n");
+
+  const alreadyOn = "[hooks]\r\nsuppress_hook_warning = true\r\n";
+  const r5 = updateRtkConfigToml(alreadyOn);
+  assert.equal(r5.changed, false);
+  assert.equal(r5.content, alreadyOn);
+
+  // Array-of-tables [[custom]] must exit [hooks] cleanly instead of inheriting inHooks
+  const arrayTableAfterHooks = "[hooks]\nfoo = 1\n[[custom]]\nsuppress_hook_warning = true\n";
+  const r6 = updateRtkConfigToml(arrayTableAfterHooks);
+  assert.equal(r6.changed, true);
+  assert.match(r6.content, /^\[hooks\]\nsuppress_hook_warning = true\nfoo = 1\n\[\[custom\]\]/m);
+
+  // Top-level dotted hooks.suppress_hook_warning must update in place without appending invalid duplicate [hooks]
+  const dottedFalse = "hooks.suppress_hook_warning = false # dotted\n";
+  const r7 = updateRtkConfigToml(dottedFalse);
+  assert.equal(r7.changed, true);
+  assert.equal(r7.content, "hooks.suppress_hook_warning = true # dotted\n");
+  assert.equal(r7.content.includes("[hooks]"), false);
+
+  const dottedTrue = "hooks.suppress_hook_warning = true\n";
+  const r8 = updateRtkConfigToml(dottedTrue);
+  assert.equal(r8.changed, false);
+
+  // Verify end-to-end ensureRtkConfigured handles commented key on disk
+  fs.writeFileSync(configPath, "[hooks]\n# suppress_hook_warning = true\n", "utf-8");
+  ensureRtkConfigured({ silent: true });
+  const diskAfterComment = fs.readFileSync(configPath, "utf-8");
+  assert.match(diskAfterComment, /^\s*suppress_hook_warning\s*=\s*true\s*$/m, "Must add active key even when commented key exists");
+  console.log("✓ Commented keys, wrong sections, inline comments, and CRLF TOML preservation verified");
+}
 
 try { fs.rmSync(tempProfile, { recursive: true, force: true }); } catch {}
 
@@ -190,6 +276,32 @@ console.log("\n--- 5. Windows rtk.cmd Shim Resolution (`ACS-R2-SCRIPT-001`) ---"
     assert.equal(localCmdWrapped, true, "Local rtk.cmd must execute via cmd.exe /d /s /c wrapper");
     assert.equal(winLocalHit?.path, fakeLocalCmd);
     assert.equal(winLocalHit?.isLocal, true);
+
+    // UX-ACS-R2-001: Managed rtk.cmd shim in ~/.gemini/antigravity/bin on PATH must resolve as local plugin RTK, never `{ path: "rtk", isLocal: false }`
+    const managedShimDir = path.join(localCmdProfile, ".gemini", "antigravity", "bin");
+    fs.mkdirSync(managedShimDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(managedShimDir, "rtk.cmd"),
+      "@echo off\r\nREM agy-context-saver-managed\r\n\"C:\\fake\\rtk.exe\" %*\r\n",
+      "utf-8"
+    );
+    const managedStubExec = (cmd, args) => {
+      if (cmd === "rtk" || (/cmd\.exe$/i.test(cmd) && args[3] === "\"rtk --version\"")) {
+        throw new Error("findExistingRtk must not treat managed ~/.gemini/antigravity/bin/rtk.cmd as external PATH rtk");
+      }
+      if (/cmd\.exe$/i.test(cmd) && args[3].includes("rtk.cmd\" --version")) {
+        return "rtk 1.1.0 (local-managed-target)\n";
+      }
+      throw new Error(`Unexpected exec call: ${cmd} ${args.join(" ")}`);
+    };
+    const winManagedHit = findExistingRtk({
+      platform: "win32",
+      pathEnv: `${managedShimDir};C:\\Windows\\System32`,
+      execFileSync: managedStubExec,
+      silent: true
+    });
+    assert.equal(winManagedHit?.path, fakeLocalCmd);
+    assert.equal(winManagedHit?.isLocal, true, "Managed rtk.cmd on PATH must return local plugin binary with isLocal: true (UX-ACS-R2-001)");
   } finally {
     if (origProfile === undefined) delete process.env.AGY_TEST_PROFILE_DIR;
     else process.env.AGY_TEST_PROFILE_DIR = origProfile;
@@ -225,6 +337,92 @@ console.log("\n--- 5. Windows rtk.cmd Shim Resolution (`ACS-R2-SCRIPT-001`) ---"
     }
   }
   console.log("✓ findExistingRtk resolves Windows rtk.cmd shims via cmd.exe /d /s /c without network fallback");
+}
+
+// --- TEST 6: SCRIPT-004 Download Timeout Signal & Manual Install Guidance ---
+console.log("\n--- 6. SCRIPT-004: Fetch Timeout AbortSignal & Manual Install Instructions ---");
+{
+  const isolatedEmptyProfile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-rtk-script004-"));
+  const origProfile = process.env.AGY_TEST_PROFILE_DIR;
+  try {
+    process.env.AGY_TEST_PROFILE_DIR = isolatedEmptyProfile;
+    const noRtkExec = () => {
+      throw Object.assign(new Error("not found"), { code: "ENOENT" });
+    };
+
+    // Unsupported platform/arch (win32-arm64) must include manual install commands
+    await assert.rejects(
+      () =>
+        ensureRtkInstalled({
+          silent: true,
+          platform: "win32",
+          arch: "arm64",
+          pathEnv: "",
+          execFileSync: noRtkExec
+        }),
+      (err) => {
+        assert.match(err.message, /Unsupported platform\/architecture/i);
+        assert.match(err.message, /brew install rtk/);
+        assert.match(err.message, /cargo install --locked rtk/);
+        return true;
+      }
+    );
+
+    // Fetch call must receive an AbortSignal and emit manual install guidance on network/HTTP failure
+    let receivedSignal = null;
+    await assert.rejects(
+      () =>
+        ensureRtkInstalled({
+          silent: true,
+          platform: "linux",
+          arch: "x64",
+          pathEnv: "",
+          execFileSync: noRtkExec,
+          timeoutMs: 1234,
+          fetch: async (_url, opts) => {
+            receivedSignal = opts?.signal || null;
+            return { ok: false, status: 503, statusText: "Service Unavailable" };
+          }
+        }),
+      (err) => {
+        assert.match(err.message, /503/);
+        assert.match(err.message, /brew install rtk/);
+        assert.match(err.message, /cargo install --locked rtk/);
+        return true;
+      }
+    );
+    assert.ok(receivedSignal && typeof receivedSignal.aborted === "boolean", "fetch() must receive an AbortSignal timeout");
+
+    // Mid-stream body read timeout/abort must also wrap with manual RTK install instructions
+    await assert.rejects(
+      () =>
+        ensureRtkInstalled({
+          silent: true,
+          platform: "linux",
+          arch: "x64",
+          pathEnv: "",
+          execFileSync: noRtkExec,
+          timeoutMs: 1234,
+          fetch: async () => ({
+            ok: true,
+            arrayBuffer: async () => {
+              throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+            }
+          })
+        }),
+      (err) => {
+        assert.match(err.message, /Failed to download RTK release/i);
+        assert.match(err.message, /brew install rtk/);
+        assert.match(err.message, /cargo install --locked rtk/);
+        return true;
+      }
+    );
+    console.log("✓ Fetch AbortSignal.timeout (headers + body stream) and manual RTK install instructions verified");
+  } finally {
+    if (origProfile === undefined) delete process.env.AGY_TEST_PROFILE_DIR;
+    else process.env.AGY_TEST_PROFILE_DIR = origProfile;
+    fs.rmSync(isolatedEmptyProfile, { recursive: true, force: true });
+  }
 }
 
 console.log("\n=================================================");

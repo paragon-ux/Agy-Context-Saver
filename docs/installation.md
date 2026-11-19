@@ -8,7 +8,7 @@
 
 - **Node.js**: Version 22.0.0 or later (`>=22` required; tested on Node 22 and 24 across Windows, macOS, and Linux).
 - **Google Antigravity**: Antigravity 2.0+ (Windows, macOS, or Linux).
-- **RTK (`>= 1.1.0`)**: Either pre-installed on `PATH` (`brew install rtk`, `cargo install --locked rtk`, or the official install script) or automatically downloaded into `bin/` during `agy-context setup` and verified against pinned `rtk v1.1.0` SHA-256 release checksums.
+- **RTK (`>= 1.1.0`)**: Either pre-installed on `PATH` (`brew install rtk`, `cargo install --locked rtk`, or the official install script) or automatically downloaded into `bin/` during `agy-context setup` and verified against pinned `rtk v1.1.0` SHA-256 release checksums (on Windows ARM64, install `rtk` manually or pass `--allow-degraded`; see [RTK Support Matrix](RTK-SUPPORT-MATRIX.md)).
 
 ---
 
@@ -32,6 +32,8 @@ This command performs five steps:
 
 After setup finishes, reload Antigravity Desktop IDE or start a new session so the plugin hook, rules, and skill activate.
 
+> **Upgrading from v1.x:** Running `agy-context setup` automatically removes legacy `mcp_config.json` entries, sweeps stale `~/.gemini/antigravity/mcp/agy-context-saver*` schema caches, and replaces the retired v1.x MCP server with the on-demand `agy-context` CLI and updated `PreToolUse` hook.
+
 ### Add `~/.gemini/antigravity/bin` to `PATH` (or use `npx`)
 
 `agy-context setup` checks whether `~/.gemini/antigravity/bin` is already on your shell `PATH`. Inside Antigravity, the `PreToolUse` hook automatically resolves bare `agy-context` and `rtk` commands to the installed shims even if your shell `PATH` has not been updated yet. To run `agy-context` directly in your terminal, add `~/.gemini/antigravity/bin` to `PATH`:
@@ -44,15 +46,27 @@ After setup finishes, reload Antigravity Desktop IDE or start a new session so t
 
 === "Windows (PowerShell)"
     ```powershell
-    # Current session
-    $env:Path += ";$env:USERPROFILE\.gemini\antigravity\bin"
+    # Current session (idempotent)
+    $bin = "$env:USERPROFILE\.gemini\antigravity\bin"
+    $parts = @($env:Path -split ';' | Where-Object { $_.Trim() })
+    if (@($parts | ForEach-Object { $_.TrimEnd('\') }) -notcontains $bin) {
+      $env:Path = ($parts + $bin) -join ';'
+    }
 
-    # Persistent user PATH
-    [Environment]::SetEnvironmentVariable(
-      "Path",
-      [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:USERPROFILE\.gemini\antigravity\bin",
-      "User"
-    )
+    # Persistent user PATH (idempotent, preserves REG_EXPAND_SZ)
+    $bin = "$env:USERPROFILE\.gemini\antigravity\bin"
+    $raw = '%USERPROFILE%\.gemini\antigravity\bin'
+    $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try {
+      $cur = [string]$k.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+      $parts = @($cur -split ';' | Where-Object { $_.Trim() })
+      $norm = @($parts | ForEach-Object { $_.TrimEnd('\') })
+      if ($norm -notcontains $bin -and $norm -notcontains $raw) {
+        $k.SetValue('Path', (($parts + $raw) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+      }
+    } finally {
+      $k.Close()
+    }
     ```
 
 If you prefer not to edit `PATH`, run commands directly through `npx`:
@@ -63,7 +77,7 @@ npx --package=agy-context-saver agy-context uninstall
 ```
 
 > [!NOTE]
-> **RTK Default Configuration Notice**: To protect agent context and prevent shell command corruption, `Agy-Context-Saver` sets `suppress_hook_warning = true` in RTK's user configuration (`%APPDATA%\rtk\config.toml` on Windows or `~/.config/rtk/config.toml` on POSIX). This silences upstream promotional banners while preserving all existing user settings. See [RTK Support Matrix](RTK-SUPPORT-MATRIX.md) for full details.
+> **RTK Default Configuration Notice**: To protect agent context and prevent shell command corruption, `Agy-Context-Saver` sets `suppress_hook_warning = true` in RTK's user configuration (`%APPDATA%\rtk\config.toml` on Windows, `~/Library/Application Support/rtk/config.toml` on macOS, or `~/.config/rtk/config.toml` on Linux). This silences upstream promotional banners while preserving all existing user settings. See [RTK Support Matrix](RTK-SUPPORT-MATRIX.md) for full details.
 
 ### Option 2: Local Repository Setup
 
@@ -112,6 +126,7 @@ Checking Agy-Context-Saver installation status...
 - CLI Shim (agy-context): INSTALLED (~/.gemini/antigravity/bin)
 - RTK Command Optimizer (>= 1.1.0): INSTALLED (rtk 1.1.0)
 - MCP Cleanup: CLEAN (0 duplicate MCP configs/schemas)
+- Plugin Enabled (config.json): ENABLED
 - Transcript Access Policy: OPEN (default)
 
 Overall Status: HEALTHY & ACTIVE

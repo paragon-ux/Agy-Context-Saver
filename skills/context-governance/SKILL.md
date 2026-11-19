@@ -21,7 +21,7 @@ description: >-
 Unbounded full-file `read_file` calls on workspace files are blocked by the `PreToolUse` hook:
 
 1. **Tier 1 (Search and discovery: `rtk grep`, `rtk find`, `rtk ls`)**:
-   - **Pattern and symbol search**: Run `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate `[StartLine, EndLine]` coordinates (always pass an explicit target path such as `.` or `src/` so `rtk grep` does not wait on stdin). Because `rtk grep` clips lines at `~80` chars and `25` matches/file (emitting ephemeral `rtk recall` hashes unreadable from transcripts), implicit `grep` commands stay unrewritten (`ACS-HOOK-09`); use raw `grep -rnE` whenever untruncated lines or `>25` matches per file are required.
+   - **Pattern and symbol search**: Run `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate `[StartLine, EndLine]` coordinates (always pass an explicit target path such as `.` or `src/` so `rtk grep` does not wait on stdin). Because `rtk grep` clips lines at `~80` chars and `25` matches/file (emitting ephemeral `rtk recall` hashes unreadable from transcripts), implicit `grep` commands stay unrewritten; use raw `grep -rnE` whenever untruncated lines or `>25` matches per file are required.
    - **Directory and file listing**: Run `rtk find <path>`, `rtk ls <path>`, or `rtk tree` (or PowerShell `dir` / `Get-ChildItem` on Windows).
 2. **Tier 2 (Workspace file reading: `read_file` slice policy)**:
    - Pass `StartLine` and `EndLine` into `read_file` in bounded slices of `1-150` lines to preserve 1-indexed line numbers for `edit_file` and `write_file`.

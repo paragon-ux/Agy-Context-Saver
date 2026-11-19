@@ -132,6 +132,7 @@ export function runReleasePreflight() {
       'bin/agy-context.mjs',
       'scripts/install-register.mjs',
       'scripts/provision-rtk.mjs',
+      'scripts/rtk-run.mjs',
       'plugin.json',
       'hooks.json',
       'README.md',
@@ -197,16 +198,16 @@ export function runReleasePreflight() {
         if (!exists(suitePath)) errors.push(`npm test references a missing test file: ${suitePath}`);
       }
 
-      const readme = readText('README.md');
-      const countMatch = readme.match(/Runs all\s+(\d+)\s+test suites?/i);
+      const publishingDoc = readText('docs/publishing.md');
+      const countMatch = publishingDoc.match(/Runs all\s+(\d+)\s+test suites?/i);
       if (!countMatch) {
-        errors.push('README.md must state the exact suite count using a sentence such as "Runs all 11 test suites".');
+        errors.push('docs/publishing.md must state the exact suite count using a sentence such as "Runs all 12 test suites".');
       } else if (Number(countMatch[1]) !== suitePaths.length) {
-        errors.push(`README.md says ${countMatch[1]} test suites, but package.json scripts.test runs ${suitePaths.length}.`);
+        errors.push(`docs/publishing.md says ${countMatch[1]} test suites, but package.json scripts.test runs ${suitePaths.length}.`);
       }
       for (const suitePath of suitePaths) {
-        if (!readme.includes(suitePath)) {
-          errors.push(`README.md does not list the test entrypoint that npm test runs: ${suitePath}`);
+        if (!publishingDoc.includes(suitePath)) {
+          errors.push(`docs/publishing.md does not list the test entrypoint that npm test runs: ${suitePath}`);
         }
       }
     }

@@ -24,7 +24,14 @@ $NodeExe = if ($NodeCmdObj -and $NodeCmdObj.Source) {
 }
 
 if (-not $NodeExe) {
-    Write-Error "Node.js (>= 22.0.0) is required but 'node' was not found on PATH or in standard Program Files install locations."
+    Write-Error "Node.js (>= 22.0.0) is required, but 'node' was not found on PATH or in standard Program Files install locations. Please install Node.js 22 or newer (https://nodejs.org/ or via nvm/fnm/volta) and re-run .\install.ps1." -ErrorAction Continue
+    exit 1
+}
+
+$NodeVersion = ((& $NodeExe -v 2>$null) | Out-String).Trim()
+if (-not ($NodeVersion -match '^v?(\d+)') -or ([int]$Matches[1] -lt 22)) {
+    $DisplayNodeVersion = if ($NodeVersion) { $NodeVersion } else { "unknown" }
+    Write-Error "Unsupported Node.js version $DisplayNodeVersion. Agy-Context-Saver requires Node.js >= 22.0.0. Please upgrade Node.js (https://nodejs.org/ or via nvm/fnm/volta) and re-run .\install.ps1." -ErrorAction Continue
     exit 1
 }
 
