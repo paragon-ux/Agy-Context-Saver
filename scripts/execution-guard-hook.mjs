@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.0.4)
+ * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.1.0)
  *
  * Closed Execution Topology & Governance Invariants:
  * 1. RTK Transparent Command Optimization:

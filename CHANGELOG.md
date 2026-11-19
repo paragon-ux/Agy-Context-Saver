@@ -5,6 +5,11 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-11-19
+
+### Changed
+- **README Session-Guard Comparison & Version `2.1.0` Alignment (`README.md`, `package.json`, `plugin.json`, `bin/agy-context.mjs`, `scripts/install-register.mjs`, `scripts/execution-guard-hook.mjs`, `lib/transcript-core.mjs`, `rules/AGENTS.md`, `skills/context-governance/SKILL.md`, `docs/index.md`, `docs/tools.md`, `docs/publishing.md`)**: Promoted the side-by-side `How Agy-Context-Saver guards a default session` visual comparison (`docs/assets/default-vs-context-saver.svg`) directly under `Quickstart` in `README.md` with plain-English copy (zero inline backticks in prose, zero em/en dashes), aligned package/CLI/doc version markers to `v2.1.0`, and updated `docs/publishing.md` package boundary file count (`34` files).
+
 ## [2.0.4] - 2026-11-19
 
 ### Changed
