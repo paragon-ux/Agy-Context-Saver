@@ -220,7 +220,7 @@ function matchesRawProtectedInternalState(targetPath) {
   return false;
 }
 
-function isProtectedShellOrScriptOperation(text) {
+function isProtectedShellOrScriptOperation(text, options = {}) {
   if (!text || typeof text !== "string") return false;
   if (isProtectedInternalState(text)) return true;
 
@@ -238,16 +238,32 @@ function isProtectedShellOrScriptOperation(text) {
     return true;
   }
 
-  // Block environment variable redirection of governance state or brain roots inside shell commands/scripts
-  if (/(?:^|[\s;|&(])(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|XDG_STATE_HOME|LOCALAPPDATA|GEMINI_CONVERSATION_ID)=/i.test(text)) {
+  // Unconditionally block Antigravity-specific governance or brain env redirection inside shell commands/scripts
+  if (/(?:^|[\s;|&(])(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)=/i.test(text)) {
     return true;
   }
   if (
-    /(?:process\.env|os\.environ)\s*(?:\.\s*(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|XDG_STATE_HOME|LOCALAPPDATA|GEMINI_CONVERSATION_ID)\b|\[\s*['"](?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|XDG_STATE_HOME|LOCALAPPDATA|GEMINI_CONVERSATION_ID)['"]\s*\])/i.test(
+    /(?:process\.env|os\.environ)\s*(?:\.\s*(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)\b|\[\s*['"](?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)['"]\s*\])/i.test(
       text
     )
   ) {
     return true;
+  }
+
+  // Scope standard OS env vars (XDG_STATE_HOME, LOCALAPPDATA) so ordinary user tests run cleanly in non-restricted
+  // sessions, while blocking restricted child sessions and commands targeting governance or .gemini state
+  const touchesStateEnv =
+    /(?:^|[\s;|&(])(?:XDG_STATE_HOME|LOCALAPPDATA)=/i.test(text) ||
+    /(?:process\.env|os\.environ)\s*(?:\.\s*(?:XDG_STATE_HOME|LOCALAPPDATA)\b|\[\s*['"](?:XDG_STATE_HOME|LOCALAPPDATA)['"]\s*\])/i.test(
+      text
+    );
+  if (touchesStateEnv) {
+    const isRestrictedChild = Boolean(options.isRestrictedChild);
+    const targetsGovernanceState =
+      /\bagy-context(?:-saver)?\b|\bexecution-guard\b|\btranscript(?:-access|-core)?\b|\.gemini\b/i.test(text);
+    if (isRestrictedChild || targetsGovernanceState) {
+      return true;
+    }
   }
 
   // Block symlinks, bulk copies/archives, file reads, or directory enumeration of <brainDir>/<convId> outside /scratch/, /browser_sandbox/, /swarm_view/, or .agents/ (in either order)
@@ -389,6 +405,17 @@ function isProtectedBenchmarkPath(targetPath) {
     /(?:^|\/)(?:benchmarks?|evaluators?|evaluation|scoring|ground_truth|prompt_templates)\//i.test(normalized) ||
     /(?:^|\/)(?:eval_[^\/]+\.(?:py|json|toml)|bench_[^\/]+\.(?:py|json|toml))$/i.test(normalized)
   );
+}
+
+/**
+ * Allows top-level non-restricted user sessions to opt out of benchmark-folder mutation prompts
+ * via AGY_DISABLE_BENCHMARK_GUARD=1 (ignored for restricted child sessions).
+ */
+function isBenchmarkGuardDisabled(convId = "global") {
+  const raw = String(process.env.AGY_DISABLE_BENCHMARK_GUARD || "").trim().toLowerCase();
+  if (raw !== "1" && raw !== "true") return false;
+  if (evaluateCallerTranscriptAccess(convId).isRestrictedChild) return false;
+  return true;
 }
 
 /**
@@ -790,10 +817,37 @@ function getLocalRtkCandidate() {
     const pluginBin = path.join(getProfileHomeDir(), ".gemini", "config", "plugins", "agy-context-saver", "bin", exeName);
     if (fs.existsSync(pluginBin)) return pluginBin;
   }
-  for (const exeName of names) {
-    const repoBin = path.resolve(hookDir, "..", "bin", exeName);
-    if (fs.existsSync(repoBin)) return repoBin;
+  if (!process.env.AGY_TEST_PROFILE_DIR) {
+    for (const exeName of names) {
+      const repoBin = path.resolve(hookDir, "..", "bin", exeName);
+      if (fs.existsSync(repoBin)) return repoBin;
+    }
   }
+  return "";
+}
+
+function resolveInstalledAgyContextCommand(binName = "agy-context") {
+  const profileHome = getProfileHomeDir();
+  const isWin = os.platform() === "win32";
+  const candidateNames = binName === "agy-context-saver"
+    ? ["agy-context-saver", "agy-context"]
+    : ["agy-context", "agy-context-saver"];
+  for (const name of candidateNames) {
+    const shimFile = path.join(profileHome, ".gemini", "antigravity", "bin", isWin ? `${name}.cmd` : name);
+    try {
+      const st = fs.statSync(shimFile);
+      if (!st.isFile()) continue;
+      if (!isWin) fs.accessSync(shimFile, fs.constants.X_OK);
+      const formatted = isWin ? shimFile : shimFile.replace(/\\/g, "/");
+      return /\s/.test(formatted) ? `"${formatted}"` : formatted;
+    } catch {}
+  }
+  const pluginCli = path.join(profileHome, ".gemini", "config", "plugins", "agy-context-saver", "bin", "agy-context.mjs");
+  try {
+    if (fs.statSync(pluginCli).isFile()) {
+      return `node "${pluginCli.replace(/\\/g, "/")}"`;
+    }
+  } catch {}
   return "";
 }
 
@@ -3775,6 +3829,75 @@ function isRtkReadCommand(cmd) {
   return Boolean(parseRtkReadCommand(cmd));
 }
 
+/**
+ * Parses a single unchained bounded `head -n <N>` / `tail -n <N>` command for degraded mode (when RTK is unavailable).
+ * Enforces explicit positive line limits `1 <= N <= MAX_SAFE_SLICE_LINES`, rejects `+N` offsets and unknown flags,
+ * and returns parsed positional operands for single-operand isolation checks.
+ */
+function parseDegradedBoundedHeadTailCommand(cmd) {
+  if (!cmd || typeof cmd !== "string") return null;
+  const tokens = tokenizeShellWords(cmd);
+  if (tokens.length < 2) return null;
+  const verb = normalizeCmdName(tokens[0]);
+  if (verb !== "head" && verb !== "tail") return null;
+
+  const operands = [];
+  const lineLimits = [];
+  let hasInvalidOrOversizedLineBound = false;
+  let hasDisallowedFlag = false;
+  let afterDoubleDash = false;
+
+  const recordLineLimit = (rawVal) => {
+    if (!/^\d+$/.test(rawVal)) {
+      hasInvalidOrOversizedLineBound = true;
+      return;
+    }
+    const n = Number(rawVal);
+    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SAFE_SLICE_LINES) {
+      hasInvalidOrOversizedLineBound = true;
+      return;
+    }
+    lineLimits.push(n);
+  };
+
+  for (let i = 1; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (!afterDoubleDash && tok === "--") {
+      afterDoubleDash = true;
+      continue;
+    }
+    if (afterDoubleDash || !tok.startsWith("-") || tok === "-") {
+      operands.push(tok);
+      continue;
+    }
+    if (tok === "-n" || tok === "--lines") {
+      if (i + 1 >= tokens.length) {
+        hasInvalidOrOversizedLineBound = true;
+      } else {
+        recordLineLimit(tokens[++i]);
+      }
+      continue;
+    }
+    if (tok.startsWith("--lines=")) {
+      recordLineLimit(tok.slice("--lines=".length));
+      continue;
+    }
+    if (tok.startsWith("-n") && tok.length > 2) {
+      recordLineLimit(tok.slice(2));
+      continue;
+    }
+    hasDisallowedFlag = true;
+  }
+
+  return {
+    operands,
+    lineLimits,
+    hasSafeLineBound: lineLimits.length > 0 && !hasInvalidOrOversizedLineBound,
+    hasInvalidOrOversizedLineBound,
+    hasDisallowedFlag
+  };
+}
+
 function isSingleUnchainedShellCmd(segments) {
   if (segments.length !== 1) return false;
   const seg = segments[0];
@@ -4200,8 +4323,8 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
   // Never emit `rtk rg` when `rg` is absent on PATH
   if ((subcmd === "rg" || subcmd === "rg.exe") && !rgAvailable) {
     let mapped = rewriteRtkRgSegment(rtkWord, rest, { inPipeline });
-    if (mapped !== rest && rtkPrefix && rtkPrefix !== "rtk" && /^rtk\s+/i.test(mapped)) {
-      mapped = mapped.replace(/^rtk(?=\s)/i, rtkPrefix);
+    if (mapped !== rest && rtkPrefix && rtkPrefix !== "rtk" && /^rtk(?:\.exe|\.cmd|\.bat)?\s+/i.test(mapped)) {
+      mapped = mapped.replace(/^rtk(?:\.exe|\.cmd|\.bat)?(?=\s)/i, rtkPrefix);
     }
     return `${effEnvPrefix}${mapped}`;
   }
@@ -4209,15 +4332,15 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
   // Normalize `rtk grep` when host `rg` is absent so directories & `a|b` alternation work reliably
   if ((subcmd === "grep" || subcmd === "grep.exe") && !rgAvailable) {
     let mapped = rewriteRtkGrepSegment(rtkWord, rest, { inPipeline });
-    if (rtkPrefix && rtkPrefix !== "rtk" && /^rtk\s+/i.test(mapped)) {
-      mapped = mapped.replace(/^rtk(?=\s)/i, rtkPrefix);
+    if (rtkPrefix && rtkPrefix !== "rtk" && /^rtk(?:\.exe|\.cmd|\.bat)?\s+/i.test(mapped)) {
+      mapped = mapped.replace(/^rtk(?:\.exe|\.cmd|\.bat)?(?=\s)/i, rtkPrefix);
     }
     return `${effEnvPrefix}${mapped}`;
   }
 
-  // If RTK came from a local binary not on PATH, rewrite bare `rtk ` prefix to explicit path
-  if (rtkPrefix && rtkPrefix !== "rtk" && /^rtk\s+/i.test(effMatchTarget) && !/^rtk\s+/i.test(rawMatchTarget)) {
-    return `${effEnvPrefix}${effMatchTarget.replace(/^rtk(?=\s)/i, rtkPrefix)}`;
+  // If RTK came from a local binary not on PATH, rewrite bare `rtk ` prefix (including explicit `rtk ...` commands) to explicit path
+  if (rtkPrefix && rtkPrefix !== "rtk" && /^rtk(?:\.exe|\.cmd|\.bat)?\s+/i.test(effMatchTarget)) {
+    return `${effEnvPrefix}${effMatchTarget.replace(/^rtk(?:\.exe|\.cmd|\.bat)?(?=\s)/i, rtkPrefix)}`;
   }
 
   return trimmedEff;
@@ -4660,11 +4783,11 @@ try {
                 "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited."
             });
           }
-          if (candidateTokens.some((tok) => isProtectedBenchmarkPath(tok))) {
+          if (!isBenchmarkGuardDisabled(convId) && candidateTokens.some((tok) => isProtectedBenchmarkPath(tok))) {
             respond({
               decision: "force_ask",
               reason:
-                "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination."
+                "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination. Set AGY_DISABLE_BENCHMARK_GUARD=1 to disable this guard for non-evaluation repos."
             });
           }
         }
@@ -4743,10 +4866,13 @@ try {
 
       // If spillover or task log is chained, redirected, uses heredocs, subshells, or `..` traversal -> DENY
       if ((isSpillover || taskMatch) && !isSingleUnchainedShellCmd(segments)) {
+        const hasRtkForSpillover = Boolean(resolveCachedHostEnv().rtk);
         respond({
           decision: "deny",
           reason: isSpillover
-            ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'rtk read <path>' command (no chaining, redirects, subshells, or '..' traversal)."
+            ? hasRtkForSpillover
+              ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'rtk read <path>' command (no chaining, redirects, subshells, or '..' traversal)."
+              : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' command (or bounded 'read_file' <= 150 lines; no chaining, redirects, subshells, or '..' traversal)."
             : buildInternalStateShellDenial(convId)
         });
       }
@@ -4783,7 +4909,7 @@ try {
           }
         }
       }
-      if (isProtectedShellOrScriptOperation(inspectRemainder)) {
+      if (isProtectedShellOrScriptOperation(inspectRemainder, { isRestrictedChild: callerAccess.isRestrictedChild })) {
         respond({
           decision: "deny",
           reason: buildInternalStateShellDenial(convId)
@@ -4839,10 +4965,36 @@ try {
       effectiveCmd = effectiveCmd.replace(/(^|\s)--parent(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--parent ${agyTranscriptCheck.injectParentId}`);
     }
 
+    // Rewrite bare `agy-context` / `agy-context-saver` to the installed shim (or plugin CLI) when absent from PATH
+    if (agyTranscriptCheck.allowed || (isSingleUnchainedShellCmd(segments) && !isSpillover && !taskMatch)) {
+      const bareAgyMatch = effectiveCmd.match(/^(\s*)(agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?)(?=\s|$)/i);
+      if (bareAgyMatch) {
+        const agyBinName = normalizeCmdName(bareAgyMatch[2]);
+        if (!findExecutableOnPath(agyBinName)) {
+          const localAgyCmd = resolveInstalledAgyContextCommand(agyBinName);
+          if (localAgyCmd) {
+            effectiveCmd = `${bareAgyMatch[1]}${localAgyCmd}${effectiveCmd.slice(bareAgyMatch[0].length)}`;
+          }
+        }
+      }
+    }
+
     const parsedEff = parseRtkReadCommand(effectiveCmd);
     const parsedRaw = parseRtkReadCommand(rawCmd);
     const isRtkRead = Boolean(parsedEff);
     const isExplicitRtkRead = Boolean(parsedRaw && parsedEff);
+    const parsedDegraded = !rtk ? parseDegradedBoundedHeadTailCommand(effectiveCmd) : null;
+    let isDegradedBoundedRead = false;
+    if ((isSpillover || taskMatch) && parsedDegraded) {
+      const opCountOk = parsedDegraded.operands.length === 1;
+      const cleanOp = opCountOk ? cleanFileToken(parsedDegraded.operands[0]) : "";
+      isDegradedBoundedRead =
+        opCountOk &&
+        parsedDegraded.hasSafeLineBound &&
+        !parsedDegraded.hasDisallowedFlag &&
+        ((isSpillover && !taskMatch && isStepSpilloverPath(cleanOp)) ||
+          (taskMatch && !isSpillover && Boolean(matchTaskLogToken(cleanOp))));
+    }
 
     // Enforce strict single-operand isolation whenever an internal spillover or task log is present (PR9-RUN-001)
     if ((isSpillover || taskMatch) && parsedEff) {
@@ -4862,23 +5014,27 @@ try {
       }
     }
 
-    // Check 3: Step Output Spillover Safe Harbor (strictly single unchained `rtk read` only)
-    if (isSpillover && !isRtkRead) {
+    // Check 3: Step Output Spillover Safe Harbor (strictly single unchained `rtk read`, or bounded `head -n 150`/`tail -n 150` in degraded mode)
+    if (isSpillover && (rtk ? !isRtkRead : !isDegradedBoundedRead)) {
       respond({
         decision: "deny",
-        reason:
-          "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
+        reason: rtk
+          ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
+          : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
       });
     }
 
-    // Check 4: Completed task logs allow post-rewrite `rtk read` (`cat`, unquoted `head -n`/`tail -n`); unknown-state logs require explicit `rtk read`
-    if (taskMatch && (taskState === "COMPLETED" ? !isRtkRead : !isExplicitRtkRead)) {
+    // Check 4: Completed task logs allow post-rewrite `rtk read` (or bounded `head -n 150`/`tail -n 150` when degraded without RTK); unknown-state logs require explicit `rtk read`
+    if (taskMatch && (rtk ? (taskState === "COMPLETED" ? !isRtkRead : !isExplicitRtkRead) : (taskState !== "COMPLETED" || !isDegradedBoundedRead))) {
       respond({
         decision: "deny",
-        reason:
-          "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
-          "- Once completed, inspect output using 'rtk read <path>' via run_command.\n" +
-          "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+        reason: rtk
+          ? "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+            "- Once completed, inspect output using 'rtk read <path>' via run_command.\n" +
+            "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+          : "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+            "- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command.\n" +
+            "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
       });
     }
 
@@ -4984,9 +5140,12 @@ try {
           respond({ decision: "allow" });
         }
       }
-      const spillCmd = isOversizedInternalTarget(target, convId, null, true)
-        ? `'rtk read --tail-lines 150 ${target}' (or '--head-lines 150')`
-        : `'rtk read ${target}'`;
+      const hasRtkForSpill = Boolean(resolveCachedHostEnv().rtk);
+      const spillCmd = hasRtkForSpill
+        ? (isOversizedInternalTarget(target, convId, null, true)
+            ? `'rtk read --tail-lines 150 ${target}' (or '--head-lines 150')`
+            : `'rtk read ${target}'`)
+        : `'tail -n 150 ${target}' (or 'head -n 150 ${target}')`;
       respond({
         decision: "deny",
         reason: `Antigravity Governance: Unbounded inspection of step spillover via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'read_file' or run ${spillCmd} via run_command instead.`
@@ -5001,12 +5160,17 @@ try {
         denyRunningTask(taskMatch.id, convId);
       }
       if (state === "COMPLETED") {
-        const taskCmd = isOversizedInternalTarget(target, convId, taskMatch, false)
-          ? `'rtk read --tail-lines 150 ${target}' (or '--head-lines 150')`
-          : `'rtk read ${target}'`;
+        const hasRtkForTask = Boolean(resolveCachedHostEnv().rtk);
+        const taskCmd = hasRtkForTask
+          ? (isOversizedInternalTarget(target, convId, taskMatch, false)
+              ? `'rtk read --tail-lines 150 ${target}' (or '--head-lines 150')`
+              : `'rtk read ${target}'`)
+          : `'tail -n 150 ${target}' (or 'head -n 150 ${target}')`;
         respond({
           decision: "deny",
-          reason: `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run ${taskCmd} via run_command instead.`
+          reason: hasRtkForTask
+            ? `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run ${taskCmd} via run_command instead.`
+            : `Antigravity Governance: Native file inspection via '${toolName}' on completed task logs is denied. Run ${taskCmd} via run_command instead.`
         });
       }
       respond({
@@ -5032,8 +5196,10 @@ try {
     // 2e. Symmetrical Hybrid Slice & Guarded Full-File Policy for `read_file` and `view_file`
     if (toolName === "read_file" || toolName === "view_file") {
       const getDiscoveryGuidance = () => {
-        const rgAvailable = isRgAvailableCached();
-        const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rnE";
+        const { rtk, rgAvailable } = resolveCachedHostEnv();
+        const searchHint = rtk
+          ? (rgAvailable ? "rtk rg" : "rtk grep -rnE")
+          : (rgAvailable ? "rg" : "grep -rnE");
         return `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
       };
 
@@ -5097,21 +5263,27 @@ try {
       });
     }
 
-    // 2f. Hard-Route Other Native File/Search Tools (LH-07)
+    // 2f. Hard-Route Other Native File/Search Tools (LH-07); degrade gracefully when RTK is absent (--allow-degraded)
+    const { rtk: hostRtk, rgAvailable: hostRgAvailable } = resolveCachedHostEnv();
+
     if (toolName === "read_many_files") {
       respond({
         decision: "deny",
-        reason:
-          "Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses token optimization. Use bounded 'read_file' slices ('<= 150' lines) for editable workspace code, or run 'rtk read <file>' via run_command for read-only logs and spillovers instead."
+        reason: hostRtk
+          ? "Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses token optimization. Use bounded 'read_file' slices ('<= 150' lines) for editable workspace code, or run 'rtk read <file>' via run_command for read-only logs and spillovers instead."
+          : "Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses context bounds. Use bounded 'read_file' slices ('<= 150' lines) for editable workspace code, or run bounded 'head -n 150 <file>' / 'tail -n 150 <file>' via run_command for read-only logs and spillovers instead."
       });
+    }
+
+    if (!hostRtk && (toolName === "grep_search" || toolName === "find_by_name" || toolName === "list_dir")) {
+      respond({ decision: "allow" });
     }
 
     if (toolName === "grep_search") {
       const pattern = String(args.Query || args.query || args.Pattern || args.pattern || "").trim();
       const searchTarget = String(args.SearchPath || args.searchPath || args.path || ".").trim() || ".";
       const safePattern = pattern ? escapeDoubleQuotedArg(pattern) : "<pattern>";
-      const rgAvailable = isRgAvailableCached();
-      const cmdHint = rgAvailable
+      const cmdHint = hostRgAvailable
         ? `rtk rg -- "${safePattern}" ${searchTarget}`
         : `rtk grep -rnE "${safePattern}" ${searchTarget}`;
       respond({
@@ -5291,7 +5463,7 @@ try {
     const callerAccess = evaluateCallerTranscriptAccess(convId);
 
     if (isScript && bodyContent && (callerAccess.isRestrictedChild || isTmpOrScratch)) {
-      if (isProtectedShellOrScriptOperation(bodyContent)) {
+      if (isProtectedShellOrScriptOperation(bodyContent, { isRestrictedChild: callerAccess.isRestrictedChild })) {
         respond({
           decision: "deny",
           reason: buildInternalStateShellDenial(convId)
@@ -5299,10 +5471,10 @@ try {
       }
     }
 
-    if (isProtectedBenchmarkPath(targetFile)) {
+    if (!isBenchmarkGuardDisabled(convId) && isProtectedBenchmarkPath(targetFile)) {
       respond({
         decision: "force_ask",
-        reason: `[BENCHMARK MUTATION DETECTED] Mutation of protected evaluator/benchmark artifact '${targetFile}' requires explicit user confirmation to prevent benchmark contamination.`
+        reason: `[BENCHMARK MUTATION DETECTED] Mutation of protected evaluator/benchmark artifact '${targetFile}' requires explicit user confirmation to prevent benchmark contamination. Set AGY_DISABLE_BENCHMARK_GUARD=1 to disable this guard for non-evaluation repos.`
       });
     }
     if (targetFile && (callerAccess.isRestrictedChild || isExecutableScriptPath(targetFile) || isTmpOrScratch)) {

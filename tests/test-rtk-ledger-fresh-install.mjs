@@ -6,7 +6,6 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setupHermeticTestEnv, withEnvPath } from "./helpers/hermetic-fixture.mjs";
 import {
-  ensureGitLineEndingConfigured,
   ensureRtkConfigured,
   findExistingRtk,
   formatWindowsExpandArchiveCommand,
@@ -40,7 +39,10 @@ console.log("✓ All 5 RTK v1.1.0 platform release assets have pinned 64-char SH
 console.log("--- 1. RTK-01: Fresh Install Config Standardization ---");
 const tempProfile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-rtk-fresh-test-"));
 process.env.AGY_TEST_PROFILE_DIR = tempProfile;
-delete process.env.GIT_CONFIG_GLOBAL;
+const isolatedGitConfig = path.join(tempProfile, ".gitconfig");
+const preExistingGitConfig = "[core]\n\tsafecrlf = true\n";
+fs.writeFileSync(isolatedGitConfig, preExistingGitConfig, "utf-8");
+process.env.GIT_CONFIG_GLOBAL = isolatedGitConfig;
 const hostGitConfig = path.join(os.homedir(), ".gitconfig");
 const hostGitBefore = fs.existsSync(hostGitConfig) ? fs.readFileSync(hostGitConfig, "utf-8") : null;
 
@@ -50,12 +52,12 @@ assert.equal(fs.existsSync(configPath), false, "Fresh profile must not have conf
 ensureRtkConfigured({ silent: true });
 
 const hostGitAfter = fs.existsSync(hostGitConfig) ? fs.readFileSync(hostGitConfig, "utf-8") : null;
-assert.equal(hostGitAfter, hostGitBefore, "Test run must never mutate host ~/.gitconfig");
-
-const isolatedGitConfig = path.join(tempProfile, ".gitconfig");
-ensureGitLineEndingConfigured({ silent: true });
-assert.equal(fs.existsSync(isolatedGitConfig), true, "ensureGitLineEndingConfigured must write isolated .gitconfig via execFileSync");
-assert.match(fs.readFileSync(isolatedGitConfig, "utf-8"), /safecrlf\s*=\s*false/i, "Isolated .gitconfig must set safecrlf = false");
+assert.equal(hostGitAfter, hostGitBefore, "Setup must never mutate host ~/.gitconfig (UX-ACS-004)");
+assert.equal(
+  fs.readFileSync(isolatedGitConfig, "utf-8"),
+  preExistingGitConfig,
+  "ensureRtkConfigured must NOT mutate GIT_CONFIG_GLOBAL or overwrite core.safecrlf = true (UX-ACS-004)"
+);
 
 assert.equal(fs.existsSync(configPath), true, `config.toml must be created at ${configPath}`);
 const freshContent = fs.readFileSync(configPath, "utf-8");

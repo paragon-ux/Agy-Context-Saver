@@ -46,7 +46,7 @@ $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5
 ### Layer 3: Synchronous Execution & Benchmark Integrity
 
 1. **10s synchronous window:** On non-daemon `run_command` calls where `WaitMsBeforeAsync` is omitted, the hook sets `WaitMsBeforeAsync` to `10,000ms` while preserving explicit caller timeouts.
-2. **Benchmark file protection:** Edits or writes targeting benchmark definitions, evaluation templates, or scoring files require `force_ask` user confirmation.
+2. **Benchmark file protection:** Edits or writes targeting `benchmarks/`, `evaluation/`, `evaluators/`, `scoring/`, `ground_truth/`, or `prompt_templates/` require `force_ask` user confirmation by default to prevent evaluation contamination. For normal application repositories that contain source directories with those names, set `AGY_DISABLE_BENCHMARK_GUARD=1` in your shell or IDE environment to disable this prompt for top-level non-restricted sessions (restricted child sessions keep benchmark protection active).
 
 ---
 

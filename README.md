@@ -33,9 +33,18 @@ npx --package=agy-context-saver agy-context setup
 # Or from a local checkout
 npm run setup
 
-# Check installation and active policy status
+# Add ~/.gemini/antigravity/bin to PATH (POSIX bash/zsh) so `agy-context` works directly:
+export PATH="$HOME/.gemini/antigravity/bin:$PATH"
+# Windows PowerShell (current session):
+# $env:Path += ";$env:USERPROFILE\.gemini\antigravity\bin"
+
+# Check installation and active policy status (or use npx without editing PATH)
 agy-context status
+# Zero-PATH fallback:
+npx --package=agy-context-saver agy-context status
 ```
+
+After setup finishes, reload Antigravity Desktop IDE or start a new session so the plugin hook, rules, and skill activate.
 
 > **Upgrading from v1.x:** Running `agy-context setup` automatically removes legacy `mcp_config.json` entries, sweeps stale `~/.gemini/antigravity/mcp/agy-context-saver*` schema caches, and replaces the retired v1.x MCP server with the on-demand `agy-context` CLI and updated `PreToolUse` hook.
 
@@ -45,6 +54,9 @@ To remove the plugin link, hook entries, and CLI shims:
 agy-context uninstall
 # Or restore pre-install .bak configuration files:
 agy-context uninstall --restore-backups
+
+# Zero-PATH fallback via npx:
+npx --package=agy-context-saver agy-context uninstall --restore-backups
 ```
 
 ## CLI and hook summary
@@ -56,9 +68,11 @@ agy-context uninstall --restore-backups
 | `agy-context transcript query` (`grep`, `search`, `find`, `tools`, `outline`, `summary`) | Search compact and truncated full steps by regex, role, tool call arguments, or print a 1-line-per-step outline | `agy-context transcript grep "<pattern>" [<id>] --summary` / `agy-context transcript outline [<id>]` |
 | `agy-context transcript step` | Extract untruncated fields for a step, comma list, or range (`N..M`) | `agy-context transcript step 10..15 [<id>] --field content --tail 40` |
 | `agy-context transcript list` (`ls`) | List recent conversation transcripts in the Antigravity brain directory (supports `--parent` and `--lineage`) | `agy-context transcript ls --parent <uuid> --lineage --limit 5` |
-| `agy-context transcript export` (`dump`) | Export a sanitized (`--sanitized`) transcript summary index to stdout or `--out` (`--sanitized` required) | `agy-context transcript export [<id>] --sanitized --out scratch/export.md` |
+| `agy-context transcript export` (`dump`) | Export a sanitized (`--sanitized`) transcript summary index to stdout or `--out` (`--sanitized` required) | `agy-context transcript export [<id>] --sanitized --out ./transcript-export.md` |
 | `agy-context transcript access` (`policy`) | View or update child subagent and `/swarm` worker transcript access | `agy-context transcript access --status` / `--off` / `--self-only` / `--allow @audit-squad*` / `--on` |
 | `agy-context status` / `setup` / `uninstall` | Audit, synchronize, or remove plugin link, hook, CLI shims, and RTK config | `agy-context status` / `agy-context setup --check` |
+
+> **`--out` file paths:** `--out` accepts any safe workspace-relative `.md`, `.json`, or `.txt` path outside protected state, governance, and benchmark directories. If you write artifacts under a `scratch/` folder, add `scratch/` to `.gitignore` or `.git/info/exclude` so exports stay untracked.
 
 ## Documentation
 

@@ -14,6 +14,8 @@ nav = [
   { "CLI & Hook Reference" = "tools.md" },
   { "Lifecycle Governance" = "governance.md" },
   { "Architecture & Internals" = "architecture.md" },
+  { "Installer Hardening" = "INSTALLER-HARDENING.md" },
+  { "RTK Support Matrix" = "RTK-SUPPORT-MATRIX.md" },
   { "Product Roadmap" = "roadmap.md" },
   { "Publishing & Verification" = "publishing.md" },
 ]

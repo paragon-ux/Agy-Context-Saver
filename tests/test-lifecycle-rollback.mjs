@@ -46,6 +46,11 @@ try {
     runUninstall,
     detectExistingInstallation,
     formatWindowsCmdShim,
+    formatWindowsNodeCmdWrapper,
+    installWindowsNodeCmdWrapper,
+    isDirOnPath,
+    formatPathOnboardingLines,
+    isManagedAgyShimFile,
     resolveProfilePaths
   } = await import("../scripts/install-register.mjs");
   const {
@@ -230,6 +235,196 @@ try {
     assert.throws(() => fs.lstatSync(pluginDest), { code: "ENOENT" }, "runUninstall must remove broken pluginDest symlink");
   }
   console.log("✓ Copy fallback, symlink-to-copy upgrade, node.cmd cleanup, and backup restoration verified");
+
+  // --- 5. Launch UX Regressions (UX-ACS-001, UX-ACS-003, UX-ACS-004, UX-ACS-006, UX-ACS-013) ---
+  console.log("\n--- 5. Launch UX Day-One Regressions (Managed RTK Shim, PATH Onboarding, Git Config, Windows Parity & Status Hints) ---");
+  {
+    const { spawnSync } = await import("node:child_process");
+    const installScriptPath = fileURLToPath(new URL("../scripts/install-register.mjs", import.meta.url));
+    const uxProfile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-ux-lifecycle-"));
+    try {
+      const uxBinDir = path.join(uxProfile, ".gemini", "antigravity", "bin");
+      const uxConfigDir = path.join(uxProfile, ".gemini", "config");
+      const uxPluginBin = path.join(uxConfigDir, "plugins", "agy-context-saver", "bin");
+      const uxGitConfig = path.join(uxProfile, ".gitconfig");
+      const origGitContent = "[core]\n\tsafecrlf = true\n";
+      fs.writeFileSync(uxGitConfig, origGitContent, "utf-8");
+
+      // 5a. UX-ACS-013: Clean profile `status` prints NOT INSTALLED + Next step setup hint; --json stays pure JSON
+      const emptyPathEnv = {
+        ...process.env,
+        AGY_TEST_PROFILE_DIR: uxProfile,
+        GIT_CONFIG_GLOBAL: uxGitConfig,
+        PATH: path.dirname(process.execPath)
+      };
+      if (process.platform === "win32") emptyPathEnv.Path = emptyPathEnv.PATH;
+
+      const cleanStatus = spawnSync(process.execPath, [installScriptPath, "--status"], {
+        env: emptyPathEnv,
+        encoding: "utf-8"
+      });
+      assert.notEqual(cleanStatus.status, 0);
+      assert.match(cleanStatus.stdout, /Overall Status:\s*NOT INSTALLED/);
+      assert.match(cleanStatus.stdout, /Next step:\s*run 'npx --package=agy-context-saver agy-context setup'/);
+
+      const cleanStatusJson = spawnSync(process.execPath, [installScriptPath, "--status", "--json"], {
+        env: emptyPathEnv,
+        encoding: "utf-8"
+      });
+      assert.notEqual(cleanStatusJson.status, 0);
+      const parsedClean = JSON.parse(cleanStatusJson.stdout);
+      assert.equal(parsedClean.isInstalled, false);
+
+      // 5b. UX-ACS-001 + UX-ACS-003 + UX-ACS-004 + UX-ACS-006:
+      // Provision standalone local-only RTK inside pluginDest/bin (no RTK on PATH), run copy-mode setup (matching npx) with uxBinDir OFF PATH
+      const writeStandaloneFakeRtk = (dir) => {
+        fs.mkdirSync(dir, { recursive: true });
+        if (process.platform === "win32") {
+          const p = path.join(dir, "rtk.cmd");
+          fs.writeFileSync(p, "@echo off\r\necho rtk 1.1.0\r\n", "utf-8");
+          return p;
+        }
+        const p = path.join(dir, "rtk");
+        fs.writeFileSync(p, '#!/bin/sh\necho "rtk 1.1.0"\n', "utf-8");
+        fs.chmodSync(p, 0o755);
+        return p;
+      };
+      const runCopySetup = (env) =>
+        spawnSync(
+          process.execPath,
+          ["--input-type=module", "-e", `import { runInstall } from ${JSON.stringify(new URL("../scripts/install-register.mjs", import.meta.url).href)}; await runInstall({ forceCopyFallback: true });`],
+          { env, encoding: "utf-8" }
+        );
+
+      writeStandaloneFakeRtk(uxPluginBin);
+      const setupOffPath = runCopySetup(emptyPathEnv);
+      assert.equal(setupOffPath.status, 0, setupOffPath.stderr || setupOffPath.stdout);
+
+      // UX-ACS-004: GIT_CONFIG_GLOBAL must stay untouched
+      assert.equal(
+        fs.readFileSync(uxGitConfig, "utf-8"),
+        origGitContent,
+        "runInstall must NEVER mutate GIT_CONFIG_GLOBAL (UX-ACS-004)"
+      );
+
+      // UX-ACS-006: Next steps guidance emitted
+      assert.match(setupOffPath.stdout, /Next steps:/);
+      assert.match(setupOffPath.stdout, /Reload Antigravity Desktop IDE or start a new session/);
+      assert.match(setupOffPath.stdout, /agy-context status/);
+
+      // UX-ACS-003: PATH warning + copy-paste export snippet + npx fallback emitted when uxBinDir is absent from PATH
+      assert.match(setupOffPath.stdout, /\[NEXT STEP\] CLI bin directory is not on your PATH/);
+      assert.match(setupOffPath.stdout, /npx --package=agy-context-saver agy-context status/);
+      if (process.platform === "win32") {
+        assert.match(setupOffPath.stdout, /\$env:Path \+=/);
+      } else {
+        assert.match(setupOffPath.stdout, /export PATH="\$HOME\/\.gemini\/antigravity\/bin:\$PATH"/);
+      }
+
+      // UX-ACS-001: Managed rtk shim installed into uxBinDir and executable
+      const managedRtkShim = path.join(uxBinDir, process.platform === "win32" ? "rtk.cmd" : "rtk");
+      assert.equal(fs.existsSync(managedRtkShim), true, "Managed rtk shim must be installed when local plugin rtk is used (UX-ACS-001)");
+      assert.equal(isManagedAgyShimFile(managedRtkShim), true, "Managed rtk shim must carry agy-context-saver-managed marker");
+      if (process.platform !== "win32") {
+        const shimVer = spawnSync(managedRtkShim, ["--version"], { env: emptyPathEnv, encoding: "utf-8" });
+        assert.equal(shimVer.status, 0, `Managed rtk shim execution failed: ${shimVer.stderr}`);
+        assert.match(shimVer.stdout, /rtk 1\.1\.0/);
+      }
+
+      // UX-ACS-003: `status` emits PATH onboarding when off PATH, omits it when uxBinDir IS on PATH
+      const statusOffPath = spawnSync(process.execPath, [installScriptPath, "--status"], {
+        env: emptyPathEnv,
+        encoding: "utf-8"
+      });
+      assert.equal(statusOffPath.status, 0, statusOffPath.stderr || statusOffPath.stdout);
+      assert.match(statusOffPath.stdout, /\[NOT ON PATH\]/);
+      assert.match(statusOffPath.stdout, /\[NEXT STEP\] CLI bin directory is not on your PATH/);
+
+      const onPathEnv = {
+        ...emptyPathEnv,
+        PATH: `${uxBinDir}${path.delimiter}${emptyPathEnv.PATH}`
+      };
+      if (process.platform === "win32") onPathEnv.Path = onPathEnv.PATH;
+      const statusOnPath = spawnSync(process.execPath, [installScriptPath, "--status"], {
+        env: onPathEnv,
+        encoding: "utf-8"
+      });
+      assert.equal(statusOnPath.status, 0, statusOnPath.stderr || statusOnPath.stdout);
+      assert.equal(statusOnPath.stdout.includes("[NOT ON PATH]"), false);
+      assert.equal(statusOnPath.stdout.includes("CLI bin directory is not on your PATH"), false);
+
+      // UX-ACS-013: Partial installation prints Next step hint in non-JSON mode
+      fs.unlinkSync(path.join(uxConfigDir, "scripts", "execution-guard-hook.mjs"));
+      const partialStatus = spawnSync(process.execPath, [installScriptPath, "--status"], {
+        env: onPathEnv,
+        encoding: "utf-8"
+      });
+      assert.notEqual(partialStatus.status, 0);
+      assert.match(partialStatus.stdout, /Overall Status:\s*PARTIAL INSTALLATION/);
+      assert.match(partialStatus.stdout, /Next step:\s*run 'npx --package=agy-context-saver agy-context setup'/);
+
+      // UX-ACS-001: Uninstall removes managed rtk shim cleanly
+      const uninstallManaged = spawnSync(process.execPath, [installScriptPath, "--uninstall"], {
+        env: emptyPathEnv,
+        encoding: "utf-8"
+      });
+      assert.equal(uninstallManaged.status, 0, uninstallManaged.stderr || uninstallManaged.stdout);
+      assert.equal(fs.existsSync(managedRtkShim), false, "Uninstall must remove Agy-managed rtk shim");
+
+      // UX-ACS-001: Pre-existing unmanaged user rtk binary in antigravityBinDir must NEVER be overwritten or deleted
+      fs.mkdirSync(uxBinDir, { recursive: true });
+      const userRtkBody = process.platform === "win32"
+        ? "@echo off\r\necho user-custom-rtk 1.1.0\r\n"
+        : "#!/bin/sh\necho 'user-custom-rtk 1.1.0'\n";
+      fs.writeFileSync(managedRtkShim, userRtkBody, "utf-8");
+      if (process.platform !== "win32") fs.chmodSync(managedRtkShim, 0o755);
+      writeStandaloneFakeRtk(uxPluginBin);
+      const setupPreserveUserRtk = runCopySetup(emptyPathEnv);
+      assert.equal(setupPreserveUserRtk.status, 0, setupPreserveUserRtk.stderr || setupPreserveUserRtk.stdout);
+      assert.equal(fs.readFileSync(managedRtkShim, "utf-8"), userRtkBody, "Setup must never overwrite an unmanaged user rtk binary");
+
+      const uninstallPreserveUserRtk = spawnSync(process.execPath, [installScriptPath, "--uninstall"], {
+        env: emptyPathEnv,
+        encoding: "utf-8"
+      });
+      assert.equal(uninstallPreserveUserRtk.status, 0, uninstallPreserveUserRtk.stderr || uninstallPreserveUserRtk.stdout);
+      assert.equal(fs.existsSync(managedRtkShim), true, "Uninstall must NEVER remove a user's unmanaged rtk binary");
+      assert.equal(fs.readFileSync(managedRtkShim, "utf-8"), userRtkBody);
+
+      // UX-ACS-003: Unit checks for isDirOnPath and formatPathOnboardingLines across POSIX & Windows
+      assert.equal(isDirOnPath(uxBinDir, `${uxBinDir}${path.delimiter}/usr/bin`), true);
+      assert.equal(isDirOnPath(uxBinDir, `${uxBinDir}${path.sep}${path.delimiter}/usr/bin`), true);
+      assert.equal(isDirOnPath(uxBinDir, "/usr/bin:/bin", "linux"), false);
+      assert.equal(
+        isDirOnPath("C:\\Users\\Dev\\.gemini\\antigravity\\bin", '"c:\\users\\dev\\.gemini\\antigravity\\bin\\";C:\\Windows', "win32"),
+        true
+      );
+      const winPathLines = formatPathOnboardingLines("C:\\Users\\Dev\\.gemini\\antigravity\\bin", { platform: "win32" }).join("\n");
+      assert.match(winPathLines, /\$env:Path \+=/);
+      assert.match(winPathLines, /SetEnvironmentVariable/);
+      assert.match(winPathLines, /npx --package=agy-context-saver agy-context status/);
+
+      // UX-ACS-006: Cross-platform unit verification of Windows node.cmd wrapper parity & backup preservation
+      const winNodeWrapText = formatWindowsNodeCmdWrapper("C:\\Program Files\\nodejs\\node.exe", "C:\\Users\\Dev\\.gemini\\config\\scripts\\execution-guard-hook.mjs");
+      assert.match(winNodeWrapText, /chcp 65001 >nul/);
+      assert.match(winNodeWrapText, /REM agy-context-saver-managed/);
+      assert.match(winNodeWrapText, /execution-guard-hook\.mjs/);
+      const fakeWinCfg = path.join(uxProfile, "win-node-parity");
+      fs.mkdirSync(fakeWinCfg, { recursive: true });
+      const origUserNodeCmd = "@echo off\r\nREM user-owned-node-cmd\r\n";
+      fs.writeFileSync(path.join(fakeWinCfg, "node.cmd"), origUserNodeCmd, "utf-8");
+      await installWindowsNodeCmdWrapper({
+        geminiConfigDir: fakeWinCfg,
+        destHook: path.join(fakeWinCfg, "scripts", "execution-guard-hook.mjs"),
+        nodeExe: "C:\\Program Files\\nodejs\\node.exe"
+      });
+      assert.equal(fs.readFileSync(path.join(fakeWinCfg, "node.cmd.bak"), "utf-8"), origUserNodeCmd);
+      assert.match(fs.readFileSync(path.join(fakeWinCfg, "node.cmd"), "utf-8"), /REM agy-context-saver-managed/);
+    } finally {
+      fs.rmSync(uxProfile, { recursive: true, force: true });
+    }
+    console.log("✓ Managed RTK shim, PATH onboarding, GIT_CONFIG_GLOBAL safety, Windows node.cmd parity, and status hints verified");
+  }
 } finally {
   try {
     fs.rmSync(testProfileDir, { recursive: true, force: true });

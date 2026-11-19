@@ -522,7 +522,87 @@ try {
     }).decision,
     "allow"
   );
-  console.log("✓ Lifecycle-gated task log backoff and completion handling verified");
+
+  // UX-ACS-002: Degraded mode (no RTK anywhere) allows bounded head/tail -n 150 on completed task logs
+  // while keeping running task logs, unbounded cat/head, and raw transcripts denied
+  {
+    const degradedProfile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-degraded-outgov-"));
+    const emptyBinDir = path.join(degradedProfile, "empty-bin");
+    fs.mkdirSync(emptyBinDir, { recursive: true });
+    const degradedEnv = {
+      ...process.env,
+      AGY_TEST_PROFILE_DIR: degradedProfile,
+      AGY_BRAIN_DIR: tempBrainDir,
+      PATH: emptyBinDir
+    };
+    if (process.platform === "win32") degradedEnv.Path = emptyBinDir;
+    const invokeDegraded = (payload) => {
+      const res = spawnSync(process.execPath, [hookScript], {
+        input: JSON.stringify(payload),
+        encoding: "utf-8",
+        env: degradedEnv
+      });
+      assert.equal(res.status, 0, `Degraded hook failed: ${res.stderr}`);
+      return JSON.parse(res.stdout.trim());
+    };
+    try {
+      const degradedTailDone = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "run_command", args: { CommandLine: "tail -n 150 tasks/task-legacy-99.log", WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(degradedTailDone.decision, "allow", "Degraded mode must allow bounded tail -n 150 on completed task log");
+
+      const degradedHeadDone = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "run_command", args: { CommandLine: "head -n 100 tasks/task-legacy-99.log", WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(degradedHeadDone.decision, "allow", "Degraded mode must allow bounded head -n 100 on completed task log");
+
+      const degradedCatDone = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "run_command", args: { CommandLine: "cat tasks/task-legacy-99.log", WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(degradedCatDone.decision, "deny", "Degraded mode must deny unbounded cat on completed task log");
+      assert.equal(degradedCatDone.reason.includes("rtk read"), false, "Degraded denial must not recommend missing rtk read");
+      assert.match(degradedCatDone.reason, /head -n 150|tail -n 150/);
+
+      const degradedOversizedHead = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "run_command", args: { CommandLine: "head -n 200 tasks/task-legacy-99.log", WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(degradedOversizedHead.decision, "deny", "Degraded mode must deny head -n >150 on completed task log");
+
+      const degradedPlusTail = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "run_command", args: { CommandLine: "tail -n +1 tasks/task-legacy-99.log", WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(degradedPlusTail.decision, "deny", "Degraded mode must deny tail -n +1 on completed task log");
+
+      const degradedRunningTask = invokeDegraded({
+        conversationId: customConv,
+        toolCall: { name: "run_command", args: { CommandLine: "tail -n 150 tasks/custom.log", WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(degradedRunningTask.decision, "deny", "Degraded mode must still deny actively RUNNING task logs");
+      assert.match(degradedRunningTask.reason, /actively RUNNING/);
+
+      const degradedRfDone = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "read_file", args: { Path: legacyLog } }
+      });
+      assert.equal(degradedRfDone.decision, "deny");
+      assert.equal(degradedRfDone.reason.includes("rtk read"), false, "Degraded read_file denial must not recommend rtk read");
+      assert.match(degradedRfDone.reason, /tail -n 150/);
+
+      const degradedTranscript = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "run_command", args: { CommandLine: `head -n 150 "${path.join(convDir, "logs", "transcript.jsonl")}"`, WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(degradedTranscript.decision, "deny", "Degraded mode must still block raw transcript access");
+    } finally {
+      fs.rmSync(degradedProfile, { recursive: true, force: true });
+    }
+  }
+  console.log("✓ Lifecycle-gated task log backoff, completion handling, and degraded-mode bounds verified");
 } finally {
   if (oldBrain) process.env.AGY_BRAIN_DIR = oldBrain;
   else delete process.env.AGY_BRAIN_DIR;

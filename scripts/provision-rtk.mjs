@@ -104,13 +104,25 @@ function runRtkVersionSync(bin, { platform = os.platform(), execFileSyncFn = exe
   }
 }
 
+export function verifyLocalRtkBinary(binPath, options = {}) {
+  if (!binPath || !fs.existsSync(binPath)) return null;
+  const platform = options.platform || os.platform();
+  const execFileSyncFn = options.execFileSync || execFileSync;
+  try {
+    const out = runRtkVersionSync(binPath, { platform, execFileSyncFn });
+    return isCompatibleRtkVersion(out) ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 export function findExistingRtk(options = {}) {
   const platform = options.platform || os.platform();
   const execFileSyncFn = options.execFileSync || execFileSync;
   const names = platform === "win32" ? ["rtk.exe", "rtk.cmd"] : ["rtk"];
   const profileHome = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
   const pluginBinDir = path.join(profileHome, ".gemini", "config", "plugins", "agy-context-saver", "bin");
-  const candidateDirs = [binDir, pluginBinDir];
+  const candidateDirs = process.env.AGY_TEST_PROFILE_DIR ? [pluginBinDir] : [binDir, pluginBinDir];
 
   // Check PATH first so a system rtk >= 1.1.0 is preferred over bundled binaries
   try {
@@ -283,20 +295,6 @@ export function ensureRtkConfigured(options = {}) {
       console.warn(`[WARN] Could not standardize RTK config: ${err.message}`);
     }
   }
-
-  ensureGitLineEndingConfigured(options);
-}
-
-export function ensureGitLineEndingConfigured(options = {}) {
-  const log = options.silent ? () => {} : console.log;
-  try {
-    const env = { ...process.env };
-    if (process.env.AGY_TEST_PROFILE_DIR && !env.GIT_CONFIG_GLOBAL) {
-      env.GIT_CONFIG_GLOBAL = path.join(process.env.AGY_TEST_PROFILE_DIR, ".gitconfig");
-    }
-    execFileSync("git", ["config", "--global", "core.safecrlf", "false"], { windowsHide: true, stdio: "ignore", env });
-    log("✓ Standardized git core.safecrlf = false to suppress line-ending warning noise");
-  } catch {}
 }
 
 // Auto-run if executed directly
