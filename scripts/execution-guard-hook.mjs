@@ -366,8 +366,12 @@ function isAntigravitySpecialFile(targetPath) {
     return false;
   }
 
-  // Antigravity skill definitions
-  if (normalized.endsWith("/SKILL.md") || normalized === "SKILL.md" || normalized.includes("/skills/")) {
+  // Antigravity skill definitions & documented skill bundles (do not match arbitrary app paths like src/skills/hero.ts)
+  if (
+    normalized.endsWith("/SKILL.md") ||
+    normalized === "SKILL.md" ||
+    /(?:^|\/)(?:\.agents?|\.gemini(?:\/antigravity(?:-cli|-ide)?\/builtin)?|\.claude)\/skills\//i.test(normalized)
+  ) {
     return true;
   }
 
@@ -3441,6 +3445,9 @@ function getInspectableTextForSegment(seg, opts = {}) {
 
   if (argStart !== -1) {
     const targets = extractRedirectTargets(allTokens);
+    if (envPrefix && envPrefix.trim()) {
+      targets.unshift(envPrefix.trim());
+    }
     let hasExplicitPattern = false;
     let afterDoubleDash = false;
     const positionals = [];

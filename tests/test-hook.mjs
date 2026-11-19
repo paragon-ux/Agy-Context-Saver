@@ -229,6 +229,21 @@ console.log("\n--- Group C: read_file & view_file Safe Harbor + Hybrid Slice ---
   });
   assert.equal(skillRead.decision, "allow", "read_file on SKILL.md via args.Path must pass Safe Harbor");
 
+  const skillRefRead = runHook({
+    toolCall: { name: "read_file", args: { Path: "/home/user/repo/.agents/skills/swarm/references/guide.md" } }
+  });
+  assert.equal(skillRefRead.decision, "allow", "read_file on .agents/skills/ reference doc must pass Safe Harbor");
+
+  const builtinSkillRefRead = runHook({
+    toolCall: { name: "read_file", args: { Path: "/home/user/.gemini/antigravity/builtin/skills/swarm/references/doc.md" } }
+  });
+  assert.equal(builtinSkillRefRead.decision, "allow", "read_file on builtin Antigravity skill reference doc must pass Safe Harbor");
+
+  const appSkillsFileRead = runHook({
+    toolCall: { name: "read_file", args: { Path: "/home/user/repo/src/skills/hero.ts" } }
+  });
+  assert.equal(appSkillsFileRead.decision, "deny", "Unbounded read_file on arbitrary src/skills/hero.ts must NOT bypass slice bounds (INFO-003)");
+
   const brainRead = runHook({
     toolCall: { name: "read_file", args: { Path: "/home/user/.gemini/antigravity/brain/conv-1/scratch/report.md" } }
   });
@@ -2735,6 +2750,8 @@ console.log("\n--- Group K: Day-1 Launch Remediation Regressions (RUN-001, RUN-0
       "git commit -aF .system_generated/logs/transcript.jsonl",
       "git commit -m <.system_generated/logs/transcript.jsonl",
       "AGY_BRAIN_DIR=/tmp git commit -m 'harmless message'",
+      "AGY_BRAIN_DIR=/tmp grep foo src/",
+      "AGY_BRAIN_DIR=/tmp rg foo src/",
       'git commit -m "$(cat .system_generated/logs/transcript.jsonl)"'
     ]) {
       assert.equal(
@@ -2743,6 +2760,11 @@ console.log("\n--- Group K: Day-1 Launch Remediation Regressions (RUN-001, RUN-0
         `Real/obfuscated .system_generated smuggling must stay denied: ${smugglingCmd}`
       );
     }
+    assert.equal(
+      runHook({ toolCall: { name: "run_command", args: { CommandLine: "LC_ALL=C grep .system_generated src/", WaitMsBeforeAsync: 5000 } } }).decision,
+      "allow",
+      "Harmless env prefix on search command mentioning .system_generated pattern must stay allowed"
+    );
     console.log("✓ RUN-003: Unprefixed system_generated files & git commit/tag -m allowed while .system_generated smuggling stays denied");
   }
 
