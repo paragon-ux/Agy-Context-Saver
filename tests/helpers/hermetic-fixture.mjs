@@ -58,7 +58,7 @@ function rewriteSingleSegment(seg) {
   const body = envPrefix ? t.slice(envPrefix.length).trim() : t;
   if (!body) return t;
   if (/^(?:["']?[^\\s"']*[/\\\\])?rtk(?:\\.exe|\\.cmd|\\.bat)?["']?\\s+/i.test(body)) return t;
-  let m = body.match(/^cat\\s+(?!-b\\b|--(?:\\s|$))([\\s\\S]+)$/i);
+  let m = body.match(/^cat\\s+(?=-n(?:\\s|$)|[^-])([\\s\\S]+)$/i);
   if (m) return envPrefix + "rtk read " + m[1].trim();
   m = body.match(/^head\\s+(?:(?:-n\\s+(\\d+)|-(\\d+)|--lines=(\\d+))\\s+)?((?![-])[^\\s"'\\\\]+)$/i);
   if (m) return envPrefix + "rtk read " + m[4] + " --head-lines " + (m[1] || m[2] || m[3] || "10");

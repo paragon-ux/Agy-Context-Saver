@@ -114,7 +114,7 @@ try {
 
   const { getStateDir } = await import("../scripts/state-dir.mjs");
   const clearTestSessionStates = () => {
-    for (const id of ["conv-test-live", "conv-test-multi", "conv-other-caller-1", "conv-other-caller-2", "conv-test-custom", "Jane Doe Conv"]) {
+    for (const id of ["conv-test-live", "conv-test-multi", "conv-other-caller-1", "conv-other-caller-2", "conv-other-caller-3", "conv-other-caller-4", "conv-test-custom", "Jane Doe Conv"]) {
       for (const norm of [id, id.replace(/[^a-zA-Z0-9_-]/g, "_"), id.replace(/-/g, "_")]) {
         try { fs.unlinkSync(path.join(getStateDir(), `agy-session-${norm}.json`)); } catch {}
       }
@@ -435,6 +435,28 @@ try {
   });
   assert.equal(relCrossRun.decision, "deny");
   assert.match(relCrossRun.reason, /actively RUNNING/);
+
+  // PR9-RUN-008: Leading ./ and brain-cwd relative cross-session paths
+  for (const [callerId, hookCwd] of [
+    ["conv-other-caller-3", os.tmpdir()],
+    ["conv-other-caller-4", tempBrainDir]
+  ]) {
+    const dotSlashCrossRun = invokeHook({
+      conversationId: callerId,
+      cwd: hookCwd,
+      toolCall: { name: "run_command", args: { CommandLine: `rtk read ./${convMulti}/.system_generated/tasks/task-run-m.log`, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(dotSlashCrossRun.decision, "deny", `Leading ./ cross-session RUNNING log must deny from cwd=${hookCwd}`);
+    assert.match(dotSlashCrossRun.reason, /actively RUNNING/);
+
+    const dotSlashSpillBig = invokeHook({
+      conversationId: convLive,
+      cwd: hookCwd,
+      toolCall: { name: "run_command", args: { CommandLine: `cat ./${convLive}/.system_generated/steps/103/output.txt`, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(dotSlashSpillBig.decision, "deny", `Leading ./ >45 KiB spillover must deny from cwd=${hookCwd}`);
+    assert.match(dotSlashSpillBig.reason, /--head-lines 150/);
+  }
 
   // Non-task-prefixed filename (tasks/custom.log)
   const customConv = "conv-test-custom";

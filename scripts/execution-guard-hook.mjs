@@ -595,14 +595,23 @@ function pickTaskFilesInSysDir(sysDir, taskName, literalBase) {
 }
 
 /**
+ * Strips one or more leading `./` or `.\` segments from a relative path.
+ */
+function stripLeadingDotSlash(p) {
+  return String(p || "").replace(/^(?:\.[\/\\])+/g, "");
+}
+
+/**
  * Resolves the task log name, candidate log path, and transcript path for a matched task token.
- * Expands leading `~/`, resolves relative `<otherConvId>/.system_generated/tasks/...` across brain dirs,
- * and falls back to non-`task-` literal log filenames when present.
+ * Expands leading `~/`, checks cwd-relative `.system_generated/tasks/` paths, resolves
+ * relative `<otherConvId>/.system_generated/tasks/...` (with or without leading `./`) across
+ * `getBrainDirs()`, and falls back to non-`task-` literal log filenames when present.
  */
 function resolveTaskPaths(match, convId) {
   const taskName = `task-${match.id}`;
   const expandedTok = expandLeadingTilde(cleanFileToken(match.token));
   const normExpanded = expandedTok.replace(/\\/g, "/");
+  const normRel = stripLeadingDotSlash(normExpanded);
   const literalBase = /\.log$/i.test(normExpanded) ? path.posix.basename(normExpanded) : "";
   let logPath = null;
   let transcript = null;
@@ -612,27 +621,38 @@ function resolveTaskPaths(match, convId) {
     const sysDir = path.posix.dirname(path.posix.dirname(normExpanded));
     if (path.posix.basename(sysDir) === ".system_generated") transcript = `${sysDir}/logs/transcript.jsonl`;
   } else {
-    const relCrossMatch = normExpanded.match(/^([^/]+)\/\.system_generated\/tasks\/([^/]+\.log)$/i);
-    const targetConv = relCrossMatch ? relCrossMatch[1] : (convId && convId !== "global" ? convId : "");
-    if (targetConv) {
-      for (const bDir of getBrainDirs()) {
-        const sysDir = path.join(bDir, targetConv, ".system_generated");
-        const { candidateTranscript, chosenLog } = pickTaskFilesInSysDir(sysDir, taskName, literalBase);
-        if (fs.existsSync(candidateTranscript) || fs.existsSync(chosenLog)) {
-          logPath = chosenLog;
-          transcript = candidateTranscript;
-          break;
+    const cwdResolved = resolveHookPath(expandedTok);
+    const cwdSysDir = cwdResolved ? path.dirname(path.dirname(cwdResolved)) : "";
+    if (
+      cwdResolved &&
+      path.basename(cwdSysDir) === ".system_generated" &&
+      (fs.existsSync(cwdResolved) || fs.existsSync(path.join(cwdSysDir, "logs", "transcript.jsonl")))
+    ) {
+      logPath = cwdResolved.replace(/\\/g, "/");
+      transcript = path.join(cwdSysDir, "logs", "transcript.jsonl").replace(/\\/g, "/");
+    } else {
+      const relCrossMatch = normRel.match(/^([^/]+)\/\.system_generated\/tasks\/([^/]+\.log)$/i);
+      const targetConv = relCrossMatch ? relCrossMatch[1] : (convId && convId !== "global" ? convId : "");
+      if (targetConv) {
+        for (const bDir of getBrainDirs()) {
+          const sysDir = path.join(bDir, targetConv, ".system_generated");
+          const { candidateTranscript, chosenLog } = pickTaskFilesInSysDir(sysDir, taskName, literalBase);
+          if (fs.existsSync(candidateTranscript) || fs.existsSync(chosenLog)) {
+            logPath = chosenLog;
+            transcript = candidateTranscript;
+            break;
+          }
         }
-      }
-      if (!logPath || !transcript) {
-        const sysDir = path.join(getBrainDir(), targetConv, ".system_generated");
-        const { candidateTranscript, chosenLog } = pickTaskFilesInSysDir(sysDir, taskName, literalBase);
-        logPath = logPath || chosenLog;
-        transcript = transcript || candidateTranscript;
+        if (!logPath || !transcript) {
+          const sysDir = path.join(getBrainDir(), targetConv, ".system_generated");
+          const { candidateTranscript, chosenLog } = pickTaskFilesInSysDir(sysDir, taskName, literalBase);
+          logPath = logPath || chosenLog;
+          transcript = transcript || candidateTranscript;
+        }
       }
     }
   }
-  if (!transcript && convId && convId !== "global" && !/^([^/]+)\/\.system_generated\//i.test(normExpanded)) {
+  if (!transcript && convId && convId !== "global" && !/^([^/]+)\/\.system_generated\//i.test(normRel)) {
     for (const bDir of getBrainDirs()) {
       const sysDir = path.join(bDir, convId, ".system_generated");
       const candidateTranscript = path.join(sysDir, "logs", "transcript.jsonl");
@@ -647,12 +667,14 @@ function resolveTaskPaths(match, convId) {
 
 /**
  * Builds deduplicated candidate paths to stat for `>45 KiB` spillover and task-log bounds checks,
- * expanding `~/` and resolving relative tokens against active brain dirs when absent from `activeHookCwd`.
+ * expanding `~/` and resolving relative tokens (including leading `./`) against active brain dirs
+ * when absent from `activeHookCwd`.
  */
 function resolveInternalReadStatPaths(candidateTok, convId, taskMatch, isSpillover) {
   const cleanTok = cleanFileToken(candidateTok);
   const expandedTok = expandLeadingTilde(cleanTok);
   const normalizedTok = expandedTok.replace(/\\/g, "/");
+  const normRel = stripLeadingDotSlash(normalizedTok);
   const results = [];
   const directPath = resolveHookPath(expandedTok);
   if (directPath) results.push(directPath);
@@ -660,9 +682,9 @@ function resolveInternalReadStatPaths(candidateTok, convId, taskMatch, isSpillov
   const isAbs = path.isAbsolute(expandedTok) || /^(?:[A-Za-z]:)?\//.test(normalizedTok);
   if (!isAbs) {
     const brainDirs = getBrainDirs();
-    if (/^[^/]+\/\.system_generated\//i.test(normalizedTok)) {
+    if (/^[^/]+\/\.system_generated\//i.test(normRel)) {
       for (const bDir of brainDirs) {
-        results.push(path.join(bDir, normalizedTok));
+        results.push(path.join(bDir, normRel));
       }
     }
     if (convId && convId !== "global") {

@@ -8,8 +8,8 @@
 - **Review Standard:** Agy-Squad PR Review Standard `1.4.0` (adapted for `Agy-Context-Saver`: normative provenance in [LEDGER.md](../plans/LEDGER.md) `L55`, zero MCP server surface, filesystem-only state, companion `Agy-Squad` untouched)
 - **Base SHA:** `8dea2b9` (`origin/main`)
 - **Pre-Remediation Head SHA:** `dba51fbf7217aa438ff77c682d073c7f6df5fe91`
-- **Remediation Tree State:** Post-`dba51fb` follow-up remediation staged cleanly on `fix/v2.0.4-rtk-read-parity` (awaiting follow-up commit/push, remote GitHub Actions CI, and Neon High swarm re-verification before merging PR #9 or tagging `v2.0.4`)
-- **Primary Evidence Inspected:** [LEDGER.md](../plans/LEDGER.md) (`L32`–`L55`), [CHANGELOG.md](https://github.com/paragon-ux/Agy-Context-Saver/blob/main/CHANGELOG.md), `.github/workflows/ci-matrix.yml`, `.github/workflows/docs.yml`, `.github/workflows/release-tag.yml`, `scripts/execution-guard-hook.mjs`, `tests/helpers/hermetic-fixture.mjs`, `tests/test-hook.mjs`, `tests/test-output-governance.mjs`, `tests/test-rtk-integration.mjs`, live host `rtk 1.1.0`, local test/package/plugin checks, and pre-remediation GitHub Actions runs on `dba51fb`.
+- **Verified Remediation Head SHA:** `6531c48e467aa711a155e5e3381d8bb7fb5ef429` (`GH CI 7/7 success`, Neon High `APPROVE` on `seq #6`) + final `PR9-RUN-008` / `[INFO]` follow-up commit on `fix/v2.0.4-rtk-read-parity`
+- **Primary Evidence Inspected:** [LEDGER.md](../plans/LEDGER.md) (`L32`–`L55`), [CHANGELOG.md](https://github.com/paragon-ux/Agy-Context-Saver/blob/main/CHANGELOG.md), `.github/workflows/ci-matrix.yml`, `.github/workflows/docs.yml`, `.github/workflows/release-tag.yml`, `scripts/execution-guard-hook.mjs`, `tests/helpers/hermetic-fixture.mjs`, `tests/test-hook.mjs`, `tests/test-output-governance.mjs`, `tests/test-rtk-integration.mjs`, live host `rtk 1.1.0`, local test/package/plugin checks, and GitHub Actions runs on `dba51fb` and `6531c48` (`44425344724`, `44425344726`).
 - **Evidence Limits:** Local `zensical` CLI is unavailable on this host (`Documentation/build` runs remotely in GitHub Actions); desktop IDE live UI tool dispatch on macOS/Windows is outside local Linux execution (covered remotely via Node 22/24 CI on `ubuntu-latest`, `macos-latest`, and `windows-latest` using hermetic `setupHermeticTestEnv` tests).
 
 ### Session Provenance
@@ -20,7 +20,9 @@
 | 2 | `42581d18-fb86-474a-a1c9-19f162d4cdb2` | `ac544c8c-7b0f-4f5c-a28d-45aaa3306605` | 2026-11-18 | `8dea2b9..dba51fb` (clean) | `/boost` `DeepInvestigator` (`pro`) full-diff + CI review |
 | 3 | `38fcb21b-f3f1-49d9-910e-5b14d2f00b1d` | `ac544c8c-7b0f-4f5c-a28d-45aaa3306605` | 2026-11-18 | `8dea2b9..dba51fb` (clean) | Native `/swarm` `reviewer` (`gemini-4-neon-high`, board `#3`) + host `rtk 1.1.0` probes |
 | 4 | `09dfd1b6-82f8-406b-8551-a19187596ba7` | `ac544c8c-7b0f-4f5c-a28d-45aaa3306605` | 2026-11-18 | `8dea2b9..dba51fb` (clean) | `/btw` reconciliation -> 14 atomic `1 ID = 1 Row` records & plan |
-| 5 | `ac544c8c-7b0f-4f5c-a28d-45aaa3306605` | - | 2026-11-18 | `8dea2b9..dba51fb` + follow-up remediation | `/pr-review` (`v1.4.0`) full remediation, test/doc sync, and durable review ledger |
+| 5 | `ac544c8c-7b0f-4f5c-a28d-45aaa3306605` | - | 2026-11-18 | `8dea2b9..6531c48` (clean) | `/pr-review` (`v1.4.0`) remediation (`PR9-RUN-001`..`007`, `PR9-TEST-001`, `PR9-DOC-001`..`006`), `npm test` 12/12 + GH CI `7/7` |
+| 6 | `38fcb21b-f3f1-49d9-910e-5b14d2f00b1d` | `ac544c8c-7b0f-4f5c-a28d-45aaa3306605` | 2026-11-18 | `8dea2b9..6531c48` (clean) | Native `/swarm` `reviewer` (`gemini-4-neon-high`, board `#6`): `APPROVE`, surfaced 1 LOW (`PR9-RUN-008`) & 2 INFO notes |
+| 7 | `ac544c8c-7b0f-4f5c-a28d-45aaa3306605` | - | 2026-11-18 | `6531c48` + `PR9-RUN-008` / INFO follow-up | Rectified leading `./` / `activeHookCwd` cross-session paths (`PR9-RUN-008`), `cat` shim flags (`-A`/`-b`/`-n`), and ledger finality |
 
 ---
 
@@ -207,21 +209,21 @@
 - **Trigger:** Running `forceShim: true` tests with `type`, `Get-Content`, bare `tail`, quoted `head`/`tail`, or Windows backslash `head`/`tail`, and omitting tests for `UNKNOWN` logs, multi-operand smuggling, line-bound edges, bounce suppression, and `~/`/cross-session/space paths.
 - **Expected / actual:** Expected hermetic shim and tests to mirror actual `rtk 1.1.0 hook antigravity` rewrite boundaries and exercise all remediated code paths; actually the old shim over-rewrote unsupported forms while missing `head <file>`, `-<N>`, and `--lines=<N>`.
 - **Impact:** Masked real-world `Check 3` / `Check 4` denials on quoted/backslash/bare-`tail` invocations and left `PR9-RUN-001`..`006` untested.
-- **Required remediation:** Align `createRtkShim` strictly with verified `rtk 1.1.0` behavior (`cat` only minus `-b`/`--`; single unquoted forward-slash `head` including bare/`-N`/`-n N`/`--lines=N`; `tail` requiring count) and add full live-host + hermetic test coverage.
+- **Required remediation:** Align `createRtkShim` strictly with verified `rtk 1.1.0` behavior (`cat` non-flag / `-n` only, excluding `-A`, `-b`, `-e`, `-E`, `-s`, `-t`, `-T`, `-u`, `-v`, `--`; single unquoted forward-slash `head` including bare/`-N`/`-n N`/`--lines=N`; `tail` requiring count) and add full live-host + hermetic test coverage.
 - **Acceptance evidence:** `node tests/test-output-governance.mjs`, `node tests/test-rtk-integration.mjs` (running against host `rtk 1.1.0`), `node tests/test-hook.mjs`, and full 12-suite `npm test` all pass.
-- **Root cause / related IDs:** Pre-existing broad regexes in test shim plus newly discovered runtime cases (`PR9-RUN-001`..`006`, `PR9-DOC-001`).
-- **Closure:** Remediated on `fix/v2.0.4-rtk-read-parity` follow-up commit; locally verified; pending Neon High `reviewer` & remote CI re-run.
+- **Root cause / related IDs:** Pre-existing broad regexes in test shim plus newly discovered runtime cases (`PR9-RUN-001`..`008`, `PR9-DOC-001`).
+- **Closure:** Verified Closed on `6531c48` (`GH CI 7/7 success`, Neon High `APPROVE`), with final `cat -n`/`-A`/`-b`/`-s` shim parity & `PR9-RUN-008` regression tests added in the follow-up commit on `fix/v2.0.4-rtk-read-parity`.
 
 #### `PR9-DOC-001` - Tier 3 and intro docs overstate unconditional `cat` / `head` / `tail` auto-rewriting under `rtk 1.1.0` | `P2` | Closed
 - **Contract provenance:** Documentation accuracy invariant (`L55`).
 - **Source evidence:** `rules/AGENTS.md#L43`, `skills/context-governance/SKILL.md#L30`, [architecture.md](../architecture.md#L14), [architecture.md](../architecture.md#L39), [governance.md](../governance.md#L33), [governance.md](../governance.md#L41), [tools.md](../tools.md#L18).
 - **Trigger:** Following unqualified `"cat, head, and tail auto-rewrite via rtk"` with bare `tail <path>`, quoted `head -n 150 "<path>"` / `tail -n 150 "<path>"`, Windows backslash paths, or env-prefixed calls.
-- **Expected / actual:** Expected docs to reflect actual `rtk 1.1.0` behavior; actually host `rtk 1.1.0` only auto-rewrites `cat` and single unquoted forward-slash `head` / counted `tail -n`/`-<N>`/`--lines=<N>`, leaving bare `tail`, quoted/spaced `head`/`tail`, and backslash `head`/`tail` unrewritten (denied at Check 3/4).
+- **Expected / actual:** Expected docs to reflect actual `rtk 1.1.0` behavior; actually host `rtk 1.1.0` only auto-rewrites `cat` (non-flag / `-n`) and single unquoted forward-slash `head` / counted `tail -n`/`-<N>`/`--lines=<N>`, leaving bare `tail`, quoted/spaced `head`/`tail`, and backslash `head`/`tail` unrewritten (denied at Check 3/4).
 - **Impact:** Agents following unqualified docs on quoted, Windows, or bare `tail` reads hit avoidable hook denials.
 - **Required remediation:** Qualify all Tier 3 and intro bullets to state `cat` and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`, and instruct explicit `rtk read <path>` for bare `tail`, quoted/spaced paths, Windows backslash paths, and env-prefixed calls.
-- **Acceptance evidence:** Source reconciliation across all 5 files paired directly with live `rtk 1.1.0 hook antigravity` probe outputs; zero prose em dashes (`NO_EM_DASHES_IN_MODIFIED_MD`).
+- **Acceptance evidence:** Source reconciliation across all 5 files paired directly with live `rtk 1.1.0 hook antigravity` probe outputs; zero prose em dashes (`NO_EM_DASHES`).
 - **Root cause / related IDs:** Assumed symmetric `rtk` rewrite rules prior to matrix probing (`PR9-TEST-001`).
-- **Closure:** Remediated on `fix/v2.0.4-rtk-read-parity` follow-up commit; pending remote `zensical build` & Neon High recheck.
+- **Closure:** Verified Closed on `6531c48` (`Documentation/build` `44425344724` `success` and Neon High `APPROVE`).
 
 ---
 
@@ -229,13 +231,14 @@
 
 | ID | Wave / Session | Cat | Status | Source | Defect / Proposal | Disposition / Fix | Verification & SHA |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `PR9-RUN-005` | Pass 1 + Pass 2 | `RUN` | Closed | `scripts/execution-guard-hook.mjs#L450-L506`, `#L4975` | `getTaskLogMatch` regex `[^\s"']*` truncated quoted paths containing spaces (failing closed on Windows/macOS spaced profiles). | Added `matchTaskLogToken()`, shell-word + quoted-span scanning in `extractTaskLogMatches()`, and direct `matchTaskLogToken(target)` in `2b` & `resolveInternalReadStatPaths()`. | Space-path `cat`, `head`, `rtk read`, and `read_file` assertions pass in `tests/test-output-governance.mjs` (follow-up commit on `fix/v2.0.4-rtk-read-parity`). |
-| `PR9-RUN-006` | Pass 1 + Pass 2 | `RUN` | Closed | `scripts/execution-guard-hook.mjs#L582-L651` | `resolveTaskPaths()` hardcoded `task-${match.id}.log` even for non-`task-`-prefixed logs like `tasks/custom.log`. | Added `pickTaskFilesInSysDir()` checking exact literal basename (`custom.log`) first when present before falling back to `task-<id>.log`. | Added `tasks/custom.log` running-state assertion in `tests/test-output-governance.mjs` (passes after final edit). |
-| `PR9-DOC-002` | Pass 2 (`LOW-2`) | `DOC` | Closed | `scripts/execution-guard-hook.mjs#L5079-L5085`, `rules/AGENTS.md#L43`, `SKILL.md#L30`, [tools.md](../tools.md#L18), [governance.md](../governance.md#L40) | `read_many_files` denial suggested bare `rtk read <file>` for multi-file workspace reads while docs prohibit `rtk read` on editable workspace code. | Updated `read_many_files` denial to steer editable workspace code to bounded `read_file` (`<= 150` lines) and retain `rtk read <file>` for read-only logs/spillovers; synced `AGENTS.md`, `SKILL.md`, `docs/*`, and `test-hook.mjs#L334-L339`. | `tests/test-hook.mjs` asserts both `read_file` and `rtk read` hints on `read_many_files`; docs reconciled. |
-| `PR9-DOC-003` | Pass 1 + Pass 2 | `DOC` | Closed | `CHANGELOG.md#L16`, [LEDGER.md](../plans/LEDGER.md#L90) | `CHANGELOG.md` omitted new test/doc files and `L55` was marked `done` prematurely while open in PR #9. | Expanded `CHANGELOG.md#L16` file/change coverage cleanly and updated `L55` status to `in PR 9` per [LEDGER.md](../plans/LEDGER.md#L23). | Inspected exact text in both files; `release-preflight.mjs` passes. |
-| `PR9-DOC-004` | Pass 1 (`LOW`) | `DOC` | Closed | [publishing.md](../publishing.md#L70), `#L85-L86` | Pre-existing drift: cited `33` package files and `v2.0.2` release tag example. | Updated to `35` files (reflecting `34` required baseline files plus this `docs/reviews/` report) and `v2.0.4` release example. | Inspected [publishing.md](../publishing.md#L70-L88) and ran `npm run verify:package` (`35 files`). |
-| `PR9-DOC-005` | Pass 1 (`LOW`) | `DOC` | Closed | [architecture.md](../architecture.md#L32) | Pre-existing drift: listed reverted implicit `wc`, `ls`, and `diff` rewrites while omitting `grep` (`scripts/execution-guard-hook.mjs#L3942`). | Added `grep` (`Implicit wc, ls, diff, and grep rewrites...`). | Inspected `docs/architecture.md#L32` vs. `postProcessSegmentText()`. |
-| `PR9-DOC-006` | Pass 1 (`LOW`) | `SKILL` | Closed | `rules/AGENTS.md#L18`, `skills/context-governance/SKILL.md#L108` | Pre-existing drift: watchdog example showed `TimerCondition="task-X"` whereas live `schedule` requires `"<convId>/task-X"`. | Updated example in both files to `TimerCondition="<convId>/task-X"`. | Verified against live `schedule` validation error encountered in Session 1. |
+| `PR9-RUN-005` | Pass 1 + Pass 2 | `RUN` | Closed | `scripts/execution-guard-hook.mjs#L450-L506`, `#L4975` | `getTaskLogMatch` regex `[^\s"']*` truncated quoted paths containing spaces (failing closed on Windows/macOS spaced profiles). | Added `matchTaskLogToken()`, shell-word + quoted-span scanning in `extractTaskLogMatches()`, and direct `matchTaskLogToken(target)` in `2b` & `resolveInternalReadStatPaths()`. | Verified Closed at `6531c48` (`GH CI 7/7 success`, Neon High `APPROVE`). |
+| `PR9-RUN-006` | Pass 1 + Pass 2 | `RUN` | Closed | `scripts/execution-guard-hook.mjs#L582-L651` | `resolveTaskPaths()` hardcoded `task-${match.id}.log` even for non-`task-`-prefixed logs like `tasks/custom.log`. | Added `pickTaskFilesInSysDir()` checking exact literal basename (`custom.log`) first when present before falling back to `task-<id>.log`. | Verified Closed at `6531c48` (`GH CI 7/7 success`, Neon High `APPROVE`). |
+| `PR9-RUN-008` | Session 6 (`[LOW]`) | `RUN` | Closed | `scripts/execution-guard-hook.mjs#L600-L693` | Leading `./` in `./<otherConv>/.system_generated/tasks/...` or `cwd = brain/` fell back to caller's `convId` in `resolveTaskPaths()` / `resolveInternalReadStatPaths()`. | Added `stripLeadingDotSlash()` normalization in both helpers plus verified `.system_generated/tasks/` `resolveHookPath()` handling in `resolveTaskPaths()`. | Regression tests added in `tests/test-output-governance.mjs` from `os.tmpdir()` and `tempBrainDir` (`npm test` 12/12). |
+| `PR9-DOC-002` | Pass 2 (`LOW-2`) | `DOC` | Closed | `scripts/execution-guard-hook.mjs#L5079-L5085`, `rules/AGENTS.md#L43`, `SKILL.md#L30`, [tools.md](../tools.md#L18), [governance.md](../governance.md#L40) | `read_many_files` denial suggested bare `rtk read <file>` for multi-file workspace reads while docs prohibit `rtk read` on editable workspace code. | Updated `read_many_files` denial to steer editable workspace code to bounded `read_file` (`<= 150` lines) and retain `rtk read <file>` for read-only logs/spillovers; synced `AGENTS.md`, `SKILL.md`, `docs/*`, and `test-hook.mjs#L334-L339`. | Verified Closed at `6531c48` (`GH CI 7/7 success`, Neon High `APPROVE`). |
+| `PR9-DOC-003` | Pass 1 + Pass 2 | `DOC` | Closed | `CHANGELOG.md#L16`, [LEDGER.md](../plans/LEDGER.md#L90) | `CHANGELOG.md` omitted new test/doc files and `L55` was marked `done` prematurely while open in PR #9. | Expanded `CHANGELOG.md#L16` file/change coverage cleanly and updated `L55` status to `in PR 9` per [LEDGER.md](../plans/LEDGER.md#L23). | Verified Closed (`release-preflight.mjs` passes; `L55` transitions to `done` upon PR #9 merge). |
+| `PR9-DOC-004` | Pass 1 (`LOW`) | `DOC` | Closed | [publishing.md](../publishing.md#L70), `#L85-L86` | Pre-existing drift: cited `33` package files and `v2.0.2` release tag example. | Updated to `35` files (reflecting `34` required baseline files plus this `docs/reviews/` report) and `v2.0.4` release example. | Verified Closed (`npm run verify:package` reports `35 files`, Neon High `APPROVE`). |
+| `PR9-DOC-005` | Pass 1 (`LOW`) | `DOC` | Closed | [architecture.md](../architecture.md#L32) | Pre-existing drift: listed reverted implicit `wc`, `ls`, and `diff` rewrites while omitting `grep` (`scripts/execution-guard-hook.mjs#L3942`). | Added `grep` (`Implicit wc, ls, diff, and grep rewrites...`). | Verified Closed at `6531c48` (Neon High `APPROVE`). |
+| `PR9-DOC-006` | Pass 1 (`LOW`) | `SKILL` | Closed | `rules/AGENTS.md#L18`, `skills/context-governance/SKILL.md#L108` | Pre-existing drift: watchdog example showed `TimerCondition="task-X"` whereas live `schedule` requires `"<convId>/task-X"`. | Updated example in both files to `TimerCondition="<convId>/task-X"`. | Verified Closed at `6531c48` (Neon High `APPROVE`). |
 
 *(Note: `PR9-RUN-007` is settled in Section 8 below as Closed (By Design) per Standard `1.4.0` Section 5.)*
 
@@ -243,34 +246,35 @@
 
 ## 6. Cross-Category Root Causes, Verification Record & Remaining Gaps
 
-- **Cross-Category Root Cause:** Relaxing `Check 4` to accept post-rewrite `rtk read` exposed asymmetric assumptions across the hook and tests: `Check 1` skipped protected-state scanning globally whenever any single spillover/task token existed, `hasLineBoundFlag` used a raw regex instead of token-level parsing, `resolveTaskPaths()` omitted `~/` and relative cross-session expansion already partially present in `resolveInternalReadStatPaths()`, and `createRtkShim` drifted from actual `rtk 1.1.0` rules. Consolidating token/path helpers (`parseRtkReadCommand()`, `extractTaskLogMatches()`, `expandLeadingTilde()`, `isOversizedInternalTarget()`) resolved both code and doc/test drift consistently.
-- **Verification Executed (Local Post-Remediation on `fix/v2.0.4-rtk-read-parity`):**
-  - `agy-context setup` & `agy-context status --json`: synchronized mirrored hook (`mirroredHookStale: false`, `isComplete: true`).
-  - `node tests/test-output-governance.mjs`, `node tests/test-rtk-integration.mjs` (live `rtk 1.1.0`), `node tests/test-hook.mjs`, and full `npm test` (12/12 suites).
-  - `npm run preflight`, `npm run verify:package`, `agy plugin validate --strict --json`, `git diff --check`, and Markdown zero-em-dash scan.
-- **Remaining Gaps:** Re-running remote GitHub Actions CI (`Release-readiness CI` macOS/Windows/Ubuntu Node 22/24 + `Documentation/build`) and `reviewer` (`Gemini 4 Neon (High)`) re-verification against the pushed follow-up head commit before merging PR #9 and tagging `v2.0.4`.
+- **Cross-Category Root Cause:** Relaxing `Check 4` to accept post-rewrite `rtk read` exposed asymmetric assumptions across the hook and tests: `Check 1` skipped protected-state scanning globally whenever any single spillover/task token existed, `hasLineBoundFlag` used a raw regex instead of token-level parsing, `resolveTaskPaths()` omitted `~/`, leading `./`, `cwd`-relative brain lookups, and relative cross-session expansion already partially present in `resolveInternalReadStatPaths()`, and `createRtkShim` drifted from actual `rtk 1.1.0` rules. Consolidating token/path helpers (`parseRtkReadCommand()`, `extractTaskLogMatches()`, `expandLeadingTilde()`, `stripLeadingDotSlash()`, `isOversizedInternalTarget()`) resolved both code and doc/test drift consistently.
+- **Verification Executed (Local & CI):**
+  - On `6531c48e467aa711a155e5e3381d8bb7fb5ef429`: GitHub Actions CI `7/7` `SUCCESS` (`Release-readiness CI` `44425344726` across Node 22 & 24 on `ubuntu-latest`, `macos-latest`, and `windows-latest`; `Documentation/build` `44425344724`; `deploy` skipped on PR), and Session #6 swarm `reviewer` (`Gemini 4 Neon (High)`, board `#6`) returned **APPROVE**.
+  - Post-`6531c48` final polish (`PR9-RUN-008` + `[INFO]` #1/#2): `agy-context setup`, `agy-context status --json` (`mirroredHookStale: false`, `isComplete: true`), `npm test` (`12/12` suites including live host `rtk 1.1.0`), `npm run preflight`, `npm run verify:package` (`35 files`), `agy plugin validate --strict --json` (`findings: []`), `git diff --check`, and Markdown zero-em-dash scan (`NO_EM_DASHES`).
+- **Remaining Gaps:** Confirm remote GitHub Actions CI and final `Gemini 4 Neon (High)` recheck on the final pushed polish head before merging PR #9 into `main` and tagging `v2.0.4`.
 
 ---
 
 ## 7. Overall Disposition & Finding Closure Summary
 
 - **Pre-Remediation Verdict (`dba51fb`):** Changes required (`1` P1, `5` P2, `8` P3 surfaced across Passes 1–2).
-- **Current Disposition (Follow-up Remediation Commit on `fix/v2.0.4-rtk-read-parity`):** Ready for remote CI + `reviewer` (`Gemini 4 Neon (High)`) final recheck; all 13 actionable IDs remediated (`Closed`), 1 design settlement recorded in Section 8 (`Closed (By Design)`), 0 open blockers locally.
+- **Remediation Verdict (`6531c48`):** Approved (`GH CI 7/7 success`, `Gemini 4 Neon (High)` `seq #6` `APPROVE`, surfaced `PR9-RUN-008` LOW + 2 INFO notes).
+- **Current Disposition (`PR9-RUN-008` + INFO follow-up on `fix/v2.0.4-rtk-read-parity`):** All 14 remediated IDs (`PR9-RUN-001`..`006`, `PR9-RUN-008`, `PR9-TEST-001`, `PR9-DOC-001`..`006`) Closed, `PR9-RUN-007` settled in Section 8 (`Closed (By Design)`), 0 open defects locally; awaiting remote CI green check on the final pushed head before merging PR #9 (`L55` -> `done`) and tagging `v2.0.4`.
 
 | ID | Pre-Remediation Status | Current Status | Closure / Verification Anchor |
 | :--- | :--- | :--- | :--- |
-| `PR9-RUN-001` | Open (Pre-Remediation) | Closed | `tests/test-output-governance.mjs`, `tests/test-rtk-integration.mjs` |
-| `PR9-RUN-002` | Open (Pre-Remediation) | Closed | `tests/test-output-governance.mjs` |
-| `PR9-RUN-003` | Open (Pre-Remediation) | Closed | `tests/test-output-governance.mjs`, `tests/test-rtk-integration.mjs` |
-| `PR9-RUN-004` | Open (Pre-Remediation) | Closed | `tests/test-output-governance.mjs` |
-| `PR9-RUN-005` | Open (Pre-Remediation) | Closed | `tests/test-output-governance.mjs` |
-| `PR9-RUN-006` | Open (Pre-Remediation) | Closed | `tests/test-output-governance.mjs` |
+| `PR9-RUN-001` | Open (Pre-Remediation) | Closed | Verified `6531c48` (`GH CI 7/7`, Neon High `APPROVE`) |
+| `PR9-RUN-002` | Open (Pre-Remediation) | Closed | Verified `6531c48` (`GH CI 7/7`, Neon High `APPROVE`) |
+| `PR9-RUN-003` | Open (Pre-Remediation) | Closed | Verified `6531c48` (`GH CI 7/7`, Neon High `APPROVE`) |
+| `PR9-RUN-004` | Open (Pre-Remediation) | Closed | Verified `6531c48` (`GH CI 7/7`, Neon High `APPROVE`) |
+| `PR9-RUN-005` | Open (Pre-Remediation) | Closed | Verified `6531c48` (`GH CI 7/7`, Neon High `APPROVE`) |
+| `PR9-RUN-006` | Open (Pre-Remediation) | Closed | Verified `6531c48` (`GH CI 7/7`, Neon High `APPROVE`) |
 | `PR9-RUN-007` | Open (Pre-Remediation) | See Section 8 (`Closed (By Design)`) | `tests/test-output-governance.mjs` (`FOO=1 cat ...` denied) |
-| `PR9-TEST-001` | Open (Pre-Remediation) | Closed | `tests/helpers/hermetic-fixture.mjs`, `npm test` (12/12) |
+| `PR9-RUN-008` | Surfaced in Session 6 (`[LOW]`) | Closed | `tests/test-output-governance.mjs` (`./<otherConv>` from `os.tmpdir()` & `tempBrainDir`) |
+| `PR9-TEST-001` | Open (Pre-Remediation) | Closed | `tests/helpers/hermetic-fixture.mjs`, `npm test` (`12/12`) |
 | `PR9-DOC-001` | Open (Pre-Remediation) | Closed | Source reconciliation + live `rtk 1.1.0` probes |
 | `PR9-DOC-002` | Open (Pre-Remediation) | Closed | `scripts/execution-guard-hook.mjs#L5079-L5085`, `tests/test-hook.mjs#L334-L339` |
 | `PR9-DOC-003` | Open (Pre-Remediation) | Closed | `CHANGELOG.md#L16`, `docs/plans/LEDGER.md#L90` (`in PR 9`) |
-| `PR9-DOC-004` | Open (Pre-Remediation) | Closed | `docs/publishing.md#L70`, `#L85-L86` |
+| `PR9-DOC-004` | Open (Pre-Remediation) | Closed | `docs/publishing.md#L70`, `#L85-L86` (`35` files, `v2.0.4`) |
 | `PR9-DOC-005` | Open (Pre-Remediation) | Closed | `docs/architecture.md#L32` |
 | `PR9-DOC-006` | Open (Pre-Remediation) | Closed | `rules/AGENTS.md#L18`, `skills/context-governance/SKILL.md#L108` |
 

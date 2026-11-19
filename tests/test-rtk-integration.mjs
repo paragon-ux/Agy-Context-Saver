@@ -131,6 +131,7 @@ try {
 
   for (const [cmd, expectedRewrite] of [
     ["cat tasks/task-comp-1.log", "rtk read tasks/task-comp-1.log"],
+    ["cat -n tasks/task-comp-1.log", "rtk read -n tasks/task-comp-1.log"],
     ["head tasks/task-comp-1.log", "rtk read tasks/task-comp-1.log --head-lines 10"],
     ["head -50 tasks/task-comp-1.log", "rtk read tasks/task-comp-1.log --head-lines 50"],
     ["head -n 50 tasks/task-comp-1.log", "rtk read tasks/task-comp-1.log --head-lines 50"],
@@ -148,6 +149,9 @@ try {
   }
 
   for (const unrewrittenDeny of [
+    "cat -A tasks/task-comp-1.log",
+    "cat -b tasks/task-comp-1.log",
+    "cat -s tasks/task-comp-1.log",
     "tail tasks/task-comp-1.log",
     'head -n 50 "tasks/task-comp-1.log"',
     'tail -n 50 "tasks/task-comp-1.log"',
