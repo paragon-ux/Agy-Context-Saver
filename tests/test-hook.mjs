@@ -2161,7 +2161,11 @@ console.log("\n--- Group J: Launch UX Day-One Regressions (Local RTK, Degraded M
       fs.writeFileSync(fakeRg, "#!/bin/sh\necho 'ripgrep 14.0.0'\n");
       fs.chmodSync(fakeRg, 0o755);
     }
-    const expectedNormPrefix = localRtkBin.replace(/\\/g, "/");
+    const expectedWinLauncher = path.join(repoRoot, "scripts", "rtk-run.mjs").replace(/\\/g, "/");
+    const expectedNormPrefix =
+      process.platform === "win32"
+        ? `node "${expectedWinLauncher}"`
+        : localRtkBin.replace(/\\/g, "/");
     const emptyBin = path.join(localRtkProfile, "empty-bin");
     fs.mkdirSync(emptyBin, { recursive: true });
 
