@@ -15,7 +15,7 @@ Unbounded `read_file` calls on workspace files are blocked by the `PreToolUse` h
 | **Tier 1: Search & discovery** | Pattern or file discovery | `rtk grep -rnE "<pattern>" <path>` (`~80`-char line / `25`-match compact view; implicit `grep` stays unrewritten for lossless output) / `rtk find <path>` / `rtk ls <path>` |
 | **Tier 2: `read_file` (bounded slice)** | `1-150` line slice | Pass `StartLine` and `EndLine` (`<= 150` lines) to preserve 1-indexed line numbers for `edit_file` and `write_file` |
 | **Tier 2: `read_file` (full-file read)** | Files $\le 800$ lines and $\le 45\text{ KiB}$ | Pass explicit `StartLine: 1, EndLine: <TotalLines>`; partial slices of `151-800` lines are denied |
-| **Tier 3: Spillovers & task logs** | `.system_generated/steps/<step>/output.txt` & completed `tasks/<taskId>.log` | Bounded `read_file` ($\le 150\text{L}$) on step spillovers or single unchained `rtk read <path>` (explicit `--head-lines 150` / `--tail-lines 150` required on `>45 KiB` files) |
+| **Tier 3: Spillovers & task logs** | `.system_generated/steps/<step>/output.txt` & completed `tasks/<taskId>.log` | Bounded `read_file` ($\le 150\text{L}$) on step spillovers or single unchained `rtk read <path>` (`cat`, and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; explicit `rtk read` needed for bare `tail`, quoted/spaced or Windows backslash `head`/`tail`, env prefixes, and `UNKNOWN` logs; `--head-lines 150` / `--tail-lines 150` required on `>45 KiB` files; not for editable workspace code, while `read_many_files` routes editable files to bounded `read_file` and logs/spillovers to `rtk read`) |
 
 Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass through Safe Harbor without slice bounds.
 
@@ -42,8 +42,8 @@ agy-context transcript info --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --json
 
 | Status | Condition | Action |
 | :--- | :--- | :--- |
-| **`HEALTHY`** | Polling $= 0$, User turns $< 35$ | Proceed normally. |
-| **`WARNING`** | User turns $\ge 35$ | Summarize progress and continue in a new conversation. |
+| **`HEALTHY`** | Polling $= 0$, User turns $\le 40$ (advisory reminder from $35\text{--}40$ turns) | Proceed normally (summarize and start a fresh conversation when turns reach $35+$). |
+| **`WARNING`** | User turns $> 40$ or $1\text{--}3$ polling violations | Stop polling violations immediately and/or summarize progress in a fresh conversation. |
 | **`CRITICAL`** | Busy-polling events $> 3$ | Stop polling `manage_task(Action='status')` and wait for Reactive Wakeup (`<SYSTEM_MESSAGE>`). |
 
 ---
@@ -72,7 +72,7 @@ Streams conversation turns from `transcript.jsonl` (or `transcript_full.jsonl`) 
 ```bash
 agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --last-turns 2
 agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --outline --limit 50
-agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --mode full --full --out scratch/session.md
+agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --mode full --full --out ./session.md
 ```
 
 ---
@@ -80,6 +80,8 @@ agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --mode full --f
 ### Output budgets
 
 `read`, `outline`, `query`, `tools`, and `export --sanitized` default to 9,200 UTF-8 bytes. `step` defaults to 24,000 bytes. The deep tier (`--full`, `--out`) allows up to 524,288 bytes. An explicit `--max-chars` budget includes serialization and the trailing newline. With `--out`, stdout reports the write and the limit applies to the file.
+
+`--out` accepts any safe workspace-relative `.md`, `.json`, or `.txt` path outside protected state, governance, and benchmark directories. If you write artifacts under a `scratch/` folder, add `scratch/` to `.gitignore` or `.git/info/exclude` so exports stay untracked. (In `self-only` child mode, `--out` is scoped to `<workspace>/scratch/` or `<brainDir>/<convId>/scratch/`.)
 
 Bounded JSON stays parseable (using 2-space indentation whenever the serialized page or clamped subset fits inside the budget before falling back to compact single-line JSON). When serialization omits records or raw fields, `jsonTruncated` and the included/total counts describe the reduction (`jsonSessionsIncluded` / `jsonSessionsTotal` and `jsonRowsIncluded` / `jsonRowsTotal` for `export --json`). `nextCursor` describes the serialized page (`export` drops truncated rows/sessions rather than splitting inside individual cells, omitting `nextCursor` when multiple sessions trim rows on the same page). If an individual record is too large for a JSON page, use a larger budget or inspect the step in Markdown with a field or line slice. A budget that cannot fit the required metadata returns a nonzero exit code and a diagnostic. Existing output files are preserved on that error.
 
@@ -98,7 +100,7 @@ Searches conversation transcripts by regex or substring, hydrating truncated fie
 | :--- | :---: | :---: | :--- |
 | `<pattern>` / `--query` | `<regex>` | `""` | Case-insensitive regex or substring pattern (first positional arg or `--query`). |
 | `[<id>]` / `--id` | `<uuid>` | Active / auto | Conversation UUID (second positional arg or `--id`). |
-| `--roles` | `<csv>` | `all` | Comma-separated filter: `user`, `assistant`, `subagent`, `tool`, `error`, or `all`. |
+| `--roles` | `<csv>` | `all` | Comma-separated filter: `user`, `assistant`, `subagent`, `tool`, `system`, `generic`, `error`, or `all`. |
 | `--mode` | `auto \| compact \| full` | `auto` | `auto` scans `transcript.jsonl` and hydrates `truncated_fields` from `transcript_full.jsonl` when matched. |
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive `step_index` bounds. |
 | `--last-turns` | `<N>` | `(none)` | Restrict search to the last `N` turns (aliases: `--last`, `--tail`). |
@@ -118,7 +120,7 @@ agy-context transcript grep "verification failed" 68cbb7bc-ce63-4be7-accb-b0e3d3
 agy-context transcript tools "run_command" --field tool_args:CommandLine --full-args
 agy-context transcript outline 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --limit 50
 agy-context transcript query --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --summary --limit 10
-agy-context transcript outline 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --full --out scratch/outline.md
+agy-context transcript outline 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --full --out ./outline.md
 ```
 
 ---
@@ -146,7 +148,7 @@ Extracts untruncated fields from `transcript_full.jsonl` (falling back to normal
 agy-context transcript step 1139 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --field content
 agy-context transcript step 110..115 --field tool_args:CommandLine --tail 40
 agy-context transcript step 566 --field tool_args:CommandLine --line-start 1 --line-end 40
-agy-context transcript step --step 42 --full --out scratch/step42.md
+agy-context transcript step --step 42 --full --out ./step-42.md
 ```
 
 ---
@@ -170,22 +172,22 @@ agy-context transcript list --parent 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --line
 - **Alias:** `dump`
 - **Usage:** `agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--full] [--max-chars N] [--out|--output <path>] [--file <path>] [--json]`
 
-Generates an `L6`-safe sanitized Markdown (or `--json`) summary index of executed steps and compact tool calls, omitting raw `.system_generated/` JSONL lines, `thinking` blocks, and large file bodies while redacting embedded media/base64 payloads and token strings. `--sanitized` is required; raw transcript export is prohibited. Standard stdout exports obey the `9,200`-byte inline ceiling, while `--full` or `--out` opts into the `524,288`-byte (`512 KB`) deep tier (`--max-chars` sets any custom ceiling up to `524,288` bytes, sizing Markdown and JSON independently in UTF-8 bytes and failing nonzero without overwriting existing files if metadata cannot fit).
+Generates a transcript-isolated sanitized Markdown (or `--json`) summary index of executed steps and compact tool calls, omitting raw `.system_generated/` JSONL lines, `thinking` blocks, and large file bodies while redacting embedded media/base64 payloads and token strings. `--sanitized` is required; raw transcript export is prohibited. Standard stdout exports obey the `9,200`-byte inline ceiling, while `--full` or `--out` opts into the `524,288`-byte (`512 KB`) deep tier (`--max-chars` sets any custom ceiling up to `524,288` bytes, sizing Markdown and JSON independently in UTF-8 bytes and failing nonzero without overwriting existing files if metadata cannot fit).
 
 | Flag / Argument | Value | Default | Description |
 | :--- | :---: | :---: | :--- |
 | `[<id>]` / `--id` | `<uuid[,uuid...]>` | Active / auto | One or more conversation UUIDs (positional, comma-separated, or repeatable `--id`). |
 | `--parent` | `<uuid \| current>` | `(none)` | Export sanitized summary tables for all child sessions belonging to `<uuid>`. |
-| `--sanitized` | `(none)` | Required | Explicit `L6` opt-in required on all `transcript export` calls. |
+| `--sanitized` | `(none)` | Required | Explicit sanitization opt-in required on all `transcript export` calls. |
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive `step_index` range filter. |
 | `--limit` | `<N>` | `150` (max `500`) | Maximum steps retained per exported session. |
 | `--full` | `(none)` | `false` | Opt into the deep `524,288`-byte (`512 KB`) stdout rendering tier. |
 | `--max-chars` | `<N>` | `(tier default)` | Override the serialized UTF-8 byte ceiling (up to `524,288` bytes). With `--out`, applies to the written artifact. |
-| `--out` / `--output` | `<path>` | `(stdout)` | Safely write index to a `.md`, `.json`, or `.txt` path (e.g. `scratch/...`, up to `524,288` bytes), rejecting `..`, symlinks, and protected state/config paths. |
+| `--out` / `--output` | `<path>` | `(stdout)` | Safely write index to a workspace-relative `.md`, `.json`, or `.txt` path (for example `./transcript-index.md`, up to `524,288` bytes), rejecting `..`, symlinks, and protected state/config paths. Add `scratch/` to `.gitignore` or `.git/info/exclude` if you store exports there. |
 | `--file` / `--json` | `<path>` / `(none)` | `(none)` | Explicit single-session `.jsonl` path or bounded JSON output (`jsonSessionsIncluded`/`Total`, `jsonRowsIncluded`/`Total`, `jsonTruncated`, `nextCursor`). |
 
 ```bash
-agy-context transcript export --parent 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --sanitized --out scratch/agy-squad/transcript-index.md
+agy-context transcript export --parent 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --sanitized --out ./transcript-index.md
 ```
 
 ---
@@ -233,6 +235,7 @@ Checking Agy-Context-Saver installation status...
 - CLI Shim (agy-context): INSTALLED (~/.gemini/antigravity/bin)
 - RTK Command Optimizer (>= 1.1.0): INSTALLED (rtk 1.1.0)
 - MCP Cleanup: CLEAN (0 duplicate MCP configs/schemas)
+- Plugin Enabled (config.json): ENABLED
 - Transcript Access Policy: OPEN (default)   # or OPEN (parent CLI policy) | Recent launch-restricted children: ... when Tier 4 child locks are active
 Overall Status: HEALTHY & ACTIVE
 ```

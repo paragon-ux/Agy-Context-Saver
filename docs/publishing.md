@@ -13,6 +13,10 @@ The `"files"` list in `package.json` defines the published npm package contents:
   "assets",
   "bin/agy-context.mjs",
   "docs",
+  "!docs/plans/**",
+  "!docs/plans",
+  "!docs/reviews/**",
+  "!docs/reviews",
   "lib",
   "scripts",
   "rules",
@@ -28,6 +32,7 @@ The `"files"` list in `package.json` defines the published npm package contents:
 ```
 
 Excluded from the npm tarball:
+- `docs/plans/` and `docs/reviews/` (internal maintainer architecture ledgers and review records)
 - `tests/` (unit, integration, and lifecycle test suites)
 - `zensical.toml` (docs site generator configuration)
 - Local `.gitignore`d binaries (such as `bin/rtk`), temporary files, and scratch directories
@@ -43,7 +48,7 @@ Run all four stages before tagging a release:
 node scripts/release-preflight.mjs
 node scripts/install-register.mjs --check
 ```
-`scripts/release-preflight.mjs` checks `package.json` metadata, `hooks.json` matcher coverage (`read_file`, `edit_file`, `write_file`, `run_command`), `lib/transcript-core.mjs` and `bin/agy-context.mjs` entrypoints, absence of legacy root `mcp/` or `mcp_config.json`, `README.md` test suite count parity (12 suites), `SECURITY.md`/`CONTRIBUTING.md`/`CODE_OF_CONDUCT.md` presence, `MIN_RTK_VERSION >= 1.1.0`, and zero runtime npm dependencies. `node scripts/install-register.mjs --check` validates RTK `>= 1.1.0` and user config syntax without writing to disk.
+`scripts/release-preflight.mjs` checks `package.json` metadata, `hooks.json` matcher coverage (`read_file`, `edit_file`, `write_file`, `run_command`), `lib/transcript-core.mjs` and `bin/agy-context.mjs` entrypoints, absence of legacy root `mcp/` or `mcp_config.json`, `docs/publishing.md` test suite count parity (12 suites), `SECURITY.md`/`CONTRIBUTING.md`/`CODE_OF_CONDUCT.md` presence, `MIN_RTK_VERSION >= 1.1.0`, and zero runtime npm dependencies. `node scripts/install-register.mjs --check` validates RTK `>= 1.1.0` and user config syntax without writing to disk.
 
 ### Stage 2: Automated test matrix
 ```bash
@@ -82,7 +87,7 @@ Validates Markdown links, navigation entries, and SVG assets.
 Pushing a `v*` tag triggers `.github/workflows/release-tag.yml`, which runs the verification matrix across Linux, macOS, and Windows (Node 22 and 24), creates the GitHub Release, and publishes to npm via OIDC Trusted Publishing (`npm publish --access public --provenance`):
 
 ```bash
-git commit -m "chore(release): v2.0.2"
-git tag -a v2.0.2 -m "Release v2.0.2"
+git commit -m "chore(release): v2.0.4"
+git tag -a v2.0.4 -m "Release v2.0.4"
 git push origin main --follow-tags
 ```

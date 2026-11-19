@@ -30,15 +30,15 @@ $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5
 - **5-strike circuit breaker:** At 5 cumulative denials across polling, internal state, or transcript access checks, the hook returns `force_ask` to pause execution and prompt the user.
 - **Task log lifecycle gating:**
   - *While running:* reading `tasks/<taskId>.log` via file tools or shell commands is denied under the backoff curve.
-  - *When completed:* reading `tasks/<taskId>.log` is allowed via a single unchained `rtk read tasks/<taskId>.log` call.
+  - *When completed:* reading `tasks/<taskId>.log` is allowed via a single unchained `rtk read tasks/<taskId>.log` call (`cat`, and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`, with explicit `--head-lines 150` / `--tail-lines 150` required on `> 45 KiB` logs; bare `tail`, quoted/spaced paths, Windows backslash `head`/`tail`, env-prefixed calls, and unknown-state logs require explicit `rtk read <path>`).
 
 ---
 
 ### Layer 2: Shell Rewriting, File Slices & Transcript Governance
 
 1. **Shell command rewriting:** `run_command` calls (`git`, `pytest`, `cargo`, `npm`, etc.) are rewritten via `rtk hook antigravity` (`rtk git`, `rtk pytest`).
-2. **Workspace file slices:** Unbounded `read_file` calls on workspace files are redirected to `rtk grep`, `rtk find`, and `rtk ls` paired with bounded `read_file(StartLine, EndLine <= 150)` slices. Full-file reads (`StartLine: 1, EndLine: <TotalLines>`) are allowed when the file on disk is `<= 800` lines and `<= 45 KiB`. Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass Safe Harbor without slice bounds.
-3. **Step output spillovers:** `.system_generated/steps/<step>/output.txt` files are readable via bounded `read_file(StartLine, EndLine <= 150)` or a single unchained `rtk read <path>` command.
+2. **Workspace file slices:** Unbounded `read_file` calls on workspace files are redirected to `rtk grep`, `rtk find`, and `rtk ls` paired with bounded `read_file(StartLine, EndLine <= 150)` slices, and `read_many_files` is denied with bounded `read_file` guidance for editable code (`rtk read` for read-only logs/spillovers). Full-file reads (`StartLine: 1, EndLine: <TotalLines>`) are allowed when the file on disk is `<= 800` lines and `<= 45 KiB`. Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass Safe Harbor without slice bounds.
+3. **Step output spillovers:** `.system_generated/steps/<step>/output.txt` files are readable via bounded `read_file(StartLine, EndLine <= 150)` or a single unchained `rtk read <path>` command (`cat`, and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; explicit `--head-lines 150` / `--tail-lines 150` required above `45 KiB`).
 4. **Transcript and state protection:** Direct file or shell access to `.system_generated/logs/transcript*` and `getStateDir()` (`~/.local/state/agy-context-saver` on POSIX or `%LOCALAPPDATA%\agy-context-saver` on Windows) is blocked. Authorized sessions inspect transcripts via unchained `agy-context transcript` commands.
 
 ---
@@ -46,7 +46,7 @@ $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5
 ### Layer 3: Synchronous Execution & Benchmark Integrity
 
 1. **10s synchronous window:** On non-daemon `run_command` calls where `WaitMsBeforeAsync` is omitted, the hook sets `WaitMsBeforeAsync` to `10,000ms` while preserving explicit caller timeouts.
-2. **Benchmark file protection:** Edits or writes targeting benchmark definitions, evaluation templates, or scoring files require `force_ask` user confirmation.
+2. **Benchmark file protection:** Edits or writes targeting `benchmarks/`, `evaluation/`, `evaluators/`, `scoring/`, `ground_truth/`, or `prompt_templates/` require `force_ask` user confirmation by default to prevent evaluation contamination. For normal application repositories that contain source directories with those names, set `AGY_DISABLE_BENCHMARK_GUARD=1` in your shell or IDE environment to disable this prompt for top-level non-restricted sessions (restricted child sessions keep benchmark protection active).
 
 ---
 

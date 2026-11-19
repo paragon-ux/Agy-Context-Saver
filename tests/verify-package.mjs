@@ -20,6 +20,7 @@ const REQUIRED = [
   "scripts/install-register.mjs",
   "scripts/provision-rtk.mjs",
   "scripts/release-preflight.mjs",
+  "scripts/rtk-run.mjs",
   "scripts/state-dir.mjs",
   "rules/AGENTS.md",
   "skills/context-governance/SKILL.md",
@@ -28,7 +29,6 @@ const REQUIRED = [
   "docs/index.md",
   "docs/installation.md",
   "docs/INSTALLER-HARDENING.md",
-  "docs/plans/LEDGER.md",
   "docs/publishing.md",
   "docs/roadmap.md",
   "docs/RTK-SUPPORT-MATRIX.md",
@@ -61,8 +61,18 @@ function validate(packages) {
   );
   assert.deepEqual(unsafe, [], `Unsafe package paths: ${unsafe.join(", ")}`);
 
-  const hasBadSubpath = (name) =>
-    name.endsWith(".tgz") || name.endsWith(".log") || /(?:^|\/)scratch(?:\/|$)/.test(name);
+  const hasBadSubpath = (name) => {
+    const lower = name.toLowerCase();
+    return (
+      lower.endsWith(".tgz") ||
+      lower.endsWith(".log") ||
+      /(?:^|\/)scratch(?:\/|$)/.test(lower) ||
+      lower === "docs/plans" ||
+      lower.startsWith("docs/plans/") ||
+      lower === "docs/reviews" ||
+      lower.startsWith("docs/reviews/")
+    );
+  };
   const allowed = names.filter((name) =>
     !hasBadSubpath(name) &&
     (name === "package.json" || name === "plugin.json" || name === "hooks.json" ||
@@ -86,18 +96,23 @@ function validate(packages) {
 function selfTest() {
   const fixture = (extra) => [{ files: [...REQUIRED, ...extra].map((p) => ({ path: p })) }];
   assert.equal(validate(fixture(["docs/extra-guide.md"])), REQUIRED.length + 1);
-  for (const bad of [
+  const badCases = [
     "tests/leaked.mjs",
     "benchmarks/private.json",
     "scratch/trace.log",
     "docs/scratch/leak.md",
+    "docs/plans",
+    "docs/plans/LEDGER.md",
+    "docs/reviews",
+    "docs/reviews/audit.md",
     "docs/package.tgz",
     "scripts/debug.log",
     "other/private.txt",
     "../outside.txt",
     "mcp_config.json",
     "mcp/index.js"
-  ]) {
+  ];
+  for (const bad of badCases) {
     assert.throws(() => validate(fixture([bad])),
       /Forbidden npm package contents|Unsafe package paths/,
       `Expected synthetic package with ${bad} to be rejected`);
@@ -105,7 +120,7 @@ function selfTest() {
   assert.throws(() => validate([{ files: REQUIRED
     .filter((p) => p !== "lib/transcript-core.mjs").map((p) => ({ path: p })) }]),
     /Missing required npm package file: lib\/transcript-core\.mjs/);
-  console.log("Package verifier self-test passed (positive + 11 negatives)");
+  console.log(`Package verifier self-test passed (positive + ${badCases.length + 1} negatives)`);
 }
 
 if (process.argv[2] === "--self-test") {

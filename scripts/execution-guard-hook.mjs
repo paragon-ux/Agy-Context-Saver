@@ -46,6 +46,9 @@ function resolveHookPath(p) {
 
 const HOOK_DEDUP_TTL_MS = 5000;
 const HOOK_SAME_ARG_CROSS_SCRIPT_MS = 500;
+const MAX_SAFE_SLICE_LINES = 150;
+const MAX_FULL_FILE_LINES = 800;
+const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes)
 let dedupRecordCtx = null;
 
 function respond(obj) {
@@ -191,7 +194,7 @@ function matchesRawProtectedInternalState(targetPath) {
   if (/\.system_generated(?:$|[\/\\])/i.test(targetPath)) return true;
   if (/(?:^|[\/\\'"`\s=:])\.system_gen/i.test(targetPath)) return true;
   if (/['"]\.system_['"]\s*(?:[+.]\s*)?['"]gen/i.test(targetPath)) return true;
-  if (/(?:^|[^a-zA-Z0-9_-])system_generated\b/i.test(targetPath)) return true;
+  if (/['"]\.['"]\s*(?:[+.]\s*)?['"]system_gen/i.test(targetPath)) return true;
   if (/\btranscript(?:_full)?\.jsonl\b/i.test(targetPath)) return true;
   if (/\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]?)?$/i.test(targetPath)) {
     return true;
@@ -217,7 +220,7 @@ function matchesRawProtectedInternalState(targetPath) {
   return false;
 }
 
-function isProtectedShellOrScriptOperation(text) {
+function isProtectedShellOrScriptOperation(text, options = {}) {
   if (!text || typeof text !== "string") return false;
   if (isProtectedInternalState(text)) return true;
 
@@ -235,16 +238,32 @@ function isProtectedShellOrScriptOperation(text) {
     return true;
   }
 
-  // Block environment variable redirection of governance state or brain roots inside shell commands/scripts
-  if (/(?:^|[\s;|&(])(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|XDG_STATE_HOME|LOCALAPPDATA|GEMINI_CONVERSATION_ID)=/i.test(text)) {
+  // Unconditionally block Antigravity-specific governance or brain env redirection inside shell commands/scripts
+  if (/(?:^|[\s;|&(])(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)=/i.test(text)) {
     return true;
   }
   if (
-    /(?:process\.env|os\.environ)\s*(?:\.\s*(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|XDG_STATE_HOME|LOCALAPPDATA|GEMINI_CONVERSATION_ID)\b|\[\s*['"](?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|XDG_STATE_HOME|LOCALAPPDATA|GEMINI_CONVERSATION_ID)['"]\s*\])/i.test(
+    /(?:process\.env|os\.environ)\s*(?:\.\s*(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)\b|\[\s*['"](?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)['"]\s*\])/i.test(
       text
     )
   ) {
     return true;
+  }
+
+  // Scope standard OS env vars (XDG_STATE_HOME, LOCALAPPDATA) so ordinary user tests run cleanly in non-restricted
+  // sessions, while blocking restricted child sessions and commands targeting governance or .gemini state
+  const touchesStateEnv =
+    /(?:^|[\s;|&(])(?:XDG_STATE_HOME|LOCALAPPDATA)=/i.test(text) ||
+    /(?:process\.env|os\.environ)\s*(?:\.\s*(?:XDG_STATE_HOME|LOCALAPPDATA)\b|\[\s*['"](?:XDG_STATE_HOME|LOCALAPPDATA)['"]\s*\])/i.test(
+      text
+    );
+  if (touchesStateEnv) {
+    const isRestrictedChild = Boolean(options.isRestrictedChild);
+    const targetsGovernanceState =
+      /\bagy-context(?:-saver)?\b|\bexecution-guard\b|\btranscript(?:-access|-core)?\b|\.gemini\b/i.test(text);
+    if (isRestrictedChild || targetsGovernanceState) {
+      return true;
+    }
   }
 
   // Block symlinks, bulk copies/archives, file reads, or directory enumeration of <brainDir>/<convId> outside /scratch/, /browser_sandbox/, /swarm_view/, or .agents/ (in either order)
@@ -347,8 +366,12 @@ function isAntigravitySpecialFile(targetPath) {
     return false;
   }
 
-  // Antigravity skill definitions
-  if (normalized.endsWith("/SKILL.md") || normalized === "SKILL.md" || normalized.includes("/skills/")) {
+  // Antigravity skill definitions & documented skill bundles (do not match arbitrary app paths like src/skills/hero.ts)
+  if (
+    normalized.endsWith("/SKILL.md") ||
+    normalized === "SKILL.md" ||
+    /(?:^|\/)(?:\.agents?|\.gemini(?:\/antigravity(?:-cli|-ide)?\/builtin)?|\.claude)\/skills\//i.test(normalized)
+  ) {
     return true;
   }
 
@@ -389,39 +412,239 @@ function isProtectedBenchmarkPath(targetPath) {
 }
 
 /**
+ * Allows top-level non-restricted user sessions to opt out of benchmark-folder mutation prompts
+ * via AGY_DISABLE_BENCHMARK_GUARD=1 (ignored for restricted child sessions).
+ */
+function isBenchmarkGuardDisabled(convId = "global") {
+  const raw = String(process.env.AGY_DISABLE_BENCHMARK_GUARD || "").trim().toLowerCase();
+  if (raw !== "1" && raw !== "true") return false;
+  if (evaluateCallerTranscriptAccess(convId).isRestrictedChild) return false;
+  return true;
+}
+
+/**
+ * Expands a leading `~/` or `~\` prefix against the active Antigravity profile home directory.
+ */
+function expandLeadingTilde(targetPath) {
+  if (!targetPath || typeof targetPath !== "string") return "";
+  const trimmed = targetPath.trim();
+  if (trimmed === "~") return getProfileHomeDir();
+  if (/^~[/\\]/.test(trimmed)) {
+    return path.join(getProfileHomeDir(), trimmed.slice(2));
+  }
+  return trimmed;
+}
+
+/**
+ * Strips optional `file://` scheme and leading `/C:` Windows URI slash from a path token.
+ */
+function cleanFileToken(targetPath) {
+  let tok = String(targetPath || "").trim().replace(/^file:\/\//i, "");
+  if (/^\/[A-Za-z]:/.test(tok)) tok = tok.slice(1);
+  return tok;
+}
+
+/**
  * Checks if target path strictly matches runtime step output spillover:
  * `<prefix>/.system_generated/steps/<digits>/output.txt` (or relative `.system_generated/steps/<digits>/output.txt`).
  */
 function isStepSpilloverPath(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
-  const normalized = targetPath.trim().replace(/\\/g, "/");
+  const normalized = cleanFileToken(targetPath).replace(/\\/g, "/");
   return /(?:^|\/)\.system_generated\/steps\/\d+\/output\.txt$/i.test(normalized);
+}
+
+/**
+ * Returns all step spillover path tokens found in a tokenized command array.
+ */
+function findStepSpilloverTokens(tokens) {
+  const found = [];
+  for (const tok of tokens) {
+    const clean = cleanFileToken(tok);
+    if (isStepSpilloverPath(clean)) found.push(clean);
+  }
+  return found;
 }
 
 /**
  * Checks whether any path token in a command string strictly contains a step spillover path.
  */
 function findStepSpilloverToken(tokens) {
-  for (const tok of tokens) {
-    const clean = tok.replace(/^file:\/\//i, "");
-    if (isStepSpilloverPath(clean)) return clean;
+  const found = findStepSpilloverTokens(tokens);
+  return found.length > 0 ? found[0] : null;
+}
+
+function resolveRealOrAncestorPath(targetPath) {
+  const resolved = path.resolve(targetPath);
+  const tail = [];
+  let cursor = resolved;
+  while (true) {
+    try {
+      const realCursor = fs.realpathSync(cursor);
+      return tail.length > 0 ? path.join(realCursor, ...tail.reverse()) : realCursor;
+    } catch {
+      const parent = path.dirname(cursor);
+      if (parent === cursor) return resolved;
+      tail.push(path.basename(cursor));
+      cursor = parent;
+    }
   }
+}
+
+function isInsideAntigravityBrainPath(targetPath) {
+  if (!targetPath || typeof targetPath !== "string") return false;
+  const cmp = os.platform() === "win32" || os.platform() === "darwin" ? (s) => s.toLowerCase() : (s) => s;
+  const rawNorm = path.resolve(targetPath).replace(/\\/g, "/");
+  const realNorm = resolveRealOrAncestorPath(targetPath).replace(/\\/g, "/");
+  const candidateTargets = rawNorm === realNorm ? [rawNorm] : [rawNorm, realNorm];
+
+  for (const cand of candidateTargets) {
+    if (/(?:^|\/)\.system_generated(?:\/|$)/i.test(cand)) return true;
+    if (/\/\.gemini\/antigravity(?:-cli|-ide)?\/brain(?:\/|$)/i.test(cand)) return true;
+  }
+
+  const brainNorms = [];
+  for (const bDir of getBrainDirs()) {
+    if (!bDir) continue;
+    const rawBrain = cmp(path.resolve(bDir).replace(/\\/g, "/").replace(/\/+$/, ""));
+    brainNorms.push(rawBrain);
+    const realBrain = cmp(resolveRealOrAncestorPath(bDir).replace(/\\/g, "/").replace(/\/+$/, ""));
+    if (realBrain !== rawBrain) brainNorms.push(realBrain);
+  }
+
+  for (const cand of candidateTargets) {
+    const nTarget = cmp(cand);
+    for (const nBrain of brainNorms) {
+      if (nTarget === nBrain || nTarget.startsWith(`${nBrain}/`)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Extracts `{ id, token, realPath? }` if a single file path token matches an Antigravity internal
+ * `tasks/*.log` path (not an ordinary user workspace log file), or null.
+ * Resolves workspace symlinks so symlinks pointing into `.system_generated/` stay gated.
+ * Preserves spaces inside full path tokens.
+ */
+function matchTaskLogToken(targetPath, convId = "global") {
+  if (!targetPath || typeof targetPath !== "string") return null;
+  const clean = cleanFileToken(targetPath);
+  const normalized = clean.replace(/\\/g, "/");
+  const m = normalized.match(/^(?:.+\/)?tasks\/(?:task-)?([a-zA-Z0-9_-]+)\.log$/i);
+  if (!m) return null;
+
+  // 1. Explicit `.system_generated/tasks/*.log` paths are always Antigravity internal task logs
+  if (/(?:^|\/)\.system_generated\/tasks\/[^/]+\.log$/i.test(normalized)) {
+    return { id: m[1], token: normalized };
+  }
+
+  const buildBrainMatch = (resolvedCandidate) => {
+    const realNorm = resolveRealOrAncestorPath(resolvedCandidate).replace(/\\/g, "/");
+    const realTaskMatch = realNorm.match(/(?:^|\/)tasks\/(?:task-)?([a-zA-Z0-9_-]+)\.log$/i);
+    return {
+      id: realTaskMatch ? realTaskMatch[1] : m[1],
+      token: normalized,
+      realPath: realNorm
+    };
+  };
+
+  const expanded = expandLeadingTilde(clean);
+  const normExpanded = expanded.replace(/\\/g, "/");
+  const isAbs = path.isAbsolute(expanded) || /^(?:[A-Za-z]:)?\//.test(normExpanded);
+
+  // 2. Absolute or `~/`-expanded paths are internal task logs only when inside an Antigravity brain root (following symlinks)
+  if (isAbs) {
+    return isInsideAntigravityBrainPath(expanded) ? buildBrainMatch(expanded) : null;
+  }
+
+  // 3. Relative paths whose resolved cwd location (or symlink realpath) falls inside `.system_generated` or a brain root
+  const cwdResolved = resolveHookPath(expanded);
+  if (cwdResolved && isInsideAntigravityBrainPath(cwdResolved)) {
+    return buildBrainMatch(cwdResolved);
+  }
+
+  // 4. Only bare relative shorthand `tasks/<name>.log` (or `./tasks/<name>.log`) can reference
+  //    `<brainDir>/<convId>/.system_generated/tasks/<name>.log`; nested project paths like
+  //    `logs/tasks/worker.log` are ordinary workspace files.
+  const bareRelMatch = normalized.match(/^(?:\.\/)?tasks\/([^/]+\.log)$/i);
+  if (!bareRelMatch) return null;
+
+  const literalBase = bareRelMatch[1];
+  const taskId = m[1];
+  if (convId && convId !== "global") {
+    for (const bDir of getBrainDirs()) {
+      const sysDir = path.join(bDir, convId, ".system_generated");
+      const { chosenLog } = pickTaskFilesInSysDir(sysDir, taskId, literalBase);
+      if (fs.existsSync(chosenLog)) {
+        return { id: taskId, token: normalized };
+      }
+    }
+  }
+
+  // If a real workspace file exists at `<cwd>/tasks/<name>.log` (outside brain dirs), treat it as workspace code/log
+  if (cwdResolved && fs.existsSync(cwdResolved)) {
+    return null;
+  }
+
+  // Preserve Antigravity shorthand gating for canonical `tasks/task-<id>.log` references when no workspace file exists
+  if (/^task-[a-zA-Z0-9_-]+\.log$/i.test(literalBase)) {
+    return { id: taskId, token: normalized };
+  }
+
   return null;
 }
 
 /**
- * Extracts the task-log reference from a target path or command, or null.
+ * Extracts all `{ id, token }` task-log references across command/script text or a single target path,
+ * preserving spaces inside quoted spans and full tokens.
+ */
+function extractTaskLogMatches(text, convId = "global") {
+  if (!text || typeof text !== "string" || !text.includes(".log")) return [];
+  const normalized = text.replace(/\\/g, "/");
+  if (!normalized.includes("tasks/")) return [];
+
+  const matches = [];
+  const pushMatch = (m) => {
+    if (!m) return;
+    if (matches.some((existing) => existing.id === m.id && existing.token.endsWith(m.token))) return;
+    const filtered = matches.filter((existing) => !(existing.id === m.id && m.token.endsWith(existing.token)));
+    if (filtered.length !== matches.length) {
+      matches.length = 0;
+      matches.push(...filtered);
+    }
+    matches.push(m);
+  };
+
+  for (const tok of tokenizeShellWords(text)) {
+    pushMatch(matchTaskLogToken(tok, convId));
+  }
+
+  const spanRe = /"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s"'()=;,\[\]{}]+)/g;
+  let sm;
+  while ((sm = spanRe.exec(normalized)) !== null) {
+    const cand = sm[1] ?? sm[2] ?? sm[3] ?? "";
+    const directCand = matchTaskLogToken(cand, convId);
+    if (directCand) {
+      pushMatch(directCand);
+      continue;
+    }
+    const innerRe = /(?:^|[\s"'(=,;\[{])((?:[^\s"'(=,;\[{]*\/)?tasks\/(?:task-)?([a-zA-Z0-9_-]+)\.log)(?=$|[\s"');,\]}])/gi;
+    let im;
+    while ((im = innerRe.exec(cand)) !== null) {
+      pushMatch(matchTaskLogToken(im[1], convId));
+    }
+  }
+  return matches;
+}
+
+/**
+ * Extracts the first task-log reference from a target path or command, or null.
  * Returns { id, token }: `id` is the bare task id; `token` is the matched path text.
  */
-function getTaskLogMatch(text) {
-  if (!text || typeof text !== "string" || !text.includes(".log")) return null;
-  const normalized = text.replace(/\\/g, "/");
-  if (!normalized.includes("tasks/")) return null;
-  const m = normalized.match(/(?:^|[\s"'])((?:[^\s"']*\/)?tasks\/(?:task-)?([a-zA-Z0-9_-]+)\.log)(?=$|[\s"'])/i);
-  if (!m) return null;
-  let token = m[1].replace(/^file:\/\//i, "");
-  if (/^\/[A-Za-z]:/.test(token)) token = token.slice(1);
-  return { id: m[2], token };
+function getTaskLogMatch(text, convId = "global") {
+  const matches = extractTaskLogMatches(text, convId);
+  return matches.length > 0 ? matches[0] : null;
 }
 
 const TASK_TAIL_BYTES = 262144; // transcript tail scanned first (256 KB)
@@ -491,34 +714,167 @@ function scanTaskMarkers(text, taskName) {
   return null;
 }
 
-function getTaskState(match, convId) {
+/**
+ * Picks candidate log and transcript paths inside one `.system_generated` directory,
+ * checking the exact literal filename (`tasks/custom.log`) before `task-<id>.log`.
+ */
+function pickTaskFilesInSysDir(sysDir, taskName, literalBase) {
+  const candidateTranscript = path.join(sysDir, "logs", "transcript.jsonl");
+  const literalLog = literalBase ? path.join(sysDir, "tasks", literalBase) : "";
+  const prefixedLog = path.join(sysDir, "tasks", `${taskName}.log`);
+  let chosenLog = prefixedLog;
+  if (literalLog && literalBase.toLowerCase() !== `${taskName}.log`.toLowerCase() && fs.existsSync(literalLog)) {
+    chosenLog = literalLog;
+  } else if (fs.existsSync(prefixedLog)) {
+    chosenLog = prefixedLog;
+  } else if (literalLog && literalBase) {
+    chosenLog = literalLog;
+  }
+  return { candidateTranscript, chosenLog };
+}
+
+/**
+ * Strips one or more leading `./` or `.\` segments from a relative path.
+ */
+function stripLeadingDotSlash(p) {
+  return String(p || "").replace(/^(?:\.[\/\\])+/g, "");
+}
+
+/**
+ * Resolves the task log name, candidate log path, and transcript path for a matched task token.
+ * Expands leading `~/`, checks cwd-relative `.system_generated/tasks/` paths, resolves
+ * relative `<otherConvId>/.system_generated/tasks/...` (with or without leading `./`) across
+ * `getBrainDirs()`, and falls back to non-`task-` literal log filenames when present.
+ */
+function resolveTaskPaths(match, convId) {
   const taskName = `task-${match.id}`;
-  const token = match.token;
+  const expandedTok = expandLeadingTilde(cleanFileToken(match.token));
+  const normExpanded = expandedTok.replace(/\\/g, "/");
+  const normRel = stripLeadingDotSlash(normExpanded);
+  const literalBase = /\.log$/i.test(normExpanded) ? path.posix.basename(normExpanded) : "";
   let logPath = null;
   let transcript = null;
 
-  if (/^(?:[A-Za-z]:)?\//.test(token)) {
-    logPath = token;
-    const sysDir = path.posix.dirname(path.posix.dirname(token));
-    if (path.posix.basename(sysDir) === ".system_generated") transcript = `${sysDir}/logs/transcript.jsonl`;
+  if (match.realPath && /^(?:[A-Za-z]:)?\//.test(match.realPath)) {
+    const realSysDir = path.posix.dirname(path.posix.dirname(match.realPath));
+    if (path.posix.basename(realSysDir) === ".system_generated") {
+      logPath = match.realPath;
+      transcript = `${realSysDir}/logs/transcript.jsonl`;
+    }
   }
-  if (convId && convId !== "global") {
+  if (!logPath && /^(?:[A-Za-z]:)?\//.test(normExpanded)) {
+    logPath = normExpanded;
+    const sysDir = path.posix.dirname(path.posix.dirname(normExpanded));
+    if (path.posix.basename(sysDir) === ".system_generated") transcript = `${sysDir}/logs/transcript.jsonl`;
+  } else if (!logPath) {
+    const cwdResolved = resolveHookPath(expandedTok);
+    const cwdSysDir = cwdResolved ? path.dirname(path.dirname(cwdResolved)) : "";
+    if (
+      cwdResolved &&
+      path.basename(cwdSysDir) === ".system_generated" &&
+      (fs.existsSync(cwdResolved) || fs.existsSync(path.join(cwdSysDir, "logs", "transcript.jsonl")))
+    ) {
+      logPath = cwdResolved.replace(/\\/g, "/");
+      transcript = path.join(cwdSysDir, "logs", "transcript.jsonl").replace(/\\/g, "/");
+    } else {
+      const relCrossMatch = normRel.match(/^([^/]+)\/\.system_generated\/tasks\/([^/]+\.log)$/i);
+      const targetConv = relCrossMatch ? relCrossMatch[1] : (convId && convId !== "global" ? convId : "");
+      if (targetConv) {
+        for (const bDir of getBrainDirs()) {
+          const sysDir = path.join(bDir, targetConv, ".system_generated");
+          const { candidateTranscript, chosenLog } = pickTaskFilesInSysDir(sysDir, taskName, literalBase);
+          if (fs.existsSync(candidateTranscript) || fs.existsSync(chosenLog)) {
+            logPath = chosenLog;
+            transcript = candidateTranscript;
+            break;
+          }
+        }
+        if (!logPath || !transcript) {
+          const sysDir = path.join(getBrainDir(), targetConv, ".system_generated");
+          const { candidateTranscript, chosenLog } = pickTaskFilesInSysDir(sysDir, taskName, literalBase);
+          logPath = logPath || chosenLog;
+          transcript = transcript || candidateTranscript;
+        }
+      }
+    }
+  }
+  if (!transcript && convId && convId !== "global" && !/^([^/]+)\/\.system_generated\//i.test(normRel)) {
     for (const bDir of getBrainDirs()) {
       const sysDir = path.join(bDir, convId, ".system_generated");
       const candidateTranscript = path.join(sysDir, "logs", "transcript.jsonl");
-      const candidateLog = path.join(sysDir, "tasks", `${taskName}.log`);
-      if (fs.existsSync(candidateTranscript) || fs.existsSync(candidateLog)) {
-        logPath = logPath || candidateLog;
-        transcript = transcript || candidateTranscript;
+      if (fs.existsSync(candidateTranscript)) {
+        transcript = candidateTranscript;
         break;
       }
     }
-    if (!logPath || !transcript) {
-      const sysDir = path.join(getBrainDir(), convId, ".system_generated");
-      logPath = logPath || path.join(sysDir, "tasks", `${taskName}.log`);
-      transcript = transcript || path.join(sysDir, "logs", "transcript.jsonl");
+  }
+  return { taskName, logPath, transcript };
+}
+
+/**
+ * Builds deduplicated candidate paths to stat for `>45 KiB` spillover and task-log bounds checks,
+ * expanding `~/` and resolving relative tokens (including leading `./`) against active brain dirs
+ * when absent from `activeHookCwd`.
+ */
+function resolveInternalReadStatPaths(candidateTok, convId, taskMatch, isSpillover) {
+  const cleanTok = cleanFileToken(candidateTok);
+  const expandedTok = expandLeadingTilde(cleanTok);
+  const normalizedTok = expandedTok.replace(/\\/g, "/");
+  const normRel = stripLeadingDotSlash(normalizedTok);
+  const results = [];
+  const directPath = resolveHookPath(expandedTok);
+  if (directPath) results.push(directPath);
+
+  const isAbs = path.isAbsolute(expandedTok) || /^(?:[A-Za-z]:)?\//.test(normalizedTok);
+  if (!isAbs) {
+    const brainDirs = getBrainDirs();
+    if (/^[^/]+\/\.system_generated\//i.test(normRel)) {
+      for (const bDir of brainDirs) {
+        results.push(path.join(bDir, normRel));
+      }
+    }
+    if (convId && convId !== "global") {
+      const tokTaskMatch =
+        (taskMatch && cleanTok.replace(/\\/g, "/") === cleanFileToken(taskMatch.token).replace(/\\/g, "/") ? taskMatch : null) ||
+        matchTaskLogToken(expandedTok, convId);
+      if (tokTaskMatch) {
+        const resolved = resolveTaskPaths(tokTaskMatch, convId);
+        if (resolved.logPath) results.push(resolved.logPath);
+        const baseLog = /\.log$/i.test(normalizedTok) ? path.posix.basename(normalizedTok) : "";
+        if (baseLog) {
+          for (const bDir of brainDirs) {
+            results.push(path.join(bDir, convId, ".system_generated", "tasks", baseLog));
+          }
+        }
+      }
+      if (isSpillover && isStepSpilloverPath(normalizedTok)) {
+        const spillMatch = normalizedTok.match(/(?:^|\/)(\.system_generated\/steps\/\d+\/output\.txt)$/i);
+        if (spillMatch) {
+          for (const bDir of brainDirs) {
+            results.push(path.join(bDir, convId, spillMatch[1]));
+          }
+        }
+      }
     }
   }
+  return [...new Set(results.filter(Boolean))];
+}
+
+/**
+ * Returns true if any resolved disk path for an internal spillover or task log exceeds 45 KiB.
+ */
+function isOversizedInternalTarget(target, convId, taskMatchObj, isSpilloverTarget) {
+  for (const statPath of resolveInternalReadStatPaths(target, convId, taskMatchObj, isSpilloverTarget)) {
+    try {
+      const st = fs.statSync(statPath);
+      if (st.isFile()) return st.size > MAX_FULL_FILE_BYTES;
+    } catch {}
+  }
+  return false;
+}
+
+function getTaskState(match, convId) {
+  const { taskName, logPath, transcript } = resolveTaskPaths(match, convId);
 
   if (transcript) {
     const tail = readTail(transcript, TASK_TAIL_BYTES);
@@ -580,25 +936,116 @@ function getLocalRtkCandidate() {
     const pluginBin = path.join(getProfileHomeDir(), ".gemini", "config", "plugins", "agy-context-saver", "bin", exeName);
     if (fs.existsSync(pluginBin)) return pluginBin;
   }
-  for (const exeName of names) {
-    const repoBin = path.resolve(hookDir, "..", "bin", exeName);
-    if (fs.existsSync(repoBin)) return repoBin;
+  if (!process.env.AGY_TEST_PROFILE_DIR) {
+    for (const exeName of names) {
+      const repoBin = path.resolve(hookDir, "..", "bin", exeName);
+      if (fs.existsSync(repoBin)) return repoBin;
+    }
   }
   return "";
 }
 
-function spawnRtk(bin, args, opts) {
+function resolveInstalledAgyContextCommand(binName = "agy-context") {
+  const profileHome = getProfileHomeDir();
+  const isWin = os.platform() === "win32";
+  const pluginCli = path.join(profileHome, ".gemini", "config", "plugins", "agy-context-saver", "bin", "agy-context.mjs");
+  const resolvePluginCli = () => {
+    try {
+      if (fs.statSync(pluginCli).isFile()) {
+        return `node "${pluginCli.replace(/\\/g, "/")}"`;
+      }
+    } catch {}
+    return "";
+  };
+
+  // On Windows, prefer `node "<pluginCli>"` over a `.cmd` shim path so spaces in %USERPROFILE%
+  // execute cleanly across PowerShell, cmd.exe, and Git Bash without leading-quote parse errors.
+  if (isWin) {
+    const nodeCliCmd = resolvePluginCli();
+    if (nodeCliCmd) return nodeCliCmd;
+  }
+
+  const candidateNames = binName === "agy-context-saver"
+    ? ["agy-context-saver", "agy-context"]
+    : ["agy-context", "agy-context-saver"];
+  for (const name of candidateNames) {
+    const shimFile = path.join(profileHome, ".gemini", "antigravity", "bin", isWin ? `${name}.cmd` : name);
+    try {
+      const st = fs.statSync(shimFile);
+      if (!st.isFile()) continue;
+      if (!isWin) fs.accessSync(shimFile, fs.constants.X_OK);
+      const formatted = isWin ? shimFile : shimFile.replace(/\\/g, "/");
+      return /\s/.test(formatted) ? `"${formatted}"` : formatted;
+    } catch {}
+  }
+
+  return isWin ? "" : resolvePluginCli();
+}
+
+function getTrustedLocalRtkLauncherCandidates() {
+  const hookDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.join(getProfileHomeDir(), ".gemini", "config", "plugins", "agy-context-saver", "scripts", "rtk-run.mjs"),
+    path.resolve(hookDir, "rtk-run.mjs")
+  ];
+  return [...new Set(candidates)];
+}
+
+function resolveLocalRtkLauncher(localCandidate = "") {
+  if (localCandidate) {
+    const pairedLauncher = path.resolve(path.dirname(localCandidate), "..", "scripts", "rtk-run.mjs");
+    try {
+      if (fs.statSync(pairedLauncher).isFile() && isTrustedLocalRtkLauncherPath(pairedLauncher)) {
+        return pairedLauncher;
+      }
+    } catch {}
+  }
+  for (const candidate of getTrustedLocalRtkLauncherCandidates()) {
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch {}
+  }
+  return "";
+}
+
+function isTrustedLocalRtkLauncherPath(candidatePath) {
+  if (!candidatePath || typeof candidatePath !== "string") return false;
+  const clean = cleanFileToken(candidatePath);
+  if (!/(?:^|[\\/])rtk-run\.mjs$/i.test(clean)) return false;
+  const isCaseInsensitive = os.platform() === "win32" || os.platform() === "darwin";
+  const normalizeCmp = (p) => {
+    let resolved = path.resolve(p);
+    try {
+      resolved = fs.realpathSync(resolved);
+    } catch {}
+    const slash = resolved.replace(/\\/g, "/");
+    return isCaseInsensitive ? slash.toLowerCase() : slash;
+  };
+  const targetNorm = normalizeCmp(clean);
+  for (const trusted of getTrustedLocalRtkLauncherCandidates()) {
+    if (normalizeCmp(trusted) === targetNorm) return true;
+  }
+  return false;
+}
+
+function spawnRtk(bin, args, opts = {}) {
   if (!bin) return { error: Object.assign(new Error("ENOENT"), { code: "ENOENT" }), status: null, stdout: "", stderr: "" };
+  const baseEnv = opts.env || process.env;
+  const mergedEnv = {
+    ...baseEnv,
+    RTK_SUPPRESS_HOOK_WARNING: baseEnv.RTK_SUPPRESS_HOOK_WARNING ?? "1"
+  };
+  const spawnOpts = { ...opts, env: mergedEnv };
   if (os.platform() === "win32" && /\.(cmd|bat)$/i.test(bin)) {
     const comspec =
-      process.env.ComSpec ||
-      process.env.COMSPEC ||
-      path.join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", "cmd.exe");
+      mergedEnv.ComSpec ||
+      mergedEnv.COMSPEC ||
+      path.join(mergedEnv.SystemRoot || mergedEnv.windir || "C:\\Windows", "System32", "cmd.exe");
     const quotedBin = /\s/.test(bin) ? `"${bin}"` : bin;
     const quotedArgs = args.map((a) => (/\s|["&|<>^]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ");
-    return spawnSync(comspec, ["/d", "/s", "/c", `"${quotedBin} ${quotedArgs}"`], { ...opts, windowsVerbatimArguments: true });
+    return spawnSync(comspec, ["/d", "/s", "/c", `"${quotedBin} ${quotedArgs}"`], { ...spawnOpts, windowsVerbatimArguments: true });
   }
-  return spawnSync(bin, args, opts);
+  return spawnSync(bin, args, spawnOpts);
 }
 
 const ENV_CACHE_TTL_MS = 60000;
@@ -646,6 +1093,7 @@ function writeEnvCacheRaw(entry) {
 function resolveCachedHostEnv() {
   const pathEnv = process.env.PATH || process.env.Path || "";
   const localCandidate = getLocalRtkCandidate();
+  const winLauncher = os.platform() === "win32" ? resolveLocalRtkLauncher(localCandidate) : "";
   const parsed = readEnvCacheRaw();
 
   // Fast-path when cache was written by this hook with full pathEnv + candidate metadata (skips multi-dir PATH stat scans)
@@ -654,10 +1102,11 @@ function resolveCachedHostEnv() {
     typeof parsed.pathEnv === "string" &&
     parsed.pathEnv === pathEnv &&
     parsed.localCandidate === localCandidate &&
+    (parsed.winLauncher || "") === winLauncher &&
     typeof parsed.pathCandidate === "string" &&
     typeof parsed.rgAvailable === "boolean"
   ) {
-    const fastKey = `${parsed.pathCandidate}::${localCandidate}::${getFileMtimeMsSafe(parsed.pathCandidate)}::${getFileMtimeMsSafe(localCandidate)}`;
+    const fastKey = `${parsed.pathCandidate}::${localCandidate}::${getFileMtimeMsSafe(parsed.pathCandidate)}::${getFileMtimeMsSafe(localCandidate)}::${winLauncher}`;
     const rgValid =
       !parsed.rgAvailable ||
       (typeof parsed.rgPath === "string" &&
@@ -674,7 +1123,7 @@ function resolveCachedHostEnv() {
   }
 
   const pathCandidate = findExecutableOnPath("rtk");
-  const key = `${pathCandidate}::${localCandidate}::${getFileMtimeMsSafe(pathCandidate)}::${getFileMtimeMsSafe(localCandidate)}`;
+  const key = `${pathCandidate}::${localCandidate}::${getFileMtimeMsSafe(pathCandidate)}::${getFileMtimeMsSafe(localCandidate)}::${winLauncher}`;
   if (cachedRtkKey === key && cachedRtkValue !== undefined && cachedRgKey === pathEnv && cachedRgValue !== undefined) {
     return { rtk: cachedRtkValue, rgAvailable: cachedRgValue };
   }
@@ -706,7 +1155,14 @@ function resolveCachedHostEnv() {
     const localRes = spawnRtk(localCandidate, ["--version"], opts);
     if (!localRes.error && localRes.status === 0 && isCompatibleRtkVersion(localRes.stdout)) {
       const normalizedLocal = localCandidate.replace(/\\/g, "/");
-      const prefix = /\s/.test(normalizedLocal) ? `"${normalizedLocal}"` : normalizedLocal;
+      // On Windows, route off-PATH local RTK through `node "<rtk-run.mjs>"` so CommandLine
+      // never starts with a double-quoted path (which fails PowerShell parsing for spaced %USERPROFILE%).
+      let prefix;
+      if (os.platform() === "win32" && winLauncher) {
+        prefix = `node "${winLauncher.replace(/\\/g, "/")}"`;
+      } else {
+        prefix = /\s/.test(normalizedLocal) ? `"${normalizedLocal}"` : normalizedLocal;
+      }
       resolved = { exe: localCandidate, prefix };
     }
   }
@@ -726,6 +1182,7 @@ function resolveCachedHostEnv() {
     pathEnv,
     pathCandidate,
     localCandidate,
+    winLauncher,
     rgAvailable,
     rgPath,
     rgMtime
@@ -2886,13 +3343,14 @@ const SEARCH_VALUE_FLAGS = new Set([
  * and ignoring literal search patterns on grep/rg commands (inspecting only target paths).
  */
 function getInspectableTextForSegment(seg, opts = {}) {
-  const { body } = splitEnvPrefix(seg.text);
+  const { prefix: envPrefix, body } = splitEnvPrefix(seg.text);
   const allTokens = tokenizeShellWordsDetailed(seg.text);
   const detailed = body ? tokenizeShellWordsDetailed(body) : allTokens;
   if (detailed.length === 0) return "";
 
   const cmd0 = normalizeCmdName(detailed[0].value);
   const cmd1 = detailed[1] ? normalizeCmdName(detailed[1].value) : "";
+  const cmd2 = detailed[2] ? normalizeCmdName(detailed[2].value) : "";
 
   // Benign standalone echo / printf: only inspect redirect targets (never printed prose),
   // UNLESS piped into a downstream command (e.g. `echo <b64> | base64 -d | xargs head`)
@@ -2901,16 +3359,95 @@ function getInspectableTextForSegment(seg, opts = {}) {
     return redirects.join(" ");
   }
 
+  // `git commit` / `git tag` (including `rtk git ...` and trusted `node <rtk-run.mjs> git ...`):
+  // skip literal `-m` / `--message` / safe combined `-am` prose values while preserving leading
+  // env assignments, redirects, `-F`/`--file`, and paths (subshells are inspected separately).
+  let gitBaseIdx = -1;
+  if (cmd0 === "git") {
+    gitBaseIdx = 0;
+  } else if (cmd0 === "rtk" && cmd1 === "git") {
+    gitBaseIdx = 1;
+  } else if (cmd0 === "node" && detailed[1] && isTrustedLocalRtkLauncherPath(detailed[1].value) && cmd2 === "git") {
+    gitBaseIdx = 2;
+  }
+  if (gitBaseIdx !== -1) {
+    const gitGlobalValueFlags = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"]);
+    let subIdx = gitBaseIdx + 1;
+    while (subIdx < detailed.length) {
+      const v = detailed[subIdx].value;
+      if (gitGlobalValueFlags.has(v)) {
+        subIdx += 2;
+        continue;
+      }
+      if (v.startsWith("-")) {
+        subIdx++;
+        continue;
+      }
+      break;
+    }
+    const gitSub = subIdx < detailed.length ? normalizeCmdName(detailed[subIdx].value) : "";
+    if (gitSub === "commit" || gitSub === "tag") {
+      const safeMsgPrefixRe = gitSub === "commit" ? /^-[apsnvqezoih]*m$/ : /^-[asfdvin]*m$/;
+      const safeMsgInlineRe = gitSub === "commit" ? /^-[apsnvqezoih]*m.+/ : /^-[asfdvin]*m.+/;
+      const isUnquotedRedirect = (t) =>
+        Boolean(t && !t.quoted && (REDIRECT_OP_REGEX.test(t.raw) || REDIRECT_ATTACHED_REGEX.test(t.raw)));
+      const kept = [];
+      if (envPrefix && envPrefix.trim()) {
+        kept.push(envPrefix.trim());
+      }
+      let afterDoubleDash = false;
+      for (let i = 0; i < detailed.length; i++) {
+        const tok = detailed[i];
+        if (i <= subIdx) {
+          kept.push(tok.value);
+          continue;
+        }
+        if (isUnquotedRedirect(tok)) {
+          kept.push(tok.raw);
+          if (!tok.quoted && REDIRECT_OP_REGEX.test(tok.raw) && i + 1 < detailed.length) {
+            kept.push(detailed[++i].value);
+          }
+          continue;
+        }
+        if (!afterDoubleDash && tok.value === "--") {
+          afterDoubleDash = true;
+          kept.push(tok.value);
+          continue;
+        }
+        if (!afterDoubleDash) {
+          if (tok.value === "-m" || tok.value === "--message" || safeMsgPrefixRe.test(tok.value)) {
+            if (i + 1 < detailed.length && !isUnquotedRedirect(detailed[i + 1])) {
+              i++; // skip literal message payload (never an unquoted redirect)
+            }
+            continue;
+          }
+          if (tok.value.startsWith("--message=") || (!tok.value.startsWith("--") && safeMsgInlineRe.test(tok.value))) {
+            continue;
+          }
+        }
+        kept.push(tok.value);
+      }
+      const redirs = extractRedirectTargets(allTokens);
+      for (const r of redirs) kept.push(r);
+      return kept.join(" ");
+    }
+  }
+
   // Search commands: skip pattern argument and inspect only target paths / -f files / redirects
   let argStart = -1;
   if (SEARCH_COMMANDS.has(cmd0)) {
     argStart = 1;
   } else if ((cmd0 === "rtk" && (cmd1 === "grep" || cmd1 === "rg")) || (cmd0 === "git" && cmd1 === "grep")) {
     argStart = 2;
+  } else if (cmd0 === "node" && detailed[1] && isTrustedLocalRtkLauncherPath(detailed[1].value) && (cmd2 === "grep" || cmd2 === "rg")) {
+    argStart = 3;
   }
 
   if (argStart !== -1) {
     const targets = extractRedirectTargets(allTokens);
+    if (envPrefix && envPrefix.trim()) {
+      targets.unshift(envPrefix.trim());
+    }
     let hasExplicitPattern = false;
     let afterDoubleDash = false;
     const positionals = [];
@@ -3230,7 +3767,7 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
       const inspectScriptToken = (rawTok) => {
         const tok = String(rawTok || "").trim();
         if (!tok) return false;
-        if (isAllowedAgyContextScriptPath(tok)) return true;
+        if (isAllowedAgyContextScriptPath(tok) || isTrustedLocalRtkLauncherPath(tok)) return true;
         try {
           const resolvedFile = resolveHookPath(tok);
           const normFile = resolvedFile.replace(/\\/g, "/");
@@ -3466,9 +4003,183 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
   return texts;
 }
 
-function isRtkReadCommand(cmd) {
+const RTK_READ_LINE_VALUE_FLAGS = new Set(["--head-lines", "--tail-lines", "--max-lines", "-m"]);
+const RTK_READ_OTHER_VALUE_FLAGS = new Set(["-l", "--level"]);
+const RTK_READ_ALLOWED_LEVELS = new Set(["none", "minimal", "aggressive"]);
+
+/**
+ * Parses an `rtk read ...` invocation (fail-closed on env prefixes: PR9-RUN-007 Closed (By Design)).
+ * Tracks positional operands after `--`, validates line bounds (`1 <= n <= MAX_SAFE_SLICE_LINES`),
+ * and rejects disallowed flags or `-l`/`--level` values.
+ */
+function parseRtkReadCommand(cmd) {
+  if (!cmd || typeof cmd !== "string") return null;
   const tokens = tokenizeShellWords(cmd);
-  return tokens.length >= 2 && normalizeCmdName(tokens[0]) === "rtk" && tokens[1].toLowerCase() === "read";
+  if (tokens.length < 2) return null;
+  let argStart = -1;
+  if (normalizeCmdName(tokens[0]) === "rtk" && tokens[1].toLowerCase() === "read") {
+    argStart = 2;
+  } else if (
+    tokens.length >= 3 &&
+    normalizeCmdName(tokens[0]) === "node" &&
+    isTrustedLocalRtkLauncherPath(tokens[1]) &&
+    tokens[2].toLowerCase() === "read"
+  ) {
+    argStart = 3;
+  }
+  if (argStart === -1) return null;
+
+  const operands = [];
+  const lineLimits = [];
+  let hasInvalidOrOversizedLineBound = false;
+  let hasDisallowedFlag = false;
+  let afterDoubleDash = false;
+
+  const recordLineLimit = (rawVal) => {
+    if (!/^\d+$/.test(rawVal)) {
+      hasInvalidOrOversizedLineBound = true;
+      return;
+    }
+    const n = Number(rawVal);
+    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SAFE_SLICE_LINES) {
+      hasInvalidOrOversizedLineBound = true;
+      return;
+    }
+    lineLimits.push(n);
+  };
+
+  for (let i = argStart; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (!afterDoubleDash && tok === "--") {
+      afterDoubleDash = true;
+      continue;
+    }
+    if (afterDoubleDash || !tok.startsWith("-") || tok === "-") {
+      operands.push(tok);
+      continue;
+    }
+    if (RTK_READ_LINE_VALUE_FLAGS.has(tok)) {
+      if (i + 1 >= tokens.length) {
+        hasInvalidOrOversizedLineBound = true;
+      } else {
+        recordLineLimit(tokens[++i]);
+      }
+      continue;
+    }
+    const eqIdx = tok.indexOf("=");
+    if (eqIdx > 0) {
+      const flagName = tok.slice(0, eqIdx);
+      const flagVal = tok.slice(eqIdx + 1);
+      if (flagName === "--head-lines" || flagName === "--tail-lines" || flagName === "--max-lines") {
+        recordLineLimit(flagVal);
+        continue;
+      }
+      if (flagName === "--level") {
+        if (!RTK_READ_ALLOWED_LEVELS.has(flagVal.toLowerCase())) hasDisallowedFlag = true;
+        continue;
+      }
+      hasDisallowedFlag = true;
+      continue;
+    }
+    if (tok.startsWith("-m") && tok.length > 2) {
+      recordLineLimit(tok.slice(2));
+      continue;
+    }
+    if (RTK_READ_OTHER_VALUE_FLAGS.has(tok)) {
+      const levelVal = i + 1 < tokens.length ? tokens[++i] : "";
+      if (!RTK_READ_ALLOWED_LEVELS.has(levelVal.toLowerCase())) hasDisallowedFlag = true;
+      continue;
+    }
+    if (tok.startsWith("-l") && tok.length > 2) {
+      if (!RTK_READ_ALLOWED_LEVELS.has(tok.slice(2).toLowerCase())) hasDisallowedFlag = true;
+      continue;
+    }
+    if (/^(?:-n|--line-numbers|--skip-env|-h|--help)$/i.test(tok) || /^-[nh]+$/i.test(tok)) {
+      continue;
+    }
+    hasDisallowedFlag = true;
+  }
+
+  return {
+    operands,
+    lineLimits,
+    hasSafeLineBound: lineLimits.length > 0 && !hasInvalidOrOversizedLineBound,
+    hasInvalidOrOversizedLineBound,
+    hasDisallowedFlag
+  };
+}
+
+function isRtkReadCommand(cmd) {
+  return Boolean(parseRtkReadCommand(cmd));
+}
+
+/**
+ * Parses a single unchained bounded `head -n <N>` / `tail -n <N>` command for degraded mode (when RTK is unavailable).
+ * Enforces explicit positive line limits `1 <= N <= MAX_SAFE_SLICE_LINES`, rejects `+N` offsets and unknown flags,
+ * and returns parsed positional operands for single-operand isolation checks.
+ */
+function parseDegradedBoundedHeadTailCommand(cmd) {
+  if (!cmd || typeof cmd !== "string") return null;
+  const tokens = tokenizeShellWords(cmd);
+  if (tokens.length < 2) return null;
+  const verb = normalizeCmdName(tokens[0]);
+  if (verb !== "head" && verb !== "tail") return null;
+
+  const operands = [];
+  const lineLimits = [];
+  let hasInvalidOrOversizedLineBound = false;
+  let hasDisallowedFlag = false;
+  let afterDoubleDash = false;
+
+  const recordLineLimit = (rawVal) => {
+    if (!/^\d+$/.test(rawVal)) {
+      hasInvalidOrOversizedLineBound = true;
+      return;
+    }
+    const n = Number(rawVal);
+    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SAFE_SLICE_LINES) {
+      hasInvalidOrOversizedLineBound = true;
+      return;
+    }
+    lineLimits.push(n);
+  };
+
+  for (let i = 1; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (!afterDoubleDash && tok === "--") {
+      afterDoubleDash = true;
+      continue;
+    }
+    if (afterDoubleDash || !tok.startsWith("-") || tok === "-") {
+      operands.push(tok);
+      continue;
+    }
+    if (tok === "-n" || tok === "--lines") {
+      if (i + 1 >= tokens.length) {
+        hasInvalidOrOversizedLineBound = true;
+      } else {
+        recordLineLimit(tokens[++i]);
+      }
+      continue;
+    }
+    if (tok.startsWith("--lines=")) {
+      recordLineLimit(tok.slice("--lines=".length));
+      continue;
+    }
+    if (tok.startsWith("-n") && tok.length > 2) {
+      recordLineLimit(tok.slice(2));
+      continue;
+    }
+    hasDisallowedFlag = true;
+  }
+
+  return {
+    operands,
+    lineLimits,
+    hasSafeLineBound: lineLimits.length > 0 && !hasInvalidOrOversizedLineBound,
+    hasInvalidOrOversizedLineBound,
+    hasDisallowedFlag
+  };
 }
 
 function isSingleUnchainedShellCmd(segments) {
@@ -3848,6 +4559,57 @@ function unwrapShellWrapper(segText) {
   return { prefix: m[1], quote: m[2], inner: m[3] };
 }
 
+function formatRtkPrefixForWrapperQuote(rtkPrefix, outerQuote, wrapperPrefix = "") {
+  if (!rtkPrefix || !outerQuote) return rtkPrefix;
+  const isCmd = /^cmd(?:\.exe)?\b/i.test(wrapperPrefix);
+  const isPowerShell = /^(?:powershell|pwsh)(?:\.exe)?\b/i.test(wrapperPrefix);
+
+  if (isCmd) {
+    // cmd.exe does not treat single quotes as delimiters and breaks on nested double quotes inside `cmd /c "..."`.
+    if (rtkPrefix.includes('"') || rtkPrefix.includes("'")) return null;
+    return rtkPrefix;
+  }
+
+  if (isPowerShell) {
+    if (outerQuote === '"') {
+      if (/[$`]/.test(rtkPrefix)) return null;
+      if (!rtkPrefix.includes('"')) return rtkPrefix;
+      return rtkPrefix.replace(/"([^"\r\n]*)"/g, (_, inner) => `'${inner.replace(/'/g, "''")}'`);
+    }
+    if (outerQuote === "'") {
+      return rtkPrefix.includes("'") ? rtkPrefix.replace(/'/g, "''") : rtkPrefix;
+    }
+    return rtkPrefix;
+  }
+
+  // POSIX shells (`bash -c`, `sh -c`)
+  if (outerQuote === '"') {
+    if (/[$`]/.test(rtkPrefix)) return null;
+    if (!rtkPrefix.includes('"')) return rtkPrefix;
+    if (!rtkPrefix.includes("'")) {
+      return rtkPrefix.replace(/"/g, "'");
+    }
+    return rtkPrefix.replace(/"/g, '\\"');
+  }
+  if (outerQuote === "'") {
+    return rtkPrefix.includes("'") ? rtkPrefix.replace(/'/g, "'\\''") : rtkPrefix;
+  }
+  return rtkPrefix;
+}
+
+function matchRtkInvocation(text) {
+  const direct = text.match(/^((?:["']?[^\s"']*[/\\])?rtk(?:\.exe|\.cmd|\.bat)?["']?\s+)([\s\S]+)$/i);
+  if (direct) return { rtkWord: direct[1], rest: direct[2], isLauncher: false };
+  const launcher = text.match(/^(node(?:\.exe)?\s+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s"']+))\s+)([\s\S]+)$/i);
+  if (launcher) {
+    const scriptPath = launcher[2] || launcher[3] || launcher[4] || "";
+    if (isTrustedLocalRtkLauncherPath(scriptPath)) {
+      return { rtkWord: launcher[1], rest: launcher[5], isLauncher: true };
+    }
+  }
+  return null;
+}
+
 function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipeline, rtkPrefix }) {
   const trimmedEff = effSegText.trim();
   const trimmedRaw = (rawSegText || "").trim();
@@ -3856,10 +4618,15 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
   const effWrap = unwrapShellWrapper(trimmedEff);
   if (effWrap) {
     const rawWrap = unwrapShellWrapper(trimmedRaw);
+    const wrappedRtkPrefix = formatRtkPrefixForWrapperQuote(rtkPrefix, effWrap.quote, effWrap.prefix);
+    if (wrappedRtkPrefix === null) {
+      // Wrapper shell cannot safely quote a local-only spaced RTK prefix; keep original raw wrapper command intact.
+      return trimmedRaw || trimmedEff;
+    }
     const processedInner = postProcessCommand(
       rawWrap ? rawWrap.inner : effWrap.inner,
       effWrap.inner,
-      { rgAvailable, rtkPrefix }
+      { rgAvailable, rtkPrefix: wrappedRtkPrefix }
     );
     return `${effWrap.prefix}${effWrap.quote}${processedInner}${effWrap.quote}`;
   }
@@ -3869,7 +4636,7 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
   const effMatchTarget = effBody || trimmedEff;
   const rawMatchTarget = rawBody || trimmedRaw;
 
-  const rtkMatch = effMatchTarget.match(/^((?:["']?[^\s"']*[/\\])?rtk(?:\.exe|\.cmd|\.bat)?["']?\s+)([\s\S]+)$/i);
+  const rtkMatch = matchRtkInvocation(effMatchTarget);
   if (!rtkMatch) {
     // When host `rg` is absent, also rewrite bare `rg` in pipelines or `bash -c` subshells to `grep`/`find`
     if (!rgAvailable && /^rg(?:\.exe)?(?=\s|$)/i.test(effMatchTarget)) {
@@ -3881,14 +4648,15 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
     return trimmedEff;
   }
 
-  const rtkWord = rtkMatch[1];
-  const rest = rtkMatch[2];
+  const rtkWord = rtkMatch.rtkWord;
+  const rest = rtkMatch.rest;
   const subcmd = (rest.match(/^([^\s"']+)/)?.[1] || "").toLowerCase();
 
   // Revert lossy `rtk wc` / `rtk ls` / `rtk diff` / `rtk grep` back to raw unless caller explicitly typed it (ACS-HOOK-09, ACS-HOOK-GREP-CLAMP)
   if (subcmd === "wc" || subcmd === "ls" || subcmd === "diff" || subcmd === "grep") {
-    const explicitPattern = new RegExp(`^(?:["']?[^\\s"']*[/\\\\])?rtk(?:\\.exe|\\.cmd|\\.bat)?["']?\\s+${subcmd}\\b`, "i");
-    if (!explicitPattern.test(rawMatchTarget)) {
+    const rawRtkMatch = matchRtkInvocation(rawMatchTarget);
+    const rawSubcmd = rawRtkMatch ? (rawRtkMatch.rest.match(/^([^\s"']+)/)?.[1] || "").toLowerCase() : "";
+    if (rawSubcmd !== subcmd) {
       return `${effEnvPrefix}${rest}`;
     }
   }
@@ -3896,8 +4664,8 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
   // Never emit `rtk rg` when `rg` is absent on PATH
   if ((subcmd === "rg" || subcmd === "rg.exe") && !rgAvailable) {
     let mapped = rewriteRtkRgSegment(rtkWord, rest, { inPipeline });
-    if (mapped !== rest && rtkPrefix && rtkPrefix !== "rtk" && /^rtk\s+/i.test(mapped)) {
-      mapped = mapped.replace(/^rtk(?=\s)/i, rtkPrefix);
+    if (mapped !== rest && rtkPrefix && rtkPrefix !== "rtk" && /^rtk(?:\.exe|\.cmd|\.bat)?\s+/i.test(mapped)) {
+      mapped = mapped.replace(/^rtk(?:\.exe|\.cmd|\.bat)?(?=\s)/i, () => rtkPrefix);
     }
     return `${effEnvPrefix}${mapped}`;
   }
@@ -3905,15 +4673,15 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
   // Normalize `rtk grep` when host `rg` is absent so directories & `a|b` alternation work reliably
   if ((subcmd === "grep" || subcmd === "grep.exe") && !rgAvailable) {
     let mapped = rewriteRtkGrepSegment(rtkWord, rest, { inPipeline });
-    if (rtkPrefix && rtkPrefix !== "rtk" && /^rtk\s+/i.test(mapped)) {
-      mapped = mapped.replace(/^rtk(?=\s)/i, rtkPrefix);
+    if (rtkPrefix && rtkPrefix !== "rtk" && /^rtk(?:\.exe|\.cmd|\.bat)?\s+/i.test(mapped)) {
+      mapped = mapped.replace(/^rtk(?:\.exe|\.cmd|\.bat)?(?=\s)/i, () => rtkPrefix);
     }
     return `${effEnvPrefix}${mapped}`;
   }
 
-  // If RTK came from a local binary not on PATH, rewrite bare `rtk ` prefix to explicit path
-  if (rtkPrefix && rtkPrefix !== "rtk" && /^rtk\s+/i.test(effMatchTarget) && !/^rtk\s+/i.test(rawMatchTarget)) {
-    return `${effEnvPrefix}${effMatchTarget.replace(/^rtk(?=\s)/i, rtkPrefix)}`;
+  // If RTK came from a local binary not on PATH, rewrite bare `rtk ` prefix (including explicit `rtk ...` commands) to explicit path
+  if (rtkPrefix && rtkPrefix !== "rtk" && /^rtk(?:\.exe|\.cmd|\.bat)?\s+/i.test(effMatchTarget)) {
+    return `${effEnvPrefix}${effMatchTarget.replace(/^rtk(?:\.exe|\.cmd|\.bat)?(?=\s)/i, () => rtkPrefix)}`;
   }
 
   return trimmedEff;
@@ -4039,7 +4807,7 @@ function isSwarmPollSchedule(args = {}) {
 function denyRunningTask(taskId, convId) {
   const session = getSessionState(convId);
   session.denials++;
-  saveSessionState(convId, session);
+  saveSessionState(convId, session, { updatePollTime: false });
 
   if (session.denials >= 5) {
     respond({
@@ -4050,7 +4818,7 @@ function denyRunningTask(taskId, convId) {
 
   const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(session.pollCount));
   const requiredBackoffMs = requiredBackoffSec * 1000;
-  const elapsedMs = session.lastPollTime ? (Date.now() - session.lastPollTime) : Infinity;
+  const elapsedMs = session.lastPollTime ? Math.max(0, Date.now() - session.lastPollTime) : 0;
   const elapsedSec = Math.floor(elapsedMs / 1000);
   const remainingSec = Math.max(1, Math.ceil((requiredBackoffMs - elapsedMs) / 1000));
 
@@ -4069,7 +4837,7 @@ function buildInternalStateShellDenial(convId = "global") {
   if (!accessEval.allowed) {
     return (
       "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n" +
-      "- Transcript inspection ('agy-context transcript' and '.system_generated/logs/') is DISABLED for this session by parent governance (L6 Transcript Isolation). Do NOT retry transcript commands or alternative file/shell reads; proceed using only your assigned workspace files and task brief.\n" +
+      "- Transcript inspection ('agy-context transcript' and '.system_generated/logs/') is DISABLED for this session by parent governance (Parent Transcript Isolation). Do NOT retry transcript commands or alternative file/shell reads; proceed using only your assigned workspace files and task brief.\n" +
       "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
     );
   }
@@ -4092,7 +4860,7 @@ function buildInternalStateToolDenial(convId = "global") {
   if (!accessEval.allowed) {
     return (
       "Antigravity Execution Governance: Direct access to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n" +
-      "- Transcript inspection ('agy-context transcript' and '.system_generated/logs/') is DISABLED for this session by parent governance (L6 Transcript Isolation). Do NOT retry transcript commands or alternative file/shell reads; proceed using only your assigned workspace files and task brief.\n" +
+      "- Transcript inspection ('agy-context transcript' and '.system_generated/logs/') is DISABLED for this session by parent governance (Parent Transcript Isolation). Do NOT retry transcript commands or alternative file/shell reads; proceed using only your assigned workspace files and task brief.\n" +
       "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
     );
   }
@@ -4327,6 +5095,202 @@ try {
       "dd",
       "patch"
     ]);
+    const extractSedWriteTargets = (expr) => {
+      if (!expr || typeof expr !== "string") return [];
+      const found = [];
+      // 1. Substitution commands with `w <file>` flag: `s/pat/rep/w file`
+      const substWriteRe = /s([^\s\\])(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[a-zA-Z0-9]*w\s+([^\s;'"]+)/g;
+      let sm;
+      while ((sm = substWriteRe.exec(expr)) !== null) {
+        if (sm[2]) found.push(sm[2]);
+      }
+      // 2. Strip `s`/`y` bodies so words like `new foo` inside patterns never false-match, then find standalone `w <file>`
+      const stripped = expr
+        .replace(/[sy]([^\s\\])(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[a-zA-Z0-9]*/g, "")
+        .replace(/\/(?:\\.|[^/])*\//g, "/");
+      const cmdWriteRe = /(?:^|[;\n}\d$/!,])\s*w\s+([^\s;'"]+)/g;
+      let cm;
+      while ((cm = cmdWriteRe.exec(stripped)) !== null) {
+        if (cm[1]) found.push(cm[1]);
+      }
+      return found;
+    };
+
+    const extractInlineScriptPathCandidates = (script) => {
+      if (!script || typeof script !== "string") return [];
+      const out = [];
+      const pushClean = (raw) => {
+        const trimmed = String(raw || "").trim();
+        if (!trimmed) return;
+        out.push(trimmed);
+        // Strip Perl/shell open mode prefixes (`>`, `>>`, `+>`, `+<`, `<`)
+        const strippedMode = trimmed.replace(/^(?:\+?[<>]|>>)\s*/, "");
+        if (strippedMode && strippedMode !== trimmed) out.push(strippedMode);
+      };
+      const quotedRe = /"([^"\r\n]+)"|'([^'\r\n]+)'/g;
+      let qm;
+      while ((qm = quotedRe.exec(script)) !== null) {
+        pushClean(qm[1] ?? qm[2]);
+      }
+      for (const piece of script.split(/[\s'"(),;]+/)) {
+        if (piece && (piece.includes("/") || piece.includes("\\") || piece.includes("."))) {
+          pushClean(piece);
+        }
+      }
+      return out;
+    };
+
+    const getShellMutationArgCandidates = (verb, detailedTokens, cmdIdx) => {
+      const argTokens = detailedTokens.slice(cmdIdx + 1);
+      const rawValues = argTokens.map((t) => t.value).filter((v) => !v.includes("\n"));
+
+      if (verb === "sed") {
+        let hasInPlace = false;
+        let hasExplicitScript = false;
+        let afterDoubleDash = false;
+        const expressions = [];
+        const positionals = [];
+        for (let i = 0; i < argTokens.length; i++) {
+          const tok = argTokens[i];
+          if (!tok.quoted && REDIRECT_OP_REGEX.test(tok.raw)) {
+            i++;
+            continue;
+          }
+          if (!tok.quoted && REDIRECT_ATTACHED_REGEX.test(tok.raw)) {
+            continue;
+          }
+          const v = tok.value;
+          if (!afterDoubleDash && v === "--") {
+            afterDoubleDash = true;
+            continue;
+          }
+          if (!afterDoubleDash && v.startsWith("-") && v !== "-") {
+            if (v === "-e" || v === "--expression") {
+              hasExplicitScript = true;
+              if (argTokens[i + 1]) expressions.push(argTokens[++i].value);
+              continue;
+            }
+            if (v.startsWith("--expression=")) {
+              hasExplicitScript = true;
+              expressions.push(v.slice("--expression=".length));
+              continue;
+            }
+            if (!v.startsWith("--") && /^-([nrEsuz]*)e(.+)$/.test(v)) {
+              hasExplicitScript = true;
+              expressions.push(v.slice(v.indexOf("e") + 1));
+              continue;
+            }
+            if (v === "-f" || v === "--file" || v.startsWith("--file=")) {
+              hasExplicitScript = true;
+              if ((v === "-f" || v === "--file") && i + 1 < argTokens.length) i++;
+              continue;
+            }
+            if (v === "-i" || v.startsWith("-i") || v === "--in-place" || v.startsWith("--in-place=") || /^-[nrEsuz]+i/i.test(v)) {
+              hasInPlace = true;
+              continue;
+            }
+            continue;
+          }
+          positionals.push(v);
+        }
+        if (hasInPlace) return rawValues;
+        if (!hasExplicitScript && positionals.length > 0) {
+          expressions.push(positionals[0]);
+        }
+        const writeTargets = expressions.flatMap(extractSedWriteTargets);
+        return writeTargets;
+      }
+
+      if (verb === "perl") {
+        let hasInPlace = false;
+        let hasInlineWrite = false;
+        let afterDoubleDash = false;
+        const inlineScripts = [];
+        const perlWriteRe =
+          /\b(?:unlink|rename|truncate|sysopen|spew|write_file|write_text|write_bytes|copy|move)\b|\bopen(?:\s*\(|\s+)[^;\n]*(?:['"]\s*(?:\+?<|>>?|>)|\bO_(?:WRONLY|RDWR|CREAT)\b)/i;
+        for (let i = 0; i < argTokens.length; i++) {
+          const v = argTokens[i].value;
+          if (!afterDoubleDash && v === "--") {
+            afterDoubleDash = true;
+            break;
+          }
+          if (v === "-e" || v === "-E" || /^-[pna0-9lwWCTS]+[eE]$/.test(v)) {
+            const script = argTokens[i + 1]?.value || "";
+            inlineScripts.push(script);
+            if (perlWriteRe.test(script)) {
+              hasInlineWrite = true;
+            }
+            i++;
+            continue;
+          }
+          if (/^-[pna0-9lwWCTS]*[eE](.+)$/s.test(v) && !v.startsWith("--")) {
+            const eMatch = v.match(/^-[pna0-9lwWCTS]*[eE](.+)$/s);
+            const script = eMatch ? eMatch[1] : "";
+            inlineScripts.push(script);
+            if (perlWriteRe.test(script)) {
+              hasInlineWrite = true;
+            }
+            continue;
+          }
+          if (v === "-i" || v.startsWith("-i") || /^-[pna0-9lwWCTS]+i/.test(v)) {
+            hasInPlace = true;
+            break;
+          }
+        }
+        if (hasInPlace) return rawValues;
+        if (hasInlineWrite) {
+          return [...rawValues, ...inlineScripts.flatMap(extractInlineScriptPathCandidates)];
+        }
+        return [];
+      }
+
+      if (verb === "cp") {
+        // Only flags that genuinely consume a separate next-token value (never GNU optional `=VALUE` flags like `--backup`/`--preserve`/`--reflink`/`--update`/`--context`)
+        const cpValueFlags = new Set(["-S", "--suffix", "--no-preserve", "--sparse"]);
+        const targetDirs = [];
+        const positionals = [];
+        let afterDoubleDash = false;
+        for (let i = 0; i < argTokens.length; i++) {
+          const tok = argTokens[i];
+          if (!tok.quoted && REDIRECT_OP_REGEX.test(tok.raw)) {
+            i++;
+            continue;
+          }
+          if (!tok.quoted && REDIRECT_ATTACHED_REGEX.test(tok.raw)) {
+            continue;
+          }
+          const v = tok.value;
+          if (!afterDoubleDash && v === "--") {
+            afterDoubleDash = true;
+            continue;
+          }
+          if (!afterDoubleDash && v.startsWith("-") && v !== "-") {
+            if (v === "-t" || v === "--target-directory" || (!v.startsWith("--") && /^-[^-]*t$/.test(v))) {
+              if (argTokens[i + 1]) targetDirs.push(argTokens[++i].value);
+              continue;
+            }
+            if (v.startsWith("--target-directory=")) {
+              targetDirs.push(v.slice("--target-directory=".length));
+              continue;
+            }
+            if (/^-[^-]*t(.+)$/.test(v) && !v.startsWith("--")) {
+              targetDirs.push(v.slice(v.indexOf("t") + 1));
+              continue;
+            }
+            if ((cpValueFlags.has(v) || (!v.startsWith("--") && /^-[^-]*S$/.test(v))) && i + 1 < argTokens.length) {
+              i++;
+            }
+            continue;
+          }
+          if (!v.includes("\n")) positionals.push(v);
+        }
+        const expandDirTarget = (dest) => (dest.endsWith("/") || dest.endsWith("\\") ? [dest] : [dest, `${dest}/`]);
+        if (targetDirs.length > 0) return targetDirs.filter((v) => !v.includes("\n")).flatMap(expandDirTarget);
+        return positionals.length >= 2 ? expandDirTarget(positionals[positionals.length - 1]) : [];
+      }
+
+      return rawValues;
+    };
     for (const seg of segments) {
       const segTexts = [seg.text, ...(seg.subshells || [])];
       for (const st of segTexts) {
@@ -4346,7 +5310,7 @@ try {
         if (seg.hasWriteRedirect || isMutatingVerb) {
           const redirectTargets = extractRedirectTargets(detailed);
           const argCandidates = isMutatingVerb
-            ? detailed.slice(cmdIdx + 1).map((t) => t.value).filter((v) => !v.includes("\n"))
+            ? getShellMutationArgCandidates(verb, detailed, cmdIdx)
             : [];
           const candidateTokens = [...redirectTargets, ...argCandidates];
           if (candidateTokens.some((tok) => isProtectedGovernanceFileMutation(tok, convId))) {
@@ -4356,11 +5320,11 @@ try {
                 "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited."
             });
           }
-          if (candidateTokens.some((tok) => isProtectedBenchmarkPath(tok))) {
+          if (!isBenchmarkGuardDisabled(convId) && candidateTokens.some((tok) => isProtectedBenchmarkPath(tok))) {
             respond({
               decision: "force_ask",
               reason:
-                "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination."
+                "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination. Set AGY_DISABLE_BENCHMARK_GUARD=1 to disable this guard for non-evaluation repos."
             });
           }
         }
@@ -4402,6 +5366,7 @@ try {
     let isSpillover = false;
     let spilloverTok = null;
     let taskMatch = null;
+    let taskState = null;
     const pendingWrittenSet = collectSegmentWrittenTargets(segments);
     if (!agyTranscriptCheck.allowed) {
       const callerAccess = evaluateCallerTranscriptAccess(convId);
@@ -4412,9 +5377,11 @@ try {
       });
       const inspectableCombined = inspectableTexts.join("\n");
       const singleTokens = segments.length === 1 ? tokenizeShellWords(segments[0].text) : [];
-      spilloverTok = findStepSpilloverToken(singleTokens);
-      isSpillover = Boolean(spilloverTok);
-      taskMatch = getTaskLogMatch(inspectableCombined);
+      const spilloverTokens = findStepSpilloverTokens(singleTokens);
+      spilloverTok = spilloverTokens[0] || null;
+      isSpillover = spilloverTokens.length > 0;
+      const taskMatches = extractTaskLogMatches(inspectableCombined, convId);
+      taskMatch = taskMatches[0] || null;
 
       // Block unwrapped shell/interpreter mutations of governance/hook files
       if (hasGovernanceMutationInText(inspectableCombined, convId)) {
@@ -4434,27 +5401,56 @@ try {
         });
       }
 
-      // Check 1: Other protected internal state (transcripts, governance state, non-canonical agy-context transcript, interpreter imports)
-      if (!isSpillover && !taskMatch && isProtectedShellOrScriptOperation(inspectableCombined)) {
-        respond({
-          decision: "deny",
-          reason: buildInternalStateShellDenial(convId)
-        });
-      }
-
       // If spillover or task log is chained, redirected, uses heredocs, subshells, or `..` traversal -> DENY
       if ((isSpillover || taskMatch) && !isSingleUnchainedShellCmd(segments)) {
+        const hasRtkForSpillover = Boolean(resolveCachedHostEnv().rtk);
         respond({
           decision: "deny",
           reason: isSpillover
-            ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'rtk read <path>' command (no chaining, redirects, subshells, or '..' traversal)."
+            ? hasRtkForSpillover
+              ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'rtk read <path>' command (no chaining, redirects, subshells, or '..' traversal)."
+              : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' command (or bounded 'read_file' <= 150 lines; no chaining, redirects, subshells, or '..' traversal)."
             : buildInternalStateShellDenial(convId)
         });
       }
 
-      // Check 2: Task Log Inspection (Lifecycle-Gated): RUNNING => Proportional Backoff
-      if (taskMatch && getTaskState(taskMatch, convId) === "RUNNING") {
-        denyRunningTask(taskMatch.id, convId);
+      // Check 2: Task Log Inspection (Lifecycle-Gated across ALL matched logs): RUNNING => Proportional Backoff
+      if (taskMatches.length > 0) {
+        const taskStates = taskMatches.map((m) => ({ match: m, state: getTaskState(m, convId) }));
+        const runningEntry = taskStates.find((entry) => entry.state === "RUNNING");
+        if (runningEntry) {
+          denyRunningTask(runningEntry.match.id, convId);
+        }
+        taskState = taskStates.some((entry) => entry.state === "UNKNOWN") ? "UNKNOWN" : "COMPLETED";
+      }
+
+      // Check 1: Other protected internal state (strip at most one non-mixed spillover/task token from single-segment tokens so quoted pairs & piggybacked paths never bypass Check 1)
+      let inspectRemainder = inspectableCombined;
+      if ((isSpillover || taskMatch) && inspectableTexts.length === 1 && segments.length === 1) {
+        const singleAllowedTok =
+          isSpillover && !taskMatch && spilloverTokens.length === 1
+            ? spilloverTokens[0]
+            : (!isSpillover && taskMatches.length === 1 ? taskMatches[0].token : "");
+        if (singleAllowedTok) {
+          const normTarget = cleanFileToken(singleAllowedTok).replace(/\\/g, "/");
+          let removed = false;
+          const remainingTokens = singleTokens.filter((tok) => {
+            if (!removed && cleanFileToken(tok).replace(/\\/g, "/") === normTarget) {
+              removed = true;
+              return false;
+            }
+            return true;
+          });
+          if (removed) {
+            inspectRemainder = remainingTokens.join(" ");
+          }
+        }
+      }
+      if (isProtectedShellOrScriptOperation(inspectRemainder, { isRestrictedChild: callerAccess.isRestrictedChild })) {
+        respond({
+          decision: "deny",
+          reason: buildInternalStateShellDenial(convId)
+        });
       }
     }
 
@@ -4506,62 +5502,101 @@ try {
       effectiveCmd = effectiveCmd.replace(/(^|\s)--parent(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--parent ${agyTranscriptCheck.injectParentId}`);
     }
 
-    const isRtkRead = isRtkReadCommand(effectiveCmd);
-    const isExplicitRtkRead = isRtkReadCommand(rawCmd) && isRtkRead;
+    // Rewrite bare `agy-context` / `agy-context-saver` to the installed shim (or plugin CLI) when absent from PATH
+    if (agyTranscriptCheck.allowed || (isSingleUnchainedShellCmd(segments) && !isSpillover && !taskMatch)) {
+      const bareAgyMatch = effectiveCmd.match(/^(\s*)(agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?)(?=\s|$)/i);
+      if (bareAgyMatch) {
+        const agyBinName = normalizeCmdName(bareAgyMatch[2]);
+        if (!findExecutableOnPath(agyBinName)) {
+          const localAgyCmd = resolveInstalledAgyContextCommand(agyBinName);
+          if (localAgyCmd) {
+            effectiveCmd = `${bareAgyMatch[1]}${localAgyCmd}${effectiveCmd.slice(bareAgyMatch[0].length)}`;
+          }
+        }
+      }
+    }
 
-    // Check 3: Step Output Spillover Safe Harbor (strictly single unchained `rtk read` only)
-    if (isSpillover && !isRtkRead) {
+    const parsedEff = parseRtkReadCommand(effectiveCmd);
+    const parsedRaw = parseRtkReadCommand(rawCmd);
+    const isRtkRead = Boolean(parsedEff);
+    const isExplicitRtkRead = Boolean(parsedRaw && parsedEff);
+    const parsedDegraded = !rtk ? parseDegradedBoundedHeadTailCommand(effectiveCmd) : null;
+    let isDegradedBoundedRead = false;
+    if ((isSpillover || taskMatch) && parsedDegraded) {
+      const opCountOk = parsedDegraded.operands.length === 1;
+      const cleanOp = opCountOk ? cleanFileToken(parsedDegraded.operands[0]) : "";
+      isDegradedBoundedRead =
+        opCountOk &&
+        parsedDegraded.hasSafeLineBound &&
+        !parsedDegraded.hasDisallowedFlag &&
+        ((isSpillover && !taskMatch && isStepSpilloverPath(cleanOp)) ||
+          (taskMatch && !isSpillover && Boolean(matchTaskLogToken(cleanOp, convId))));
+    }
+
+    // Enforce strict single-operand isolation whenever an internal spillover or task log is present (PR9-RUN-001)
+    if ((isSpillover || taskMatch) && parsedEff) {
+      const opCountOk = parsedEff.operands.length === 1;
+      const cleanOp = opCountOk ? cleanFileToken(parsedEff.operands[0]) : "";
+      const singleOpValid =
+        opCountOk &&
+        !parsedEff.hasDisallowedFlag &&
+        ((isSpillover && !taskMatch && isStepSpilloverPath(cleanOp)) ||
+          (taskMatch && !isSpillover && Boolean(matchTaskLogToken(cleanOp, convId))));
+      if (!singleOpValid) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Internal step spillovers and task logs must be inspected strictly one file at a time using 'rtk read <path>' with valid read flags (multi-file operands and mixed targets are prohibited)."
+        });
+      }
+    }
+
+    // Check 3: Step Output Spillover Safe Harbor (strictly single unchained `rtk read`, or bounded `head -n 150`/`tail -n 150` in degraded mode)
+    if (isSpillover && (rtk ? !isRtkRead : !isDegradedBoundedRead)) {
       respond({
         decision: "deny",
-        reason:
-          "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
+        reason: rtk
+          ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
+          : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
       });
     }
 
-    // Check 4: Completed / unknown-state task log: allow only through strictly single unchained `rtk read`
-    if (taskMatch && !isExplicitRtkRead) {
+    // Check 4: Completed task logs allow post-rewrite `rtk read` (or bounded `head -n 150`/`tail -n 150` when degraded without RTK); unknown-state logs require explicit `rtk read`
+    if (taskMatch && (rtk ? (taskState === "COMPLETED" ? !isRtkRead : !isExplicitRtkRead) : (taskState !== "COMPLETED" || !isDegradedBoundedRead))) {
       respond({
         decision: "deny",
-        reason:
-          "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
-          "- Once completed, inspect output using 'rtk read <path>' via run_command.\n" +
-          "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+        reason: rtk
+          ? "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+            "- Once completed, inspect output using 'rtk read <path>' via run_command.\n" +
+            "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+          : "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+            "- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines).\n" +
+            "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
       });
     }
 
     // Fail loud with explicit guidance instead of silently injecting --tail-lines 150 on >45 KiB spillover/task logs (ACS-HOOK-GREP-CLAMP)
-    if (isRtkRead && (isSpillover || taskMatch)) {
-      const hasLineBoundFlag = /(?:^|\s)(?:--head-lines|--tail-lines|--max-lines|-m)(?:=|\s|$)/.test(effectiveCmd);
-      if (!hasLineBoundFlag) {
-        const rtkTokens = tokenizeShellWords(effectiveCmd);
-        const candidates = [];
-        if (spilloverTok) candidates.push(spilloverTok);
-        if (taskMatch?.token) candidates.push(taskMatch.token);
-        for (let i = 2; i < rtkTokens.length; i++) {
-          const tok = rtkTokens[i];
-          if (tok === "--") {
-            for (let j = i + 1; j < rtkTokens.length; j++) candidates.push(rtkTokens[j]);
-            break;
-          }
-          if (tok === "-l" || tok === "--level") {
-            i++;
-            continue;
-          }
-          if (!tok.startsWith("-")) {
-            candidates.push(tok);
-          }
-        }
-        for (const candidateTok of new Set(candidates)) {
+    if (isRtkRead && (isSpillover || taskMatch) && !parsedEff.hasSafeLineBound) {
+      const candidates = [];
+      if (spilloverTok) candidates.push(spilloverTok);
+      if (taskMatch?.token) candidates.push(taskMatch.token);
+      for (const op of parsedEff.operands) candidates.push(op);
+      for (const candidateTok of new Set(candidates)) {
+        for (const statPath of resolveInternalReadStatPaths(candidateTok, convId, taskMatch, isSpillover)) {
           try {
-            const st = fs.statSync(resolveHookPath(candidateTok));
-            if (st.isFile() && st.size > 46080) {
-              const kib = (st.size / 1024).toFixed(1);
-              respond({
-                decision: "deny",
-                reason:
-                  `Antigravity Execution Governance: Unbounded 'rtk read' on >45 KiB spillover/task log (${kib} KiB) is denied to prevent cascading spillovers. ` +
-                  "Pass '--head-lines 150' or '--tail-lines 150' explicitly (or use bounded 'read_file' <= 150 lines) instead."
-              });
+            const st = fs.statSync(statPath);
+            if (st.isFile()) {
+              if (st.size > MAX_FULL_FILE_BYTES) {
+                const kib = (st.size / 1024).toFixed(1);
+                const boundedFallback = isSpillover && !taskMatch ? " (or use bounded 'read_file' <= 150 lines)" : "";
+                respond({
+                  decision: "deny",
+                  reason:
+                    `Antigravity Execution Governance: Unbounded 'rtk read' on >45 KiB spillover/task log (${kib} KiB) is denied to prevent cascading spillovers. ` +
+                    `Pass '--head-lines 150' or '--tail-lines 150' explicitly${boundedFallback} instead.`
+                });
+              }
+              break;
             }
           } catch {}
         }
@@ -4622,10 +5657,6 @@ try {
       "";
     const target = String(rawTarget).trim();
 
-    const MAX_SAFE_SLICE_LINES = 150;
-    const MAX_FULL_FILE_LINES = 800;
-    const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes)
-
     const rawStart = args.StartLine !== undefined ? args.StartLine : (args.startLine !== undefined ? args.startLine : args.start_line);
     const rawEnd = args.EndLine !== undefined ? args.EndLine : (args.endLine !== undefined ? args.endLine : args.end_line);
     const hasByteOffset = args.ByteOffset !== undefined || args.byteOffset !== undefined || args.byte_offset !== undefined;
@@ -4646,23 +5677,50 @@ try {
           respond({ decision: "allow" });
         }
       }
+      const hasRtkForSpill = Boolean(resolveCachedHostEnv().rtk);
+      const spillCmd = hasRtkForSpill
+        ? (isOversizedInternalTarget(target, convId, null, true)
+            ? `'rtk read --tail-lines 150 ${target}' (or '--head-lines 150')`
+            : `'rtk read ${target}'`)
+        : `'tail -n 150 ${target}' (or 'head -n 150 ${target}')`;
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Unbounded inspection of step spillover via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'read_file' or run 'rtk read ${target}' via run_command instead.`
+        reason: `Antigravity Governance: Unbounded inspection of step spillover via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'read_file' or run ${spillCmd} via run_command instead.`
       });
     }
 
     // 2b. Task Log Inspection (Lifecycle-Gated)
-    const taskMatch = getTaskLogMatch(target);
+    const taskMatch = matchTaskLogToken(target, convId);
     if (taskMatch) {
       const state = getTaskState(taskMatch, convId);
       if (state === "RUNNING") {
         denyRunningTask(taskMatch.id, convId);
       }
       if (state === "COMPLETED") {
+        const hasRtkForTask = Boolean(resolveCachedHostEnv().rtk);
+        if (!hasRtkForTask && toolName === "read_file" && rawStart !== undefined && rawEnd !== undefined) {
+          const startLine = Number(rawStart);
+          const endLine = Number(rawEnd);
+          if (
+            Number.isInteger(startLine) &&
+            Number.isInteger(endLine) &&
+            startLine > 0 &&
+            endLine >= startLine &&
+            (endLine - startLine + 1) <= MAX_SAFE_SLICE_LINES
+          ) {
+            respond({ decision: "allow" });
+          }
+        }
+        const taskCmd = hasRtkForTask
+          ? (isOversizedInternalTarget(target, convId, taskMatch, false)
+              ? `'rtk read --tail-lines 150 ${target}' (or '--head-lines 150')`
+              : `'rtk read ${target}'`)
+          : `'tail -n 150 ${target}' (or 'head -n 150 ${target}')`;
         respond({
           decision: "deny",
-          reason: `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run 'rtk read ${target}' via run_command instead.`
+          reason: hasRtkForTask
+            ? `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run ${taskCmd} via run_command instead.`
+            : `Antigravity Governance: Unbounded inspection of completed task logs via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'read_file' or run ${taskCmd} via run_command instead.`
         });
       }
       respond({
@@ -4688,9 +5746,13 @@ try {
     // 2e. Symmetrical Hybrid Slice & Guarded Full-File Policy for `read_file` and `view_file`
     if (toolName === "read_file" || toolName === "view_file") {
       const getDiscoveryGuidance = () => {
-        const rgAvailable = isRgAvailableCached();
-        const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rnE";
-        return `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}', or run 'rtk read ${target || "<file>"}' via run_command instead`;
+        const { rtk, rgAvailable } = resolveCachedHostEnv();
+        if (rtk) {
+          const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rnE";
+          return `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
+        }
+        const shellSearchHint = rgAvailable ? "rg" : "grep -rnE";
+        return `Locate the target symbol, heading, or config key first with 'grep_search' (or '${shellSearchHint}' via run_command) and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
       };
 
       if (hasByteOffset && !hasSliceParams) {
@@ -4753,20 +5815,27 @@ try {
       });
     }
 
-    // 2f. Hard-Route Other Native File/Search Tools (LH-07)
+    // 2f. Hard-Route Other Native File/Search Tools (LH-07); degrade gracefully when RTK is absent (--allow-degraded)
+    const { rtk: hostRtk, rgAvailable: hostRgAvailable } = resolveCachedHostEnv();
+
     if (toolName === "read_many_files") {
       respond({
         decision: "deny",
-        reason: "Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses token optimization. Run 'rtk read <file>' via run_command instead."
+        reason: hostRtk
+          ? "Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses token optimization. Use bounded 'read_file' slices ('<= 150' lines) for editable workspace code, or run 'rtk read <file>' via run_command for read-only logs and spillovers instead."
+          : "Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses context bounds. Use bounded 'read_file' slices ('<= 150' lines) for editable workspace code, or run bounded 'head -n 150 <file>' / 'tail -n 150 <file>' via run_command for read-only logs and spillovers instead."
       });
+    }
+
+    if (!hostRtk && (toolName === "grep_search" || toolName === "find_by_name" || toolName === "list_dir")) {
+      respond({ decision: "allow" });
     }
 
     if (toolName === "grep_search") {
       const pattern = String(args.Query || args.query || args.Pattern || args.pattern || "").trim();
       const searchTarget = String(args.SearchPath || args.searchPath || args.path || ".").trim() || ".";
       const safePattern = pattern ? escapeDoubleQuotedArg(pattern) : "<pattern>";
-      const rgAvailable = isRgAvailableCached();
-      const cmdHint = rgAvailable
+      const cmdHint = hostRgAvailable
         ? `rtk rg -- "${safePattern}" ${searchTarget}`
         : `rtk grep -rnE "${safePattern}" ${searchTarget}`;
       respond({
@@ -4813,7 +5882,7 @@ try {
     }
 
     const now = Date.now();
-    const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(session.pollCount));
+    const requiredBackoffSec = session.pollCount === 0 ? 0 : getRequiredBackoffSeconds(session.pollCount);
     const requiredBackoffMs = requiredBackoffSec * 1000;
     const elapsedMs = session.lastPollTime ? (now - session.lastPollTime) : Infinity;
     const elapsedSec = Math.floor(elapsedMs / 1000);
@@ -4821,7 +5890,7 @@ try {
     // Premature check before backoff interval has elapsed
     if (elapsedMs < requiredBackoffMs) {
       session.denials++;
-      saveSessionState(convId, session);
+      saveSessionState(convId, session, { updatePollTime: false });
 
       if (session.denials >= 5) {
         respond({
@@ -4851,7 +5920,7 @@ try {
     if (isSwarmPollSchedule(args)) {
       const session = getSessionState(convId);
       session.denials++;
-      saveSessionState(convId, session);
+      saveSessionState(convId, session, { updatePollTime: false });
       if (session.denials >= 5) {
         respond({
           decision: "force_ask",
@@ -4874,7 +5943,7 @@ try {
       // Task watchdog timers must be AT LEAST the required backoff window!
       if (duration < requiredBackoffSec) {
         session.denials++;
-        saveSessionState(convId, session);
+        saveSessionState(convId, session, { updatePollTime: false });
 
         if (session.denials >= 5) {
           respond({
@@ -4946,7 +6015,7 @@ try {
     const callerAccess = evaluateCallerTranscriptAccess(convId);
 
     if (isScript && bodyContent && (callerAccess.isRestrictedChild || isTmpOrScratch)) {
-      if (isProtectedShellOrScriptOperation(bodyContent)) {
+      if (isProtectedShellOrScriptOperation(bodyContent, { isRestrictedChild: callerAccess.isRestrictedChild })) {
         respond({
           decision: "deny",
           reason: buildInternalStateShellDenial(convId)
@@ -4954,10 +6023,10 @@ try {
       }
     }
 
-    if (isProtectedBenchmarkPath(targetFile)) {
+    if (!isBenchmarkGuardDisabled(convId) && isProtectedBenchmarkPath(targetFile)) {
       respond({
         decision: "force_ask",
-        reason: `[BENCHMARK MUTATION DETECTED] Mutation of protected evaluator/benchmark artifact '${targetFile}' requires explicit user confirmation to prevent benchmark contamination.`
+        reason: `[BENCHMARK MUTATION DETECTED] Mutation of protected evaluator/benchmark artifact '${targetFile}' requires explicit user confirmation to prevent benchmark contamination. Set AGY_DISABLE_BENCHMARK_GUARD=1 to disable this guard for non-evaluation repos.`
       });
     }
     if (targetFile && (callerAccess.isRestrictedChild || isExecutableScriptPath(targetFile) || isTmpOrScratch)) {

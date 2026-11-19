@@ -11,7 +11,7 @@ description: >-
 
 ## Architectural Boundary
 
-- **RTK (`>= 1.1.0`)**: Rewrites shell commands (`rtk hook antigravity`), compresses command output, and provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`, `rtk read`, `rtk err`, `rtk summary`).
+- **RTK (`>= 1.1.0`)**: Rewrites shell commands (`rtk hook antigravity`), compresses command output, provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`), reads spillovers and completed task logs (`rtk read`), and filters errors or summaries (`rtk err`, `rtk summary`).
 - **Agy-Context-Saver (`v2.0.4`)**: Enforces Reactive Wakeup backoff, bounds `read_file` slices, protects `.system_generated/` and the state directory, and exposes two-tier `agy-context transcript` (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode).
 
 ---
@@ -21,17 +21,17 @@ description: >-
 Unbounded full-file `read_file` calls on workspace files are blocked by the `PreToolUse` hook:
 
 1. **Tier 1 (Search and discovery: `rtk grep`, `rtk find`, `rtk ls`)**:
-   - **Pattern and symbol search**: Run `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate `[StartLine, EndLine]` coordinates (always pass an explicit target path such as `.` or `src/` so `rtk grep` does not wait on stdin). Because `rtk grep` clips lines at `~80` chars and `25` matches/file (emitting ephemeral `rtk recall` hashes unreadable from transcripts), implicit `grep` commands stay unrewritten (`ACS-HOOK-09`); use raw `grep -rnE` whenever untruncated lines or `>25` matches per file are required.
+   - **Pattern and symbol search**: Run `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate `[StartLine, EndLine]` coordinates (always pass an explicit target path such as `.` or `src/` so `rtk grep` does not wait on stdin). Because `rtk grep` clips lines at `~80` chars and `25` matches/file (emitting ephemeral `rtk recall` hashes unreadable from transcripts), implicit `grep` commands stay unrewritten; use raw `grep -rnE` whenever untruncated lines or `>25` matches per file are required.
    - **Directory and file listing**: Run `rtk find <path>`, `rtk ls <path>`, or `rtk tree` (or PowerShell `dir` / `Get-ChildItem` on Windows).
 2. **Tier 2 (Workspace file reading: `read_file` slice policy)**:
    - Pass `StartLine` and `EndLine` into `read_file` in bounded slices of `1-150` lines to preserve 1-indexed line numbers for `edit_file` and `write_file`.
-   - Partial slices of `151-800` lines and `ByteOffset`-only unbounded reads are denied. An explicit full-file read (`StartLine: 1, EndLine: <TotalLines>`) is allowed when the file on disk is $\le 800$ lines and $\le 45\text{ KiB}$ (`46,080` bytes).
-3. **Tier 3 (Spillovers and diagnostics: `rtk read`, `rtk err`, `rtk summary`)**:
-   - **Spillovers and task logs**: Read `.system_generated/steps/<step>/output.txt` spillovers (via bounded `read_file` $\le 150$ lines or `rtk read <path>`) and completed `tasks/<taskId>.log` files via `rtk read <path>` (`--head-lines 150` / `--tail-lines 150` required explicitly on `>45 KiB` files). Never use `rtk read -l minimal|aggressive` or `-m` to derive line numbers for `edit_file` or `write_file`.
+   - Partial slices of `151-800` lines and `ByteOffset`-only unbounded reads are denied. An explicit full-file read (`StartLine: 1, EndLine: <TotalLines>`) is allowed when the file on disk is `<= 800` lines and `<= 45 KiB` (`46,080` bytes).
+3. **Tier 3 (Spillovers, completed task logs, and diagnostics: `rtk read`, `rtk err`, `rtk summary`)**:
+   - **Spillovers and completed task logs only**: Read `.system_generated/steps/<step>/output.txt` spillovers (via bounded `read_file` `<= 150` lines or `rtk read <path>`) and completed `tasks/<taskId>.log` files via `rtk read <path>` (`cat`, and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; use explicit `rtk read <path>` for bare `tail`, quoted/spaced paths, Windows backslash `head`/`tail`, or env prefixes, and `--head-lines 150` / `--tail-lines 150` required on `>45 KiB` files). Never use `rtk read` for editable workspace code; use bounded `read_file` slices so 1-indexed line numbers stay exact for `edit_file` (when denied on `read_many_files`, use bounded `read_file` for editable code or `rtk read` for read-only logs/spillovers).
    - `rtk err <cmd>`: Runs a command and prints only errors and warnings.
    - `rtk summary <cmd>`: Runs a command and prints a 2-line summary.
 
-*Safe harbor*: Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) may be read via `read_file` without slice bounds, and `.system_generated/steps/<n>/output.txt` supports bounded `read_file` ($\le 150$ lines).
+*Safe harbor*: Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) may be read via `read_file` without slice bounds, and `.system_generated/steps/<n>/output.txt` supports bounded `read_file` (`<= 150` lines).
 
 ---
 
@@ -74,7 +74,7 @@ agy-context transcript list [--limit N] [--parent <uuid>] [--lineage] [--json]
 ```
 
 ### 6. `agy-context transcript export` (alias: `dump`)
-Exports an `L6`-safe sanitized conversation transcript summary (`--sanitized` is required to redact tool payload bodies and secrets for safe sharing or restricted child review), keeping stdout within ~`9.2 KB` inline unless `--full` or `--out`/`--output <path>` unlocks the `512 KB` deep tier (`--max-chars` overrides up to `524,288` bytes).
+Exports a sanitized conversation transcript summary (`--sanitized` is required to redact tool payload bodies and secrets for safe sharing or restricted child review), keeping stdout within ~`9.2 KB` inline unless `--full` or `--out`/`--output <path>` unlocks the `512 KB` deep tier (`--max-chars` overrides up to `524,288` bytes).
 ```bash
 agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--full] [--max-chars N] [--out|--output <path>] [--file <path>] [--json]
 ```
@@ -104,8 +104,8 @@ agy-context restore-backups
 1. **Layer 1 (Reactive lifecycle and backoff)**:
    - Do not busy-wait on `manage_task(Action='status')` or short polling timers; end the turn and wait for Reactive Wakeup (`<SYSTEM_MESSAGE>`).
    - Do not run blocking CI watch loops (`gh pr checks --watch`, `gh run watch`) inside `run_command`; use one-shot snapshots (`gh pr checks`, `gh run list`) instead.
-   - Status checks follow exponential backoff: $\min(600, \text{round}(30 \times 2.5^{\text{pollCount}-1}))$. 5 cumulative denials trigger the `force_ask` circuit breaker.
-   - For background shell tasks $>15\text{s}$, schedule `schedule(DurationSeconds=45, TimerCondition="task-X")` and output a Pre-Yield Status Card. Never pair `swarm_wait` or subagents with a one-shot `schedule` timer.
+   - Status checks follow exponential backoff: `min(600, round(30 * 2.5^(pollCount - 1)))`. 5 cumulative denials trigger the `force_ask` circuit breaker.
+   - For background shell tasks `> 15s`, schedule `schedule(DurationSeconds=45, TimerCondition="<convId>/task-X")` and output a Pre-Yield Status Card. Never pair `swarm_wait` or subagents with a one-shot `schedule` timer.
 2. **Layer 2 (Shell rewriting, file slices, and transcript access)**:
    - Shell commands rewrite via `rtk hook antigravity`.
    - Workspace inspection uses `rtk grep` / `rtk find` -> bounded `read_file(StartLine, EndLine)` -> `edit_file` / `write_file`, while `rtk read` reads step spillovers and completed task logs.
