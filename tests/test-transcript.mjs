@@ -2842,6 +2842,103 @@ try {
 
     console.log("✓ PR #8 L54 normalization, JSON pretty-printing, compact arg decoding & pretty clamped pages verified");
   }
+
+  // --- UX-ACS-011 & UX-ACS-012: Readable Top-Level Help & Focused Subcommand Help ---
+  console.log("\n--- 11. CLI Help Ergonomics & Subcommand-Scoped Help (UX-ACS-011 / UX-ACS-012) ---");
+  {
+    const topHelp = runCli(["--help"]);
+    assert.equal(topHelp.status, 0, topHelp.stderr);
+    assert.match(topHelp.stdout, /Transcript Commands:/);
+    assert.match(topHelp.stdout, /Lifecycle Commands:/);
+    assert.match(topHelp.stdout, /Examples:/);
+    assert.match(topHelp.stdout, /agy-context status/);
+    assert.match(topHelp.stdout, /agy-context transcript health/);
+    assert.match(topHelp.stdout, /agy-context transcript read --last-turns 3/);
+    assert.match(topHelp.stdout, /agy-context transcript query/);
+    const topMaxLine = Math.max(...topHelp.stdout.split(/\r?\n/).map((l) => l.length));
+    assert.ok(topMaxLine <= 105, `Top-level --help line exceeded 105 chars (max=${topMaxLine})`);
+
+    const noArgsHelp = runCli([]);
+    assert.equal(noArgsHelp.status, 0);
+    assert.equal(noArgsHelp.stdout, topHelp.stdout);
+
+    const subHelpChecks = [
+      [["transcript", "--help"], /Subcommands:/, /agy-context transcript <subcommand> --help/],
+      [["transcript", "read", "--help"], /--last-turns/, /--outline/],
+      [["transcript", "outline", "--help"], /--outline/, /--start/],
+      [["transcript", "query", "--help"], /--roles.*system.*generic/s, /--full-args/],
+      [["transcript", "grep", "--help"], /--query/, /--include-tools/],
+      [["transcript", "step", "--help"], /--line-start/, /--tail/],
+      [["transcript", "health", "--help"], /--json/, /agy-context transcript health/],
+      [["transcript", "list", "--help"], /--lineage/, /--parent/],
+      [["transcript", "export", "--help"], /--sanitized/, /--out/],
+      [["transcript", "access", "--help"], /--self-only/, /--allow/],
+      [["status", "--help"], /--json/, /agy-context status/],
+      [["setup", "--help"], /--allow-degraded/, /--check/],
+      [["uninstall", "--help"], /--restore-backups/, /agy-context uninstall/],
+      [["restore-backups", "--help"], /hooks\.json\.bak/, /agy-context restore-backups/]
+    ];
+    for (const [args, flagRe, secondRe] of subHelpChecks) {
+      const res = runCli(args);
+      assert.equal(res.status, 0, `${args.join(" ")} must exit 0: ${res.stderr}`);
+      assert.notEqual(res.stdout, topHelp.stdout, `${args.join(" ")} must print focused subcommand help, not top-level help`);
+      assert.match(res.stdout, flagRe, `${args.join(" ")} missing expected flag/pattern ${flagRe}`);
+      assert.match(res.stdout, secondRe, `${args.join(" ")} missing expected pattern ${secondRe}`);
+      assert.match(res.stdout, /Examples:/, `${args.join(" ")} must include Examples:`);
+      const maxLine = Math.max(...res.stdout.split(/\r?\n/).map((l) => l.length));
+      assert.ok(maxLine <= 105, `${args.join(" ")} line exceeded 105 chars (max=${maxLine})`);
+    }
+
+    // assertCleanHelp must still reject conflicting flags with --help
+    for (const badArgs of [
+      ["transcript", "read", "--last-turns", "2", "--help"],
+      ["setup", "--check", "--help"],
+      ["uninstall", "--restore-backups", "--help"]
+    ]) {
+      const badRes = runCli(badArgs);
+      assert.notEqual(badRes.status, 0, `Conflicting --help args must fail: ${badArgs.join(" ")}`);
+    }
+    console.log("✓ Top-level --help (<= 105 cols + examples) and all 14 subcommand --help topics verified");
+  }
+
+  // --- RUN-005 & RUN-006: Clean health --json stderr & darwin case-insensitive path containment ---
+  console.log("\n--- 12. Health --json Stderr Hygiene (RUN-005) & Darwin Path Casing (RUN-006) ---");
+  {
+    const convRun005 = "conv-run005-silent-health";
+    const run005Logs = path.join(brainDir, convRun005, ".system_generated", "logs");
+    fs.mkdirSync(run005Logs, { recursive: true });
+    fs.writeFileSync(
+      path.join(run005Logs, "transcript.jsonl"),
+      JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "Health check" }) + "\n",
+      "utf-8"
+    );
+    const legacyRtkDir = path.join(tempHome, "legacy-rtk-090");
+    createRtkShim(legacyRtkDir, "0.9.0");
+    const legacyEnv = { ...testEnv, PATH: legacyRtkDir };
+    if (process.platform === "win32") legacyEnv.Path = legacyRtkDir;
+    const healthJsonRes = spawnSync(process.execPath, [cliScript, "transcript", "health", "--id", convRun005, "--json"], {
+      env: legacyEnv,
+      encoding: "utf-8"
+    });
+    assert.equal(healthJsonRes.status, 0, healthJsonRes.stderr);
+    assert.equal(healthJsonRes.stderr.trim(), "", `health --json must emit zero stderr warnings even with legacy RTK (<1.1.0), got: ${healthJsonRes.stderr}`);
+    const parsedHealth = JSON.parse(healthJsonRes.stdout);
+    assert.equal(parsedHealth.rtkInfo, null);
+
+    // RUN-006: extractConvId must fold path casing on both darwin and win32
+    const mixedCaseBrainFile = path.join(brainDir.toUpperCase(), "Conv-Darwin-Case", ".system_generated", "logs", "transcript.jsonl");
+    assert.equal(
+      extractConvId(mixedCaseBrainFile, { strictBrainContainment: true, platform: "darwin" }),
+      "Conv-Darwin-Case",
+      "extractConvId must match mixed-case brain root on darwin (RUN-006)"
+    );
+    assert.equal(
+      extractConvId(mixedCaseBrainFile, { strictBrainContainment: true, platform: "win32" }),
+      "Conv-Darwin-Case",
+      "extractConvId must match mixed-case brain root on win32 (RUN-006)"
+    );
+    console.log("✓ RUN-005 (silent health --json with legacy RTK) and RUN-006 (darwin/win32 case folding) verified");
+  }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });
 }

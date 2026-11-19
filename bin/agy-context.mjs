@@ -31,6 +31,7 @@ import {
 } from "../lib/transcript-core.mjs";
 import { getStateDir } from "../scripts/state-dir.mjs";
 import {
+  assertSupportedNodeVersion,
   runInstall,
   runUninstall,
   runStatus,
@@ -58,22 +59,274 @@ Usage:
   agy-context <command> [options]
 
 Transcript Commands:
-  agy-context transcript read   [--id <conv>] [--mode compact|full] [--last-turns N] [--offset N] [--limit N] [--outline] [--include-thinking] [--full] [--max-chars N] [--out <path>] [--json] [--file <path>]
-  agy-context transcript query  [--id <conv>] [--query <regex>] [--roles csv] [--mode auto|compact|full] [--start N] [--end N] [--last-turns N] [--limit N] [--summary] [--include-tools] [--full-args] [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--include-thinking] [--full] [--max-chars N] [--out <path>] [--json] [--file <path>]
-  agy-context transcript step   [--id <conv>] (--step <N|N,M|N-M|N..M> | --start N --end M) [--field content|thinking|tool_calls|tool_args|tool_args:<Key>|all] [--head N] [--tail N] [--line-start N] [--line-end N] [--full] [--max-chars N] [--out <path>] [--json] [--file <path>]
-  agy-context transcript health [--id <conv>] [--json] [--file <path>]
-  agy-context transcript list   [--limit N] [--parent <id>] [--lineage] [--json]
-  agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--full] [--max-chars N] [--out|--output <path>] [--file <path>] [--json]
-  agy-context transcript access [--status | --off | --on | --reset | --self-only | --mode <open|allowlist|self-only|deny> | --allow <id,@roster*...> | --deny <id,@roster*...> | --ttl <sec>] [--json]
-  Aliases: grep/search/find -> query | stats/info -> health | tools -> query --roles assistant --field tool_args | outline/summary -> query --summary --include-tools | ls -> list | dump -> export | policy -> access
+  transcript read [id]         Stream recent turns in Markdown/JSON (--outline, --full)
+  transcript query [pat] [id]  Search turns and tool calls (grep, search, find, tools)
+  transcript step <N|N..M>     Extract full fields for one step or range (--field, --tail)
+  transcript health [id]       Audit turns, transcript size, RTK, and polling (stats, info)
+  transcript list              List recent sessions with optional lineage (alias: ls)
+  transcript export [id]       Export sanitized transcript index (--sanitized, dump)
+  transcript access            Manage child transcript access policy (alias: policy)
 
 Lifecycle Commands:
-  agy-context status            [--json]
-  agy-context setup             [--check] [--allow-degraded]
-  agy-context uninstall         [--restore-backups]
-  agy-context restore-backups
-  agy-context --help | -h | --version | -v
+  status [--json]              Audit plugin link, hook, CLI shims, RTK, and access policy
+  setup [--check]              Install or sync plugin, hooks, shims, and RTK
+  uninstall                    Remove plugin link, hooks, and shims (--restore-backups)
+  restore-backups              Restore pre-install .bak configuration files
+  --help | -h | --version | -v Show help or CLI version
+
+Examples:
+  agy-context status
+  agy-context transcript health
+  agy-context transcript read --last-turns 3
+  agy-context transcript query "error" --summary
+
+Run 'agy-context <command> --help' or 'agy-context transcript <subcommand> --help' for flags.
 `);
+}
+
+function printSubcommandHelp(topic) {
+  const version = getVersion();
+  const key = String(topic || "").toLowerCase();
+  const canonicalMap = {
+    outline: "read",
+    summary: "read",
+    grep: "query",
+    search: "query",
+    find: "query",
+    tools: "query",
+    stats: "health",
+    info: "health",
+    ls: "list",
+    dump: "export",
+    policy: "access",
+    install: "setup"
+  };
+  const resolved = canonicalMap[key] || key;
+
+  const docs = {
+    transcript: `Agy-Context-Saver CLI (v${version}) - transcript
+
+Usage:
+  agy-context transcript <subcommand> [options]
+
+Subcommands:
+  read [id]            Stream recent conversation turns (--outline, --full, --out)
+  query [pat] [id]     Search turns and tool calls (aliases: grep, search, find, tools)
+  step <N|N..M> [id]   Extract untruncated fields for a step, list, or range
+  health [id]          Check turn counts, byte size, RTK, and polling (stats, info)
+  list                 List recent conversations with optional lineage (alias: ls)
+  export [id]          Export sanitized transcript index (--sanitized, alias: dump)
+  access               View or update child transcript access policy (alias: policy)
+
+Examples:
+  agy-context transcript health
+  agy-context transcript read --last-turns 3
+
+Run 'agy-context transcript <subcommand> --help' for full options.`,
+
+    read: `Agy-Context-Saver CLI (v${version}) - transcript read (aliases: outline, summary)
+
+Usage:
+  agy-context transcript read [<id>] [options]
+
+Options:
+  --id <uuid>            Conversation UUID (or pass as first positional argument)
+  --mode <compact|full>  Read transcript.jsonl (default) or transcript_full.jsonl
+  --last-turns <N>       Trailing turns to show (default: 3; aliases: --last, --tail)
+  --offset <N>           0-indexed forward step offset for pagination
+  --limit <N>            Maximum steps to return (default: 50, max: 200; 500 in outline)
+  --outline, --summary   Delegate to 1-line-per-step outline (accepts --start, --end)
+  --include-tools        Include tool names/args in outline mode
+  --full-args            Show untruncated tool arguments in outline mode
+  --include-thinking     Include model thinking blocks
+  --full                 Opt into 512 KB deep output tier (bypasses inline clamps)
+  --max-chars <N>        Override UTF-8 output budget (up to 524288 bytes)
+  --out, --output <path> Write output to a safe .md/.json/.txt file
+  --file <path>          Explicit transcript .jsonl path inside Antigravity brain roots
+  --json                 Emit structured JSON output
+
+Examples:
+  agy-context transcript read --last-turns 3
+  agy-context transcript read --outline --start 0 --end 50`,
+
+    query: `Agy-Context-Saver CLI (v${version}) - transcript query
+Aliases: grep, search, find, tools
+
+Usage:
+  agy-context transcript query [<pattern>] [<id>] [options]
+
+Options:
+  --query <regex>        Case-insensitive regex or substring pattern (or positional #1)
+  --id <uuid>            Conversation UUID (or positional #2)
+  --roles <csv>          Filter roles: user,assistant,subagent,tool,system,generic,error,all
+  --mode <mode>          auto (default), compact, or full
+  --start <N> / --end <N> Inclusive step_index bounds
+  --last-turns <N>       Restrict search to last N turns (aliases: --last, --tail)
+  --limit <N>            Maximum matching steps to return
+  --summary, --outline   Print 1-line timeline bullets with tool and error tags
+  --include-tools        Search and display tool call names and arguments
+  --full-args            Print full tool call arguments
+  --field <spec>         content|thinking|tool_calls|tool_args|tool_args:<Key>|all
+  --include-thinking     Search and include model thinking blocks
+  --full                 Opt into 512 KB deep output tier
+  --max-chars <N>        Override UTF-8 output budget (up to 524288 bytes)
+  --out, --output <path> Write output to a safe .md/.json/.txt file
+  --file <path>          Explicit transcript .jsonl path inside Antigravity brain roots
+  --json                 Emit structured JSON output
+
+Examples:
+  agy-context transcript grep "verification failed" --limit 5
+  agy-context transcript tools "run_command" --field tool_args:CommandLine`,
+
+    step: `Agy-Context-Saver CLI (v${version}) - transcript step
+
+Usage:
+  agy-context transcript step [<N|N,M|N-M|N..M>] [<id>] [options]
+
+Options:
+  --step <spec>          Step index, comma list (2,8,14), or range (2-10 / 2..10)
+  --start <N> / --end <N> Inclusive step range when --step is omitted
+  --id <uuid>            Conversation UUID (or positional #2)
+  --field <spec>         content|thinking|tool_calls|tool_args|tool_args:<Key>|all
+  --head <N>             Return first N lines (alias: --head-lines)
+  --tail <N>             Return last N lines (alias: --tail-lines)
+  --line-start <N>       1-indexed start line for slice extraction
+  --line-end <N>         1-indexed inclusive end line for slice extraction
+  --full                 Opt into 512 KB deep output tier
+  --max-chars <N>        Override UTF-8 output budget (up to 524288 bytes)
+  --out, --output <path> Write output to a safe .md/.json/.txt file
+  --file <path>          Explicit transcript .jsonl path inside Antigravity brain roots
+  --json                 Emit structured JSON output
+
+Examples:
+  agy-context transcript step 10..15 --field content --tail 40
+  agy-context transcript step --step 42 --full --out ./step-42.md`,
+
+    health: `Agy-Context-Saver CLI (v${version}) - transcript health (aliases: stats, info)
+
+Usage:
+  agy-context transcript health [<id>] [options]
+
+Options:
+  --id <uuid>            Conversation UUID (or pass as first positional argument)
+  --file <path>          Explicit transcript .jsonl path inside Antigravity brain roots
+  --json                 Emit structured JSON health metrics
+
+Examples:
+  agy-context transcript health
+  agy-context transcript stats --json`,
+
+    list: `Agy-Context-Saver CLI (v${version}) - transcript list (alias: ls)
+
+Usage:
+  agy-context transcript list [options]
+
+Options:
+  --limit <N>            Maximum conversations to show (default: 10, or 50 w/ --parent)
+  --parent <uuid>        Filter strictly to child sessions of a parent conversation
+  --lineage              Include sessionKind, stepCount, parentConvId, and @rosterName
+  --json                 Emit structured JSON output
+
+Examples:
+  agy-context transcript list --limit 5
+  agy-context transcript ls --parent current --lineage --json`,
+
+    export: `Agy-Context-Saver CLI (v${version}) - transcript export (alias: dump)
+
+Usage:
+  agy-context transcript export [<id>] --sanitized [options]
+
+Options:
+  --sanitized            Required: redact tool payload bodies and secrets
+  --id <uuid[,uuid...]>  One or more conversation UUIDs (repeatable or comma-separated)
+  --parent <uuid>        Export all child sessions belonging to a parent UUID
+  --start <N> / --end <N> Inclusive step_index bounds
+  --limit <N>            Maximum steps retained per session (default: 150, max: 500)
+  --full                 Opt into 512 KB deep stdout tier
+  --max-chars <N>        Override UTF-8 output budget (up to 524288 bytes)
+  --out, --output <path> Write sanitized index to a safe .md/.json/.txt file
+  --file <path>          Explicit single-session transcript .jsonl path
+  --json                 Emit structured JSON output
+
+Examples:
+  agy-context transcript export --sanitized --out ./transcript-export.md
+  agy-context transcript dump --parent current --sanitized --json`,
+
+    access: `Agy-Context-Saver CLI (v${version}) - transcript access (alias: policy)
+
+Usage:
+  agy-context transcript access [status|off|on|reset|self-only] [options]
+
+Options:
+  --status               Show active parent policy and recent launchRestrictions
+  --off, --deny-children Deny transcript access to all child sessions
+  --on, --reset          Clear parent CLI policy overrides (keeps Tier 4 launch locks)
+  --self-only            Restrict child sessions to their own conversation transcript
+  --mode <mode>          Explicit cohort default: open | allowlist | self-only | deny
+  --allow <list>         Comma-separated allowed session IDs or @roster* globs
+  --deny <list>          Comma-separated denied session IDs or @roster* globs
+  --ttl <sec>            Policy expiration time in seconds (default: 3600)
+  --json                 Emit structured JSON output
+
+Examples:
+  agy-context transcript access --status
+  agy-context transcript policy --mode allowlist --allow @audit-squad*`,
+
+    status: `Agy-Context-Saver CLI (v${version}) - status
+
+Usage:
+  agy-context status [options]
+
+Options:
+  --json                 Emit structured JSON installation and policy status
+
+Examples:
+  agy-context status
+  agy-context status --json`,
+
+    setup: `Agy-Context-Saver CLI (v${version}) - setup (alias: install)
+
+Usage:
+  agy-context setup [options]
+
+Options:
+  --check, -c            Read-only preflight validation (writes zero files)
+  --allow-degraded       Install hook-only governance even if RTK provisioning fails
+
+Examples:
+  agy-context setup
+  agy-context setup --check`,
+
+    uninstall: `Agy-Context-Saver CLI (v${version}) - uninstall
+
+Usage:
+  agy-context uninstall [options]
+
+Options:
+  --restore-backups      Restore pre-install .bak hook and MCP configuration files
+
+Examples:
+  agy-context uninstall
+  agy-context uninstall --restore-backups`,
+
+    "restore-backups": `Agy-Context-Saver CLI (v${version}) - restore-backups
+
+Usage:
+  agy-context restore-backups
+
+Description:
+  Restores pre-install hooks.json.bak and mcp_config.json backup files when present.
+
+Examples:
+  agy-context restore-backups
+  agy-context uninstall --restore-backups`
+  };
+
+  if (docs[resolved]) {
+    console.log(`${docs[resolved]}\n`);
+    return;
+  }
+  printHelp();
 }
 
 function parseFlags(argv, spec) {
@@ -621,7 +874,7 @@ async function handleTranscriptCommand(argv) {
     if (argv.length > 1) {
       throw new Error("Conflicting flags: '--help' cannot be combined with operational flags or arguments.");
     }
-    printHelp();
+    printSubcommandHelp("transcript");
     process.exit(0);
   }
 
@@ -637,7 +890,7 @@ async function handleTranscriptCommand(argv) {
     if (opts.help) {
       assertCleanHelp(opts, positional);
       consumeTranscriptAccessGrant({ subcommand: sub });
-      printHelp();
+      printSubcommandHelp(sub);
       process.exit(0);
     }
     if (opts.id === undefined && positional.length === 1) {
@@ -722,7 +975,7 @@ async function handleTranscriptCommand(argv) {
     if (opts.help) {
       assertCleanHelp(opts, positional);
       consumeTranscriptAccessGrant({ subcommand: sub });
-      printHelp();
+      printSubcommandHelp(sub);
       process.exit(0);
     }
     if (sub === "grep" || sub === "search" || sub === "find") {
@@ -808,7 +1061,7 @@ async function handleTranscriptCommand(argv) {
     if (opts.help) {
       assertCleanHelp(opts, positional);
       consumeTranscriptAccessGrant({ subcommand: sub });
-      printHelp();
+      printSubcommandHelp("step");
       process.exit(0);
     }
     if (opts.step === undefined && positional.length >= 1) {
@@ -872,7 +1125,7 @@ async function handleTranscriptCommand(argv) {
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
-      printHelp();
+      printSubcommandHelp(sub);
       process.exit(0);
     }
     if (opts.id === undefined && positional.length === 1) {
@@ -908,7 +1161,7 @@ async function handleTranscriptCommand(argv) {
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
-      printHelp();
+      printSubcommandHelp(sub);
       process.exit(0);
     }
     if (positional.length > 0) {
@@ -973,7 +1226,7 @@ async function handleTranscriptCommand(argv) {
     if (opts.help) {
       assertCleanHelp(opts, positional);
       consumeTranscriptAccessGrant({ subcommand: sub });
-      printHelp();
+      printSubcommandHelp(sub);
       process.exit(0);
     }
     if ((!opts.id || opts.id.length === 0) && !opts.parent && !opts.file && positional.length >= 1) {
@@ -1049,7 +1302,7 @@ async function handleTranscriptCommand(argv) {
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
-      printHelp();
+      printSubcommandHelp(sub);
       process.exit(0);
     }
     if (positional.length === 1 && !opts.status && !opts.off && !opts["deny-children"] && !opts.on && !opts.reset && !opts["self-only"] && opts.mode === undefined) {
@@ -1118,6 +1371,8 @@ async function main() {
     process.exit(0);
   }
 
+  assertSupportedNodeVersion();
+
   const cmd = argv[0];
   const rest = argv.slice(1);
 
@@ -1133,7 +1388,7 @@ async function main() {
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
-      printHelp();
+      printSubcommandHelp("status");
       process.exit(0);
     }
     if (positional.length > 0) {
@@ -1156,7 +1411,7 @@ async function main() {
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
-      printHelp();
+      printSubcommandHelp("setup");
       process.exit(0);
     }
     if (positional.length > 0) {
@@ -1176,7 +1431,7 @@ async function main() {
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
-      printHelp();
+      printSubcommandHelp("uninstall");
       process.exit(0);
     }
     if (positional.length > 0) {
@@ -1195,7 +1450,7 @@ async function main() {
     });
     if (opts.help) {
       assertCleanHelp(opts, positional);
-      printHelp();
+      printSubcommandHelp("restore-backups");
       process.exit(0);
     }
     if (positional.length > 0) {

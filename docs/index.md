@@ -36,6 +36,8 @@
 === "Check status"
     ```bash
     agy-context status
+    # Or without editing PATH:
+    npx --package=agy-context-saver agy-context status
     ```
 
 ## Companion integration: Agy-Squad

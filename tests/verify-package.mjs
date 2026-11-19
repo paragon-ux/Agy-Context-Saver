@@ -20,6 +20,7 @@ const REQUIRED = [
   "scripts/install-register.mjs",
   "scripts/provision-rtk.mjs",
   "scripts/release-preflight.mjs",
+  "scripts/rtk-run.mjs",
   "scripts/state-dir.mjs",
   "rules/AGENTS.md",
   "skills/context-governance/SKILL.md",

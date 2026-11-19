@@ -8,7 +8,7 @@
 
 - **Node.js**: Version 22.0.0 or later (`>=22` required; tested on Node 22 and 24 across Windows, macOS, and Linux).
 - **Google Antigravity**: Antigravity 2.0+ (Windows, macOS, or Linux).
-- **RTK (`>= 1.1.0`)**: Either pre-installed on `PATH` (`brew install rtk`, `cargo install --locked rtk`, or the official install script) or automatically downloaded into `bin/` during `agy-context setup` and verified against pinned `rtk v1.1.0` SHA-256 release checksums.
+- **RTK (`>= 1.1.0`)**: Either pre-installed on `PATH` (`brew install rtk`, `cargo install --locked rtk`, or the official install script) or automatically downloaded into `bin/` during `agy-context setup` and verified against pinned `rtk v1.1.0` SHA-256 release checksums (on Windows ARM64, install `rtk` manually or pass `--allow-degraded`; see [RTK Support Matrix](RTK-SUPPORT-MATRIX.md)).
 
 ---
 
@@ -24,14 +24,60 @@ npx --package=agy-context-saver agy-context setup
 ```
 
 This command performs five steps:
-1. Links the package into your active Antigravity plugins directory (`~/.gemini/config/plugins/agy-context-saver`) and registers the `agy-context-saver` `PreToolUse` hook in both the plugin `hooks.json` and global `~/.gemini/config/hooks.json` (ensuring coverage across top-level sessions, subagents, and `/swarm` workers).
+1. Links or copies the package into your active Antigravity plugins directory (`~/.gemini/config/plugins/agy-context-saver`) and registers the `agy-context-saver` `PreToolUse` hook in both the plugin `hooks.json` and global `~/.gemini/config/hooks.json` (ensuring coverage across top-level sessions, subagents, and `/swarm` workers). On Windows, it also installs the managed `~/.gemini/config/node.cmd` wrapper (backing up any existing unmanaged `node.cmd` to `node.cmd.bak`), matching `install.ps1`.
 2. Prunes legacy `execution-guard` entries from global `hooks.json` after creating an automatic `.bak` backup.
 3. Retires default MCP registration by removing legacy `agy-context-saver*` keys from `mcp_config.json` and sweeping stale schema caches under `~/.gemini/antigravity/mcp/agy-context-saver*` while preserving all third-party MCP servers.
-4. Installs executable `agy-context` and `agy-context-saver` shims into `~/.gemini/antigravity/bin/`.
-5. Verifies `rtk >= 1.1.0` on `PATH` and sets `suppress_hook_warning = true` in RTK's configuration.
+4. Installs executable `agy-context` and `agy-context-saver` shims into `~/.gemini/antigravity/bin/` (plus a managed `rtk` shim when local plugin-bundled `rtk` is provisioned and no compatible `rtk` is on `PATH`).
+5. Verifies `rtk >= 1.1.0` and sets `suppress_hook_warning = true` in RTK's configuration without touching global Git settings.
+
+After setup finishes, reload Antigravity Desktop IDE or start a new session so the plugin hook, rules, and skill activate.
+
+> **Upgrading from v1.x:** Running `agy-context setup` automatically removes legacy `mcp_config.json` entries, sweeps stale `~/.gemini/antigravity/mcp/agy-context-saver*` schema caches, and replaces the retired v1.x MCP server with the on-demand `agy-context` CLI and updated `PreToolUse` hook.
+
+### Add `~/.gemini/antigravity/bin` to `PATH` (or use `npx`)
+
+`agy-context setup` checks whether `~/.gemini/antigravity/bin` is already on your shell `PATH`. Inside Antigravity, the `PreToolUse` hook automatically resolves bare `agy-context` and `rtk` commands to the installed shims even if your shell `PATH` has not been updated yet. To run `agy-context` directly in your terminal, add `~/.gemini/antigravity/bin` to `PATH`:
+
+=== "macOS / Linux (Bash or Zsh)"
+    ```bash
+    # Add to ~/.bashrc or ~/.zshrc
+    export PATH="$HOME/.gemini/antigravity/bin:$PATH"
+    ```
+
+=== "Windows (PowerShell)"
+    ```powershell
+    # Current session (idempotent)
+    $bin = "$env:USERPROFILE\.gemini\antigravity\bin"
+    $parts = @($env:Path -split ';' | Where-Object { $_.Trim() })
+    if (@($parts | ForEach-Object { $_.TrimEnd('\') }) -notcontains $bin) {
+      $env:Path = ($parts + $bin) -join ';'
+    }
+
+    # Persistent user PATH (idempotent, preserves REG_EXPAND_SZ)
+    $bin = "$env:USERPROFILE\.gemini\antigravity\bin"
+    $raw = '%USERPROFILE%\.gemini\antigravity\bin'
+    $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try {
+      $cur = [string]$k.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+      $parts = @($cur -split ';' | Where-Object { $_.Trim() })
+      $norm = @($parts | ForEach-Object { $_.TrimEnd('\') })
+      if ($norm -notcontains $bin -and $norm -notcontains $raw) {
+        $k.SetValue('Path', (($parts + $raw) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+      }
+    } finally {
+      $k.Close()
+    }
+    ```
+
+If you prefer not to edit `PATH`, run commands directly through `npx`:
+
+```bash
+npx --package=agy-context-saver agy-context status
+npx --package=agy-context-saver agy-context uninstall
+```
 
 > [!NOTE]
-> **RTK Default Configuration Notice**: To protect agent context and prevent shell command corruption, `Agy-Context-Saver` sets `suppress_hook_warning = true` in RTK's user configuration (`%APPDATA%\rtk\config.toml` on Windows or `~/.config/rtk/config.toml` on POSIX). This silences upstream promotional banners while preserving all existing user settings. See [RTK Support Matrix](RTK-SUPPORT-MATRIX.md) for full details.
+> **RTK Default Configuration Notice**: To protect agent context and prevent shell command corruption, `Agy-Context-Saver` sets `suppress_hook_warning = true` in RTK's user configuration (`%APPDATA%\rtk\config.toml` on Windows, `~/Library/Application Support/rtk/config.toml` on macOS, or `~/.config/rtk/config.toml` on Linux). This silences upstream promotional banners while preserving all existing user settings. See [RTK Support Matrix](RTK-SUPPORT-MATRIX.md) for full details.
 
 ### Option 2: Local Repository Setup
 
@@ -80,6 +126,7 @@ Checking Agy-Context-Saver installation status...
 - CLI Shim (agy-context): INSTALLED (~/.gemini/antigravity/bin)
 - RTK Command Optimizer (>= 1.1.0): INSTALLED (rtk 1.1.0)
 - MCP Cleanup: CLEAN (0 duplicate MCP configs/schemas)
+- Plugin Enabled (config.json): ENABLED
 - Transcript Access Policy: OPEN (default)
 
 Overall Status: HEALTHY & ACTIVE
@@ -91,13 +138,24 @@ When a parent session restricts child transcript inspection via `agy-context tra
 
 ## Clean Uninstallation & Rollback
 
-Remove `Agy-Context-Saver` without disturbing foreign hooks or third-party MCP servers:
+Remove `Agy-Context-Saver` without disturbing foreign hooks, third-party MCP servers, or any pre-existing user `rtk` binary:
 
 ```bash
 # Standard clean uninstallation (preserves non-Agy configurations)
-npm run uninstall
+agy-context uninstall
 
 # Clean uninstallation with full backup file restoration
+agy-context uninstall --restore-backups
+
+# Zero-PATH fallback via npx (works from any directory)
+npx --package=agy-context-saver agy-context uninstall
+npx --package=agy-context-saver agy-context uninstall --restore-backups
+```
+
+From a local `Agy-Context-Saver` repository checkout:
+
+```bash
+npm run uninstall
 node scripts/install-register.mjs --uninstall --restore-backups
 ```
 
