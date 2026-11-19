@@ -23,6 +23,12 @@ npx --package=agy-context-saver agy-context status
 
 Reload Antigravity Desktop IDE or start a new session after setup finishes so the hook, rules, and skill activate. For shell PATH configuration, local checkout setup, v1.x upgrades, and clean uninstallation, see the [Installation and setup guide](https://paragon-ux.github.io/Agy-Context-Saver/installation/).
 
+## How Agy-Context-Saver guards a default session
+
+Agy-Context-Saver layers a lightweight pre-tool hook on top of Google Antigravity's native shell, file, and background-task tools rather than replacing them. It compresses noisy terminal output through RTK, keeps workspace file reads focused, prevents background polling loops, and lets parent sessions control child transcript access:
+
+![Default Antigravity session vs. Antigravity with Agy-Context-Saver](docs/assets/default-vs-context-saver.svg)
+
 ## Documentation
 
 Read the full documentation at [paragon-ux.github.io/Agy-Context-Saver](https://paragon-ux.github.io/Agy-Context-Saver/):

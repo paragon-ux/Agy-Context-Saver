@@ -72,7 +72,7 @@ Runs all 12 test suites in isolated temporary profiles:
 ```bash
 npm run verify:package
 ```
-Runs `node tests/verify-package.mjs --self-test` and validates `npm pack --dry-run --json` against the whitelisted files in `package.json` (`33` files).
+Runs `node tests/verify-package.mjs --self-test` and validates `npm pack --dry-run --json` against the whitelisted files in `package.json` (`34` files).
 
 ### Stage 4: Documentation build
 ```bash
@@ -87,7 +87,7 @@ Validates Markdown links, navigation entries, and SVG assets.
 Pushing a `v*` tag triggers `.github/workflows/release-tag.yml`, which runs the verification matrix across Linux, macOS, and Windows (Node 22 and 24), creates the GitHub Release, and publishes to npm via OIDC Trusted Publishing (`npm publish --access public --provenance`):
 
 ```bash
-git commit -m "chore(release): v2.0.4"
-git tag -a v2.0.4 -m "Release v2.0.4"
+git commit -m "chore(release): v2.1.0"
+git tag -a v2.1.0 -m "Release v2.1.0"
 git push origin main --follow-tags
 ```
