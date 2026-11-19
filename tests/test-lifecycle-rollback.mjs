@@ -317,7 +317,8 @@ try {
       assert.match(setupOffPath.stdout, /\[NEXT STEP\] CLI bin directory is not on your PATH/);
       assert.match(setupOffPath.stdout, /npx --package=agy-context-saver agy-context status/);
       if (process.platform === "win32") {
-        assert.match(setupOffPath.stdout, /\$env:Path \+=/);
+        assert.match(setupOffPath.stdout, /\$env:Path/);
+        assert.match(setupOffPath.stdout, /CreateSubKey\("Environment"\)/);
       } else {
         assert.match(setupOffPath.stdout, /export PATH="\$HOME\/\.gemini\/antigravity\/bin:\$PATH"/);
       }
