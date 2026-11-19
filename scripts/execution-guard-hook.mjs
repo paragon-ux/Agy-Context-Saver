@@ -829,6 +829,23 @@ function getLocalRtkCandidate() {
 function resolveInstalledAgyContextCommand(binName = "agy-context") {
   const profileHome = getProfileHomeDir();
   const isWin = os.platform() === "win32";
+  const pluginCli = path.join(profileHome, ".gemini", "config", "plugins", "agy-context-saver", "bin", "agy-context.mjs");
+  const resolvePluginCli = () => {
+    try {
+      if (fs.statSync(pluginCli).isFile()) {
+        return `node "${pluginCli.replace(/\\/g, "/")}"`;
+      }
+    } catch {}
+    return "";
+  };
+
+  // On Windows, prefer `node "<pluginCli>"` over a `.cmd` shim path so spaces in %USERPROFILE%
+  // execute cleanly across PowerShell, cmd.exe, and Git Bash without leading-quote parse errors.
+  if (isWin) {
+    const nodeCliCmd = resolvePluginCli();
+    if (nodeCliCmd) return nodeCliCmd;
+  }
+
   const candidateNames = binName === "agy-context-saver"
     ? ["agy-context-saver", "agy-context"]
     : ["agy-context", "agy-context-saver"];
@@ -842,13 +859,8 @@ function resolveInstalledAgyContextCommand(binName = "agy-context") {
       return /\s/.test(formatted) ? `"${formatted}"` : formatted;
     } catch {}
   }
-  const pluginCli = path.join(profileHome, ".gemini", "config", "plugins", "agy-context-saver", "bin", "agy-context.mjs");
-  try {
-    if (fs.statSync(pluginCli).isFile()) {
-      return `node "${pluginCli.replace(/\\/g, "/")}"`;
-    }
-  } catch {}
-  return "";
+
+  return isWin ? "" : resolvePluginCli();
 }
 
 function spawnRtk(bin, args, opts) {
@@ -5033,7 +5045,7 @@ try {
             "- Once completed, inspect output using 'rtk read <path>' via run_command.\n" +
             "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
           : "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
-            "- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command.\n" +
+            "- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines).\n" +
             "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
       });
     }
@@ -5161,6 +5173,19 @@ try {
       }
       if (state === "COMPLETED") {
         const hasRtkForTask = Boolean(resolveCachedHostEnv().rtk);
+        if (!hasRtkForTask && toolName === "read_file" && rawStart !== undefined && rawEnd !== undefined) {
+          const startLine = Number(rawStart);
+          const endLine = Number(rawEnd);
+          if (
+            Number.isInteger(startLine) &&
+            Number.isInteger(endLine) &&
+            startLine > 0 &&
+            endLine >= startLine &&
+            (endLine - startLine + 1) <= MAX_SAFE_SLICE_LINES
+          ) {
+            respond({ decision: "allow" });
+          }
+        }
         const taskCmd = hasRtkForTask
           ? (isOversizedInternalTarget(target, convId, taskMatch, false)
               ? `'rtk read --tail-lines 150 ${target}' (or '--head-lines 150')`
@@ -5170,7 +5195,7 @@ try {
           decision: "deny",
           reason: hasRtkForTask
             ? `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run ${taskCmd} via run_command instead.`
-            : `Antigravity Governance: Native file inspection via '${toolName}' on completed task logs is denied. Run ${taskCmd} via run_command instead.`
+            : `Antigravity Governance: Unbounded inspection of completed task logs via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'read_file' or run ${taskCmd} via run_command instead.`
         });
       }
       respond({
@@ -5197,10 +5222,12 @@ try {
     if (toolName === "read_file" || toolName === "view_file") {
       const getDiscoveryGuidance = () => {
         const { rtk, rgAvailable } = resolveCachedHostEnv();
-        const searchHint = rtk
-          ? (rgAvailable ? "rtk rg" : "rtk grep -rnE")
-          : (rgAvailable ? "rg" : "grep -rnE");
-        return `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
+        if (rtk) {
+          const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rnE";
+          return `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
+        }
+        const shellSearchHint = rgAvailable ? "rg" : "grep -rnE";
+        return `Locate the target symbol, heading, or config key first with 'grep_search' (or '${shellSearchHint}' via run_command) and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
       };
 
       if (hasByteOffset && !hasSliceParams) {

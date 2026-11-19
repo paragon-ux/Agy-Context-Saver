@@ -190,6 +190,32 @@ console.log("\n--- 5. Windows rtk.cmd Shim Resolution (`ACS-R2-SCRIPT-001`) ---"
     assert.equal(localCmdWrapped, true, "Local rtk.cmd must execute via cmd.exe /d /s /c wrapper");
     assert.equal(winLocalHit?.path, fakeLocalCmd);
     assert.equal(winLocalHit?.isLocal, true);
+
+    // UX-ACS-R2-001: Managed rtk.cmd shim in ~/.gemini/antigravity/bin on PATH must resolve as local plugin RTK, never `{ path: "rtk", isLocal: false }`
+    const managedShimDir = path.join(localCmdProfile, ".gemini", "antigravity", "bin");
+    fs.mkdirSync(managedShimDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(managedShimDir, "rtk.cmd"),
+      "@echo off\r\nREM agy-context-saver-managed\r\n\"C:\\fake\\rtk.exe\" %*\r\n",
+      "utf-8"
+    );
+    const managedStubExec = (cmd, args) => {
+      if (cmd === "rtk" || (/cmd\.exe$/i.test(cmd) && args[3] === "\"rtk --version\"")) {
+        throw new Error("findExistingRtk must not treat managed ~/.gemini/antigravity/bin/rtk.cmd as external PATH rtk");
+      }
+      if (/cmd\.exe$/i.test(cmd) && args[3].includes("rtk.cmd\" --version")) {
+        return "rtk 1.1.0 (local-managed-target)\n";
+      }
+      throw new Error(`Unexpected exec call: ${cmd} ${args.join(" ")}`);
+    };
+    const winManagedHit = findExistingRtk({
+      platform: "win32",
+      pathEnv: `${managedShimDir};C:\\Windows\\System32`,
+      execFileSync: managedStubExec,
+      silent: true
+    });
+    assert.equal(winManagedHit?.path, fakeLocalCmd);
+    assert.equal(winManagedHit?.isLocal, true, "Managed rtk.cmd on PATH must return local plugin binary with isLocal: true (UX-ACS-R2-001)");
   } finally {
     if (origProfile === undefined) delete process.env.AGY_TEST_PROFILE_DIR;
     else process.env.AGY_TEST_PROFILE_DIR = origProfile;

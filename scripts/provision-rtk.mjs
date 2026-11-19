@@ -12,6 +12,7 @@ const binDir = path.join(repoRoot, "bin");
 export const RTK_VERSION = "v1.1.0";
 export const MIN_RTK_VERSION = "1.1.0";
 export const MIN_COMPATIBLE_RTK_VERSION = MIN_RTK_VERSION;
+export const MANAGED_SHIM_MARKER = "agy-context-saver-managed";
 
 export function quotePowerShellSingle(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
@@ -116,13 +117,136 @@ export function verifyLocalRtkBinary(binPath, options = {}) {
   }
 }
 
+function isManagedRtkShimFile(filePath) {
+  try {
+    const st = fs.lstatSync(filePath);
+    if (!st.isFile() || st.isSymbolicLink() || st.size > 4096) return false;
+    return fs.readFileSync(filePath, "utf-8").includes(MANAGED_SHIM_MARKER);
+  } catch {
+    return false;
+  }
+}
+
+function normalizePathDir(dirPath, platform) {
+  if (!dirPath || typeof dirPath !== "string") return "";
+  let trimmed = dirPath.trim().replace(/^"(.*)"$/, "$1");
+  if (!trimmed) return "";
+  if (trimmed === "~") {
+    trimmed = os.homedir();
+  } else if (/^~[\\/]/.test(trimmed)) {
+    trimmed = path.join(os.homedir(), trimmed.slice(2));
+  }
+  const resolved = path.resolve(trimmed);
+  const root = path.parse(resolved).root;
+  let normalized = resolved === root ? resolved : resolved.replace(/[\\/]+$/, "");
+  if (platform === "win32" || platform === "darwin") {
+    normalized = normalized.toLowerCase();
+  }
+  return normalized;
+}
+
+function isSameDir(dirA, dirB, platform) {
+  const normA = normalizePathDir(dirA, platform);
+  const normB = normalizePathDir(dirB, platform);
+  if (!normA || !normB) return false;
+  if (normA === normB) return true;
+  try {
+    const realA = normalizePathDir(fs.realpathSync(dirA), platform);
+    const realB = normalizePathDir(fs.realpathSync(dirB), platform);
+    return Boolean(realA && realB && realA === realB);
+  } catch {
+    return false;
+  }
+}
+
+function scanPathForRtk({ platform, pathEnv, antigravityBinDir }) {
+  const delim = platform === "win32" ? ";" : ":";
+  const exts = platform === "win32" ? [".exe", ".cmd", ".bat"] : [""];
+  let firstHit = null;
+  let firstExternalHit = null;
+
+  for (const rawEntry of String(pathEnv || "").split(delim)) {
+    let dir = rawEntry.trim().replace(/^"(.*)"$/, "$1");
+    if (!dir) continue;
+    if (dir === "~") {
+      dir = os.homedir();
+    } else if (/^~[\\/]/.test(dir)) {
+      dir = path.join(os.homedir(), dir.slice(2));
+    }
+    const isManagedDir = isSameDir(dir, antigravityBinDir, platform);
+    for (const ext of exts) {
+      const candidate = path.join(dir, `rtk${ext}`);
+      try {
+        const st = fs.statSync(candidate);
+        if (!st.isFile()) continue;
+        if (platform !== "win32") {
+          fs.accessSync(candidate, fs.constants.X_OK);
+        }
+        const isManaged = isManagedDir && isManagedRtkShimFile(candidate);
+        if (!firstHit) {
+          firstHit = { path: candidate, isManaged };
+        }
+        if (!isManaged && !firstExternalHit) {
+          firstExternalHit = candidate;
+        }
+        break;
+      } catch {}
+    }
+    if (firstHit && firstExternalHit) break;
+  }
+
+  return { firstHit, firstExternalHit };
+}
+
 export function findExistingRtk(options = {}) {
   const platform = options.platform || os.platform();
   const execFileSyncFn = options.execFileSync || execFileSync;
+  const pathEnv = options.pathEnv ?? (process.env.PATH || process.env.Path || "");
   const names = platform === "win32" ? ["rtk.exe", "rtk.cmd"] : ["rtk"];
   const profileHome = process.env.AGY_TEST_PROFILE_DIR || os.homedir();
   const pluginBinDir = path.join(profileHome, ".gemini", "config", "plugins", "agy-context-saver", "bin");
+  const antigravityBinDir = path.join(profileHome, ".gemini", "antigravity", "bin");
   const candidateDirs = process.env.AGY_TEST_PROFILE_DIR ? [pluginBinDir] : [binDir, pluginBinDir];
+
+  const findLocalRtk = () => {
+    for (const dir of candidateDirs) {
+      for (const exeName of names) {
+        const localExe = path.join(dir, exeName);
+        if (fs.existsSync(localExe)) {
+          try {
+            const out = runRtkVersionSync(localExe, { platform, execFileSyncFn });
+            if (isCompatibleRtkVersion(out)) {
+              return { path: localExe, version: out, isLocal: true };
+            }
+          } catch {}
+        }
+      }
+    }
+    return null;
+  };
+
+  // Detect whether the first `rtk` on PATH is our own managed shim in ~/.gemini/antigravity/bin.
+  // Never misclassify our managed shim as an external system rtk (`isLocal: false`), or copy-mode
+  // npx upgrades will drop pluginDest/bin/rtk and leave a dangling shim.
+  const { firstHit, firstExternalHit } = scanPathForRtk({ platform, pathEnv, antigravityBinDir });
+  if (firstHit?.isManaged) {
+    const localHit = findLocalRtk();
+    if (localHit) {
+      return localHit;
+    }
+    if (firstExternalHit) {
+      try {
+        const out = runRtkVersionSync(firstExternalHit, { platform, execFileSyncFn });
+        if (isCompatibleRtkVersion(out)) {
+          return { path: firstExternalHit, version: out, isLocal: false };
+        }
+        if (!options.silent) {
+          console.warn(`[WARN] System RTK version '${out}' is below minimum supported version >=${MIN_RTK_VERSION}. Local or manual ${RTK_VERSION} installation is required.`);
+        }
+      } catch {}
+    }
+    return null;
+  }
 
   // Check PATH first so a system rtk >= 1.1.0 is preferred over bundled binaries
   try {
@@ -135,21 +259,7 @@ export function findExistingRtk(options = {}) {
     }
   } catch {}
 
-  for (const dir of candidateDirs) {
-    for (const exeName of names) {
-      const localExe = path.join(dir, exeName);
-      if (fs.existsSync(localExe)) {
-        try {
-          const out = runRtkVersionSync(localExe, { platform, execFileSyncFn });
-          if (isCompatibleRtkVersion(out)) {
-            return { path: localExe, version: out, isLocal: true };
-          }
-        } catch {}
-      }
-    }
-  }
-
-  return null;
+  return findLocalRtk();
 }
 
 export async function ensureRtkInstalled(options = {}) {

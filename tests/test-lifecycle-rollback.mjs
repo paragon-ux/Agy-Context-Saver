@@ -289,10 +289,10 @@ try {
         fs.chmodSync(p, 0o755);
         return p;
       };
-      const runCopySetup = (env) =>
+      const runCopySetup = (env, extraOpts = "") =>
         spawnSync(
           process.execPath,
-          ["--input-type=module", "-e", `import { runInstall } from ${JSON.stringify(new URL("../scripts/install-register.mjs", import.meta.url).href)}; await runInstall({ forceCopyFallback: true });`],
+          ["--input-type=module", "-e", `import { runInstall } from ${JSON.stringify(new URL("../scripts/install-register.mjs", import.meta.url).href)}; await runInstall({ forceCopyFallback: true${extraOpts ? `, ${extraOpts}` : ""} });`],
           { env, encoding: "utf-8" }
         );
 
@@ -353,6 +353,41 @@ try {
       assert.equal(statusOnPath.stdout.includes("[NOT ON PATH]"), false);
       assert.equal(statusOnPath.stdout.includes("CLI bin directory is not on your PATH"), false);
 
+      // UX-ACS-R2-001: Second copy-mode setup/upgrade WITH uxBinDir on PATH must preserve pluginDest/bin/rtk
+      // and keep the managed shim executable & status HEALTHY
+      const pluginLocalRtk = path.join(uxPluginBin, process.platform === "win32" ? "rtk.cmd" : "rtk");
+      const setupOnPathUpgrade = runCopySetup(onPathEnv);
+      assert.equal(setupOnPathUpgrade.status, 0, setupOnPathUpgrade.stderr || setupOnPathUpgrade.stdout);
+      assert.equal(
+        fs.existsSync(pluginLocalRtk),
+        true,
+        "Copy-mode re-install/upgrade with managed rtk shim on PATH must preserve pluginDest/bin/rtk (UX-ACS-R2-001)"
+      );
+      assert.equal(isManagedAgyShimFile(managedRtkShim), true, "Managed rtk shim must remain intact after on-PATH upgrade");
+      const upgradedShimRun =
+        process.platform === "win32"
+          ? spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"\"${managedRtkShim}\" --version"`], {
+              env: emptyPathEnv,
+              encoding: "utf-8",
+              windowsVerbatimArguments: true
+            })
+          : spawnSync(managedRtkShim, ["--version"], { env: emptyPathEnv, encoding: "utf-8" });
+      assert.equal(upgradedShimRun.status, 0, `Managed rtk shim failed after on-PATH upgrade: ${upgradedShimRun.stderr}`);
+      assert.match(upgradedShimRun.stdout, /rtk 1\.1\.0/);
+
+      const statusAfterUpgradeJson = spawnSync(process.execPath, [installScriptPath, "--status", "--json"], {
+        env: onPathEnv,
+        encoding: "utf-8"
+      });
+      assert.equal(statusAfterUpgradeJson.status, 0, statusAfterUpgradeJson.stderr || statusAfterUpgradeJson.stdout);
+      const parsedAfterUpgrade = JSON.parse(statusAfterUpgradeJson.stdout);
+      assert.equal(parsedAfterUpgrade.isComplete, true, "status --json must remain isComplete === true after on-PATH copy upgrade");
+      assert.equal(parsedAfterUpgrade.details.rtk?.isLocal, true, "Managed rtk shim on PATH must resolve as local plugin RTK");
+      assert.ok(
+        path.resolve(parsedAfterUpgrade.details.rtk?.path || "").startsWith(path.resolve(uxPluginBin) + path.sep),
+        `Expected local pluginDest/bin rtk path, got: ${parsedAfterUpgrade.details.rtk?.path}`
+      );
+
       // UX-ACS-013: Partial installation prints Next step hint in non-JSON mode
       fs.unlinkSync(path.join(uxConfigDir, "scripts", "execution-guard-hook.mjs"));
       const partialStatus = spawnSync(process.execPath, [installScriptPath, "--status"], {
@@ -371,6 +406,69 @@ try {
       assert.equal(uninstallManaged.status, 0, uninstallManaged.stderr || uninstallManaged.stdout);
       assert.equal(fs.existsSync(managedRtkShim), false, "Uninstall must remove Agy-managed rtk shim");
 
+      // UX-ACS-R2-001: Stale/dangling managed rtk shim cleanup when transitioning to --allow-degraded or external system rtk
+      {
+        // Case A: Transition to --allow-degraded when pluginDest/bin/rtk is gone removes dangling managed shim
+        writeStandaloneFakeRtk(uxPluginBin);
+        const seedRes = runCopySetup(emptyPathEnv);
+        assert.equal(seedRes.status, 0, seedRes.stderr || seedRes.stdout);
+        assert.equal(isManagedAgyShimFile(managedRtkShim), true);
+        fs.unlinkSync(pluginLocalRtk);
+        const degradedOnlyShimEnv = { ...emptyPathEnv, PATH: uxBinDir };
+        if (process.platform === "win32") degradedOnlyShimEnv.Path = uxBinDir;
+        const degradedCleanupRes = runCopySetup(degradedOnlyShimEnv, "allowDegraded: true");
+        assert.equal(degradedCleanupRes.status, 0, degradedCleanupRes.stderr || degradedCleanupRes.stdout);
+        assert.equal(
+          fs.existsSync(managedRtkShim),
+          false,
+          "Stale/dangling managed rtk shim must be removed on --allow-degraded when no local RTK binary exists (UX-ACS-R2-001)"
+        );
+
+        // Case B: Transition to external system rtk later on PATH removes dangling managed shim and resolves system rtk
+        writeStandaloneFakeRtk(uxPluginBin);
+        const seedSysRes = runCopySetup(emptyPathEnv);
+        assert.equal(seedSysRes.status, 0, seedSysRes.stderr || seedSysRes.stdout);
+        assert.equal(isManagedAgyShimFile(managedRtkShim), true);
+        fs.unlinkSync(pluginLocalRtk);
+
+        const sysRtkDir = path.join(uxProfile, "system-rtk-bin");
+        fs.mkdirSync(sysRtkDir, { recursive: true });
+        if (process.platform === "win32") {
+          fs.writeFileSync(path.join(sysRtkDir, "rtk.cmd"), "@echo off\r\necho rtk 1.2.0\r\n", "utf-8");
+        } else {
+          const sysRtk = path.join(sysRtkDir, "rtk");
+          fs.writeFileSync(sysRtk, '#!/bin/sh\necho "rtk 1.2.0"\n', "utf-8");
+          fs.chmodSync(sysRtk, 0o755);
+        }
+        const sysTransitionEnv = {
+          ...emptyPathEnv,
+          PATH: `${uxBinDir}${path.delimiter}${sysRtkDir}${path.delimiter}${emptyPathEnv.PATH}`
+        };
+        if (process.platform === "win32") sysTransitionEnv.Path = sysTransitionEnv.PATH;
+        const sysTransitionRes = runCopySetup(sysTransitionEnv);
+        assert.equal(sysTransitionRes.status, 0, sysTransitionRes.stderr || sysTransitionRes.stdout);
+        assert.equal(
+          fs.existsSync(managedRtkShim),
+          false,
+          "Stale/dangling managed rtk shim must be removed when transitioning to an external system rtk on PATH (UX-ACS-R2-001)"
+        );
+        const statusSysJson = spawnSync(process.execPath, [installScriptPath, "--status", "--json"], {
+          env: sysTransitionEnv,
+          encoding: "utf-8"
+        });
+        assert.equal(statusSysJson.status, 0, statusSysJson.stderr || statusSysJson.stdout);
+        const parsedSys = JSON.parse(statusSysJson.stdout);
+        assert.equal(parsedSys.isComplete, true);
+        assert.equal(parsedSys.details.rtk?.isLocal, false);
+        assert.match(parsedSys.details.rtk?.version || "", /1\.2\.0/);
+
+        const uninstallAfterSys = spawnSync(process.execPath, [installScriptPath, "--uninstall"], {
+          env: emptyPathEnv,
+          encoding: "utf-8"
+        });
+        assert.equal(uninstallAfterSys.status, 0, uninstallAfterSys.stderr || uninstallAfterSys.stdout);
+      }
+
       // UX-ACS-001: Pre-existing unmanaged user rtk binary in antigravityBinDir must NEVER be overwritten or deleted
       fs.mkdirSync(uxBinDir, { recursive: true });
       const userRtkBody = process.platform === "win32"
@@ -382,6 +480,12 @@ try {
       const setupPreserveUserRtk = runCopySetup(emptyPathEnv);
       assert.equal(setupPreserveUserRtk.status, 0, setupPreserveUserRtk.stderr || setupPreserveUserRtk.stdout);
       assert.equal(fs.readFileSync(managedRtkShim, "utf-8"), userRtkBody, "Setup must never overwrite an unmanaged user rtk binary");
+
+      // Unmanaged user rtk must also survive --allow-degraded when no local pluginDest/bin/rtk exists
+      if (fs.existsSync(pluginLocalRtk)) fs.unlinkSync(pluginLocalRtk);
+      const degradedPreserveUserRtk = runCopySetup({ ...emptyPathEnv, PATH: path.dirname(process.execPath) }, "allowDegraded: true");
+      assert.equal(degradedPreserveUserRtk.status, 0, degradedPreserveUserRtk.stderr || degradedPreserveUserRtk.stdout);
+      assert.equal(fs.readFileSync(managedRtkShim, "utf-8"), userRtkBody, "Stale-shim cleanup must NEVER remove an unmanaged user rtk binary");
 
       const uninstallPreserveUserRtk = spawnSync(process.execPath, [installScriptPath, "--uninstall"], {
         env: emptyPathEnv,

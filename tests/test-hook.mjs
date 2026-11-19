@@ -2217,13 +2217,14 @@ console.log("\n--- Group J: Launch UX Day-One Regressions (Local RTK, Degraded M
       "deny"
     );
 
-    // Unbounded read_file still denied, but guidance omits rtk
+    // Unbounded read_file still denied, but guidance omits rtk and recommends native grep_search first (UX-ACS-R2-002)
     const degradedReadDeny = runHook(
       { toolCall: { name: "read_file", args: { Path: path.join(repoRoot, "scripts", "execution-guard-hook.mjs") } } },
       degradedEnv
     );
     assert.equal(degradedReadDeny.decision, "deny");
     assert.equal(degradedReadDeny.reason.includes("rtk "), false, "Degraded read_file guidance must not mention missing rtk");
+    assert.match(degradedReadDeny.reason, /'grep_search'/, "Degraded read_file guidance must recommend native grep_search first (UX-ACS-R2-002)");
     assert.match(degradedReadDeny.reason, /grep -rnE|rg/);
 
     const degradedReadMany = runHook(
@@ -2277,11 +2278,13 @@ console.log("\n--- Group J: Launch UX Day-One Regressions (Local RTK, Degraded M
       offPathEnv
     );
     assert.equal(shimRes.decision, "allow");
-    const expectedShimToken = process.platform === "win32" ? shimFile : shimFile.replace(/\\/g, "/");
+    const expectedRewriteCmd = process.platform === "win32"
+      ? `node "${pluginCliFile.replace(/\\/g, "/")}" transcript health`
+      : `${shimFile.replace(/\\/g, "/")} transcript health`;
     assert.equal(
       shimRes.overwrite?.CommandLine,
-      `${expectedShimToken} transcript health`,
-      "Bare agy-context off PATH must rewrite to installed shim"
+      expectedRewriteCmd,
+      "Bare agy-context off PATH must rewrite to installed CLI (node <pluginCli> on win32, shim on POSIX)"
     );
 
     // When agyBinDir IS on PATH, no rewrite is needed
@@ -2292,6 +2295,18 @@ console.log("\n--- Group J: Launch UX Day-One Regressions (Local RTK, Degraded M
     );
     assert.equal(onPathRes.decision, "allow");
     assert.equal(onPathRes.overwrite?.CommandLine, undefined, "Bare agy-context on PATH must pass through unrewritten");
+
+    // On Windows, falling back to shimFile still works when pluginCli is absent
+    if (process.platform === "win32") {
+      fs.unlinkSync(pluginCliFile);
+      const winShimFallbackRes = runHook(
+        { toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript health", WaitMsBeforeAsync: 5000 } } },
+        offPathEnv
+      );
+      assert.equal(winShimFallbackRes.decision, "allow");
+      assert.equal(winShimFallbackRes.overwrite?.CommandLine, `${shimFile} transcript health`);
+      fs.writeFileSync(pluginCliFile, "// stub\n", "utf-8");
+    }
 
     // When shim is absent, fall back to `node "<pluginDest>/bin/agy-context.mjs"`
     fs.unlinkSync(shimFile);
@@ -2305,7 +2320,82 @@ console.log("\n--- Group J: Launch UX Day-One Regressions (Local RTK, Degraded M
       `node "${pluginCliFile.replace(/\\/g, "/")}" transcript read --last-turns 2`,
       "Missing shim must fall back to node <pluginDest>/bin/agy-context.mjs"
     );
-    console.log("✓ UX-ACS-003: Bare agy-context rewrites to installed shim / plugin CLI fallback when absent from PATH");
+
+    // UX-ACS-R2-003: Spaced user profile directory (`Jane Doe Profile`) rewrites cleanly and executes without PowerShell leading-quote breakage
+    const spacedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agy-ux-spaced-root-"));
+    try {
+      const spacedProfile = path.join(spacedRoot, "Jane Doe Profile");
+      const spacedEmptyBin = path.join(spacedRoot, "empty-bin");
+      const spacedBinDir = path.join(spacedProfile, ".gemini", "antigravity", "bin");
+      const spacedPluginBin = path.join(spacedProfile, ".gemini", "config", "plugins", "agy-context-saver", "bin");
+      fs.mkdirSync(spacedEmptyBin, { recursive: true });
+      fs.mkdirSync(spacedBinDir, { recursive: true });
+      fs.mkdirSync(spacedPluginBin, { recursive: true });
+      const spacedShim = path.join(spacedBinDir, process.platform === "win32" ? "agy-context.cmd" : "agy-context");
+      fs.writeFileSync(spacedShim, process.platform === "win32" ? "@echo off\r\necho ok-shim\r\n" : "#!/bin/sh\necho ok-shim\n", "utf-8");
+      if (process.platform !== "win32") fs.chmodSync(spacedShim, 0o755);
+      const spacedPluginCli = path.join(spacedPluginBin, "agy-context.mjs");
+      fs.writeFileSync(spacedPluginCli, 'console.log("ok-plugin-cli");\n', "utf-8");
+
+      const spacedOffPathEnv = withEnvPath(spacedEmptyBin, { ...process.env, AGY_TEST_PROFILE_DIR: spacedProfile });
+      const spacedRes = runHook(
+        { toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript health", WaitMsBeforeAsync: 5000 } } },
+        spacedOffPathEnv
+      );
+      assert.equal(spacedRes.decision, "allow");
+      if (process.platform === "win32") {
+        assert.equal(
+          spacedRes.overwrite?.CommandLine,
+          `node "${spacedPluginCli.replace(/\\/g, "/")}" transcript health`,
+          "Windows spaced profile dir must rewrite bare agy-context to bare `node \"<pluginCli>\"` (UX-ACS-R2-003)"
+        );
+        assert.equal(
+          spacedRes.overwrite?.CommandLine.startsWith('"'),
+          false,
+          "Windows rewrite must never emit a leading double-quoted .cmd path that fails PowerShell parsing (UX-ACS-R2-003)"
+        );
+        const psEnv = { ...process.env };
+        prependToPath(path.dirname(process.execPath), psEnv);
+        const psRun = spawnSync("powershell", ["-NoProfile", "-Command", spacedRes.overwrite.CommandLine], {
+          env: psEnv,
+          encoding: "utf-8"
+        });
+        assert.equal(psRun.status, 0, `PowerShell execution of rewritten spaced command failed: ${psRun.stderr}`);
+        assert.match(psRun.stdout, /ok-plugin-cli/);
+      } else {
+        assert.equal(
+          spacedRes.overwrite?.CommandLine,
+          `"${spacedShim.replace(/\\/g, "/")}" transcript health`,
+          "POSIX spaced profile dir must properly quote shim path"
+        );
+        const shRun = spawnSync("/bin/sh", ["-c", spacedRes.overwrite.CommandLine], { encoding: "utf-8" });
+        assert.equal(shRun.status, 0, `POSIX shell execution of rewritten spaced command failed: ${shRun.stderr}`);
+        assert.match(shRun.stdout, /ok-shim/);
+
+        // Also verify node "<pluginCli>" fallback executes cleanly with spaces in profile path
+        fs.unlinkSync(spacedShim);
+        const spacedFallbackRes = runHook(
+          { toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript read --last-turns 2", WaitMsBeforeAsync: 5000 } } },
+          spacedOffPathEnv
+        );
+        assert.equal(spacedFallbackRes.decision, "allow");
+        assert.equal(
+          spacedFallbackRes.overwrite?.CommandLine,
+          `node "${spacedPluginCli.replace(/\\/g, "/")}" transcript read --last-turns 2`
+        );
+        const nodeEnv = { ...process.env };
+        prependToPath(path.dirname(process.execPath), nodeEnv);
+        const nodeRun = spawnSync("/bin/sh", ["-c", spacedFallbackRes.overwrite.CommandLine], {
+          env: nodeEnv,
+          encoding: "utf-8"
+        });
+        assert.equal(nodeRun.status, 0, `POSIX shell execution of node "<pluginCli>" failed: ${nodeRun.stderr}`);
+        assert.match(nodeRun.stdout, /ok-plugin-cli/);
+      }
+    } finally {
+      fs.rmSync(spacedRoot, { recursive: true, force: true });
+    }
+    console.log("✓ UX-ACS-003 / UX-ACS-R2-003: Bare agy-context rewrites cleanly off PATH (including spaced profile dirs)");
   } finally {
     fs.rmSync(agyShimProfile, { recursive: true, force: true });
   }

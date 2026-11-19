@@ -16,7 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureRtkInstalled, findExistingRtk, verifyLocalRtkBinary } from "./provision-rtk.mjs";
+import { ensureRtkInstalled, findExistingRtk, MANAGED_SHIM_MARKER, verifyLocalRtkBinary } from "./provision-rtk.mjs";
 import { getStateDir, removeLegacyTmpState } from "./state-dir.mjs";
 import { formatTranscriptAccessStatus } from "../lib/transcript-core.mjs";
 
@@ -74,7 +74,6 @@ const repoHooksJsonPath = path.join(repoRoot, "hooks.json");
 const HOOK_KEY = "agy-context-saver";
 const LEGACY_HOOK_KEY = "execution-guard";
 const CLI_SHIM_NAMES = ["agy-context", "agy-context-saver"];
-const MANAGED_SHIM_MARKER = "agy-context-saver-managed";
 const DEFAULT_HOOK_MATCHER =
   "manage_task|schedule|run_command|view_file|read_file|read_many_files|grep_search|find_by_name|list_dir|replace_file_content|write_file|write_to_file|edit_file";
 
@@ -666,10 +665,27 @@ export function formatManagedRtkShims(targetRtkPath) {
 }
 
 async function installManagedRtkShim({ log, rtkResult }) {
-  if (!rtkResult) return { installed: false };
   const { pluginDest, antigravityBinDir } = resolveProfilePaths();
   const isWin = os.platform() === "win32";
   const exeNames = isWin ? ["rtk.exe", "rtk.cmd"] : ["rtk"];
+  const posixShimPath = path.join(antigravityBinDir, "rtk");
+  const winShimPath = path.join(antigravityBinDir, "rtk.cmd");
+
+  const removeStaleManagedRtkShims = async () => {
+    let removed = false;
+    for (const shimPath of [posixShimPath, winShimPath]) {
+      if (isManagedAgyShimFile(shimPath)) {
+        try {
+          await fsPromises.unlink(shimPath);
+          log(`[OK] Removed stale managed RTK shim: ${shimPath}`);
+          removed = true;
+        } catch (err) {
+          if (err.code !== "ENOENT") throw err;
+        }
+      }
+    }
+    return removed;
+  };
 
   let localRtkTarget = "";
   for (const name of exeNames) {
@@ -679,13 +695,14 @@ async function installManagedRtkShim({ log, rtkResult }) {
       break;
     }
   }
-  if (!localRtkTarget && rtkResult.isLocal && rtkResult.path && verifyLocalRtkBinary(rtkResult.path)) {
+  if (!localRtkTarget && rtkResult?.isLocal && rtkResult.path && verifyLocalRtkBinary(rtkResult.path)) {
     localRtkTarget = rtkResult.path;
   }
-  if (!localRtkTarget) return { installed: false };
+  if (!rtkResult || !localRtkTarget) {
+    const removed = await removeStaleManagedRtkShims();
+    return { installed: false, removed };
+  }
 
-  const posixShimPath = path.join(antigravityBinDir, "rtk");
-  const winShimPath = path.join(antigravityBinDir, "rtk.cmd");
   const hasExistingManagedShim = isManagedAgyShimFile(posixShimPath) || isManagedAgyShimFile(winShimPath);
 
   // Only install/refresh a managed rtk shim when no compatible external rtk was found on PATH
@@ -939,17 +956,20 @@ export async function runInstall(options = {}) {
     pluginLst && !installedSource &&
     (!pluginExists || isTempOrNpx || options.forceCopyFallback || !pluginLst.isSymbolicLink() || pluginPointsElsewhere)
   ) {
-    if (rtkResult?.isLocal && rtkResult.path && !pluginLst.isSymbolicLink()) {
-      const normRtk = path.resolve(rtkResult.path);
-      const normPluginBin = path.resolve(pluginDest, "bin") + path.sep;
-      if (normRtk.startsWith(normPluginBin) && fs.existsSync(normRtk)) {
-        try {
-          preservedPluginRtk = {
-            name: path.basename(normRtk),
-            data: await fsPromises.readFile(normRtk),
-            mode: fs.statSync(normRtk).mode
-          };
-        } catch {}
+    if (!pluginLst.isSymbolicLink()) {
+      const candidateNames = os.platform() === "win32" ? ["rtk.exe", "rtk.cmd", "rtk"] : ["rtk", "rtk.exe", "rtk.cmd"];
+      for (const candidateName of candidateNames) {
+        const candidatePath = path.join(pluginDest, "bin", candidateName);
+        if (verifyLocalRtkBinary(candidatePath)) {
+          try {
+            preservedPluginRtk = {
+              name: candidateName,
+              data: await fsPromises.readFile(candidatePath),
+              mode: fs.statSync(candidatePath).mode
+            };
+            break;
+          } catch {}
+        }
       }
     }
     if (pluginLst.isSymbolicLink()) {

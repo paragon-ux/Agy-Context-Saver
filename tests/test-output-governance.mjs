@@ -592,6 +592,50 @@ try {
       assert.equal(degradedRfDone.decision, "deny");
       assert.equal(degradedRfDone.reason.includes("rtk read"), false, "Degraded read_file denial must not recommend rtk read");
       assert.match(degradedRfDone.reason, /tail -n 150/);
+      assert.match(degradedRfDone.reason, /bounded slice.*read_file/i, "Degraded unbounded read_file denial must recommend bounded read_file (UX-ACS-R2-002)");
+
+      // UX-ACS-R2-002: Degraded mode allows bounded read_file (<= 150 lines) on COMPLETED task logs (Windows ARM64 safe harbor)
+      // while strictly denying oversized slices (> 150 lines), RUNNING logs, and UNKNOWN logs
+      const degradedRfBoundedDone = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "read_file", args: { Path: legacyLog, StartLine: 1, EndLine: 150 } }
+      });
+      assert.equal(
+        degradedRfBoundedDone.decision,
+        "allow",
+        "Degraded mode must allow bounded read_file (<= 150 lines) on completed task log (UX-ACS-R2-002)"
+      );
+
+      const degradedRfOversizedDone = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "read_file", args: { Path: legacyLog, StartLine: 1, EndLine: 200 } }
+      });
+      assert.equal(
+        degradedRfOversizedDone.decision,
+        "deny",
+        "Degraded mode must deny read_file slices > 150 lines on completed task log (UX-ACS-R2-002)"
+      );
+
+      const degradedRfRunning = invokeDegraded({
+        conversationId: customConv,
+        toolCall: { name: "read_file", args: { Path: path.join(customDir, "tasks", "custom.log"), StartLine: 1, EndLine: 150 } }
+      });
+      assert.equal(
+        degradedRfRunning.decision,
+        "deny",
+        "Degraded mode must strictly deny bounded read_file on RUNNING task logs (UX-ACS-R2-002)"
+      );
+      assert.match(degradedRfRunning.reason, /actively RUNNING/);
+
+      const degradedRfUnknown = invokeDegraded({
+        conversationId: convLive,
+        toolCall: { name: "read_file", args: { Path: path.join(convDir, "tasks", "task-missing-unknown.log"), StartLine: 1, EndLine: 150 } }
+      });
+      assert.equal(
+        degradedRfUnknown.decision,
+        "deny",
+        "Degraded mode must strictly deny bounded read_file on UNKNOWN task logs (UX-ACS-R2-002)"
+      );
 
       const degradedTranscript = invokeDegraded({
         conversationId: convLive,
