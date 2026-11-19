@@ -235,6 +235,7 @@ Checking Agy-Context-Saver installation status...
 - CLI Shim (agy-context): INSTALLED (~/.gemini/antigravity/bin)
 - RTK Command Optimizer (>= 1.1.0): INSTALLED (rtk 1.1.0)
 - MCP Cleanup: CLEAN (0 duplicate MCP configs/schemas)
+- Plugin Enabled (config.json): ENABLED
 - Transcript Access Policy: OPEN (default)   # or OPEN (parent CLI policy) | Recent launch-restricted children: ... when Tier 4 child locks are active
 Overall Status: HEALTHY & ACTIVE
 ```

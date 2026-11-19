@@ -956,7 +956,7 @@ export async function runInstall(options = {}) {
     pluginLst && !installedSource &&
     (!pluginExists || isTempOrNpx || options.forceCopyFallback || !pluginLst.isSymbolicLink() || pluginPointsElsewhere)
   ) {
-    if (!pluginLst.isSymbolicLink()) {
+    if (pluginExists) {
       const candidateNames = os.platform() === "win32" ? ["rtk.exe", "rtk.cmd", "rtk"] : ["rtk", "rtk.exe", "rtk.cmd"];
       for (const candidateName of candidateNames) {
         const candidatePath = path.join(pluginDest, "bin", candidateName);

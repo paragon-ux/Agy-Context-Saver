@@ -467,6 +467,35 @@ try {
           encoding: "utf-8"
         });
         assert.equal(uninstallAfterSys.status, 0, uninstallAfterSys.stderr || uninstallAfterSys.stdout);
+
+        // Case C: Migrating directly from a local git-clone symlink (with bin/rtk) to copy mode preserves local RTK on first run
+        const uxPluginDest = path.dirname(uxPluginBin);
+        const fakeCloneRoot = path.join(uxProfile, "fake-clone-checkout");
+        writeStandaloneFakeRtk(path.join(fakeCloneRoot, "bin"));
+        fs.mkdirSync(path.dirname(uxPluginDest), { recursive: true });
+        let symlinkSeeded = false;
+        try {
+          fs.symlinkSync(fakeCloneRoot, uxPluginDest, process.platform === "win32" ? "junction" : "dir");
+          symlinkSeeded = true;
+        } catch (err) {
+          if (err?.code !== "EPERM") throw err;
+        }
+        if (symlinkSeeded) {
+          const symlinkToCopyRes = runCopySetup(emptyPathEnv);
+          assert.equal(symlinkToCopyRes.status, 0, symlinkToCopyRes.stderr || symlinkToCopyRes.stdout);
+          assert.equal(fs.lstatSync(uxPluginDest).isSymbolicLink(), false, "Copy setup must replace symlink with a standalone copy");
+          assert.equal(
+            fs.existsSync(pluginLocalRtk),
+            true,
+            "Symlink-to-copy migration must carry over previously bundled local bin/rtk on first run"
+          );
+          assert.equal(isManagedAgyShimFile(managedRtkShim), true);
+          const uninstallAfterSymlinkCopy = spawnSync(process.execPath, [installScriptPath, "--uninstall"], {
+            env: emptyPathEnv,
+            encoding: "utf-8"
+          });
+          assert.equal(uninstallAfterSymlinkCopy.status, 0, uninstallAfterSymlinkCopy.stderr || uninstallAfterSymlinkCopy.stdout);
+        }
       }
 
       // UX-ACS-001: Pre-existing unmanaged user rtk binary in antigravityBinDir must NEVER be overwritten or deleted
