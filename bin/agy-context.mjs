@@ -1035,7 +1035,7 @@ async function handleTranscriptCommand(argv) {
     emitTranscriptResult(res, asJson, rawOut, safeOutPath, {
       label: "sanitized transcript export",
       customMessage: safeOutPath
-        ? `[OK] Exported sanitized L6 transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}`
+        ? `[OK] Exported sanitized transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}`
         : undefined,
       maxBytes: effectiveMaxChars
     });

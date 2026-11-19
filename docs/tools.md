@@ -170,13 +170,13 @@ agy-context transcript list --parent 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --line
 - **Alias:** `dump`
 - **Usage:** `agy-context transcript export [<id>] [--id <conv[,conv...]>] [--parent <id>] --sanitized [--start N] [--end N] [--limit N] [--full] [--max-chars N] [--out|--output <path>] [--file <path>] [--json]`
 
-Generates an `L6`-safe sanitized Markdown (or `--json`) summary index of executed steps and compact tool calls, omitting raw `.system_generated/` JSONL lines, `thinking` blocks, and large file bodies while redacting embedded media/base64 payloads and token strings. `--sanitized` is required; raw transcript export is prohibited. Standard stdout exports obey the `9,200`-byte inline ceiling, while `--full` or `--out` opts into the `524,288`-byte (`512 KB`) deep tier (`--max-chars` sets any custom ceiling up to `524,288` bytes, sizing Markdown and JSON independently in UTF-8 bytes and failing nonzero without overwriting existing files if metadata cannot fit).
+Generates a transcript-isolated sanitized Markdown (or `--json`) summary index of executed steps and compact tool calls, omitting raw `.system_generated/` JSONL lines, `thinking` blocks, and large file bodies while redacting embedded media/base64 payloads and token strings. `--sanitized` is required; raw transcript export is prohibited. Standard stdout exports obey the `9,200`-byte inline ceiling, while `--full` or `--out` opts into the `524,288`-byte (`512 KB`) deep tier (`--max-chars` sets any custom ceiling up to `524,288` bytes, sizing Markdown and JSON independently in UTF-8 bytes and failing nonzero without overwriting existing files if metadata cannot fit).
 
 | Flag / Argument | Value | Default | Description |
 | :--- | :---: | :---: | :--- |
 | `[<id>]` / `--id` | `<uuid[,uuid...]>` | Active / auto | One or more conversation UUIDs (positional, comma-separated, or repeatable `--id`). |
 | `--parent` | `<uuid \| current>` | `(none)` | Export sanitized summary tables for all child sessions belonging to `<uuid>`. |
-| `--sanitized` | `(none)` | Required | Explicit `L6` opt-in required on all `transcript export` calls. |
+| `--sanitized` | `(none)` | Required | Explicit sanitization opt-in required on all `transcript export` calls. |
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive `step_index` range filter. |
 | `--limit` | `<N>` | `150` (max `500`) | Maximum steps retained per exported session. |
 | `--full` | `(none)` | `false` | Opt into the deep `524,288`-byte (`512 KB`) stdout rendering tier. |

@@ -13,6 +13,10 @@ The `"files"` list in `package.json` defines the published npm package contents:
   "assets",
   "bin/agy-context.mjs",
   "docs",
+  "!docs/plans/**",
+  "!docs/plans",
+  "!docs/reviews/**",
+  "!docs/reviews",
   "lib",
   "scripts",
   "rules",
@@ -28,6 +32,7 @@ The `"files"` list in `package.json` defines the published npm package contents:
 ```
 
 Excluded from the npm tarball:
+- `docs/plans/` and `docs/reviews/` (internal maintainer architecture ledgers and review records)
 - `tests/` (unit, integration, and lifecycle test suites)
 - `zensical.toml` (docs site generator configuration)
 - Local `.gitignore`d binaries (such as `bin/rtk`), temporary files, and scratch directories
@@ -67,7 +72,7 @@ Runs all 12 test suites in isolated temporary profiles:
 ```bash
 npm run verify:package
 ```
-Runs `node tests/verify-package.mjs --self-test` and validates `npm pack --dry-run --json` against the whitelisted files in `package.json` (`35` files).
+Runs `node tests/verify-package.mjs --self-test` and validates `npm pack --dry-run --json` against the whitelisted files in `package.json` (`32` files).
 
 ### Stage 4: Documentation build
 ```bash

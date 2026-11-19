@@ -56,7 +56,7 @@ agy-context uninstall --restore-backups
 | `agy-context transcript query` (`grep`, `search`, `find`, `tools`, `outline`, `summary`) | Search compact and truncated full steps by regex, role, tool call arguments, or print a 1-line-per-step outline | `agy-context transcript grep "<pattern>" [<id>] --summary` / `agy-context transcript outline [<id>]` |
 | `agy-context transcript step` | Extract untruncated fields for a step, comma list, or range (`N..M`) | `agy-context transcript step 10..15 [<id>] --field content --tail 40` |
 | `agy-context transcript list` (`ls`) | List recent conversation transcripts in the Antigravity brain directory (supports `--parent` and `--lineage`) | `agy-context transcript ls --parent <uuid> --lineage --limit 5` |
-| `agy-context transcript export` (`dump`) | Export an L6-safe `--sanitized` transcript summary index to stdout or `--out` (`--sanitized` required) | `agy-context transcript export [<id>] --sanitized --out scratch/export.md` |
+| `agy-context transcript export` (`dump`) | Export a sanitized (`--sanitized`) transcript summary index to stdout or `--out` (`--sanitized` required) | `agy-context transcript export [<id>] --sanitized --out scratch/export.md` |
 | `agy-context transcript access` (`policy`) | View or update child subagent and `/swarm` worker transcript access | `agy-context transcript access --status` / `--off` / `--self-only` / `--allow @audit-squad*` / `--on` |
 | `agy-context status` / `setup` / `uninstall` | Audit, synchronize, or remove plugin link, hook, CLI shims, and RTK config | `agy-context status` / `agy-context setup --check` |
 

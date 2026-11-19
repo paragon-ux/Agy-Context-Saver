@@ -4373,7 +4373,7 @@ function buildInternalStateShellDenial(convId = "global") {
   if (!accessEval.allowed) {
     return (
       "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n" +
-      "- Transcript inspection ('agy-context transcript' and '.system_generated/logs/') is DISABLED for this session by parent governance (L6 Transcript Isolation). Do NOT retry transcript commands or alternative file/shell reads; proceed using only your assigned workspace files and task brief.\n" +
+      "- Transcript inspection ('agy-context transcript' and '.system_generated/logs/') is DISABLED for this session by parent governance (Parent Transcript Isolation). Do NOT retry transcript commands or alternative file/shell reads; proceed using only your assigned workspace files and task brief.\n" +
       "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
     );
   }
@@ -4396,7 +4396,7 @@ function buildInternalStateToolDenial(convId = "global") {
   if (!accessEval.allowed) {
     return (
       "Antigravity Execution Governance: Direct access to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n" +
-      "- Transcript inspection ('agy-context transcript' and '.system_generated/logs/') is DISABLED for this session by parent governance (L6 Transcript Isolation). Do NOT retry transcript commands or alternative file/shell reads; proceed using only your assigned workspace files and task brief.\n" +
+      "- Transcript inspection ('agy-context transcript' and '.system_generated/logs/') is DISABLED for this session by parent governance (Parent Transcript Isolation). Do NOT retry transcript commands or alternative file/shell reads; proceed using only your assigned workspace files and task brief.\n" +
       "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs."
     );
   }
