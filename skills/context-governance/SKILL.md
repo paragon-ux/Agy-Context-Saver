@@ -12,7 +12,7 @@ description: >-
 ## Architectural Boundary
 
 - **RTK (`>= 1.1.0`)**: Rewrites shell commands (`rtk hook antigravity`), compresses command output, provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`), reads spillovers and completed task logs (`rtk read`), and filters errors or summaries (`rtk err`, `rtk summary`).
-- **Agy-Context-Saver (`v2.1.0`)**: Enforces Reactive Wakeup backoff, bounds `read_file` slices, protects `.system_generated/` and the state directory, and exposes two-tier `agy-context transcript` (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode).
+- **Agy-Context-Saver (`v2.1.1`)**: Enforces per-task Reactive Wakeup stall-watchdog backoff, bounds `read_file` slices, protects `.system_generated/` and the state directory, and exposes two-tier `agy-context transcript` (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode).
 
 ---
 
@@ -101,11 +101,12 @@ agy-context restore-backups
 
 ## Governance Summary
 
-1. **Layer 1 (Reactive lifecycle and backoff)**:
-   - Do not busy-wait on `manage_task(Action='status')` or short polling timers; end the turn and wait for Reactive Wakeup (`<SYSTEM_MESSAGE>`).
+1. **Layer 1 (Reactive lifecycle and per-task stall-watchdog backoff)**:
+   - Do not busy-wait on `manage_task(Action='status')` or schedule short/unconditioned polling timers; end the turn and wait for Reactive Wakeup (`<SYSTEM_MESSAGE>`).
    - Do not run blocking CI watch loops (`gh pr checks --watch`, `gh run watch`) inside `run_command`; use one-shot snapshots (`gh pr checks`, `gh run list`) instead.
-   - Status checks follow exponential backoff: `min(600, round(30 * 2.5^(pollCount - 1)))`. 5 cumulative denials trigger the `force_ask` circuit breaker.
-   - For background shell tasks `> 15s`, schedule `schedule(DurationSeconds=45, TimerCondition="<convId>/task-X")` and output a Pre-Yield Status Card. Never pair `swarm_wait` or subagents with a one-shot `schedule` timer.
+   - Status checks follow per-task exponential backoff (`min(600, round(30 * 2.5^(pollCount - 1)))`, pruned on task completion so fresh tasks start at `0s`/`30s`). 5 cumulative denials trigger the `force_ask` circuit breaker.
+   - Whenever any `run_command` moves to the background, arm `schedule(DurationSeconds=45, TimerCondition="<convId>/task-X")` and output a Pre-Yield Status Card. On wakeup, inspect via `manage_task(Action='status')` for stalls, runaway loops, or unsafe output (`manage_task(Action='kill')` is always allowed at `0s`) and re-arm the next backoff-level watchdog (`75s`, `188s`, `469s`, `600s`) if still progressing. Conditioned task watchdogs `>= 15s` auto-clamp to the required floor instead of dropping monitoring; `< 15s` or unconditioned polls are denied.
+   - Never pair `/swarm` (`swarm_wait`) with a one-shot `schedule` timer (`swarm_monitor` handles stalls). Direct `invoke_subagent` launches may optionally arm a conditioned `180s-300s` stall watchdog (`TimerCondition="<subagentConvId>"`, scaling `180s -> 450s -> 600s`; `30s..179s` auto-clamp, `< 30s` or unconditioned subagent timers are denied).
 2. **Layer 2 (Shell rewriting, file slices, and transcript access)**:
    - Shell commands rewrite via `rtk hook antigravity`.
    - Workspace inspection uses `rtk grep` / `rtk find` -> bounded `read_file(StartLine, EndLine)` -> `edit_file` / `write_file`, while `rtk read` reads step spillovers and completed task logs.

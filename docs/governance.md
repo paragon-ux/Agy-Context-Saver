@@ -10,23 +10,24 @@ The `PreToolUse` hook (`agy-context-saver`, implemented in `scripts/execution-gu
 
 ### Layer 1: Reactive Lifecycle & Polling Backoff
 
-#### 1. Exponential Backoff on Task Status Checks
-Instead of polling `manage_task(Action='status')` in loops, agents yield their turn and wait for **Reactive Wakeup** (`<SYSTEM_MESSAGE>`). Diagnostic status checks follow an exponential cooldown curve:
+#### 1. Per-Task Exponential Backoff & Stall Watchdogs
+Instead of polling `manage_task(Action='status')` in loops, agents arm a conditioned stall watchdog, yield their turn, and wait for **Reactive Wakeup** (`<SYSTEM_MESSAGE>`). Diagnostic status checks are tracked per task (`session.taskBackoff[taskKey]`, automatically pruned when `getTaskState()` reports `COMPLETED` or past TTL, with flat `session.pollCount` kept only as a fallback for unkeyed calls) along an exponential cooldown curve:
 
 $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5^{\max(0, \text{pollCount} - 1)}\right)\right)$$
 
 | Check # | Required Cooldown | Purpose | Action if Premature |
 | :---: | :---: | :--- | :--- |
-| **Check 1** | **0s (immediate)** | Initial check upon launch | **Allowed** (`pollCount = 1`) |
-| **Check 2** | **30s** | Check for fast tasks | **Denied** with remaining cooldown |
-| **Check 3** | **75s** | Standard build progress | **Denied** with remaining cooldown |
-| **Check 4** | **188s** | Test suite check | **Denied** with remaining cooldown |
-| **Check 5** | **469s** | Long build or hung process | **Denied** with remaining cooldown |
-| **Check 6+** | **600s** | Prolonged process | **Denied**; trips `force_ask` circuit breaker |
+| **Check 1** | **0s (immediate)** | Initial check upon launch (isolated per task) | **Allowed** (`pollCount = 1`) |
+| **Check 2** | **30s** | Check for fast tasks | **Denied** with remaining cooldown and watchdog guidance |
+| **Check 3** | **75s** | Standard build progress | **Denied** with remaining cooldown and watchdog guidance |
+| **Check 4** | **188s** | Test suite check | **Denied** with remaining cooldown and watchdog guidance |
+| **Check 5** | **469s** | Long build or hung process | **Denied** with remaining cooldown and watchdog guidance |
+| **Check 6+** | **600s** | Prolonged process | **Denied**; trips `force_ask` circuit breaker at 5 denials |
 
 - **Immediate operations:** `manage_task(Action='kill')` and `manage_task(Action='send_input')` are always allowed immediately (`0s` cooldown, zero penalties).
 - **Blocking CI watch loops denied:** `gh pr checks --watch` / `-w` and `gh run watch` inside `run_command` are denied because CI runner queues can hang indefinitely; run one-shot snapshots (`gh pr checks`, `gh run list`) paired with exponential backoff instead.
-- **Watchdog timers:** Any `schedule` task watchdog timer must set `DurationSeconds >= Math.max(30, requiredBackoffSeconds)` and pair with a Pre-Yield Status Card. One-shot `schedule` timers polling a `/swarm` or subagent are denied (`swarm_wait` sleeps at zero token cost).
+- **Mandatory background task watchdogs & auto-clamping:** Whenever any `run_command` moves to the background, arm a conditioned watchdog (`schedule(DurationSeconds=45, TimerCondition="<convId>/task-X")`) and emit a Pre-Yield Status Card. On wakeup, inspect via `manage_task(Action='status')` for stalls, TTY freezes, runaway loops, or unsafe output (killing immediately at `0s` if hung, or re-arming the next backoff level if progressing). Conditioned task watchdogs with `DurationSeconds >= 15` that are shorter than the task's current required backoff are automatically clamped via `overwrite: { DurationSeconds: requiredBackoffSeconds }` so background tasks are never left unmonitored; abusive micro-polls (`< 15s`) and unconditioned task polling loops remain hard-denied with retry instructions.
+- **Direct `invoke_subagent` stall watchdogs vs. `/swarm` ban:** One-shot `schedule` timers polling a `/swarm`, squad, or board remain strictly denied (`swarm_wait` sleeps at zero token cost while `swarm_monitor` `*/3` handles stall detection). Direct `invoke_subagent` runs may optionally arm a conditioned stall-safety watchdog bound to that specific subagent conversation ID (`TimerCondition="<subagentConvId>"`, not `any` or `never`), scaling `180s -> 450s -> 600s` per subagent ID (recommended `180s-300s`; `30s..179s` auto-clamp to the required floor, while `< 30s` or unconditioned subagent polling is hard-denied).
 - **5-strike circuit breaker:** At 5 cumulative denials across polling, internal state, or transcript access checks, the hook returns `force_ask` to pause execution and prompt the user.
 - **Task log lifecycle gating:**
   - *While running:* reading `tasks/<taskId>.log` via file tools or shell commands is denied under the backoff curve.

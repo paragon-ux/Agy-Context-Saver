@@ -476,14 +476,171 @@ console.log("\n--- Group E: Task Polling Backoff, Watchdog & Benchmark Mutation 
   // kill and send_input always allowed immediately
   assert.equal(runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "kill", TaskId: "t1" } } }).decision, "allow");
 
-  // Short schedule polling timer denied; non-polling reminder allowed; swarm polling one-shot denied; repeated 60s task watchdog denied
+  // Short/unconditioned schedule polling timers denied (without "Stop calling tools"); conditioned watchdogs auto-clamp;
+  // per-task isolation, completed-task pruning, watchdog wakeup checks, and direct-subagent (>=180s) vs /swarm separation
   resetState();
-  assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 5, Prompt: "Check status of task-1", TimerCondition: "task-1" } } }).decision, "deny");
+  const microDeny = runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 5, Prompt: "Check status of task-1", TimerCondition: "task-1" } } });
+  assert.equal(microDeny.decision, "deny", "Micro-poll < 15s must be hard-denied");
+  assert.match(microDeny.reason, /DurationSeconds >= 30/, "Micro-poll denial must instruct retrying with required DurationSeconds");
+  assert.match(microDeny.reason, /TimerCondition=/, "Micro-poll denial must include TimerCondition guidance");
+  assert.equal(/stop calling tools/i.test(microDeny.reason), false, "Watchdog denial must NEVER tell the agent to stop calling tools with no watchdog");
+
+  const uncondTaskDeny = runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-1" } } });
+  assert.equal(uncondTaskDeny.decision, "deny", "Unconditioned task polling loop must be hard-denied");
+  assert.match(uncondTaskDeny.reason, /TimerCondition=/, "Unconditioned task denial must instruct binding TimerCondition");
+  assert.equal(/stop calling tools/i.test(uncondTaskDeny.reason), false, "Unconditioned task denial must NEVER tell the agent to drop monitoring");
+
+  const neverCondDeny = runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-1", TimerCondition: "never" } } });
+  assert.equal(neverCondDeny.decision, "deny", "TimerCondition='never' task poll must be treated as unconditioned and denied");
+
+  // 4th + 5th consecutive task polling denials trip the 5-strike force_ask circuit breaker
+  const fourthDeny = runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 10, Prompt: "Check status of task-1", TimerCondition: "task-1" } } });
+  assert.equal(fourthDeny.decision, "deny", "4th consecutive polling denial must be deny");
+  const fifthBreaker = runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 10, Prompt: "Check status of task-1", TimerCondition: "task-1" } } });
+  assert.equal(fifthBreaker.decision, "force_ask", "5th consecutive task polling denial must trip force_ask circuit breaker");
+
+  resetState();
   assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 60, Prompt: "Check status of Clarity Wave 2 swarm", TimerCondition: "any" } } }).decision, "deny");
+  assert.equal(
+    runHook({
+      conversationId: convId,
+      toolCall: { name: "schedule", args: { DurationSeconds: 180, Prompt: "Check if swarm worker stalled", TimerCondition: "7657a17a-258b-4f47-a860-4cf3072800f6" } }
+    }).decision,
+    "deny",
+    "/swarm one-shot timers must stay hard-denied even when given a UUID TimerCondition"
+  );
   assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { CronExpression: "*/3 * * * *", IsDaemon: true, Prompt: "[monitor] tick: check the swarm for a stall" } } }).decision, "allow");
-  assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-1", TimerCondition: "task-1" } } }).decision, "allow");
-  assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 60, Prompt: "Check status of task-1", TimerCondition: "task-1" } } }).decision, "deny", "Second task watchdog must require Level 2 backoff (>= 75s), blocking repeated 60s timers");
-  assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 75, Prompt: "Check status of task-1", TimerCondition: "task-1" } } }).decision, "allow");
+
+  const task1First = runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-1", TimerCondition: "task-1" } } });
+  assert.equal(task1First.decision, "allow");
+  assert.equal(task1First.overwrite, undefined, "Level 0/1 45s conditioned watchdog must allow without overwrite");
+
+  const task1Clamped = runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 60, Prompt: "Check status of task-1", TimerCondition: "task-1" } } });
+  assert.equal(task1Clamped.decision, "allow", "Conditioned 60s Level-2 task watchdog must auto-clamp instead of denying");
+  assert.equal(task1Clamped.overwrite?.DurationSeconds, 75, "Conditioned 60s Level-2 task watchdog must auto-clamp to 75s");
+
+  const task1Level3Clamped = runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 75, Prompt: "Check status of task-1", TimerCondition: "task-1" } } });
+  assert.equal(task1Level3Clamped.decision, "allow", "Conditioned 75s Level-3 task watchdog must auto-clamp");
+  assert.equal(task1Level3Clamped.overwrite?.DurationSeconds, 188, "Conditioned 75s Level-3 task watchdog must auto-clamp to 188s");
+
+  // Cross-task isolation: fresh task-2 starts at Level 0/1 (45s allowed without clamping), task-3 auto-clamps 20s->30s, task-4 Check #1 allowed at 0s
+  const task2Fresh = runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of background task-2", TimerCondition: `${convId}/task-2` } } });
+  assert.equal(task2Fresh.decision, "allow", "Fresh task-2 must not inherit Level 3+ backoff from task-1");
+  assert.equal(task2Fresh.overwrite, undefined, "Fresh task-2 45s watchdog must not be clamped");
+
+  const task3Clamp20 = runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 20, Prompt: "Check status of task-3", TimerCondition: `${convId}/task-3` } } });
+  assert.equal(task3Clamp20.decision, "allow", "Fresh conditioned 20s (>=15s) task watchdog must auto-clamp");
+  assert.equal(task3Clamp20.overwrite?.DurationSeconds, 30, "Fresh conditioned 20s task watchdog must auto-clamp to 30s");
+
+  const task4Check1 = runHook({ conversationId: convId, toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-4" } } });
+  assert.equal(task4Check1.decision, "allow", "Fresh task-4 Check #1 manage_task(status) must remain immediate (0s)");
+
+  // Armed watchdog wakeup flow: premature check at 5s denied; check after 45s allowed; follow-up 75s Level-2 watchdog allowed without overwrite
+  const convWake = "conv-watchdog-wakeup";
+  const wakeArm = runHook({ conversationId: convWake, toolCall: { name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-5", TimerCondition: `${convWake}/task-5` } } });
+  assert.equal(wakeArm.decision, "allow");
+  assert.equal(wakeArm.overwrite, undefined);
+  const wakePremature = runHook({ conversationId: convWake, toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-5" } } });
+  assert.equal(wakePremature.decision, "deny", "Calling manage_task(status) immediately after arming 45s watchdog must still be denied");
+  const wakeSessionFile = path.join(stateDir, `agy-session-${convWake}.json`);
+  const wakeState = JSON.parse(fs.readFileSync(wakeSessionFile, "utf-8"));
+  wakeState.taskBackoff["task-5"].lastPollTime = Date.now() - 45000;
+  wakeState.lastPollTime = wakeState.taskBackoff["task-5"].lastPollTime;
+  fs.writeFileSync(wakeSessionFile, JSON.stringify(wakeState), "utf-8");
+  const wakeCheck = runHook({ conversationId: convWake, toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-5" } } });
+  assert.equal(wakeCheck.decision, "allow", "manage_task(status) must succeed when the armed 45s watchdog fires");
+  const wakeReArm = runHook({ conversationId: convWake, toolCall: { name: "schedule", args: { DurationSeconds: 75, Prompt: "Check status of task-5", TimerCondition: `${convWake}/task-5` } } });
+  assert.equal(wakeReArm.decision, "allow", "Re-arming Level-2 75s watchdog after wakeup inspection must succeed");
+  assert.equal(wakeReArm.overwrite, undefined, "Re-arming Level-2 75s watchdog must not double-escalate to Level 3");
+
+  // Completed-task backoff pruning via getTaskState() === "COMPLETED" (both quiet mtime > 5m and transcript marker)
+  const convPrune = "conv-task-prune";
+  const pruneSysDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", convPrune, ".system_generated");
+  const pruneTasksDir = path.join(pruneSysDir, "tasks");
+  const pruneLogsDir = path.join(pruneSysDir, "logs");
+  fs.mkdirSync(pruneTasksDir, { recursive: true });
+  fs.mkdirSync(pruneLogsDir, { recursive: true });
+  const doneLog = path.join(pruneTasksDir, "task-99.log");
+  fs.writeFileSync(doneLog, "done\n", "utf-8");
+  const oldDate = new Date(Date.now() - 360000); // > TASK_QUIET_MS (300000ms)
+  fs.utimesSync(doneLog, oldDate, oldDate);
+  fs.writeFileSync(
+    path.join(pruneLogsDir, "transcript.jsonl"),
+    JSON.stringify({ step_index: 1, content: `Task id "${convPrune}/task-98" finished with result: ok` }) + "\n",
+    "utf-8"
+  );
+  const pruneSessionFile = path.join(stateDir, `agy-session-${convPrune}.json`);
+  fs.writeFileSync(
+    pruneSessionFile,
+    JSON.stringify({
+      pollCount: 0,
+      denials: 0,
+      taskIds: ["task-98", "task-99"],
+      taskBackoff: {
+        "task-98": { pollCount: 3, lastPollTime: Date.now() - 10000, denials: 0, lastSeenTime: Date.now() - 10000 },
+        "task-99": { pollCount: 4, lastPollTime: Date.now() - 10000, denials: 0, lastSeenTime: Date.now() - 10000 }
+      },
+      lastPollTime: Date.now() - 10000,
+      lastSeenTime: Date.now() - 10000,
+      recentHookCalls: []
+    }),
+    "utf-8"
+  );
+  const pruneTrigger = runHook({ conversationId: convPrune, toolCall: { name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-100", TimerCondition: `${convPrune}/task-100` } } });
+  assert.equal(pruneTrigger.decision, "allow");
+  const afterPrune = JSON.parse(fs.readFileSync(pruneSessionFile, "utf-8"));
+  assert.equal(afterPrune.taskBackoff["task-98"], undefined, "Transcript-completed task-98 must be pruned from session.taskBackoff");
+  assert.equal(afterPrune.taskBackoff["task-99"], undefined, "Quiet-log completed task-99 must be pruned from session.taskBackoff");
+  assert.ok(afterPrune.taskBackoff["task-100"], "Active task-100 must remain in session.taskBackoff");
+
+  // Direct invoke_subagent stall watchdogs (180s -> 450s -> 600s, 30..179 auto-clamp, <30s & unconditioned denied)
+  const convSub = "conv-subagent-watchdog";
+  const subA = "7657a17a-258b-4f47-a860-4cf3072800f6";
+  const subB = "88888888-258b-4f47-a860-4cf3072800f6";
+  const subC = "99999999-258b-4f47-a860-4cf3072800f6";
+  assert.equal(
+    runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 180, Prompt: "Check if subagent stalled" } } }).decision,
+    "deny",
+    "Unconditioned subagent polling must be denied"
+  );
+  assert.equal(
+    runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 180, Prompt: "Check if subagent stalled", TimerCondition: "never" } } }).decision,
+    "deny",
+    "TimerCondition='never' subagent polling must be denied"
+  );
+  assert.equal(
+    runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 180, Prompt: "Check if subagent stalled", TimerCondition: "any" } } }).decision,
+    "deny",
+    "TimerCondition='any' subagent polling must be denied"
+  );
+  const subMicroDeny = runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 20, Prompt: "Check if subagent stalled", TimerCondition: subA } } });
+  assert.equal(subMicroDeny.decision, "deny", "Direct subagent watchdog < 30s must be hard-denied");
+  assert.match(subMicroDeny.reason, /DurationSeconds >= 180/);
+
+  const subAClamp1 = runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 60, Prompt: "Check if subagent stalled", TimerCondition: subA } } });
+  assert.equal(subAClamp1.decision, "allow", "Conditioned 60s direct subagent watchdog must auto-clamp");
+  assert.equal(subAClamp1.overwrite?.DurationSeconds, 180, "1st direct subagent watchdog must auto-clamp to 180s");
+
+  const subAClamp2 = runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 180, Prompt: "Check if subagent stalled", TimerCondition: subA } } });
+  assert.equal(subAClamp2.decision, "allow", "2nd direct subagent watchdog must auto-clamp");
+  assert.equal(subAClamp2.overwrite?.DurationSeconds, 450, "2nd direct subagent watchdog must auto-clamp to 450s");
+
+  const subAClamp3 = runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 300, Prompt: "Check if subagent stalled", TimerCondition: subA } } });
+  assert.equal(subAClamp3.decision, "allow", "3rd direct subagent watchdog must auto-clamp");
+  assert.equal(subAClamp3.overwrite?.DurationSeconds, 600, "3rd direct subagent watchdog must auto-clamp to 600s");
+
+  const subAExact4 = runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 600, Prompt: "Check if subagent stalled", TimerCondition: subA } } });
+  assert.equal(subAExact4.decision, "allow");
+  assert.equal(subAExact4.overwrite, undefined, "600s direct subagent watchdog at cap must allow without overwrite");
+
+  const subBFresh = runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 180, Prompt: "Check if direct subagent stalled", TimerCondition: subB } } });
+  assert.equal(subBFresh.decision, "allow", "Fresh subB must start at 180s without bleed from subA");
+  assert.equal(subBFresh.overwrite, undefined, "Fresh subB 180s watchdog must not be clamped");
+
+  const subCUuidRoute = runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 60, Prompt: "Check if reviewer is still running", TimerCondition: subC } } });
+  assert.equal(subCUuidRoute.decision, "allow");
+  assert.equal(subCUuidRoute.overwrite?.DurationSeconds, 180, "Bare UUID TimerCondition must route to direct-subagent 180s floor even if prompt says 'still running'");
+
   assert.equal(runHook({ conversationId: convId, toolCall: { name: "schedule", args: { DurationSeconds: 10, Prompt: "Remind me about coffee" } } }).decision, "allow");
 
   // LH-09 Benchmark protection on edit_file, write_file, relative paths, and shell redirection/rm
@@ -2797,10 +2954,11 @@ console.log("\n--- Group K: Day-1 Launch Remediation Regressions (RUN-001, RUN-0
     });
     assert.equal(checkOne.decision, "allow", "Check #1 manage_task(status) must remain immediate (0s) even after prior schedule denials (SVC-001)");
 
-    // Part B: Premature manage_task denial at t=25s must NOT reset lastPollTime; retrying at t=31s must succeed
+    // Part B: Premature manage_task denial at t=25s must NOT reset lastPollTime (or taskBackoff.t1.lastPollTime); retrying at t=31s must succeed
     const stateAfterCheck1 = JSON.parse(fs.readFileSync(sessionFile, "utf-8"));
     const fixedT0 = Date.now() - 25000;
     stateAfterCheck1.lastPollTime = fixedT0;
+    stateAfterCheck1.taskBackoff.t1.lastPollTime = fixedT0;
     fs.writeFileSync(sessionFile, JSON.stringify(stateAfterCheck1), "utf-8");
 
     const prematureDeny = runHook({
@@ -2810,9 +2968,12 @@ console.log("\n--- Group K: Day-1 Launch Remediation Regressions (RUN-001, RUN-0
     assert.equal(prematureDeny.decision, "deny");
     const stateAfterDeny = JSON.parse(fs.readFileSync(sessionFile, "utf-8"));
     assert.equal(stateAfterDeny.lastPollTime, fixedT0, "Premature manage_task denial must NOT advance lastPollTime (SVC-001)");
+    assert.equal(stateAfterDeny.taskBackoff.t1.lastPollTime, fixedT0, "Premature manage_task denial must NOT advance per-task lastPollTime (SVC-001)");
 
     // Advance elapsed time past 30s (t=31s) -> diagnostic check #2 must now be allowed
-    stateAfterDeny.lastPollTime = Date.now() - 31000;
+    const fixedT1 = Date.now() - 31000;
+    stateAfterDeny.lastPollTime = fixedT1;
+    stateAfterDeny.taskBackoff.t1.lastPollTime = fixedT1;
     fs.writeFileSync(sessionFile, JSON.stringify(stateAfterDeny), "utf-8");
     const checkTwo = runHook({
       conversationId: convSvc,
@@ -2833,6 +2994,7 @@ console.log("\n--- Group K: Day-1 Launch Remediation Regressions (RUN-001, RUN-0
     assert.equal(runTaskDeny.reason.includes("Infinity"), false, "denyRunningTask must never print Infinitys elapsed");
     const runTaskState = JSON.parse(fs.readFileSync(path.join(stateDir, `agy-session-${convRunTask}.json`), "utf-8"));
     assert.equal(runTaskState.lastPollTime, 0, "denyRunningTask must NOT overwrite lastPollTime (SVC-001)");
+    assert.equal(runTaskState.taskBackoff["task-live-svc"].lastPollTime, 0, "denyRunningTask must NOT overwrite per-task lastPollTime (SVC-001)");
     console.log("✓ SVC-001: Backoff/schedule/running-task denials preserve lastPollTime and keep Check #1 immediate (0s)");
   }
 

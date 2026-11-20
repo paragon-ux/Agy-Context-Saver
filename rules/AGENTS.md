@@ -2,29 +2,32 @@
 
 ## Architectural Boundary
 - **RTK (`>= 1.1.0`)**: Rewrites shell commands via `rtk hook antigravity`, compresses command output, provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`), reads spillovers and completed task logs (`rtk read`), and filters errors or summaries (`rtk err`, `rtk summary`).
-- **Agy-Context-Saver (`v2.1.0`)**: Governs background task polling and Reactive Wakeup, bounds `read_file` slices, protects `.system_generated/` and the state directory, and provides two-tier transcript inspection (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode) and access control via `agy-context transcript`.
+- **Agy-Context-Saver (`v2.1.1`)**: Governs background task polling and Reactive Wakeup with per-task stall-watchdog backoff, bounds `read_file` slices, protects `.system_generated/` and the state directory, and provides two-tier transcript inspection (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode) and access control via `agy-context transcript`.
 
 ---
 
 ## Layer 1: Background Tasks & Proportional Backoff
-- **No busy-polling**: Do not call `manage_task(Action='status')` in loops or schedule short timers to poll running background tasks. Background tasks resume the agent automatically via **Reactive Wakeup** (`<SYSTEM_MESSAGE>`).
+- **No busy-polling**: Do not call `manage_task(Action='status')` in loops or schedule short or unconditioned polling timers. Background tasks resume the agent automatically via **Reactive Wakeup** (`<SYSTEM_MESSAGE>`).
 - **No blocking CLI watch loops**: Never run blocking CI poll watches (`gh pr checks --watch`, `gh run watch`) inside `run_command`; run one-shot snapshots (`gh pr checks`, `gh run list`) instead.
-- **Proportional backoff**: Diagnostic status checks follow an exponential cooldown curve:
+- **Per-task proportional backoff**: Diagnostic status checks are tracked per task (`session.taskBackoff[taskKey]`, pruned automatically when a task completes or expires) along an exponential cooldown curve:
   `Cooldown = min(600, round(30 * 2.5^(pollCount - 1)))` (`0s -> 30s -> 75s -> 188s -> 469s -> 600s`)
-  - Check #1 (immediate upon launch): permitted (`0s`).
+  - Check #1 (immediate upon launch): permitted (`0s`) for each distinct task without cross-task bleed from earlier tasks.
   - Premature checks inside an active backoff window are denied. 5 cumulative denials trip the `force_ask` circuit breaker.
-  - Once a backoff window elapses, one diagnostic check is permitted to inspect logs or issue `manage_task(Action='kill')`.
-- **Coordinated watchdog timers (`schedule`)**: For background shell tasks (`run_command` builds, migrations, full test runs) expected to take `> 15s`:
-  - Schedule a watchdog timer: `schedule(DurationSeconds=45, Prompt="Check status of background task-X", TimerCondition="<convId>/task-X")`.
-  - Watchdog timers must satisfy `DurationSeconds >= Math.max(30, requiredBackoffSec)`. Each task watchdog advances the backoff level (`30s -> 75s -> 188s -> 469s -> 600s`), so repeated `45s`/`60s` timers are denied.
-  - **Swarm and subagent exemption (`swarm_wait` only)**: Never pair `swarm_wait` or subagent launches with a one-shot `schedule` timer. `swarm_wait` sleeps at zero token cost and wakes on board posts; one-shot `schedule` timers polling a swarm or subagent are denied.
+  - Once a backoff window or armed watchdog elapses, one diagnostic check (`manage_task(Action='status')`) is permitted to inspect progress or issue `manage_task(Action='kill')`.
+- **Mandatory conditioned stall watchdogs (`schedule`)**: Whenever ANY `run_command` moves to the background (not just commands expected to run long):
+  - Always arm an auto-cancelling watchdog bound to that task: `schedule(DurationSeconds=45, Prompt="Check status of background task-X", TimerCondition="<convId>/task-X")`. When the task finishes normally, `TimerCondition` cancels the timer automatically at zero token cost.
+  - Watchdog timers scale per task (`30s -> 75s -> 188s -> 469s -> 600s`). Conditioned task watchdogs with `DurationSeconds >= 15` that fall below the task's current required backoff are auto-clamped (`overwrite: { DurationSeconds: requiredBackoffSec }`) instead of stripping monitoring; abusive micro-polls (`< 15s`) and unconditioned polling loops are hard-denied.
+  - On watchdog wakeup, inspect with `manage_task(Action='status')` for stalled, frozen (TTY stop), runaway, or harmful behavior: if stalled or unsafe, terminate immediately via `manage_task(Action='kill')` (`0s` cooldown); if making healthy progress, re-arm the next backoff-level conditioned watchdog (`75s`, `188s`, `469s`, `600s`) before yielding.
+  - **Direct `invoke_subagent` stall watchdogs vs. `/swarm` ban**:
+    - For `/swarm` cohorts, never pair `swarm_wait` with a one-shot `schedule` timer (`swarm` / `board` / `squad` one-shot timers remain strictly denied because `swarm_wait` sleeps at zero token cost and the `swarm_monitor` `*/3` daemon cron detects stalls).
+    - For direct `invoke_subagent` runs, you may optionally arm a stall-safety watchdog bound to that specific subagent conversation ID: `schedule(DurationSeconds=180, Prompt="Check if subagent <convId> stalled", TimerCondition="<subagentConvId>")` (recommended `180s-300s`). Direct-subagent watchdogs track per subagent ID along `180s -> 450s -> 600s` (`30s..179s` auto-clamp up to the required floor; `< 30s` or unconditioned subagent polling is denied).
 - **Pre-yield status card**: When a command moves to the background, output a status card before ending your turn:
   ```markdown
   ### ⏳ Background Execution Started
   - **Command**: `<cmd>`
   - **Scope / Target**: `<scope>`
   - **Estimated Duration**: `~X minutes`
-  - **Watchdog Active**: Coordinated check scheduled in 45s via Reactive Wakeup.
+  - **Watchdog Active**: Conditioned check scheduled in 45s (`TimerCondition="<convId>/task-X"`) via Reactive Wakeup.
   ```
 - **Immediate kill and stdin**: `manage_task(Action='kill')` and `manage_task(Action='send_input')` are always allowed immediately (`0s` cooldown, zero penalties).
 
