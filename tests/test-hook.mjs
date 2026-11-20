@@ -608,11 +608,10 @@ console.log("\n--- Group E: Task Polling Backoff, Watchdog & Benchmark Mutation 
     "deny",
     "TimerCondition='never' subagent polling must be denied"
   );
-  assert.equal(
-    runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 180, Prompt: "Check if subagent stalled", TimerCondition: "any" } } }).decision,
-    "deny",
-    "TimerCondition='any' subagent polling must be denied"
-  );
+  const subAnyDeny = runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 180, Prompt: "Check if subagent stalled", TimerCondition: "any" } } });
+  assert.equal(subAnyDeny.decision, "deny", "TimerCondition='any' subagent polling must be denied");
+  assert.match(subAnyDeny.reason, /TimerCondition="<subagentConvId>"/, "Direct subagent TimerCondition='any' denial must instruct binding <subagentConvId>, not swarm_wait");
+  assert.equal(/swarm_wait/i.test(subAnyDeny.reason), false, "Direct subagent TimerCondition='any' denial must not misroute to swarm_wait guidance");
   const subMicroDeny = runHook({ conversationId: convSub, toolCall: { name: "schedule", args: { DurationSeconds: 20, Prompt: "Check if subagent stalled", TimerCondition: subA } } });
   assert.equal(subMicroDeny.decision, "deny", "Direct subagent watchdog < 30s must be hard-denied");
   assert.match(subMicroDeny.reason, /DurationSeconds >= 180/);
@@ -2995,6 +2994,17 @@ console.log("\n--- Group K: Day-1 Launch Remediation Regressions (RUN-001, RUN-0
     const runTaskState = JSON.parse(fs.readFileSync(path.join(stateDir, `agy-session-${convRunTask}.json`), "utf-8"));
     assert.equal(runTaskState.lastPollTime, 0, "denyRunningTask must NOT overwrite lastPollTime (SVC-001)");
     assert.equal(runTaskState.taskBackoff["task-live-svc"].lastPollTime, 0, "denyRunningTask must NOT overwrite per-task lastPollTime (SVC-001)");
+
+    // Non-`task-` literal log filename (tasks/t1.log) uses exact key `t1` matching manage_task(TaskId="t1")
+    fs.writeFileSync(path.join(runTaskBrain, "tasks", "t1.log"), "running...\n", "utf-8");
+    const literalRunTaskDeny = runHook({
+      conversationId: convRunTask,
+      toolCall: { name: "run_command", args: { CommandLine: "rtk read tasks/t1.log", WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(literalRunTaskDeny.decision, "deny");
+    const afterLiteralDeny = JSON.parse(fs.readFileSync(path.join(stateDir, `agy-session-${convRunTask}.json`), "utf-8"));
+    assert.ok(afterLiteralDeny.taskBackoff["t1"], "tasks/t1.log must track under exact key 't1' matching manage_task(TaskId='t1')");
+    assert.equal(afterLiteralDeny.taskBackoff["task-t1"], undefined, "tasks/t1.log must not create duplicate 'task-t1' bucket");
     console.log("✓ SVC-001: Backoff/schedule/running-task denials preserve lastPollTime and keep Check #1 immediate (0s)");
   }
 

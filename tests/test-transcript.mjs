@@ -388,6 +388,27 @@ try {
     assert.equal(badWatchdogRes.metrics.pollingViolations, 4, "Unconditioned task/subagent polls, <180s subagent polls, and /swarm polls must all count as violations");
     assert.match(badWatchdogRes.status, /CRITICAL/);
 
+    // Auto-clamp state sync: a conditioned 60s Level-2 task watchdog flags the under-sized attempt (1 violation)
+    // AND advances the bucket to Level 3 + arms pendingWatchdog (75s), so wakeup manage_task(status) at +75s is legal
+    const clampSyncConv = "conv-clamp-sync";
+    const clampSyncLogs = path.join(brainDir, clampSyncConv, ".system_generated", "logs");
+    fs.mkdirSync(clampSyncLogs, { recursive: true });
+    const clampSyncSteps = [
+      { step_index: 1, type: "USER_INPUT", content: "Run", created_at: new Date(baseMs).toISOString() },
+      { step_index: 2, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-1", TimerCondition: `${clampSyncConv}/task-1` } }], created_at: new Date(baseMs + 1000).toISOString() },
+      { step_index: 3, type: "PLANNER_RESPONSE", tool_calls: [{ name: "manage_task", args: { Action: "status", TaskId: "task-1" } }], created_at: new Date(baseMs + 46000).toISOString() },
+      // Under-sized 60s Level-2 conditioned watchdog (hook auto-clamps to 75s -> 1 violation, advances bucket to Level 3)
+      { step_index: 4, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 60, Prompt: "Check status of task-1", TimerCondition: `${clampSyncConv}/task-1` } }], created_at: new Date(baseMs + 47000).toISOString() },
+      // Wakeup inspection after clamped 75s -> legal!
+      { step_index: 5, type: "PLANNER_RESPONSE", tool_calls: [{ name: "manage_task", args: { Action: "status", TaskId: "task-1" } }], created_at: new Date(baseMs + 122000).toISOString() },
+      // Next watchdog properly uses Level 3 (188s) -> legal!
+      { step_index: 6, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 188, Prompt: "Check status of task-1", TimerCondition: `${clampSyncConv}/task-1` } }], created_at: new Date(baseMs + 123000).toISOString() }
+    ];
+    fs.writeFileSync(path.join(clampSyncLogs, "transcript.jsonl"), clampSyncSteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+    const clampSyncRes = await checkContextHealth({ conversationId: clampSyncConv });
+    assert.equal(clampSyncRes.metrics.pollingViolations, 1, "Only the under-sized 60s Level-2 attempt should register as a violation");
+    assert.equal(clampSyncRes.metrics.legalChecks, 4, "Wakeup inspection at +75s and Level-3 188s watchdog must stay synced with live hook state");
+
     console.log("✓ Unified health evaluator enforces per-task & direct-subagent backoff parity without false-flagging kill/list");
   }
 

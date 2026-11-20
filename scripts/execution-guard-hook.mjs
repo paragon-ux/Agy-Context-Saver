@@ -4782,7 +4782,12 @@ function cleanGovernanceArg(val) {
   return String(val || "").replace(/^["']|["']$/g, "").trim();
 }
 
-function normalizeTaskKeyFromId(taskId) {
+function normalizeTaskKeyFromId(taskId, taskToken = "") {
+  const cleanTok = cleanGovernanceArg(taskToken).replace(/\\/g, "/");
+  const baseMatch = cleanTok.match(/(?:^|\/)([^/]+)\.log$/i);
+  if (baseMatch && baseMatch[1]) {
+    return baseMatch[1].toLowerCase();
+  }
   const clean = cleanGovernanceArg(taskId);
   if (!clean) return null;
   const taskMatch = clean.match(/(?:^|\/)(task-[a-z0-9_-]+)$/i);
@@ -4886,7 +4891,9 @@ function isSwarmPollSchedule(args = {}) {
   const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
   return (
     /\b(?:swarm|squad|board)\b/i.test(prompt) ||
-    (cond === "any" && /\b(?:check|status|poll|monitor|wait|worker|lead|auditor|subagent|subagents)\b/i.test(prompt))
+    (cond === "any" &&
+      !/\b(?:subagent|subagents)\b/i.test(prompt) &&
+      /\b(?:check|status|poll|monitor|wait|worker|lead|auditor)\b/i.test(prompt))
   );
 }
 
@@ -4952,11 +4959,11 @@ function getOrCreateTaskBucket(session, key, now = Date.now()) {
  * Denies reading the log of an actively RUNNING task: records the denial, trips the circuit
  * breaker at 5 cumulative denials, otherwise answers with the Proportional Backoff message.
  */
-function denyRunningTask(taskId, convId) {
+function denyRunningTask(taskId, convId, taskToken = "") {
   const session = getSessionState(convId);
   const now = Date.now();
   pruneTaskBackoff(session, convId, now);
-  const taskKey = normalizeTaskKeyFromId(taskId);
+  const taskKey = normalizeTaskKeyFromId(taskId, taskToken);
   const bucket = taskKey ? getOrCreateTaskBucket(session, taskKey, now) : null;
   if (bucket) {
     bucket.denials++;
@@ -5580,7 +5587,7 @@ try {
         const taskStates = taskMatches.map((m) => ({ match: m, state: getTaskState(m, convId) }));
         const runningEntry = taskStates.find((entry) => entry.state === "RUNNING");
         if (runningEntry) {
-          denyRunningTask(runningEntry.match.id, convId);
+          denyRunningTask(runningEntry.match.id, convId, runningEntry.match.token);
         }
         taskState = taskStates.some((entry) => entry.state === "UNKNOWN") ? "UNKNOWN" : "COMPLETED";
       }
@@ -5855,7 +5862,7 @@ try {
     if (taskMatch) {
       const state = getTaskState(taskMatch, convId);
       if (state === "RUNNING") {
-        denyRunningTask(taskMatch.id, convId);
+        denyRunningTask(taskMatch.id, convId, taskMatch.token);
       }
       if (state === "COMPLETED") {
         const hasRtkForTask = Boolean(resolveCachedHostEnv().rtk);
