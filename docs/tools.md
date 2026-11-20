@@ -1,6 +1,6 @@
 # CLI & Hook Reference
 
-`Agy-Context-Saver` (`v2.1.0`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs`), paired with **RTK (`>= 1.1.0`)**.
+`Agy-Context-Saver` (`v2.1.1`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs`), paired with **RTK (`>= 1.1.0`)**.
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
@@ -26,7 +26,7 @@ Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view
 - **Aliases:** `stats`, `info`
 - **Usage:** `agy-context transcript health [<id>] [--id <uuid>] [--file <path>] [--json]`
 
-Streams `transcript.jsonl` to report step counts, user turns, tool call counts, transcript byte size, busy-polling events, and local RTK status.
+Streams `transcript.jsonl` to report step counts, user turns, tool call counts, transcript byte size, per-task and direct-subagent backoff-aware busy-polling events (`>= 30s` per task and `>= 180s` per conditioned direct subagent stall watchdog, while flagging `/swarm` one-shot polls and unconditioned loops), and local RTK status.
 
 | Flag / Argument | Value | Required | Description |
 | :--- | :---: | :---: | :--- |

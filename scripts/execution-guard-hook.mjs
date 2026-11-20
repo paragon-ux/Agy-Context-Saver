@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.1.0)
+ * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.1.1)
  *
  * Closed Execution Topology & Governance Invariants:
  * 1. RTK Transparent Command Optimization:
@@ -101,6 +101,7 @@ const GOVERNED_TOOLS = new Set([
 
 const STATE_TTL_MS = 3600000; // 1 hour TTL
 const MAX_STATE_ENTRIES = 50;
+const MAX_TASK_BACKOFF_ENTRIES = 64;
 
 // Per-user state folder, never the shared os.tmpdir(). Keep identical to scripts/state-dir.mjs:
 // this hook is mirrored as a standalone file, so it can't import it.
@@ -138,10 +139,13 @@ function getSessionState(convId = "global") {
     const now = Date.now();
     const activityTime = Math.max(entry?.lastPollTime || 0, entry?.lastSeenTime || 0);
     if (entry && activityTime > 0 && (now - activityTime) < STATE_TTL_MS) {
+      if (!entry.taskBackoff || typeof entry.taskBackoff !== "object" || Array.isArray(entry.taskBackoff)) {
+        entry.taskBackoff = {};
+      }
       return entry;
     }
   } catch {}
-  return { pollCount: 0, denials: 0, taskIds: [], lastPollTime: 0, lastSeenTime: 0, recentHookCalls: [] };
+  return { pollCount: 0, denials: 0, taskIds: [], taskBackoff: {}, lastPollTime: 0, lastSeenTime: 0, recentHookCalls: [] };
 }
 
 function saveSessionState(convId = "global", entry, { updatePollTime = true } = {}) {
@@ -709,7 +713,22 @@ function readTail(file, bytes) {
 }
 
 function scanTaskMarkers(text, taskName) {
-  if (text.includes(`/${taskName}\\" finished`) || text.includes(`/${taskName}" finished`)) return "COMPLETED";
+  if (
+    text.includes(`/${taskName}\\" finished`) ||
+    text.includes(`/${taskName}" finished`) ||
+    text.includes(`/${taskName}\\" was canceled`) ||
+    text.includes(`/${taskName}" was canceled`) ||
+    text.includes(`/${taskName}\\" cancelled.`) ||
+    text.includes(`/${taskName}" cancelled.`)
+  ) {
+    return "COMPLETED";
+  }
+  const hasOneShotTimerLaunch =
+    text.includes(`/${taskName}\\nTask Description: Timer:`) ||
+    text.includes(`/${taskName}\nTask Description: Timer:`);
+  if (hasOneShotTimerLaunch && text.includes(`/${taskName} priority=`)) {
+    return "COMPLETED";
+  }
   if (text.includes(`/${taskName}\\nTask `) || text.includes(`/${taskName}\nTask `)) return "RUNNING";
   return null;
 }
@@ -4763,12 +4782,102 @@ function getRequiredBackoffSeconds(pollCount) {
 }
 
 /**
+ * Proportional Backoff for direct `invoke_subagent` stall watchdogs bound via `TimerCondition`.
+ * Formula: Math.min(600, Math.round(180 * Math.pow(2.5, Math.max(0, pollCount))))
+ * Levels: Level 0 -> 180s, Level 1 -> 450s, Level 2+ -> 600s
+ * Keep identical to lib/transcript-core.mjs `getRequiredSubagentBackoffSeconds`.
+ */
+function getRequiredSubagentBackoffSeconds(pollCount) {
+  return Math.min(600, Math.round(180 * Math.pow(2.5, Math.max(0, pollCount))));
+}
+
+const BACKOFF_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function cleanGovernanceArg(val) {
+  return String(val || "").replace(/^["']|["']$/g, "").trim();
+}
+
+function normalizeTaskKeyFromId(taskId, taskToken = "") {
+  const cleanTok = cleanGovernanceArg(taskToken).replace(/\\/g, "/");
+  const baseMatch = cleanTok.match(/(?:^|\/)([^/]+)\.log$/i);
+  if (baseMatch && baseMatch[1]) {
+    return baseMatch[1].toLowerCase();
+  }
+  const clean = cleanGovernanceArg(taskId);
+  if (!clean) return null;
+  const taskMatch = clean.match(/(?:^|\/)(task-[a-z0-9_-]+)$/i);
+  if (taskMatch) return taskMatch[1].toLowerCase();
+  const tail = clean.includes("/") ? clean.slice(clean.lastIndexOf("/") + 1).trim() : clean;
+  if (!tail) return null;
+  return /^task-/i.test(tail) ? tail.toLowerCase() : `task-${tail.toLowerCase()}`;
+}
+
+/**
+ * Extracts a normalized per-task (or per-subagent) backoff key for `manage_task` and `schedule`.
+ * Returns `null` when no task or subagent identifier is present so callers fall back to flat `session.pollCount`.
+ * Keep identical to lib/transcript-core.mjs `extractTaskBackoffKey`.
+ */
+function extractTaskBackoffKey(toolName, args = {}) {
+  if (toolName === "manage_task") {
+    const raw = cleanGovernanceArg(args.TaskId || args.taskId);
+    if (!raw) return null;
+    const taskMatch = raw.match(/(?:^|\/)(task-[a-z0-9_-]+)$/i);
+    if (taskMatch) return taskMatch[1].toLowerCase();
+    const tail = raw.includes("/") ? raw.slice(raw.lastIndexOf("/") + 1).trim() : raw;
+    return tail ? tail.toLowerCase() : null;
+  }
+
+  if (toolName === "schedule") {
+    const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition);
+    const condLower = cond.toLowerCase();
+    if (cond && condLower !== "any" && condLower !== "never" && !/\s/.test(cond)) {
+      const taskMatch = cond.match(/(?:^|\/)(task-[a-z0-9_-]+)$/i);
+      if (taskMatch) return taskMatch[1].toLowerCase();
+      if (BACKOFF_UUID_RE.test(cond)) return condLower;
+      const tail = cond.includes("/") ? cond.slice(cond.lastIndexOf("/") + 1).trim() : cond;
+      if (tail) return tail.toLowerCase();
+    }
+    const prompt = cleanGovernanceArg(args.Prompt || args.prompt);
+    const promptTask = prompt.match(/\b(task-\d+)\b/i);
+    if (promptTask) return promptTask[1].toLowerCase();
+    const promptUuid = prompt.match(/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i);
+    if (promptUuid) return promptUuid[1].toLowerCase();
+  }
+
+  return null;
+}
+
+/**
+ * Returns true when a task `schedule` call binds a specific auto-cancelling `TimerCondition`
+ * (neither omitted, `"any"`, nor `"never"`).
+ * Keep identical to lib/transcript-core.mjs `hasValidTaskTimerCondition`.
+ */
+function hasValidTaskTimerCondition(args = {}) {
+  const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition);
+  const condLower = cond.toLowerCase();
+  return Boolean(cond) && condLower !== "any" && condLower !== "never" && !/\s/.test(cond);
+}
+
+/**
+ * Returns true when a direct `invoke_subagent` stall watchdog binds a specific subagent
+ * conversation/sender ID via `TimerCondition` (not omitted, `"any"`, `"never"`, or a `task-*` target).
+ * Keep identical to lib/transcript-core.mjs `hasValidSubagentTimerCondition`.
+ */
+function hasValidSubagentTimerCondition(args = {}) {
+  const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition);
+  const condLower = cond.toLowerCase();
+  if (!cond || condLower === "any" || condLower === "never" || /\s/.test(cond)) return false;
+  if (/(?:^|\/)task-[a-z0-9_-]+$/i.test(cond) || condLower.includes("task")) return false;
+  return true;
+}
+
+/**
  * Strict task-polling detection for `schedule` tool calls.
  * Keep identical to lib/transcript-core.mjs `isTaskPollSchedule`.
  */
 function isTaskPollSchedule(args = {}) {
-  const prompt = String(args.Prompt || args.prompt || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
-  const cond = String(args.TimerCondition || args.timerCondition || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+  const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
+  const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
   return (
     cond.startsWith("task-") ||
     cond.includes("task") ||
@@ -4783,48 +4892,122 @@ function isTaskPollSchedule(args = {}) {
 }
 
 /**
- * Detects one-shot `schedule` timers used to poll a `/swarm` or subagent instead of
- * relying on `swarm_wait` or native Reactive Wakeup.
+ * Detects one-shot `schedule` timers used to poll a `/swarm`, squad, or board instead of
+ * relying on `swarm_wait` + `swarm_monitor`.
  * Exempts the dedicated `swarm_monitor` daemon cron (`CronExpression` + `IsDaemon: true`).
+ * Keep identical to lib/transcript-core.mjs `isSwarmPollSchedule`.
  */
 function isSwarmPollSchedule(args = {}) {
   const isDaemon = args.IsDaemon === true || args.isDaemon === true;
   const cron = String(args.CronExpression || args.cronExpression || "").trim();
   if (isDaemon && cron) return false;
 
-  const prompt = String(args.Prompt || args.prompt || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
-  const cond = String(args.TimerCondition || args.timerCondition || "").replace(/^["']|["']$/g, "").trim().toLowerCase();
+  const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
+  const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
   return (
-    /\b(?:swarm|subagent|subagents|squad|board)\b/i.test(prompt) ||
-    (cond === "any" && /\b(?:check|status|poll|monitor|wait|worker|lead|auditor)\b/i.test(prompt))
+    /\b(?:swarm|squad|board)\b/i.test(prompt) ||
+    (cond === "any" &&
+      !/\b(?:subagent|subagents)\b/i.test(prompt) &&
+      /\b(?:check|status|poll|monitor|wait|worker|lead|auditor)\b/i.test(prompt))
   );
+}
+
+/**
+ * Detects one-shot `schedule` timers targeting a direct `invoke_subagent` (separated from `/swarm`
+ * bans so specific `TimerCondition="<subagentConvId>"` stall watchdogs can use the `180s -> 450s -> 600s`
+ * safety floor while `< 30s` and unconditioned subagent polling remain denied).
+ * Keep identical to lib/transcript-core.mjs `isSubagentPollSchedule`.
+ */
+function isSubagentPollSchedule(args = {}) {
+  const isDaemon = args.IsDaemon === true || args.isDaemon === true;
+  const cron = String(args.CronExpression || args.cronExpression || "").trim();
+  if (isDaemon && cron) return false;
+  if (isSwarmPollSchedule(args)) return false;
+
+  const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
+  const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
+  if (/(?:^|\/)task-[a-z0-9_-]+$/i.test(cond) || cond.includes("task")) return false;
+  return /\b(?:subagent|subagents)\b/i.test(prompt) || BACKOFF_UUID_RE.test(cond);
+}
+
+/**
+ * Prunes expired, completed (`getTaskState() === "COMPLETED"`), and excess per-task backoff buckets.
+ */
+function pruneTaskBackoff(session, convId, now = Date.now()) {
+  if (!session.taskBackoff || typeof session.taskBackoff !== "object" || Array.isArray(session.taskBackoff)) {
+    session.taskBackoff = {};
+    return;
+  }
+  const kept = [];
+  for (const [key, entry] of Object.entries(session.taskBackoff)) {
+    if (!entry || typeof entry !== "object") continue;
+    const activityTs = Math.max(entry.lastPollTime || 0, entry.lastSeenTime || 0);
+    if (activityTs > 0 && (now - activityTs) >= STATE_TTL_MS) continue;
+    if (convId && convId !== "global" && !BACKOFF_UUID_RE.test(key)) {
+      try {
+        const strippedId = key.replace(/^task-/i, "");
+        const state = getTaskState({ id: strippedId, token: `tasks/${key}.log` }, convId);
+        if (state === "COMPLETED") continue;
+      } catch {}
+    }
+    kept.push([key, entry]);
+  }
+  kept.sort(
+    (a, b) =>
+      Math.max(b[1].lastPollTime || 0, b[1].lastSeenTime || 0) -
+      Math.max(a[1].lastPollTime || 0, a[1].lastSeenTime || 0)
+  );
+  session.taskBackoff = Object.fromEntries(kept.slice(0, MAX_TASK_BACKOFF_ENTRIES));
+}
+
+function getOrCreateTaskBucket(session, key, now = Date.now()) {
+  if (!session.taskBackoff || typeof session.taskBackoff !== "object" || Array.isArray(session.taskBackoff)) {
+    session.taskBackoff = {};
+  }
+  if (!session.taskBackoff[key] || typeof session.taskBackoff[key] !== "object") {
+    session.taskBackoff[key] = { pollCount: 0, lastPollTime: 0, denials: 0, lastSeenTime: now };
+  }
+  return session.taskBackoff[key];
 }
 
 /**
  * Denies reading the log of an actively RUNNING task: records the denial, trips the circuit
  * breaker at 5 cumulative denials, otherwise answers with the Proportional Backoff message.
  */
-function denyRunningTask(taskId, convId) {
+function denyRunningTask(taskId, convId, taskToken = "") {
   const session = getSessionState(convId);
+  const now = Date.now();
+  pruneTaskBackoff(session, convId, now);
+  const taskKey = normalizeTaskKeyFromId(taskId, taskToken);
+  const bucket = taskKey ? getOrCreateTaskBucket(session, taskKey, now) : null;
+  if (bucket) {
+    bucket.denials++;
+    bucket.lastSeenTime = now;
+  }
   session.denials++;
   saveSessionState(convId, session, { updatePollTime: false });
 
-  if (session.denials >= 5) {
+  const effectiveDenials = bucket ? Math.max(bucket.denials, session.denials) : session.denials;
+  if (effectiveDenials >= 5) {
     respond({
       decision: "force_ask",
-      reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: reading task log '${taskId}' attempted prematurely ${session.denials} times during active backoff window. Stop calling tools and yield the turn for native Reactive Wakeup (<SYSTEM_MESSAGE>). User confirmation required to proceed.`
+      reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: reading task log '${taskId}' attempted prematurely ${effectiveDenials} times during active backoff window. User confirmation required to proceed.`
     });
   }
 
-  const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(session.pollCount));
+  const currentPollCount = bucket ? bucket.pollCount : session.pollCount;
+  const currentLastPoll = bucket ? bucket.lastPollTime : session.lastPollTime;
+  const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(currentPollCount));
   const requiredBackoffMs = requiredBackoffSec * 1000;
-  const elapsedMs = session.lastPollTime ? Math.max(0, Date.now() - session.lastPollTime) : 0;
+  const elapsedMs = currentLastPoll ? Math.max(0, now - currentLastPoll) : 0;
   const elapsedSec = Math.floor(elapsedMs / 1000);
   const remainingSec = Math.max(1, Math.ceil((requiredBackoffMs - elapsedMs) / 1000));
+  const condTarget = taskKey || `task-${taskId}`;
+  const condExample = convId && convId !== "global" ? `${convId}/${condTarget}` : condTarget;
 
   respond({
     decision: "deny",
-    reason: `Antigravity Execution Governance: Task '${taskId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. Diagnostic check #${session.pollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${remainingSec}s remaining). Tasks execute asynchronously and notify you automatically via native Reactive Wakeup (<SYSTEM_MESSAGE>) upon completion. Stop calling tools and yield your turn now.`
+    reason: `Antigravity Execution Governance: Task '${taskId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. Diagnostic check #${currentPollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${remainingSec}s remaining). Keep a conditioned watchdog armed via schedule(DurationSeconds=${requiredBackoffSec}, TimerCondition="${condExample}") so Reactive Wakeup (<SYSTEM_MESSAGE>) notifies you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
   });
 }
 
@@ -5419,7 +5602,7 @@ try {
         const taskStates = taskMatches.map((m) => ({ match: m, state: getTaskState(m, convId) }));
         const runningEntry = taskStates.find((entry) => entry.state === "RUNNING");
         if (runningEntry) {
-          denyRunningTask(runningEntry.match.id, convId);
+          denyRunningTask(runningEntry.match.id, convId, runningEntry.match.token);
         }
         taskState = taskStates.some((entry) => entry.state === "UNKNOWN") ? "UNKNOWN" : "COMPLETED";
       }
@@ -5694,7 +5877,7 @@ try {
     if (taskMatch) {
       const state = getTaskState(taskMatch, convId);
       if (state === "RUNNING") {
-        denyRunningTask(taskMatch.id, convId);
+        denyRunningTask(taskMatch.id, convId, taskMatch.token);
       }
       if (state === "COMPLETED") {
         const hasRtkForTask = Boolean(resolveCachedHostEnv().rtk);
@@ -5876,39 +6059,69 @@ try {
     }
 
     const session = getSessionState(convId);
-    const taskId = String(args.TaskId || args.taskId || "").trim();
+    const now = Date.now();
+    pruneTaskBackoff(session, convId, now);
+
+    const taskId = cleanGovernanceArg(args.TaskId || args.taskId);
     if (taskId && !session.taskIds.includes(taskId)) {
       session.taskIds.push(taskId);
     }
 
-    const now = Date.now();
-    const requiredBackoffSec = session.pollCount === 0 ? 0 : getRequiredBackoffSeconds(session.pollCount);
+    const taskKey = extractTaskBackoffKey("manage_task", args);
+    const bucket = taskKey ? getOrCreateTaskBucket(session, taskKey, now) : null;
+    const stateRef = bucket || session;
+    const pendingWatchdog = stateRef.pendingWatchdog && typeof stateRef.pendingWatchdog === "object"
+      ? stateRef.pendingWatchdog
+      : null;
+
+    const requiredBackoffSec = pendingWatchdog
+      ? Math.max(0, (Number(pendingWatchdog.requiredSec) || 30) - 2)
+      : (stateRef.pollCount === 0 ? 0 : getRequiredBackoffSeconds(stateRef.pollCount));
+    const displayRequiredSec = pendingWatchdog
+      ? (Number(pendingWatchdog.requiredSec) || 30)
+      : requiredBackoffSec;
     const requiredBackoffMs = requiredBackoffSec * 1000;
-    const elapsedMs = session.lastPollTime ? (now - session.lastPollTime) : Infinity;
+    const elapsedMs = stateRef.lastPollTime ? Math.max(0, now - stateRef.lastPollTime) : Infinity;
     const elapsedSec = Math.floor(elapsedMs / 1000);
 
     // Premature check before backoff interval has elapsed
     if (elapsedMs < requiredBackoffMs) {
+      if (bucket) {
+        bucket.denials++;
+        bucket.lastSeenTime = now;
+      }
       session.denials++;
       saveSessionState(convId, session, { updatePollTime: false });
 
-      if (session.denials >= 5) {
+      const effectiveDenials = bucket ? Math.max(bucket.denials, session.denials) : session.denials;
+      if (effectiveDenials >= 5) {
         respond({
           decision: "force_ask",
-          reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: manage_task('${action}') called prematurely ${session.denials} times during active backoff window across tasks [${session.taskIds.join(", ")}]. Stop calling tools and yield the turn for native Reactive Wakeup (<SYSTEM_MESSAGE>). User confirmation required to proceed.`
+          reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: manage_task('${action}') called prematurely ${effectiveDenials} times during active backoff window across tasks [${session.taskIds.join(", ")}]. User confirmation required to proceed.`
         });
       }
 
-      const remainingSec = Math.ceil((requiredBackoffMs - elapsedMs) / 1000);
+      const remainingSec = Math.max(1, Math.ceil((Math.max(requiredBackoffMs, displayRequiredSec * 1000) - elapsedMs) / 1000));
+      const condTarget = taskKey || "task-X";
+      const condExample = convId && convId !== "global" ? `${convId}/${condTarget}` : condTarget;
       respond({
         decision: "deny",
-        reason: `Antigravity Execution Governance: Proportional Backoff Active (Level ${session.pollCount}, ${session.denials} denial${session.denials > 1 ? "s" : ""}). Diagnostic check #${session.pollCount + 1} requires at least ${requiredBackoffSec}s elapsed since previous check (${elapsedSec}s elapsed, ${remainingSec}s remaining). Tasks execute asynchronously and notify you automatically via native Reactive Wakeup (<SYSTEM_MESSAGE>) upon completion. Stop calling tools and yield your turn now.`
+        reason: `Antigravity Execution Governance: Proportional Backoff Active (Level ${stateRef.pollCount}${taskKey ? ` for '${taskKey}'` : ""}, ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Diagnostic check #${stateRef.pollCount + 1} requires at least ${displayRequiredSec}s elapsed since previous check (${elapsedSec}s elapsed, ${remainingSec}s remaining). Keep a conditioned watchdog armed via schedule(DurationSeconds=${Math.max(30, displayRequiredSec)}, TimerCondition="${condExample}") so Reactive Wakeup (<SYSTEM_MESSAGE>) wakes you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
       });
     }
 
     // Backoff window satisfied! Allow diagnostic check and advance level:
-    session.pollCount++;
-    session.lastPollTime = now;
+    if (pendingWatchdog) {
+      // Consuming an armed watchdog's diagnostic inspection preserves the level already advanced by schedule()
+      delete stateRef.pendingWatchdog;
+    } else {
+      stateRef.pollCount++;
+    }
+    stateRef.lastPollTime = now;
+    if (bucket) {
+      bucket.lastSeenTime = now;
+      bucket.denials = 0;
+    }
     session.denials = 0;
     saveSessionState(convId, session);
     respond({ decision: "allow" });
@@ -5916,6 +6129,7 @@ try {
 
   if (toolName === "schedule") {
     const duration = Number(args.DurationSeconds || args.durationSeconds || args.duration || 0);
+    const rawCond = cleanGovernanceArg(args.TimerCondition || args.timerCondition);
 
     if (isSwarmPollSchedule(args)) {
       const session = getSessionState(convId);
@@ -5924,46 +6138,125 @@ try {
       if (session.denials >= 5) {
         respond({
           decision: "force_ask",
-          reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: swarm/subagent schedule polling attempted ${session.denials} times. Use 'swarm_wait' for '/swarm' or stop calling tools for subagents. User confirmation required to proceed.`
+          reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: /swarm schedule polling attempted ${session.denials} times. Use 'swarm_wait' for '/swarm' (the dedicated 'swarm_monitor' daemon cron checks for stalls). User confirmation required to proceed.`
         });
       }
       respond({
         decision: "deny",
         reason:
-          "Antigravity Execution Governance: Using one-shot 'schedule' timers to poll a swarm or subagent is strictly prohibited. " +
-          "For '/swarm', call 'swarm_wait' directly without a 'schedule' timer (it sleeps at zero token cost and wakes immediately when any board message arrives, while the dedicated 'swarm_monitor' daemon cron checks for stalls). " +
-          "For subagents, stop calling tools and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+          "Antigravity Execution Governance: Using one-shot 'schedule' timers to poll a '/swarm' board or squad is strictly prohibited. " +
+          "Call 'swarm_wait' directly without a 'schedule' timer (it sleeps at zero token cost and wakes immediately when any board message arrives, while the dedicated 'swarm_monitor' daemon cron handles stall detection)."
       });
+    }
+
+    if (isSubagentPollSchedule(args)) {
+      const session = getSessionState(convId);
+      const now = Date.now();
+      pruneTaskBackoff(session, convId, now);
+
+      const subKey = extractTaskBackoffKey("schedule", args);
+      const bucket = subKey ? getOrCreateTaskBucket(session, subKey, now) : null;
+      const stateRef = bucket || session;
+      const requiredSubagentSec = getRequiredSubagentBackoffSeconds(stateRef.pollCount);
+      const hasValidCond = hasValidSubagentTimerCondition(args);
+
+      if (!hasValidCond || !Number.isFinite(duration) || duration < 30) {
+        if (bucket) {
+          bucket.denials++;
+          bucket.lastSeenTime = now;
+        }
+        session.denials++;
+        saveSessionState(convId, session, { updatePollTime: false });
+
+        const effectiveDenials = bucket ? Math.max(bucket.denials, session.denials) : session.denials;
+        if (effectiveDenials >= 5) {
+          respond({
+            decision: "force_ask",
+            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: direct subagent schedule polling denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredSubagentSec} and TimerCondition="<subagentConvId>", or confirm with the user to proceed.`
+          });
+        }
+
+        const condHint = rawCond && hasValidCond ? rawCond : (subKey || "<subagentConvId>");
+        const cause = !hasValidCond
+          ? "Unconditioned subagent polling timers are prohibited."
+          : `Direct subagent stall watchdog duration too short (${duration}s < 30s minimum).`;
+        respond({
+          decision: "deny",
+          reason: `Antigravity Execution Governance: ${cause} (${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). For direct invoke_subagent stall safety, retry 'schedule' with DurationSeconds >= ${requiredSubagentSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost if the subagent finishes normally.`
+        });
+      }
+
+      // Valid conditioned direct-subagent stall watchdog (>= 30s): auto-clamp 30..required-1 up to requiredSubagentSec
+      const clamped = duration < requiredSubagentSec;
+      stateRef.pollCount++;
+      stateRef.lastPollTime = now;
+      if (bucket) {
+        bucket.lastSeenTime = now;
+        bucket.denials = 0;
+      }
+      session.denials = 0;
+      saveSessionState(convId, session);
+      if (clamped) {
+        respond({ decision: "allow", overwrite: { DurationSeconds: requiredSubagentSec } });
+      }
+      respond({ decision: "allow" });
     }
 
     if (isTaskPollSchedule(args)) {
       const session = getSessionState(convId);
-      const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(session.pollCount));
+      const now = Date.now();
+      pruneTaskBackoff(session, convId, now);
 
-      // Task watchdog timers must be AT LEAST the required backoff window!
-      if (duration < requiredBackoffSec) {
+      const taskKey = extractTaskBackoffKey("schedule", args);
+      const bucket = taskKey ? getOrCreateTaskBucket(session, taskKey, now) : null;
+      const stateRef = bucket || session;
+      const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(stateRef.pollCount));
+      const hasValidCond = hasValidTaskTimerCondition(args);
+      const condTarget = taskKey || "task-X";
+      const condHint = hasValidCond
+        ? rawCond
+        : (convId && convId !== "global" ? `${convId}/${condTarget}` : condTarget);
+
+      // Hard deny abusive micro-polls (< 15s) or unconditioned task polling loops
+      if (!hasValidCond || !Number.isFinite(duration) || duration < 15) {
+        if (bucket) {
+          bucket.denials++;
+          bucket.lastSeenTime = now;
+        }
         session.denials++;
         saveSessionState(convId, session, { updatePollTime: false });
 
-        if (session.denials >= 5) {
+        const effectiveDenials = bucket ? Math.max(bucket.denials, session.denials) : session.denials;
+        if (effectiveDenials >= 5) {
           respond({
             decision: "force_ask",
-            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: schedule polling timer has been denied ${session.denials} times. Background tasks notify you automatically upon completion. User confirmation required to proceed.`
+            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: schedule polling timer denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} and TimerCondition="${condHint}", or confirm with the user to proceed.`
           });
         }
 
+        const cause = !hasValidCond
+          ? "Unconditioned task polling timers are prohibited because they do not auto-cancel when the task finishes."
+          : `Task watchdog timer duration too short (${duration}s < 15s minimum).`;
         respond({
           decision: "deny",
-          reason: `Antigravity Execution Governance: Task watchdog timer duration too short (${duration}s, ${session.denials} denial${session.denials > 1 ? "s" : ""}). Under Proportional Backoff (Level ${session.pollCount}), watchdog timer must be at least ${requiredBackoffSec}s. Tasks notify you automatically via native Reactive Wakeup (<SYSTEM_MESSAGE>). Stop calling tools and yield the turn instead.`
+          reason: `Antigravity Execution Governance: ${cause} (Level ${stateRef.pollCount}${taskKey ? ` for '${taskKey}'` : ""}, ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost on normal completion while protecting against stalls.`
         });
       }
 
-      // If duration >= requiredBackoffSec, watchdog timer is permitted AND advances backoff level
-      // so repeated 45s/60s timers without exponential backoff are blocked on subsequent turns:
-      session.pollCount = Math.max(1, session.pollCount) + 1;
-      session.lastPollTime = Date.now();
+      // Conditioned task watchdog with DurationSeconds >= 15: auto-clamp up to requiredBackoffSec instead of dropping monitoring
+      const effectiveDuration = duration < requiredBackoffSec ? requiredBackoffSec : duration;
+      stateRef.pollCount = Math.max(1, stateRef.pollCount) + 1;
+      stateRef.lastPollTime = now;
+      stateRef.pendingWatchdog = { armedAt: now, requiredSec: requiredBackoffSec, durationSec: effectiveDuration };
+      if (bucket) {
+        bucket.lastSeenTime = now;
+        bucket.denials = 0;
+      }
       session.denials = 0;
       saveSessionState(convId, session);
+      if (duration < requiredBackoffSec) {
+        respond({ decision: "allow", overwrite: { DurationSeconds: requiredBackoffSec } });
+      }
       respond({ decision: "allow" });
     }
 

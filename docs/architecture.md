@@ -1,6 +1,6 @@
 # Architecture & Internals
 
-`Agy-Context-Saver` (`v2.0.x`) pairs a `PreToolUse` hook (`scripts/execution-guard-hook.mjs`) with a streaming transcript engine (`lib/transcript-core.mjs`, `bin/agy-context.mjs`) and **RTK (`>= 1.1.0`)**, a CLI proxy that compresses noisy shell and test output.
+`Agy-Context-Saver` (`v2.1.1`) pairs a `PreToolUse` hook (`scripts/execution-guard-hook.mjs`) with a streaming transcript engine (`lib/transcript-core.mjs`, `bin/agy-context.mjs`) and **RTK (`>= 1.1.0`)**, a CLI proxy that compresses noisy shell and test output.
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
@@ -19,8 +19,8 @@
 - Searches and lists workspace files (`rtk grep`, `rtk find`, `rtk ls`, `rtk tree`).
 - Reads step spillovers and completed task logs (`rtk read`, including `cat` and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrites) and filters command output to errors or summaries (`rtk err`, `rtk summary`).
 
-### Agy-Context-Saver (`v2.0.x`)
-- Enforces Reactive Wakeup backoff on `manage_task` and `schedule`, backed by a 5-strike `force_ask` circuit breaker.
+### Agy-Context-Saver (`v2.1.1`)
+- Enforces per-task Reactive Wakeup backoff and conditioned stall-watchdog auto-clamping on `manage_task` and `schedule` (`30s -> 75s -> 188s -> 469s -> 600s` per task; `180s -> 450s -> 600s` per direct subagent), backed by a 5-strike `force_ask` circuit breaker.
 - Bounds workspace `read_file` slices (`<= 150` lines, or explicit `1..TotalLines` reads on files `<= 800` lines and `<= 45 KiB`).
 - Protects `.system_generated/` and the state directory (`getStateDir()`, `~/.local/state/agy-context-saver` on POSIX or `%LOCALAPPDATA%\agy-context-saver` on Windows).
 - Streams Markdown transcript turns, regex queries, lineage lists, sanitized exports, and step ranges via `agy-context transcript` (`read`, `query`, `step`, `health`, `list`, `export`, `access`).
@@ -50,9 +50,10 @@ Segment-, quote-, and heredoc-aware shell parsing protects `.system_generated/` 
 - Inline interpreter invocations (`node -e`, `python3 -c`, `bash -c`, `sh -c`) and executable script or heredoc bodies are scanned for references to `.system_generated`, `getStateDir()`, `transcript-core.mjs`, and `bin/agy-context.mjs`.
 - When a child session is restricted (`deny` or `self-only`), `.system_generated` denial messages state that transcript access is disabled by parent policy rather than suggesting `agy-context transcript`, avoiding futile retry turns.
 
-### 4. Session-Wide Lifecycle Ledger
-Polling counters are tracked per session in `<stateDir>/agy-session-governance-state.json`:
-- Counters persist across task ID changes, pauses, and interleaved tool calls.
+### 4. Per-Task Lifecycle Ledger
+Polling and watchdog counters are tracked per task and per direct subagent inside `<stateDir>/agy-session-<convId>.json` (`session.taskBackoff[taskKey]`, capped at 64 entries and automatically pruned when `getTaskState()` reports `COMPLETED` or past the 1-hour TTL, with flat `session.pollCount` kept only as a fallback for unkeyed calls):
+- Fresh background tasks always start at Level 0 (`0s` immediate Check #1 and `>= 30s` / `45s` conditioned watchdog) without cross-task bleed from earlier tasks.
+- Conditioned task watchdogs (`>= 15s`) and conditioned direct-subagent stall watchdogs (`>= 30s`, bound to `TimerCondition="<subagentConvId>"`) auto-clamp via `overwrite: { DurationSeconds: requiredBackoffSec }` instead of stripping monitoring, while abusive micro-polls, unconditioned polling loops, and `/swarm` one-shot timers remain hard-denied.
 - Prompt keywords (`debug`, `stuck`, `timeout`) do not bypass backoff rules.
 - Reaching 5 cumulative denials across polling, internal state, or transcript access guards triggers `force_ask`, pausing autonomous execution and prompting the user.
 

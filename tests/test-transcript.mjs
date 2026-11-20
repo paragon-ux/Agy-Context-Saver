@@ -13,6 +13,12 @@ import {
   getStepDetail,
   checkContextHealth,
   getRequiredBackoffSeconds,
+  getRequiredSubagentBackoffSeconds,
+  extractTaskBackoffKey,
+  hasValidTaskTimerCondition,
+  hasValidSubagentTimerCondition,
+  isSwarmPollSchedule,
+  isSubagentPollSchedule,
   listTranscriptConversations,
   exportSanitizedTranscript,
   stripSummaryStepBoilerplate,
@@ -305,6 +311,19 @@ try {
     assert.equal(getRequiredBackoffSeconds(1), 30);
     assert.equal(getRequiredBackoffSeconds(2), 75);
     assert.equal(getRequiredBackoffSeconds(3), 188);
+    assert.equal(getRequiredSubagentBackoffSeconds(0), 180);
+    assert.equal(getRequiredSubagentBackoffSeconds(1), 450);
+    assert.equal(getRequiredSubagentBackoffSeconds(2), 600);
+    assert.equal(getRequiredSubagentBackoffSeconds(3), 600);
+    assert.equal(extractTaskBackoffKey("manage_task", { TaskId: "conv-1/task-150" }), "task-150");
+    assert.equal(extractTaskBackoffKey("schedule", { TimerCondition: "conv-1/task-150", Prompt: "Check status" }), "task-150");
+    assert.equal(extractTaskBackoffKey("schedule", { TimerCondition: "7657a17a-258b-4f47-a860-4cf3072800f6", Prompt: "Check subagent" }), "7657a17a-258b-4f47-a860-4cf3072800f6");
+    assert.equal(hasValidTaskTimerCondition({ TimerCondition: "conv-1/task-1" }), true);
+    assert.equal(hasValidTaskTimerCondition({ TimerCondition: "never" }), false);
+    assert.equal(hasValidSubagentTimerCondition({ TimerCondition: "7657a17a-258b-4f47-a860-4cf3072800f6" }), true);
+    assert.equal(hasValidSubagentTimerCondition({ TimerCondition: "conv-1/task-1" }), false);
+    assert.equal(isSwarmPollSchedule({ Prompt: "Check swarm status", TimerCondition: "7657a17a-258b-4f47-a860-4cf3072800f6" }), true);
+    assert.equal(isSubagentPollSchedule({ Prompt: "Check if subagent stalled", TimerCondition: "7657a17a-258b-4f47-a860-4cf3072800f6" }), true);
 
     const pollConv = "conv-polling-health";
     const pollLogs = path.join(brainDir, pollConv, ".system_generated", "logs");
@@ -327,7 +346,70 @@ try {
     assert.equal(health.metrics.legalChecks, 1);
     assert.equal(health.metrics.pollingViolations, 2);
     assert.match(health.status, /WARNING/);
-    console.log("✓ Unified health evaluator enforces timestamped backoff parity without false-flagging kill/list");
+
+    // Per-task isolation, watchdog wakeup inspections, and conditioned direct-subagent (>=180s) watchdogs
+    const healthyWatchdogConv = "conv-healthy-watchdogs";
+    const healthyWatchdogLogs = path.join(brainDir, healthyWatchdogConv, ".system_generated", "logs");
+    fs.mkdirSync(healthyWatchdogLogs, { recursive: true });
+    const subA = "7657a17a-258b-4f47-a860-4cf3072800f6";
+    const subB = "88888888-258b-4f47-a860-4cf3072800f6";
+    const healthySteps = [
+      { step_index: 1, type: "USER_INPUT", content: "Run tasks", created_at: new Date(baseMs).toISOString() },
+      { step_index: 2, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-1", TimerCondition: `${healthyWatchdogConv}/task-1` } }], created_at: new Date(baseMs + 1000).toISOString() },
+      { step_index: 3, type: "PLANNER_RESPONSE", tool_calls: [{ name: "manage_task", args: { Action: "status", TaskId: "task-1" } }], created_at: new Date(baseMs + 46000).toISOString() },
+      { step_index: 4, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 75, Prompt: "Check status of task-1", TimerCondition: `${healthyWatchdogConv}/task-1` } }], created_at: new Date(baseMs + 47000).toISOString() },
+      // Fresh task-2 immediately starts at Level 0 (45s allowed without inheriting task-1 Level 3!)
+      { step_index: 5, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-2", TimerCondition: `${healthyWatchdogConv}/task-2` } }], created_at: new Date(baseMs + 48000).toISOString() },
+      { step_index: 6, type: "PLANNER_RESPONSE", tool_calls: [{ name: "manage_task", args: { Action: "status", TaskId: "task-3" } }], created_at: new Date(baseMs + 49000).toISOString() },
+      // Direct subagent stall watchdogs (180s -> 450s on subA, fresh 180s on subB)
+      { step_index: 7, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 180, Prompt: "Check if subagent stalled", TimerCondition: subA } }], created_at: new Date(baseMs + 50000).toISOString() },
+      { step_index: 8, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 450, Prompt: "Check if subagent stalled", TimerCondition: subA } }], created_at: new Date(baseMs + 230000).toISOString() },
+      { step_index: 9, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 180, Prompt: "Check if direct subagent stalled", TimerCondition: subB } }], created_at: new Date(baseMs + 231000).toISOString() }
+    ];
+    fs.writeFileSync(path.join(healthyWatchdogLogs, "transcript.jsonl"), healthySteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+    const healthyWatchdogRes = await checkContextHealth({ conversationId: healthyWatchdogConv });
+    assert.equal(healthyWatchdogRes.metrics.pollingViolations, 0, "Per-task watchdogs and >=180s conditioned direct-subagent watchdogs must have 0 violations");
+    assert.equal(healthyWatchdogRes.metrics.legalChecks, 8);
+    assert.equal(healthyWatchdogRes.status, "HEALTHY");
+
+    // Violation parity: unconditioned task poll, <180s subagent poll, unconditioned subagent poll, and /swarm poll with UUID
+    const badWatchdogConv = "conv-bad-watchdogs";
+    const badWatchdogLogs = path.join(brainDir, badWatchdogConv, ".system_generated", "logs");
+    fs.mkdirSync(badWatchdogLogs, { recursive: true });
+    const badSteps = [
+      { step_index: 1, type: "USER_INPUT", content: "Poll", created_at: new Date(baseMs).toISOString() },
+      { step_index: 2, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-1" } }], created_at: new Date(baseMs + 1000).toISOString() },
+      { step_index: 3, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 60, Prompt: "Check if subagent stalled", TimerCondition: subA } }], created_at: new Date(baseMs + 2000).toISOString() },
+      { step_index: 4, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 180, Prompt: "Check if subagent stalled" } }], created_at: new Date(baseMs + 3000).toISOString() },
+      { step_index: 5, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 180, Prompt: "Check if swarm worker stalled", TimerCondition: subA } }], created_at: new Date(baseMs + 4000).toISOString() }
+    ];
+    fs.writeFileSync(path.join(badWatchdogLogs, "transcript.jsonl"), badSteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+    const badWatchdogRes = await checkContextHealth({ conversationId: badWatchdogConv });
+    assert.equal(badWatchdogRes.metrics.pollingViolations, 4, "Unconditioned task/subagent polls, <180s subagent polls, and /swarm polls must all count as violations");
+    assert.match(badWatchdogRes.status, /CRITICAL/);
+
+    // Auto-clamp state sync: a conditioned 60s Level-2 task watchdog flags the under-sized attempt (1 violation)
+    // AND advances the bucket to Level 3 + arms pendingWatchdog (75s), so wakeup manage_task(status) at +75s is legal
+    const clampSyncConv = "conv-clamp-sync";
+    const clampSyncLogs = path.join(brainDir, clampSyncConv, ".system_generated", "logs");
+    fs.mkdirSync(clampSyncLogs, { recursive: true });
+    const clampSyncSteps = [
+      { step_index: 1, type: "USER_INPUT", content: "Run", created_at: new Date(baseMs).toISOString() },
+      { step_index: 2, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-1", TimerCondition: `${clampSyncConv}/task-1` } }], created_at: new Date(baseMs + 1000).toISOString() },
+      { step_index: 3, type: "PLANNER_RESPONSE", tool_calls: [{ name: "manage_task", args: { Action: "status", TaskId: "task-1" } }], created_at: new Date(baseMs + 46000).toISOString() },
+      // Under-sized 60s Level-2 conditioned watchdog (hook auto-clamps to 75s -> 1 violation, advances bucket to Level 3)
+      { step_index: 4, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 60, Prompt: "Check status of task-1", TimerCondition: `${clampSyncConv}/task-1` } }], created_at: new Date(baseMs + 47000).toISOString() },
+      // Wakeup inspection after clamped 75s -> legal!
+      { step_index: 5, type: "PLANNER_RESPONSE", tool_calls: [{ name: "manage_task", args: { Action: "status", TaskId: "task-1" } }], created_at: new Date(baseMs + 122000).toISOString() },
+      // Next watchdog properly uses Level 3 (188s) -> legal!
+      { step_index: 6, type: "PLANNER_RESPONSE", tool_calls: [{ name: "schedule", args: { DurationSeconds: 188, Prompt: "Check status of task-1", TimerCondition: `${clampSyncConv}/task-1` } }], created_at: new Date(baseMs + 123000).toISOString() }
+    ];
+    fs.writeFileSync(path.join(clampSyncLogs, "transcript.jsonl"), clampSyncSteps.map((s) => JSON.stringify(s)).join("\n") + "\n");
+    const clampSyncRes = await checkContextHealth({ conversationId: clampSyncConv });
+    assert.equal(clampSyncRes.metrics.pollingViolations, 1, "Only the under-sized 60s Level-2 attempt should register as a violation");
+    assert.equal(clampSyncRes.metrics.legalChecks, 4, "Wakeup inspection at +75s and Level-3 188s watchdog must stay synced with live hook state");
+
+    console.log("✓ Unified health evaluator enforces per-task & direct-subagent backoff parity without false-flagging kill/list");
   }
 
   // ==========================================================================
