@@ -593,6 +593,117 @@ console.log("\n--- Group E: Task Polling Backoff, Watchdog & Benchmark Mutation 
   assert.equal(afterPrune.taskBackoff["task-99"], undefined, "Quiet-log completed task-99 must be pruned from session.taskBackoff");
   assert.ok(afterPrune.taskBackoff["task-100"], "Active task-100 must remain in session.taskBackoff");
 
+  // Killed tasks (`was canceled` / `cancelled.`) and fired one-shot `Timer:` tasks -> COMPLETED;
+  // unfired `Timer:` tasks and active recurring `Cron:` tasks (even after tick delivery) -> RUNNING.
+  const convMarkers = "conv-task-markers";
+  const markersSysDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", convMarkers, ".system_generated");
+  const markersTasksDir = path.join(markersSysDir, "tasks");
+  const markersLogsDir = path.join(markersSysDir, "logs");
+  fs.mkdirSync(markersTasksDir, { recursive: true });
+  fs.mkdirSync(markersLogsDir, { recursive: true });
+  for (const tid of ["task-k1", "task-k2", "task-t1", "task-t2", "task-c1", "task-c2", "task-5", "task-52"]) {
+    // Fresh mtime (< 5m) ensures mtime fallback alone would return RUNNING; transcript markers must drive COMPLETED.
+    fs.writeFileSync(path.join(markersTasksDir, `${tid}.log`), `log for ${tid}\n`, "utf-8");
+  }
+  fs.writeFileSync(
+    path.join(markersLogsDir, "transcript.jsonl"),
+    [
+      JSON.stringify({ step_index: 1, content: `Tool is running as a background task with task id: ${convMarkers}/task-k1\nTask Description: cmd\nTask logs: tasks/task-k1.log` }),
+      JSON.stringify({ step_index: 2, content: `Task id "${convMarkers}/task-k1" was canceled with result:\nTool execution was canceled` }),
+      JSON.stringify({ step_index: 3, content: `Tool is running as a background task with task id: ${convMarkers}/task-k2\nTask Description: cmd\nTask logs: tasks/task-k2.log` }),
+      JSON.stringify({ step_index: 4, content: `Task "${convMarkers}/task-k2" cancelled.` }),
+      JSON.stringify({ step_index: 5, content: `Tool is running as a background task with task id: ${convMarkers}/task-t1\nTask Description: Timer: 3m, Prompt: Check status\nTask logs: tasks/task-t1.log` }),
+      JSON.stringify({ step_index: 6, content: `[Message] timestamp=2026-11-20T03:00:00Z sender=${convMarkers}/task-t1 priority=MESSAGE_PRIORITY_HIGH content=Check status` }),
+      JSON.stringify({ step_index: 7, content: `Tool is running as a background task with task id: ${convMarkers}/task-t2\nTask Description: Timer: 3m, Prompt: Unfired timer\nTask logs: tasks/task-t2.log` }),
+      JSON.stringify({ step_index: 8, content: `Tool is running as a background task with task id: ${convMarkers}/task-c1\nTask Description: Cron: */3 * * * *, Prompt: Monitor swarm\nTask logs: tasks/task-c1.log` }),
+      JSON.stringify({ step_index: 9, content: `[Message] timestamp=2026-11-20T03:03:00Z sender=${convMarkers}/task-c1 priority=MESSAGE_PRIORITY_HIGH content=Monitor swarm` }),
+      JSON.stringify({ step_index: 10, content: `Tool is running as a background task with task id: ${convMarkers}/task-c2\nTask Description: Cron: */3 * * * *, Prompt: Old monitor\nTask logs: tasks/task-c2.log` }),
+      JSON.stringify({ step_index: 11, content: `[Message] timestamp=2026-11-20T03:03:00Z sender=${convMarkers}/task-c2 priority=MESSAGE_PRIORITY_HIGH content=Old monitor` }),
+      JSON.stringify({ step_index: 12, content: `Task "${convMarkers}/task-c2" cancelled.` }),
+      JSON.stringify({ step_index: 13, content: `Tool is running as a background task with task id: ${convMarkers}/task-5\nTask Description: Timer: 3m, Prompt: Prefix check\nTask logs: tasks/task-5.log` }),
+      JSON.stringify({ step_index: 14, content: `Tool is running as a background task with task id: ${convMarkers}/task-52\nTask Description: Timer: 3m, Prompt: Fired sibling\nTask logs: tasks/task-52.log` }),
+      JSON.stringify({ step_index: 15, content: `[Message] timestamp=2026-11-20T03:05:00Z sender=${convMarkers}/task-52 priority=MESSAGE_PRIORITY_HIGH content=Fired sibling` })
+    ].join("\n") + "\n",
+    "utf-8"
+  );
+  const markersSessionFile = path.join(stateDir, `agy-session-${convMarkers}.json`);
+  const recentTs = Date.now() - 10000;
+  fs.writeFileSync(
+    markersSessionFile,
+    JSON.stringify({
+      pollCount: 0,
+      denials: 0,
+      taskIds: ["task-k1", "task-k2", "task-t1", "task-t2", "task-c1", "task-c2", "task-5", "task-52"],
+      taskBackoff: {
+        "task-k1": { pollCount: 2, lastPollTime: recentTs, denials: 0, lastSeenTime: recentTs },
+        "task-k2": { pollCount: 2, lastPollTime: recentTs, denials: 0, lastSeenTime: recentTs },
+        "task-t1": { pollCount: 1, lastPollTime: recentTs, denials: 0, lastSeenTime: recentTs },
+        "task-t2": { pollCount: 1, lastPollTime: recentTs, denials: 0, lastSeenTime: recentTs },
+        "task-c1": { pollCount: 1, lastPollTime: recentTs, denials: 0, lastSeenTime: recentTs },
+        "task-c2": { pollCount: 1, lastPollTime: recentTs, denials: 0, lastSeenTime: recentTs },
+        "task-5": { pollCount: 1, lastPollTime: recentTs, denials: 0, lastSeenTime: recentTs },
+        "task-52": { pollCount: 1, lastPollTime: recentTs, denials: 0, lastSeenTime: recentTs }
+      },
+      lastPollTime: recentTs,
+      lastSeenTime: recentTs,
+      recentHookCalls: []
+    }),
+    "utf-8"
+  );
+  const markersPrune = runHook({ conversationId: convMarkers, toolCall: { name: "schedule", args: { DurationSeconds: 45, Prompt: "Check status of task-200", TimerCondition: `${convMarkers}/task-200` } } });
+  assert.equal(markersPrune.decision, "allow");
+  const afterMarkers = JSON.parse(fs.readFileSync(markersSessionFile, "utf-8"));
+  assert.equal(afterMarkers.taskBackoff["task-k1"], undefined, "Killed task ('was canceled') must be pruned immediately");
+  assert.equal(afterMarkers.taskBackoff["task-k2"], undefined, "Killed task ('cancelled.') must be pruned immediately");
+  assert.equal(afterMarkers.taskBackoff["task-t1"], undefined, "Fired one-shot Timer task must be pruned immediately");
+  assert.equal(afterMarkers.taskBackoff["task-c2"], undefined, "Canceled recurring Cron task must be pruned immediately");
+  assert.equal(afterMarkers.taskBackoff["task-52"], undefined, "Fired sibling task-52 must be pruned immediately");
+  assert.ok(afterMarkers.taskBackoff["task-t2"], "Unfired Timer task must remain RUNNING in session.taskBackoff");
+  assert.ok(afterMarkers.taskBackoff["task-c1"], "Active recurring Cron task (even after tick) must remain RUNNING in session.taskBackoff");
+  assert.ok(afterMarkers.taskBackoff["task-5"], "Prefix-sibling unfired task-5 must remain RUNNING when only task-52 fired");
+
+  for (const completedTid of ["task-k1", "task-k2", "task-t1", "task-c2", "task-52"]) {
+    const readRes = runHook({
+      conversationId: convMarkers,
+      toolCall: { name: "run_command", args: { CommandLine: `rtk read tasks/${completedTid}.log`, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(readRes.decision, "allow", `rtk read tasks/${completedTid}.log must be allowed once COMPLETED`);
+  }
+  for (const runningTid of ["task-t2", "task-c1", "task-5"]) {
+    const readRes = runHook({
+      conversationId: convMarkers,
+      toolCall: { name: "run_command", args: { CommandLine: `rtk read tasks/${runningTid}.log`, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(readRes.decision, "deny", `rtk read tasks/${runningTid}.log must stay denied while RUNNING`);
+  }
+
+  // Tail-window split (> 256 KiB): launch marker before tail window + fire/tick marker inside tail window
+  const convTail = "conv-task-tail-split";
+  const tailSysDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", convTail, ".system_generated");
+  fs.mkdirSync(path.join(tailSysDir, "tasks"), { recursive: true });
+  fs.mkdirSync(path.join(tailSysDir, "logs"), { recursive: true });
+  fs.writeFileSync(path.join(tailSysDir, "tasks", "task-t9.log"), "timer log\n", "utf-8");
+  fs.writeFileSync(path.join(tailSysDir, "tasks", "task-c9.log"), "cron log\n", "utf-8");
+  const fillerLine = JSON.stringify({ step_index: 50, content: "x".repeat(4000) });
+  const tailLines = [
+    JSON.stringify({ step_index: 1, content: `Tool is running as a background task with task id: ${convTail}/task-t9\nTask Description: Timer: 3m, Prompt: Long wait\nTask logs: tasks/task-t9.log` }),
+    JSON.stringify({ step_index: 2, content: `Tool is running as a background task with task id: ${convTail}/task-c9\nTask Description: Cron: */3 * * * *, Prompt: Long cron\nTask logs: tasks/task-c9.log` }),
+    ...Array.from({ length: 70 }, () => fillerLine),
+    JSON.stringify({ step_index: 80, content: `[Message] timestamp=2026-11-20T03:10:00Z sender=${convTail}/task-t9 priority=MESSAGE_PRIORITY_HIGH content=Long wait` }),
+    JSON.stringify({ step_index: 81, content: `[Message] timestamp=2026-11-20T03:10:00Z sender=${convTail}/task-c9 priority=MESSAGE_PRIORITY_HIGH content=Long cron` })
+  ];
+  fs.writeFileSync(path.join(tailSysDir, "logs", "transcript.jsonl"), tailLines.join("\n") + "\n", "utf-8");
+  assert.equal(
+    runHook({ conversationId: convTail, toolCall: { name: "run_command", args: { CommandLine: "rtk read tasks/task-t9.log", WaitMsBeforeAsync: 5000 } } }).decision,
+    "allow",
+    "Fired one-shot Timer launched before >256 KiB tail window must fall through to full transcript scan and allow rtk read"
+  );
+  assert.equal(
+    runHook({ conversationId: convTail, toolCall: { name: "run_command", args: { CommandLine: "rtk read tasks/task-c9.log", WaitMsBeforeAsync: 5000 } } }).decision,
+    "deny",
+    "Recurring Cron launched before >256 KiB tail window must stay RUNNING on tick delivery"
+  );
+
   // Direct invoke_subagent stall watchdogs (180s -> 450s -> 600s, 30..179 auto-clamp, <30s & unconditioned denied)
   const convSub = "conv-subagent-watchdog";
   const subA = "7657a17a-258b-4f47-a860-4cf3072800f6";

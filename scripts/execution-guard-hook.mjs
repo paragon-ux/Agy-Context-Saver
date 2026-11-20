@@ -713,7 +713,22 @@ function readTail(file, bytes) {
 }
 
 function scanTaskMarkers(text, taskName) {
-  if (text.includes(`/${taskName}\\" finished`) || text.includes(`/${taskName}" finished`)) return "COMPLETED";
+  if (
+    text.includes(`/${taskName}\\" finished`) ||
+    text.includes(`/${taskName}" finished`) ||
+    text.includes(`/${taskName}\\" was canceled`) ||
+    text.includes(`/${taskName}" was canceled`) ||
+    text.includes(`/${taskName}\\" cancelled.`) ||
+    text.includes(`/${taskName}" cancelled.`)
+  ) {
+    return "COMPLETED";
+  }
+  const hasOneShotTimerLaunch =
+    text.includes(`/${taskName}\\nTask Description: Timer:`) ||
+    text.includes(`/${taskName}\nTask Description: Timer:`);
+  if (hasOneShotTimerLaunch && text.includes(`/${taskName} priority=`)) {
+    return "COMPLETED";
+  }
   if (text.includes(`/${taskName}\\nTask `) || text.includes(`/${taskName}\nTask `)) return "RUNNING";
   return null;
 }
