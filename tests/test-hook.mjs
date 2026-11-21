@@ -89,20 +89,20 @@ console.log("\n--- Group B: RTK >= 1.1.0 Delegation & Edge-Case Guards ---");
   console.log("✓ WaitMsBeforeAsync applied only when !isDaemon && waitMs === undefined (ACS-HOOK-05)");
 }
 
-// B.2: Compound chains & bash -c wrappers handled cleanly via `rtk hook antigravity` (ACS-HOOK-06, 07)
+// B.2: Compound chains & bash -c wrappers rewrite ONLY high-ROI segments via Narrow Pre-Gate (ACS-HOOK-06, 07, IND-RUN-002)
 {
   const outChain = runHook({
     toolCall: { name: "run_command", args: { CommandLine: "git status && cat package.json", WaitMsBeforeAsync: 5000 } }
   });
   assert.equal(outChain.decision, "allow");
-  assert.equal(outChain.overwrite?.CommandLine, "rtk git status && rtk read package.json");
+  assert.equal(outChain.overwrite?.CommandLine, "rtk git status && cat package.json");
 
   const outWrap = runHook({
     toolCall: { name: "run_command", args: { CommandLine: "bash -c 'git status && cat package.json'", WaitMsBeforeAsync: 5000 } }
   });
   assert.equal(outWrap.decision, "allow");
-  assert.equal(outWrap.overwrite?.CommandLine, "bash -c 'rtk git status && rtk read package.json'");
-  console.log("✓ Compound chains and bash -c wrappers rewrite via rtk hook antigravity without bespoke cache/wrapper bugs");
+  assert.equal(outWrap.overwrite?.CommandLine, "bash -c 'rtk git status && cat package.json'");
+  console.log("✓ Compound chains and bash -c wrappers rewrite only high-ROI segments via Narrow Pre-Gate");
 }
 
 // B.3: Lossy rtk wc / rtk ls / rtk diff rewrites reverted back to raw (ACS-HOOK-09)
@@ -124,7 +124,7 @@ console.log("\n--- Group B: RTK >= 1.1.0 Delegation & Edge-Case Guards ---");
   console.log("✓ Implicit rtk wc / rtk ls / rtk diff rewrites reverted; explicit rtk invocation preserved (ACS-HOOK-09)");
 }
 
-// B.4: Never emit `rtk rg` when `rg` binary is absent on PATH (ACS-HOOK-15)
+// B.4: Never emit `rtk rg` when `rg` binary is absent on PATH; bare `rg` maps to lossless `grep` (ACS-HOOK-15)
 {
   const emptyBinEnv = withEnvPath(path.join(hermetic.profileDir, "rtk-shim-bin"));
   const outSimpleRg = runHook(
@@ -132,17 +132,26 @@ console.log("\n--- Group B: RTK >= 1.1.0 Delegation & Edge-Case Guards ---");
     emptyBinEnv
   );
   assert.equal(outSimpleRg.decision, "allow");
-  assert.match(outSimpleRg.overwrite?.CommandLine || "", /rtk grep/);
+  assert.match(outSimpleRg.overwrite?.CommandLine || "", /^grep\b/);
   assert.equal((outSimpleRg.overwrite?.CommandLine || "").includes("rtk rg"), false, "Must NEVER emit rtk rg when rg is absent");
 
-  // Unsupported rg-only flag (-t js) maps cleanly to rtk grep --include instead of emitting `rtk rg`
+  // Explicit `rtk rg` still maps cleanly to `rtk grep` when host `rg` is absent
+  const outExplicitRtkRg = runHook(
+    { toolCall: { name: "run_command", args: { CommandLine: 'rtk rg -n "HOOK_KEY" scripts/', WaitMsBeforeAsync: 5000 } } },
+    emptyBinEnv
+  );
+  assert.equal(outExplicitRtkRg.decision, "allow");
+  assert.match(outExplicitRtkRg.overwrite?.CommandLine || "", /^rtk grep\b/);
+  assert.equal((outExplicitRtkRg.overwrite?.CommandLine || "").includes("rtk rg"), false);
+
+  // Unsupported rg-only flag (-t js) maps cleanly to grep --include instead of emitting broken `rg` or `rtk rg`
   const outUnsupportedRg = runHook(
     { toolCall: { name: "run_command", args: { CommandLine: 'rg -t js "HOOK_KEY" scripts/', WaitMsBeforeAsync: 5000 } } },
     emptyBinEnv
   );
   assert.equal(outUnsupportedRg.decision, "allow");
   assert.equal((outUnsupportedRg.overwrite?.CommandLine || "").includes("rtk rg"), false, "Must NEVER emit rtk rg when rg is absent");
-  assert.match(outUnsupportedRg.overwrite?.CommandLine || "", /rtk grep.*--include=\*\.js/);
+  assert.match(outUnsupportedRg.overwrite?.CommandLine || "", /^grep\b.*--include=\*\.js/);
 
   // Direct `rtk grep "a|b" lib/` & `rtk grep -rn "a|b" lib/` normalize to `-r` + `-E` when rg is absent
   const outRtkGrepDir = runHook(
@@ -166,15 +175,15 @@ console.log("\n--- Group B: RTK >= 1.1.0 Delegation & Edge-Case Guards ---");
     emptyBinEnv
   );
   assert.equal(outSmartRg.decision, "allow");
-  assert.match(outSmartRg.overwrite?.CommandLine || "", /rtk grep -r -i -E --include=\*\.mjs/);
+  assert.match(outSmartRg.overwrite?.CommandLine || "", /grep -r -i -E --include=\*\.mjs/);
 
-  // Env-prefixed commands still guard absent `rg` and revert lossy `wc` (HOOK-REV-02)
+  // Env-prefixed commands still guard absent `rg` and skip lossy `wc` (HOOK-REV-02)
   const outEnvRg = runHook(
     { toolCall: { name: "run_command", args: { CommandLine: 'FOO=1 rg -n "HOOK_KEY" scripts/', WaitMsBeforeAsync: 5000 } } },
     emptyBinEnv
   );
   assert.equal(outEnvRg.decision, "allow");
-  assert.match(outEnvRg.overwrite?.CommandLine || "", /^FOO=1 rtk grep\b/);
+  assert.match(outEnvRg.overwrite?.CommandLine || "", /^FOO=1 grep\b/);
   assert.equal((outEnvRg.overwrite?.CommandLine || "").includes("rtk rg"), false, "Env-prefixed rg must never emit rtk rg when rg is absent");
 
   const outEnvWc = runHook(
@@ -182,7 +191,7 @@ console.log("\n--- Group B: RTK >= 1.1.0 Delegation & Edge-Case Guards ---");
     emptyBinEnv
   );
   assert.equal(outEnvWc.decision, "allow");
-  assert.equal(outEnvWc.overwrite?.CommandLine, undefined, "Env-prefixed implicit wc rewrite must revert cleanly");
+  assert.equal(outEnvWc.overwrite?.CommandLine, undefined, "Env-prefixed implicit wc rewrite must stay lossless");
 
   const outExplicitEnvWc = runHook(
     { toolCall: { name: "run_command", args: { CommandLine: "FOO=1 rtk wc -l package.json", WaitMsBeforeAsync: 5000 } } },
@@ -191,15 +200,13 @@ console.log("\n--- Group B: RTK >= 1.1.0 Delegation & Edge-Case Guards ---");
   assert.equal(outExplicitEnvWc.decision, "allow");
   assert.equal(outExplicitEnvWc.overwrite?.CommandLine, undefined, "Explicit env-prefixed `FOO=1 rtk wc` must be preserved");
 
-  // grep_search hint when rg absent recommends rtk grep -rn, never rtk rg
-  const grepHint = runHook(
+  // Native grep_search is unblocked on workspace paths while still blocked on internal state
+  const grepAllow = runHook(
     { toolCall: { name: "grep_search", args: { query: "HOOK_KEY", SearchPath: "scripts" } } },
     emptyBinEnv
   );
-  assert.equal(grepHint.decision, "deny");
-  assert.match(grepHint.reason, /rtk grep -rn/);
-  assert.equal(grepHint.reason.includes("rtk rg"), false);
-  console.log("✓ Absent host `rg` guarded across run_command & grep_search hints (ACS-HOOK-15)");
+  assert.equal(grepAllow.decision, "allow", "Native grep_search on workspace paths must be allowed");
+  console.log("✓ Absent host `rg` guarded across run_command & native grep_search unblocked (ACS-HOOK-15)");
 }
 
 // B.5: Legacy RTK < 1.1.0 is rejected (does not emit broken `rtk hook antigravity` calls)
@@ -277,21 +284,22 @@ console.log("\n--- Group C: read_file & view_file Safe Harbor + Hybrid Slice ---
   assert.equal(byteOffsetOnly.decision, "deny", "ByteOffset-only unbounded read_file must be denied");
   assert.equal(byteOffsetOnly.reason.includes("rtk read"), false, "Workspace ByteOffset-only read_file denial must NOT suggest rtk read");
 
-  // Guarded full-file audit (<= 800 lines, <= 45 KiB) using explicit StartLine=1..TotalLines
+  // Guarded full-file audit (<= 800 lines, <= 45 KiB) using explicit StartLine=1..EndLine >= TotalLines & 300-line slice window
   const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-audit-file-"));
   try {
-    const smallFile = path.join(auditDir, "small.js");
-    fs.writeFileSync(smallFile, Array.from({ length: 220 }, (_, i) => `const x${i} = ${i};`).join("\n"), "utf-8");
-    const fullSmallAudit = runHook({
-      toolCall: { name: "read_file", args: { Path: smallFile, StartLine: 1, EndLine: 220 } }
+    const mediumFile = path.join(auditDir, "medium.js");
+    fs.writeFileSync(mediumFile, Array.from({ length: 450 }, (_, i) => `const x${i} = ${i};`).join("\n"), "utf-8");
+    const fullMediumAudit = runHook({
+      toolCall: { name: "read_file", args: { Path: mediumFile, StartLine: 1, EndLine: 450 } }
     });
-    assert.equal(fullSmallAudit.decision, "allow", "Explicit full-file read_file (<=800L & <=45KiB) allowed");
+    assert.equal(fullMediumAudit.decision, "allow", "Explicit full-file read_file (<=800L & <=45KiB) allowed");
 
     const partialOver = runHook({
-      toolCall: { name: "read_file", args: { Path: smallFile, StartLine: 1, EndLine: 180 } }
+      toolCall: { name: "read_file", args: { Path: mediumFile, StartLine: 1, EndLine: 350 } }
     });
-    assert.equal(partialOver.decision, "deny", "Partial slice 1..180 of 220-line file must be denied");
+    assert.equal(partialOver.decision, "deny", "Partial slice 1..350 (>300L) of 450-line file must be denied");
     assert.equal(partialOver.reason.includes("rtk read"), false, "Workspace partial read_file denial must NOT suggest rtk read");
+    assert.match(partialOver.reason, /450 lines/, "Partial slice denial must report actual file line count (FRIC-RUN-010)");
 
     const bigWorkspaceFile = path.join(auditDir, "big.js");
     fs.writeFileSync(bigWorkspaceFile, Array.from({ length: 850 }, (_, i) => `const y${i} = ${i};`).join("\n"), "utf-8");
@@ -3533,6 +3541,175 @@ console.log("\n--- Group M: Wave 1 Dual-Hook Atomicity, Surface Dedup & Perf ---
   assert.ok(afterBulk.taskBackoff["task-bulk-21"], "Running bulk task-bulk-21 must stay in taskBackoff");
   assert.ok(afterBulk.taskBackoff["task-bulk-40"], "Running bulk task-bulk-40 must stay in taskBackoff");
   console.log("✓ IND-RUN-001, FRIC-RUN-008, IND-SCRIPT-001, PR13-RUN-006 & IND-RUN-004 verified");
+}
+
+// ============================================================================
+// GROUP N: v2.1.2 Wave 2 Narrow High-ROI RTK Pre-Gate, Native Discovery, 300L/24KiB read_file & Watchdogs
+// ============================================================================
+console.log("\n--- Group N: Wave 2 Narrow RTK Pre-Gate, 300L/24KiB read_file & Ergonomics ---");
+{
+  const w2Dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-w2-erg-"));
+  try {
+    // N.1: FRIC-RUN-001 - Safe workspace multimodal media files allowed; internal-state lookalikes stay denied
+    const pngFile = path.join(w2Dir, "diagram.png");
+    const pdfFile = path.join(w2Dir, "spec.pdf");
+    fs.writeFileSync(pngFile, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    fs.writeFileSync(pdfFile, "%PDF-1.4\n");
+    assert.equal(runHook({ toolCall: { name: "read_file", args: { Path: pngFile } } }).decision, "allow", "Workspace .png must bypass text line-slice requirement (FRIC-RUN-001)");
+    assert.equal(runHook({ toolCall: { name: "read_file", args: { Path: pdfFile } } }).decision, "allow", "Workspace .pdf must bypass text line-slice requirement (FRIC-RUN-001)");
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: "/home/u/.gemini/antigravity/brain/c1/.system_generated/snap.png" } } }).decision,
+      "deny",
+      "Internal .system_generated media path must remain denied"
+    );
+
+    // N.2: FRIC-RUN-002 & FRIC-RUN-010 - Unified 300L / 24 KiB preset, EOF clamping, relaxed full-file audit & exact size reporting
+    const small260 = path.join(w2Dir, "small-260.js");
+    fs.writeFileSync(small260, Array.from({ length: 260 }, (_, i) => `const a${i} = ${i};`).join("\n"), "utf-8");
+    assert.equal(runHook({ toolCall: { name: "read_file", args: { Path: small260 } } }).decision, "allow", "Omitted-bound read_file on <=300L & <=24KiB file must auto-allow (FRIC-RUN-002)");
+
+    const dense28k = path.join(w2Dir, "dense-28k.json");
+    fs.writeFileSync(dense28k, Array.from({ length: 10 }, () => `"${"x".repeat(2800)}"`).join("\n"), "utf-8");
+    const denseDeny = runHook({ toolCall: { name: "read_file", args: { Path: dense28k } } });
+    assert.equal(denseDeny.decision, "deny", "Dense >24 KiB omitted-bound file must be denied even if <=300 lines");
+    assert.match(denseDeny.reason, /10 lines, \d+\.\d KiB/, "Denial must report exact lines and KiB (FRIC-RUN-010)");
+
+    const med450 = path.join(w2Dir, "med-450.js");
+    fs.writeFileSync(med450, Array.from({ length: 450 }, (_, i) => `const m${i} = ${i};`).join("\n"), "utf-8");
+    const medOmittedDeny = runHook({ toolCall: { name: "read_file", args: { Path: med450 } } });
+    assert.equal(medOmittedDeny.decision, "deny", "Omitted-bound >300L file must be denied");
+    assert.match(medOmittedDeny.reason, /450 lines/, "Omitted-bound denial must report exact TotalLines (FRIC-RUN-010)");
+
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: med450, StartLine: 1, EndLine: 800 } } }).decision,
+      "allow",
+      "Explicit StartLine=1, EndLine >= TotalLines (<=800L & <=45KiB) must allow without exact line-count guessing (FRIC-RUN-002)"
+    );
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: med450, StartLine: 200, EndLine: 600 } } }).decision,
+      "allow",
+      "EOF-clamped partial slice (min(600,450)-200+1 = 251 <= 300) must allow (FRIC-RUN-002)"
+    );
+
+    const huge60k = path.join(w2Dir, "huge-60k.js");
+    fs.writeFileSync(huge60k, "x".repeat(60 * 1024), "utf-8");
+    const hugeDeny = runHook({ toolCall: { name: "read_file", args: { Path: huge60k } } });
+    assert.equal(hugeDeny.decision, "deny", ">45 KiB omitted-bound file must be denied without reading full content");
+    assert.match(hugeDeny.reason, /60\.0 KiB > 45 KiB/, "Oversized denial must report exact KiB");
+
+    // Step spillovers stay tightly bounded at 150 lines even with 300-line workspace slices
+    assert.equal(
+      runHook({
+        toolCall: { name: "read_file", args: { Path: "/home/u/.gemini/antigravity/brain/c1/.system_generated/steps/9/output.txt", StartLine: 1, EndLine: 200 } }
+      }).decision,
+      "deny",
+      "Step spillover read_file must stay capped at 150 lines"
+    );
+
+    // N.3: IND-RUN-002 & FRIC-RUN-003 - Narrow High-ROI Pre-Gate + AGY_RTK_MODE=off|all
+    for (const [cmd, expectedRe] of [
+      ["pytest tests/unit", /^rtk pytest\b/],
+      ["cargo test --lib", /^rtk cargo test\b/],
+      ["git -C /tmp/repo status", /^rtk git -C \/tmp\/repo status$/],
+      ["npm test", /^rtk npm test$/]
+    ]) {
+      const res = runHook({ toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } });
+      assert.equal(res.decision, "allow");
+      assert.match(res.overwrite?.CommandLine || "", expectedRe, `Pre-gate must delegate '${cmd}'`);
+    }
+    for (const rawPass of [
+      "find /tmp -maxdepth 2 -name '*.js'",
+      "git diff HEAD~1",
+      "git -C /tmp/repo diff",
+      "git show HEAD",
+      "git log -p -1",
+      "git status --porcelain",
+      "git status -s",
+      "ps aux",
+      "cat package.json",
+      "npm test | tail -n 20",
+      "pytest tests/ > /tmp/out.txt"
+    ]) {
+      const res = runHook({ toolCall: { name: "run_command", args: { CommandLine: rawPass, WaitMsBeforeAsync: 5000 } } });
+      assert.equal(res.decision, "allow");
+      assert.equal(res.overwrite?.CommandLine, undefined, `Pre-gate must leave '${rawPass}' untouched (IND-RUN-002)`);
+    }
+    // AGY_RTK_MODE=off disables auto-delegation while preserving explicit rtk
+    const offEnv = { ...process.env, AGY_RTK_MODE: "off" };
+    assert.equal(
+      runHook({ toolCall: { name: "run_command", args: { CommandLine: "git status", WaitMsBeforeAsync: 5000 } } }, offEnv).overwrite?.CommandLine,
+      undefined,
+      "AGY_RTK_MODE=off must disable automatic RTK delegation"
+    );
+    // AGY_RTK_MODE=all still reverts lossy find/ps/git-diff/git-log-p/workspace-cat defensively
+    const allEnv = { ...process.env, AGY_RTK_MODE: "all" };
+    for (const lossyLegacy of ["find . -name '*.mjs'", "ps aux", "git -C repo diff", "git log -p -1", "cat package.json"]) {
+      assert.equal(
+        runHook({ toolCall: { name: "run_command", args: { CommandLine: lossyLegacy, WaitMsBeforeAsync: 5000 } } }, allEnv).overwrite?.CommandLine,
+        undefined,
+        `AGY_RTK_MODE=all must defensively revert lossy '${lossyLegacy}'`
+      );
+    }
+
+    // N.4: FRIC-SVC-001 - open-mode injectSelfId for omitted --id & current placeholder
+    const openSelfConv = "conv-w2-open-selfid";
+    const openHealthRes = runHook({
+      conversationId: openSelfConv,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript health", WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(openHealthRes.decision, "allow");
+    assert.equal(openHealthRes.overwrite?.CommandLine, `agy-context transcript health --id ${openSelfConv}`, "open-mode omitted --id must inject convId (FRIC-SVC-001)");
+
+    const openCurrentRes = runHook({
+      conversationId: openSelfConv,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript query foo current", WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(openCurrentRes.decision, "allow");
+    assert.equal(openCurrentRes.overwrite?.CommandLine, `agy-context transcript query foo --id ${openSelfConv}`, "open-mode current placeholder must resolve to --id convId (FRIC-SVC-001)");
+
+    // N.5: PR13-RUN-001 - task-* TimerCondition exempt from isSwarmPollSchedule even when prompt mentions Squad/swarm
+    const pr13Conv = "conv-w2-pr13-task-squad";
+    const squadTaskSched = runHook({
+      conversationId: pr13Conv,
+      toolCall: {
+        name: "schedule",
+        args: { DurationSeconds: 45, Prompt: "Check status of Agy-Squad test suite task-12", TimerCondition: `${pr13Conv}/task-12` }
+      }
+    });
+    assert.equal(squadTaskSched.decision, "allow", "Conditioned task-* watchdog mentioning 'Squad' must not be blocked as a /swarm poll (PR13-RUN-001)");
+
+    // N.6: FRIC-RUN-004 - Backoff-compliant remote CI schedule works without impossible local task-X TimerCondition
+    const ciConv = "conv-w2-remote-ci";
+    assert.equal(
+      runHook({ conversationId: ciConv, toolCall: { name: "schedule", args: { DurationSeconds: 10, Prompt: "Check GitHub Actions CI & CodeQL status" } } }).decision,
+      "deny",
+      "Remote CI micro-poll <15s must be denied"
+    );
+    const ciClamp1 = runHook({
+      conversationId: ciConv,
+      toolCall: { name: "schedule", args: { DurationSeconds: 20, Prompt: "Check GitHub Actions CI & CodeQL status" } }
+    });
+    assert.equal(ciClamp1.decision, "allow", "Remote CI timer >=15s must allow without local TimerCondition (FRIC-RUN-004)");
+    assert.equal(ciClamp1.overwrite?.DurationSeconds, 30, "1st remote CI timer <30s must auto-clamp to 30s");
+
+    const ciClamp2 = runHook({
+      conversationId: ciConv,
+      toolCall: { name: "schedule", args: { DurationSeconds: 45, Prompt: "Check gh pr checks status" } }
+    });
+    assert.equal(ciClamp2.decision, "allow");
+    assert.equal(ciClamp2.overwrite?.DurationSeconds, 75, "2nd remote CI timer must auto-clamp to 75s backoff");
+
+    const ciExact3 = runHook({
+      conversationId: ciConv,
+      toolCall: { name: "schedule", args: { DurationSeconds: 188, Prompt: "Check CodeQL workflow status" } }
+    });
+    assert.equal(ciExact3.decision, "allow");
+    assert.equal(ciExact3.overwrite, undefined, "3rd remote CI timer at 188s must allow without overwrite");
+
+    console.log("✓ FRIC-RUN-001..004, IND-RUN-002, FRIC-RUN-010, FRIC-SVC-001 & PR13-RUN-001 verified");
+  } finally {
+    fs.rmSync(w2Dir, { recursive: true, force: true });
+  }
 }
 
 hermetic.cleanup();

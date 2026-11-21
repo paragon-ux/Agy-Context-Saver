@@ -20,6 +20,7 @@ import {
   hasValidSubagentTimerCondition,
   isSwarmPollSchedule,
   isSubagentPollSchedule,
+  isRemoteCiPollSchedule,
   listTranscriptConversations,
   exportSanitizedTranscript,
   stripSummaryStepBoilerplate,
@@ -3126,6 +3127,26 @@ try {
       try { fs.unlinkSync(t4ChildState); } catch {}
     }
     console.log("✓ IND-SEC-004: Tier 4 grant enforcement without GEMINI_CONVERSATION_ID & subcommand-bound grant cleanup verified");
+  }
+
+  // --- Wave 2 PR13-RUN-001 & FRIC-RUN-004: Schedule Classifier Parity ---
+  {
+    assert.equal(
+      isSwarmPollSchedule({ Prompt: "Check Agy-Squad tests on task-9", TimerCondition: "conv-1/task-9" }),
+      false,
+      "Conditioned task-* watchdog mentioning Squad must not classify as swarm poll (PR13-RUN-001)"
+    );
+    assert.equal(
+      isRemoteCiPollSchedule({ DurationSeconds: 45, Prompt: "Check GitHub Actions CI & CodeQL status" }),
+      true,
+      "Remote CI schedule must classify cleanly (FRIC-RUN-004)"
+    );
+    assert.equal(
+      isRemoteCiPollSchedule({ DurationSeconds: 45, Prompt: "Check background task-4 status", TimerCondition: "conv-1/task-4" }),
+      false,
+      "Local task watchdog must not classify as remote CI"
+    );
+    console.log("✓ Wave 2 PR13-RUN-001 & FRIC-RUN-004 schedule classifier parity verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

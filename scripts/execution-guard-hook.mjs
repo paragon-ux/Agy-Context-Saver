@@ -48,9 +48,13 @@ const HOOK_DEDUP_TTL_MS = 5000;
 const HOOK_SAME_ARG_CROSS_SCRIPT_MS = 2500;
 const SESSION_LOCK_STALE_MS = 3000;
 const SESSION_LOCK_WAIT_MS = 800;
-const MAX_SAFE_SLICE_LINES = 150;
+const MAX_SAFE_SLICE_LINES = 300;
+const MAX_SMALL_AUTO_ALLOW_LINES = 300;
+const MAX_SMALL_AUTO_ALLOW_BYTES = 24 * 1024; // 24 KiB omitted-bound auto-allow cap
+const MAX_SPILLOVER_SLICE_LINES = 150;
 const MAX_FULL_FILE_LINES = 800;
 const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes)
+const SAFE_MULTIMODAL_MEDIA_RE = /\.(?:png|jpe?g|gif|webp|bmp|ico|pdf|mp3|wav|ogg|flac|m4a|mp4|webm|mov)$/i;
 const STATELESS_READ_TOOLS = new Set(["read_file", "view_file", "grep_search", "find_by_name", "list_dir"]);
 const HOOK_SURFACE = (() => {
   for (const arg of process.argv.slice(2)) {
@@ -3523,6 +3527,19 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       }
     }
 
+    const openTargetWasCurrent = Boolean(
+      targetInfo.targetId && targetInfo.targetId.toLowerCase() === "current"
+    );
+    const needsOpenSelfIdInjection =
+      !isListSub &&
+      !(isExportSub && targetInfo.targetParent) &&
+      !targetInfo.explicitFile &&
+      (!targetInfo.targetId || openTargetWasCurrent) &&
+      Boolean(convId && convId !== "global");
+    if (needsOpenSelfIdInjection) {
+      resolvedTargetConvId = convId;
+    }
+
     return {
       matched: true,
       allowed: true,
@@ -3530,6 +3547,8 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       mode: "open",
       needsReadGrant: true,
       targetConvId: resolvedTargetConvId,
+      injectSelfId: needsOpenSelfIdInjection ? convId : null,
+      targetWasCurrentPlaceholder: openTargetWasCurrent,
       injectParentId
     };
   }
@@ -4236,7 +4255,7 @@ const RTK_READ_ALLOWED_LEVELS = new Set(["none", "minimal", "aggressive"]);
 
 /**
  * Parses an `rtk read ...` invocation (fail-closed on env prefixes: PR9-RUN-007 Closed (By Design)).
- * Tracks positional operands after `--`, validates line bounds (`1 <= n <= MAX_SAFE_SLICE_LINES`),
+ * Tracks positional operands after `--`, validates line bounds (`1 <= n <= MAX_SPILLOVER_SLICE_LINES`),
  * and rejects disallowed flags or `-l`/`--level` values.
  */
 function parseRtkReadCommand(cmd) {
@@ -4268,7 +4287,7 @@ function parseRtkReadCommand(cmd) {
       return;
     }
     const n = Number(rawVal);
-    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SAFE_SLICE_LINES) {
+    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SPILLOVER_SLICE_LINES) {
       hasInvalidOrOversizedLineBound = true;
       return;
     }
@@ -4342,7 +4361,7 @@ function isRtkReadCommand(cmd) {
 
 /**
  * Parses a single unchained bounded `head -n <N>` / `tail -n <N>` command for degraded mode (when RTK is unavailable).
- * Enforces explicit positive line limits `1 <= N <= MAX_SAFE_SLICE_LINES`, rejects `+N` offsets and unknown flags,
+ * Enforces explicit positive line limits `1 <= N <= MAX_SPILLOVER_SLICE_LINES`, rejects `+N` offsets and unknown flags,
  * and returns parsed positional operands for single-operand isolation checks.
  */
 function parseDegradedBoundedHeadTailCommand(cmd) {
@@ -4364,7 +4383,7 @@ function parseDegradedBoundedHeadTailCommand(cmd) {
       return;
     }
     const n = Number(rawVal);
-    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SAFE_SLICE_LINES) {
+    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SPILLOVER_SLICE_LINES) {
       hasInvalidOrOversizedLineBound = true;
       return;
     }
@@ -4837,7 +4856,255 @@ function matchRtkInvocation(text) {
   return null;
 }
 
-function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipeline, rtkPrefix }) {
+const RTK_HIGH_ROI_DIRECT_CMDS = new Set([
+  "pytest",
+  "vitest",
+  "jest",
+  "playwright",
+  "ctest",
+  "phpunit",
+  "pest",
+  "paratest",
+  "phpt",
+  "rspec",
+  "mvn",
+  "mvnd",
+  "gradlew",
+  "sbt",
+  "tsc",
+  "eslint",
+  "ruff",
+  "mypy",
+  "prettier",
+  "phpstan",
+  "rubocop",
+  "golangci-lint",
+  "sqlfluff",
+  "ecs",
+  "pint"
+]);
+
+const RTK_HIGH_ROI_SUBCMDS = {
+  cargo: new Set(["test", "nextest", "build", "check", "clippy", "install", "update"]),
+  go: new Set(["test", "build", "vet"]),
+  dotnet: new Set(["test", "build", "restore", "format"]),
+  npm: new Set(["test", "t", "run", "build", "install", "i", "ci", "add", "update", "audit", "outdated", "lint", "typecheck", "check"]),
+  pnpm: new Set(["test", "t", "run", "build", "install", "i", "ci", "add", "update", "audit", "outdated", "lint", "typecheck", "check"]),
+  yarn: new Set(["test", "run", "build", "install", "add", "upgrade", "audit", "outdated", "lint", "typecheck", "check"]),
+  bun: new Set(["test", "run", "build", "install", "i", "add", "update", "lint", "typecheck", "check"]),
+  deno: new Set(["test", "run", "compile", "install", "lint", "check", "fmt"]),
+  npx: new Set(["tsc", "eslint", "vitest", "jest", "playwright", "prettier", "prisma", "next", "ng"]),
+  bunx: new Set(["tsc", "eslint", "vitest", "jest", "playwright", "prettier", "prisma", "next", "ng"]),
+  uv: new Set(["run", "sync", "pip", "pytest", "ruff", "mypy"]),
+  pip: new Set(["install", "list", "check"]),
+  pip3: new Set(["install", "list", "check"]),
+  next: new Set(["build", "lint"]),
+  ng: new Set(["build", "test", "lint"]),
+  prisma: new Set(["generate", "migrate", "db"]),
+  docker: new Set(["build", "compose", "ps", "images", "logs", "pull", "push"]),
+  kubectl: new Set(["get", "logs", "describe", "apply", "rollout"]),
+  oc: new Set(["get", "logs", "describe", "apply", "rollout"]),
+  git: new Set(["status", "push", "pull", "fetch", "clone", "submodule"])
+};
+
+const RTK_RUNNER_VALUE_FLAGS = {
+  git: new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"]),
+  npm: new Set(["--prefix", "-C", "--cwd", "--workspace", "-w"]),
+  pnpm: new Set(["--dir", "-C", "--filter", "-F", "--prefix"]),
+  yarn: new Set(["--cwd"]),
+  bun: new Set(["--cwd"]),
+  npx: new Set(["-p", "--package", "-c", "--call"]),
+  bunx: new Set(["-p", "--package"]),
+  docker: new Set(["-H", "--host", "--context", "--config", "-l", "--log-level"]),
+  kubectl: new Set(["-n", "--namespace", "--context", "--kubeconfig", "--cluster", "--user"]),
+  oc: new Set(["-n", "--namespace", "--context", "--kubeconfig", "--cluster", "--user"])
+};
+
+function getAgyRtkMode() {
+  const raw = String(process.env.AGY_RTK_MODE || "pregate").trim().toLowerCase();
+  if (raw === "off" || raw === "none" || raw === "disabled") return "off";
+  if (raw === "all" || raw === "full" || raw === "legacy") return "all";
+  return "pregate";
+}
+
+function hasMachineReadableOutputFlag(cmd0, subcmd, tokens) {
+  for (let i = 1; i < tokens.length; i++) {
+    const v = tokens[i].value;
+    const low = v.toLowerCase();
+    if (
+      low === "--json" ||
+      low === "--porcelain" ||
+      low.startsWith("--porcelain=") ||
+      low === "--format=json" ||
+      low === "--output=json" ||
+      low === "--output=yaml" ||
+      low === "--output=jsonpath" ||
+      low === "--raw" ||
+      low === "-ojson" ||
+      low === "-oyaml"
+    ) {
+      return true;
+    }
+    if ((low === "-o" || low === "--output") && i + 1 < tokens.length) {
+      const nextLow = tokens[i + 1].value.toLowerCase();
+      if (/^(?:json|yaml|jsonpath|custom-columns|go-template|name)(?:=|$)/i.test(nextLow)) {
+        return true;
+      }
+    }
+    if (cmd0 === "docker" && (low === "--format" || low.startsWith("--format="))) {
+      return true;
+    }
+    if (cmd0 === "git" && subcmd === "status" && (v === "-s" || v === "--short" || v === "-z" || low.startsWith("--porcelain"))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Narrow High-ROI RTK Pre-Gate (v2.1.2):
+ * Decides before spawning `rtk hook antigravity` whether a standalone shell segment should be
+ * compressed via RTK. Precision/inspection commands (`find`, `grep`, `rg`, `ls`, `wc`, `diff`,
+ * workspace `cat`/`head`/`tail`, `ps`, `git diff`/`show`/`log`, `gh`, `curl`, `node`, `python`),
+ * pipelines, redirects, and machine-readable outputs return `false` (0 RTK subprocess spawns).
+ */
+function shouldDelegateSegmentToRtk(segText, { inPipeline = false, hasWriteRedirect = false, allowInternalReadRewrite = false } = {}) {
+  const trimmed = String(segText || "").trim();
+  if (!trimmed || inPipeline || hasWriteRedirect) return false;
+  const { body } = splitEnvPrefix(trimmed);
+  const target = (body || trimmed).trim();
+  if (!target) return false;
+  if (matchRtkInvocation(target)) return false;
+
+  const tokens = tokenizeShellWordsDetailed(target);
+  if (tokens.length === 0) return false;
+  if (tokens.some((t) => !t.quoted && (REDIRECT_OP_REGEX.test(t.raw) || REDIRECT_ATTACHED_REGEX.test(t.raw)))) {
+    return false;
+  }
+
+  const cmd0 = normalizeCmdName(tokens[0].value);
+  if (!cmd0) return false;
+
+  // Scoped internal spillover / completed task-log reads retain cat/head/tail -> `rtk read` parity
+  if (allowInternalReadRewrite && (cmd0 === "cat" || cmd0 === "head" || cmd0 === "tail")) {
+    return true;
+  }
+
+  if (RTK_HIGH_ROI_DIRECT_CMDS.has(cmd0)) {
+    return !hasMachineReadableOutputFlag(cmd0, "", tokens);
+  }
+
+  if (cmd0 === "rake") {
+    const sub = tokens[1] ? normalizeCmdName(tokens[1].value) : "";
+    if (sub === "test" || sub.startsWith("test:")) {
+      return !hasMachineReadableOutputFlag(cmd0, sub, tokens);
+    }
+    return false;
+  }
+
+  const allowedSubs = RTK_HIGH_ROI_SUBCMDS[cmd0];
+  if (!allowedSubs) return false;
+
+  const valueFlags = RTK_RUNNER_VALUE_FLAGS[cmd0] || new Set();
+  let subIdx = 1;
+  while (subIdx < tokens.length) {
+    const v = tokens[subIdx].value;
+    if (valueFlags.has(v)) {
+      subIdx += 2;
+      continue;
+    }
+    if (v.startsWith("-")) {
+      subIdx++;
+      continue;
+    }
+    break;
+  }
+  const sub = subIdx < tokens.length ? normalizeCmdName(tokens[subIdx].value) : "";
+  if (!sub || !allowedSubs.has(sub)) return false;
+
+  return !hasMachineReadableOutputFlag(cmd0, sub, tokens);
+}
+
+function isLossyLegacyGitRewrite(rest) {
+  const tokens = tokenizeShellWordsDetailed(rest);
+  if (tokens.length < 2 || normalizeCmdName(tokens[0].value) !== "git") return false;
+  const valueFlags = RTK_RUNNER_VALUE_FLAGS.git;
+  let subIdx = 1;
+  while (subIdx < tokens.length) {
+    const v = tokens[subIdx].value;
+    if (valueFlags.has(v)) {
+      subIdx += 2;
+      continue;
+    }
+    if (v.startsWith("-")) {
+      subIdx++;
+      continue;
+    }
+    break;
+  }
+  const sub = subIdx < tokens.length ? normalizeCmdName(tokens[subIdx].value) : "";
+  if (sub === "diff" || sub === "show") return true;
+  if (sub === "log") {
+    const restArgs = tokens.slice(subIdx + 1).map((t) => t.value);
+    if (restArgs.some((a) => a === "-p" || a === "--patch" || a === "-u")) return true;
+  }
+  return false;
+}
+
+function rewriteCommandViaRtkPreGate(rawCmd, rtk, ctx = {}) {
+  const segs = splitShellSegments(rawCmd);
+  if (segs.length === 0) return { decision: "allow", commandLine: rawCmd };
+
+  let result = rawCmd;
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const seg = segs[i];
+    const leadWs = (seg.text.match(/^\s*/) || [""])[0];
+    const trailWs = (seg.text.match(/\s*$/) || [""])[0];
+    const trimmed = seg.text.trim();
+    if (!trimmed) continue;
+
+    const wrap = unwrapShellWrapper(trimmed);
+    if (wrap) {
+      const innerRes = rewriteCommandViaRtkPreGate(wrap.inner, rtk, {
+        ...ctx,
+        allowInternalReadRewrite: false
+      });
+      if (innerRes.decision !== "allow") return innerRes;
+      if (innerRes.commandLine !== wrap.inner) {
+        const rebuilt = `${leadWs}${wrap.prefix}${wrap.quote}${innerRes.commandLine}${wrap.quote}${trailWs}`;
+        result = result.slice(0, seg.start) + rebuilt + result.slice(seg.end);
+      }
+      continue;
+    }
+
+    const inPipeline =
+      seg.leadingSep === "|" ||
+      seg.leadingSep === "|&" ||
+      (i + 1 < segs.length && (segs[i + 1].leadingSep === "|" || segs[i + 1].leadingSep === "|&"));
+
+    if (
+      !shouldDelegateSegmentToRtk(trimmed, {
+        inPipeline,
+        hasWriteRedirect: Boolean(seg.hasWriteRedirect),
+        allowInternalReadRewrite: Boolean(ctx.allowInternalReadRewrite && segs.length === 1)
+      })
+    ) {
+      continue;
+    }
+
+    const delegated = delegateRewriteToRtk(trimmed, rtk);
+    if (delegated.decision !== "allow") {
+      return delegated;
+    }
+    if (delegated.commandLine && delegated.commandLine !== trimmed) {
+      result = result.slice(0, seg.start) + `${leadWs}${delegated.commandLine}${trailWs}` + result.slice(seg.end);
+    }
+  }
+
+  return { decision: "allow", commandLine: result };
+}
+
+function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipeline, rtkPrefix, allowInternalReadRewrite = false }) {
   const trimmedEff = effSegText.trim();
   const trimmedRaw = (rawSegText || "").trim();
 
@@ -4853,7 +5120,7 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
     const processedInner = postProcessCommand(
       rawWrap ? rawWrap.inner : effWrap.inner,
       effWrap.inner,
-      { rgAvailable, rtkPrefix: wrappedRtkPrefix }
+      { rgAvailable, rtkPrefix: wrappedRtkPrefix, allowInternalReadRewrite: false }
     );
     return `${effWrap.prefix}${effWrap.quote}${processedInner}${effWrap.quote}`;
   }
@@ -4865,7 +5132,7 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
 
   const rtkMatch = matchRtkInvocation(effMatchTarget);
   if (!rtkMatch) {
-    // When host `rg` is absent, also rewrite bare `rg` in pipelines or `bash -c` subshells to `grep`/`find`
+    // When host `rg` is absent, rewrite bare `rg` to lossless `grep`/`find`
     if (!rgAvailable && /^rg(?:\.exe)?(?=\s|$)/i.test(effMatchTarget)) {
       const mapped = rewriteRtkRgSegment("", effMatchTarget, { inPipeline });
       if (mapped !== effMatchTarget) {
@@ -4879,12 +5146,23 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
   const rest = rtkMatch.rest;
   const subcmd = (rest.match(/^([^\s"']+)/)?.[1] || "").toLowerCase();
 
-  // Revert lossy `rtk wc` / `rtk ls` / `rtk diff` / `rtk grep` back to raw unless caller explicitly typed it (ACS-HOOK-09, ACS-HOOK-GREP-CLAMP)
-  if (subcmd === "wc" || subcmd === "ls" || subcmd === "diff" || subcmd === "grep") {
-    const rawRtkMatch = matchRtkInvocation(rawMatchTarget);
-    const rawSubcmd = rawRtkMatch ? (rawRtkMatch.rest.match(/^([^\s"']+)/)?.[1] || "").toLowerCase() : "";
-    if (rawSubcmd !== subcmd) {
+  // Defensive safety net (esp. under AGY_RTK_MODE=all): revert lossy implicit rewrites unless caller explicitly typed `rtk ...`
+  const rawRtkMatch = matchRtkInvocation(rawMatchTarget);
+  const rawSubcmd = rawRtkMatch ? (rawRtkMatch.rest.match(/^([^\s"']+)/)?.[1] || "").toLowerCase() : "";
+  if (rawSubcmd !== subcmd) {
+    if (
+      subcmd === "wc" ||
+      subcmd === "ls" ||
+      subcmd === "diff" ||
+      subcmd === "grep" ||
+      subcmd === "find" ||
+      subcmd === "ps" ||
+      (subcmd === "git" && isLossyLegacyGitRewrite(rest))
+    ) {
       return `${effEnvPrefix}${rest}`;
+    }
+    if (subcmd === "read" && !allowInternalReadRewrite) {
+      return trimmedRaw || trimmedEff;
     }
   }
 
@@ -5112,11 +5390,34 @@ function isSwarmPollSchedule(args = {}) {
 
   const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
   const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
+  // Conditioned local background-task watchdogs (`TimerCondition="<conv>/task-X"`) are never `/swarm` board polls (PR13-RUN-001)
+  if (/(?:^|\/)task-[a-z0-9_-]+$/i.test(cond)) return false;
   return (
     /\b(?:swarm|squad|board)\b/i.test(prompt) ||
     (cond === "any" &&
       !/\b(?:subagent|subagents)\b/i.test(prompt) &&
       /\b(?:check|status|poll|monitor|wait|worker|lead|auditor)\b/i.test(prompt))
+  );
+}
+
+/**
+ * Detects backoff-compliant remote CI `schedule` timers (e.g., waiting on GitHub Actions / CodeQL / `gh pr checks`)
+ * where no local `task-X` `TimerCondition` exists (FRIC-RUN-004).
+ * Keep identical to lib/transcript-core.mjs `isRemoteCiPollSchedule`.
+ */
+function isRemoteCiPollSchedule(args = {}) {
+  const isDaemon = args.IsDaemon === true || args.isDaemon === true;
+  const cron = String(args.CronExpression || args.cronExpression || "").trim();
+  if (isDaemon && cron) return false;
+  if (isSwarmPollSchedule(args)) return false;
+
+  const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
+  const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
+  if (/(?:^|\/)task-[a-z0-9_-]+$/i.test(cond) || cond.includes("task") || BACKOFF_UUID_RE.test(cond)) return false;
+  if (/\b(?:background task|task-\d+|subagent|subagents)\b/i.test(prompt)) return false;
+  return (
+    /\b(?:ci|github actions|workflow|codeql|pr checks|gh pr checks|gh run|remote checks|check runs?|pipeline)\b/i.test(prompt) &&
+    /\b(?:check|status|poll|monitor|wait|watch|complete|finish|result|pass|scan)\b/i.test(prompt)
   );
 }
 
@@ -5423,13 +5724,17 @@ function getFileMetrics(filePath) {
     const stat = fs.statSync(resolvedPath);
     if (!stat.isFile()) return null;
     const bytes = stat.size;
+    // Guard against reading multi-megabyte files synchronously into memory (FRIC-RUN-002)
+    if (bytes > MAX_FULL_FILE_BYTES) {
+      return { bytes, lineCount: null, rawSplitCount: null, oversized: true };
+    }
     const content = fs.readFileSync(resolvedPath, "utf-8");
     if (content.length === 0) {
-      return { bytes: 0, lineCount: 0, rawSplitCount: 1 };
+      return { bytes: 0, lineCount: 0, rawSplitCount: 1, oversized: false };
     }
     const rawSplitCount = content.split(/\r?\n/).length;
     const lineCount = /\r?\n$/.test(content) ? Math.max(1, rawSplitCount - 1) : rawSplitCount;
-    return { bytes, lineCount, rawSplitCount };
+    return { bytes, lineCount, rawSplitCount, oversized: false };
   } catch {
     return null;
   }
@@ -5968,23 +6273,39 @@ try {
       });
     }
 
-    // Delegate command rewriting to `rtk hook antigravity` (>= 1.1.0)
+    // Delegate high-ROI command rewriting to `rtk hook antigravity` (>= 1.1.0) via Narrow Pre-Gate (AGY_RTK_MODE=pregate|off|all)
     const { rtk, rgAvailable } = resolveCachedHostEnv();
+    const rtkMode = getAgyRtkMode();
+    const allowInternalReadRewrite = Boolean(
+      isSingleUnchainedShellCmd(segments) && (isSpillover || (taskMatch && taskState === "COMPLETED"))
+    );
     let effectiveCmd = rawCmd;
 
     if (rtk) {
-      const delegated = delegateRewriteToRtk(rawCmd, rtk);
-      if (delegated.decision !== "allow") {
-        respond({ decision: delegated.decision, reason: delegated.reason });
+      let rewrittenCandidate = rawCmd;
+      if (rtkMode === "pregate") {
+        const gated = rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite });
+        if (gated.decision !== "allow") {
+          respond({ decision: gated.decision, reason: gated.reason });
+        }
+        rewrittenCandidate = gated.commandLine;
+      } else if (rtkMode === "all") {
+        const delegated = delegateRewriteToRtk(rawCmd, rtk);
+        if (delegated.decision !== "allow") {
+          respond({ decision: delegated.decision, reason: delegated.reason });
+        }
+        rewrittenCandidate = delegated.commandLine;
       }
-      effectiveCmd = postProcessCommand(rawCmd, delegated.commandLine, {
+      effectiveCmd = postProcessCommand(rawCmd, rewrittenCandidate, {
         rgAvailable,
-        rtkPrefix: rtk.prefix
+        rtkPrefix: rtk.prefix,
+        allowInternalReadRewrite
       });
     } else if (!rgAvailable) {
       effectiveCmd = postProcessCommand(rawCmd, rawCmd, {
         rgAvailable: false,
-        rtkPrefix: "rtk"
+        rtkPrefix: "rtk",
+        allowInternalReadRewrite
       });
     }
 
@@ -6213,7 +6534,7 @@ try {
           Number.isInteger(endLine) &&
           startLine > 0 &&
           endLine >= startLine &&
-          (endLine - startLine + 1) <= MAX_SAFE_SLICE_LINES
+          (endLine - startLine + 1) <= MAX_SPILLOVER_SLICE_LINES
         ) {
           respond({ decision: "allow" });
         }
@@ -6226,7 +6547,7 @@ try {
         : `'tail -n 150 ${target}' (or 'head -n 150 ${target}')`;
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Unbounded inspection of step spillover via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'read_file' or run ${spillCmd} via run_command instead.`
+        reason: `Antigravity Governance: Unbounded inspection of step spillover via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SPILLOVER_SLICE_LINES} lines) to 'read_file' or run ${spillCmd} via run_command instead.`
       });
     }
 
@@ -6254,7 +6575,7 @@ try {
             Number.isInteger(endLine) &&
             startLine > 0 &&
             endLine >= startLine &&
-            (endLine - startLine + 1) <= MAX_SAFE_SLICE_LINES
+            (endLine - startLine + 1) <= MAX_SPILLOVER_SLICE_LINES
           ) {
             respond({ decision: "allow" });
           }
@@ -6268,7 +6589,7 @@ try {
           decision: "deny",
           reason: hasRtkForTask
             ? `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run ${taskCmd} via run_command instead.`
-            : `Antigravity Governance: Unbounded inspection of completed task logs via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'read_file' or run ${taskCmd} via run_command instead.`
+            : `Antigravity Governance: Unbounded inspection of completed task logs via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SPILLOVER_SLICE_LINES} lines) to 'read_file' or run ${taskCmd} via run_command instead.`
         });
       }
       respond({
@@ -6305,21 +6626,34 @@ try {
     }
 
     // 2e. Symmetrical Hybrid Slice & Guarded Full-File Policy for `read_file` and `view_file`
+    //     Unified v2.1.2 preset: <= 300 lines & <= 24 KiB omitted-bound auto-allow, <= 300-line slices
+    //     (EOF-clamped), <= 800 lines & <= 45 KiB explicit full-file audit, safe multimodal media exempt.
     if (toolName === "read_file" || toolName === "view_file") {
+      // Safe workspace multimodal media files cannot be line-sliced (FRIC-RUN-001; checked AFTER internal-state/symlink guards)
+      if (SAFE_MULTIMODAL_MEDIA_RE.test(target)) {
+        respond({ decision: "allow" });
+      }
+
       const getDiscoveryGuidance = () => {
-        const { rtk, rgAvailable } = resolveCachedHostEnv();
-        if (rtk) {
-          const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rnE";
-          return `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
-        }
+        const { rgAvailable } = resolveCachedHostEnv();
         const shellSearchHint = rgAvailable ? "rg" : "grep -rnE";
-        return `Locate the target symbol, heading, or config key first with 'grep_search' (or '${shellSearchHint}' via run_command) and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
+        return `Locate the target symbol, heading, or section first with 'grep_search' (or '${shellSearchHint}' via run_command) and pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
+      };
+
+      const formatMetricsTag = (metrics) => {
+        if (!metrics) return "";
+        const kib = (metrics.bytes / 1024).toFixed(1);
+        if (metrics.oversized || metrics.lineCount === null) {
+          return ` (actual file: ${kib} KiB > 45 KiB)`;
+        }
+        return ` (actual file: ${metrics.lineCount} lines, ${kib} KiB)`;
       };
 
       if (hasByteOffset && !hasSliceParams) {
+        const metrics = getFileMetrics(target);
         respond({
           decision: "deny",
-          reason: `Antigravity Governance: Unbounded 'ByteOffset'-only read via '${toolName}' is denied. ${getDiscoveryGuidance()}.`
+          reason: `Antigravity Governance: Unbounded 'ByteOffset'-only read via '${toolName}'${formatMetricsTag(metrics)} is denied. ${getDiscoveryGuidance()}.`
         });
       }
 
@@ -6340,14 +6674,16 @@ try {
             respond({ decision: "allow" });
           }
 
-          const metrics = startLine === 1 && !hasByteOffset ? getFileMetrics(target) : null;
-          const isExplicitFullFile = Boolean(
+          const metrics = getFileMetrics(target);
+          // Explicit full-file audit: StartLine=1 covering >= actual end of a file <= 800 lines & <= 45 KiB (FRIC-RUN-002)
+          if (
+            startLine === 1 &&
+            !hasByteOffset &&
             metrics &&
-              startLine === 1 &&
-              (endLine === metrics.lineCount || endLine === metrics.rawSplitCount)
-          );
-
-          if (isExplicitFullFile) {
+            !metrics.oversized &&
+            metrics.lineCount !== null &&
+            endLine >= metrics.lineCount
+          ) {
             if (metrics.lineCount <= MAX_FULL_FILE_LINES && metrics.bytes <= MAX_FULL_FILE_BYTES) {
               respond({ decision: "allow" });
             }
@@ -6358,9 +6694,17 @@ try {
             });
           }
 
+          // EOF-clamped partial slice: if actual lines returned (min(EndLine, TotalLines) - StartLine + 1) <= 300, allow (FRIC-RUN-002)
+          if (metrics && !metrics.oversized && metrics.lineCount !== null && startLine <= metrics.lineCount) {
+            const effectiveSpan = Math.min(endLine, metrics.lineCount) - startLine + 1;
+            if (effectiveSpan >= 1 && effectiveSpan <= MAX_SAFE_SLICE_LINES) {
+              respond({ decision: "allow" });
+            }
+          }
+
           respond({
             decision: "deny",
-            reason: `Antigravity Governance: Oversized partial file slice via '${toolName}' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window). Partial slices above ${MAX_SAFE_SLICE_LINES} lines are denied; full-file reads are only permitted when explicitly covering line 1 through the actual end of a file <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${getDiscoveryGuidance()}.`
+            reason: `Antigravity Governance: Oversized partial file slice via '${toolName}' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window)${formatMetricsTag(metrics)}. Partial slices above ${MAX_SAFE_SLICE_LINES} lines are denied; full-file reads are permitted via StartLine=1, EndLine >= TotalLines when <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${getDiscoveryGuidance()}.`
           });
         }
 
@@ -6370,55 +6714,34 @@ try {
         });
       }
 
+      // Omitted-bound auto-allow for small workspace files (<= 300 lines AND <= 24 KiB; FRIC-RUN-002)
+      const omittedMetrics = getFileMetrics(target);
+      if (
+        omittedMetrics &&
+        !omittedMetrics.oversized &&
+        omittedMetrics.lineCount !== null &&
+        omittedMetrics.lineCount <= MAX_SMALL_AUTO_ALLOW_LINES &&
+        omittedMetrics.bytes <= MAX_SMALL_AUTO_ALLOW_BYTES
+      ) {
+        respond({ decision: "allow" });
+      }
+
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Full-file inspection via '${toolName}' without explicit bounds is denied. ${getDiscoveryGuidance()} (or pass explicit StartLine=1, EndLine=<TotalLines> for a one-pass audit when the file is <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB).`
+        reason: `Antigravity Governance: Full-file inspection via '${toolName}' without explicit bounds is denied${formatMetricsTag(omittedMetrics)} (omitted bounds auto-allow files <= ${MAX_SMALL_AUTO_ALLOW_LINES} lines and <= 24 KiB). ${getDiscoveryGuidance()} (or pass explicit StartLine=1, EndLine=<TotalLines> for a one-pass audit when the file is <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB).`
       });
     }
 
-    // 2f. Hard-Route Other Native File/Search Tools (LH-07); degrade gracefully when RTK is absent (--allow-degraded)
-    const { rtk: hostRtk, rgAvailable: hostRgAvailable } = resolveCachedHostEnv();
+    // 2f. Block unbounded multi-file dumps (`read_many_files`), while allowing native workspace discovery tools
+    //     (`grep_search`, `find_by_name`, `list_dir`) now that Check 2c protects internal state & RTK uses the narrow pre-gate.
+    const { rtk: hostRtk } = resolveCachedHostEnv();
 
     if (toolName === "read_many_files") {
       respond({
         decision: "deny",
         reason: hostRtk
-          ? "Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses token optimization. Use bounded 'read_file' slices ('<= 150' lines) for editable workspace code, or run 'rtk read <file>' via run_command for read-only logs and spillovers instead."
-          : "Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses context bounds. Use bounded 'read_file' slices ('<= 150' lines) for editable workspace code, or run bounded 'head -n 150 <file>' / 'tail -n 150 <file>' via run_command for read-only logs and spillovers instead."
-      });
-    }
-
-    if (!hostRtk && (toolName === "grep_search" || toolName === "find_by_name" || toolName === "list_dir")) {
-      respond({ decision: "allow" });
-    }
-
-    if (toolName === "grep_search") {
-      const pattern = String(args.Query || args.query || args.Pattern || args.pattern || "").trim();
-      const searchTarget = String(args.SearchPath || args.searchPath || args.path || ".").trim() || ".";
-      const safePattern = pattern ? escapeDoubleQuotedArg(pattern) : "<pattern>";
-      const cmdHint = hostRgAvailable
-        ? `rtk rg -- "${safePattern}" ${searchTarget}`
-        : `rtk grep -rnE "${safePattern}" ${searchTarget}`;
-      respond({
-        decision: "deny",
-        reason: `Antigravity Governance: Native grep inspection via 'grep_search' bypasses token optimization. Run '${cmdHint}' via run_command instead (or raw 'grep -rnE' when untruncated lines or >25 matches per file are needed).`
-      });
-    }
-
-    if (toolName === "find_by_name") {
-      const searchTarget = args.Pattern || args.pattern || args.query || target || ".";
-      respond({
-        decision: "deny",
-        reason: `Antigravity Governance: Native file search via 'find_by_name' bypasses token optimization. Run 'rtk find ${searchTarget}' via run_command instead.`
-      });
-    }
-
-    if (toolName === "list_dir") {
-      const isWin = os.platform() === "win32";
-      const cmdHint = isWin ? `rtk find ${target || "."}` : `rtk ls ${target || "."}`;
-      respond({
-        decision: "deny",
-        reason: `Antigravity Governance: Native directory listing via 'list_dir' bypasses token optimization. Run '${cmdHint}' via run_command instead.`
+          ? `Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses context bounds. Use bounded 'read_file' slices ('<= ${MAX_SAFE_SLICE_LINES}' lines) for editable workspace code, or run 'rtk read <file>' via run_command for read-only logs and spillovers instead.`
+          : `Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses context bounds. Use bounded 'read_file' slices ('<= ${MAX_SAFE_SLICE_LINES}' lines) for editable workspace code, or run bounded 'head -n 150 <file>' / 'tail -n 150 <file>' via run_command for read-only logs and spillovers instead.`
       });
     }
 
@@ -6590,6 +6913,51 @@ try {
       if (clamped) {
         respond(
           { decision: "allow", overwrite: { DurationSeconds: requiredSubagentSec } },
+          { convId, sessionToSave: session, updatePollTime: true }
+        );
+      }
+      respond({ decision: "allow" }, { convId, sessionToSave: session, updatePollTime: true });
+    }
+
+    if (isRemoteCiPollSchedule(args)) {
+      const session = getSessionState(convId);
+      const now = Date.now();
+      pruneTaskBackoff(session, convId, now);
+
+      const bucket = getOrCreateTaskBucket(session, "remote-ci", now);
+      const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(bucket.pollCount));
+
+      if (!Number.isFinite(duration) || duration < 15) {
+        bucket.denials++;
+        bucket.lastSeenTime = now;
+        session.denials++;
+        const effectiveDenials = Math.max(bucket.denials, session.denials);
+        if (effectiveDenials >= 5) {
+          respond(
+            {
+              decision: "force_ask",
+              reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: remote CI polling timer denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec}, or confirm with the user to proceed.`
+            },
+            { convId, sessionToSave: session, updatePollTime: false }
+          );
+        }
+        respond(
+          {
+            decision: "deny",
+            reason: `Antigravity Execution Governance: Remote CI schedule timer duration too short (${duration}s < 15s minimum; ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} (no local task-X TimerCondition is required for remote CI checks).`
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
+      }
+
+      bucket.pollCount = Math.max(1, bucket.pollCount) + 1;
+      bucket.lastPollTime = now;
+      bucket.lastSeenTime = now;
+      bucket.denials = 0;
+      session.denials = 0;
+      if (duration < requiredBackoffSec) {
+        respond(
+          { decision: "allow", overwrite: { DurationSeconds: requiredBackoffSec } },
           { convId, sessionToSave: session, updatePollTime: true }
         );
       }

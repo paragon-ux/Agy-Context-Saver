@@ -203,31 +203,32 @@ const unsetWaitOutput = runHook({
   toolCall: { name: "run_command", args: { CommandLine: "cat package.json" } }
 });
 assert.equal(unsetWaitOutput.decision, "allow");
-assert.equal(unsetWaitOutput.overwrite?.CommandLine, "rtk read package.json");
+assert.equal(unsetWaitOutput.overwrite?.CommandLine, undefined, "Workspace cat stays lossless under Narrow High-ROI Pre-Gate");
 assert.equal(unsetWaitOutput.overwrite?.WaitMsBeforeAsync, 10000, "Unset WaitMsBeforeAsync defaults to 10000");
 
-// --- TEST 4: Search/Find/List Routing Hints ---
-console.log("\n--- 4. Search, Find & List Native Tool Routing ---");
+// --- TEST 4: Native Discovery Unblocked & Internal State Protected ---
+console.log("\n--- 4. Native Discovery Unblocked & Internal State Protection ---");
 const noRgEnv = withEnvPath(path.join(profileDir, "rtk-shim-bin"));
 const grepOutput = runHook(
-  { toolCall: { name: "grep_search", args: { query: "export function" } } },
+  { toolCall: { name: "grep_search", args: { query: "export function", SearchPath: "scripts" } } },
   noRgEnv
 );
-assert.equal(grepOutput.decision, "deny");
-assert.match(grepOutput.reason, /rtk grep -rnE "export function" \./, "When rg is absent, grep_search routes to rtk grep -rnE <pattern> .");
+assert.equal(grepOutput.decision, "allow", "Native grep_search on workspace paths must be allowed");
 
-const findOutput = runHook({ toolCall: { name: "find_by_name", args: { pattern: "*.mjs" } } });
-assert.equal(findOutput.decision, "deny");
-assert.match(findOutput.reason, /rtk find \*\.mjs/);
-assert.equal(findOutput.reason.includes("-name"), false);
+const grepProtectedOutput = runHook(
+  { toolCall: { name: "grep_search", args: { query: "secret", SearchPath: ".system_generated/logs" } } },
+  noRgEnv
+);
+assert.equal(grepProtectedOutput.decision, "deny", "Native grep_search on .system_generated must stay denied");
+
+const findOutput = runHook({ toolCall: { name: "find_by_name", args: { pattern: "*.mjs", SearchPath: "." } } });
+assert.equal(findOutput.decision, "allow", "Native find_by_name on workspace paths must be allowed");
 
 const listOutput = runHook({ toolCall: { name: "list_dir", args: { dir_path: "c:/project/tests" } } });
-assert.equal(listOutput.decision, "deny");
-if (process.platform === "win32") {
-  assert.match(listOutput.reason, /rtk find c:\/project\/tests/);
-} else {
-  assert.match(listOutput.reason, /rtk ls c:\/project\/tests/);
-}
+assert.equal(listOutput.decision, "allow", "Native list_dir on workspace paths must be allowed");
+
+const readManyOutput = runHook({ toolCall: { name: "read_many_files", args: { paths: ["a.js", "b.js"] } } });
+assert.equal(readManyOutput.decision, "deny", "Unbounded read_many_files must stay denied");
 
 cleanup();
 
