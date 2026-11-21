@@ -21,6 +21,7 @@ import {
   isSwarmPollSchedule,
   isSubagentPollSchedule,
   isRemoteCiPollSchedule,
+  extractRemoteCiBackoffKey,
   listTranscriptConversations,
   exportSanitizedTranscript,
   stripSummaryStepBoilerplate,
@@ -3197,7 +3198,42 @@ try {
       "task-2239",
       "Bare numeric TaskId '2239' must normalize to 'task-2239' (PR13-RUN-007)"
     );
-    console.log("✓ Wave 2 + Boost Pass PR13-RUN-001, PR13-RUN-007 & FRIC-RUN-004 classifier parity verified");
+    assert.equal(extractRemoteCiBackoffKey({ Prompt: "Check PR #14 build status" }), "remote-ci:pr-14");
+    assert.equal(extractRemoteCiBackoffKey({ Prompt: "Check PR #15 build status" }), "remote-ci:pr-15");
+
+    // §3.2: checkContextHealth() must scope remote CI backoff per PR key with 15-min decay (no cross-PR false pollingViolations)
+    const ciHealthConv = "conv-boost-ci-health";
+    const ciHealthLogs = path.join(tempHome, ".gemini", "antigravity", "brain", ciHealthConv, ".system_generated", "logs");
+    fs.mkdirSync(ciHealthLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(ciHealthLogs, "transcript.jsonl"),
+      [
+        JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "Check CI on PR #14 and PR #15", created_at: "2026-11-21T10:00:00Z" }),
+        JSON.stringify({
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          created_at: "2026-11-21T10:00:05Z",
+          tool_calls: [{ name: "schedule", args: { DurationSeconds: 30, Prompt: "Check PR #14 build status" } }]
+        }),
+        JSON.stringify({
+          step_index: 2,
+          type: "PLANNER_RESPONSE",
+          created_at: "2026-11-21T10:00:10Z",
+          tool_calls: [{ name: "schedule", args: { DurationSeconds: 30, Prompt: "Check PR #15 build status" } }]
+        }),
+        JSON.stringify({
+          step_index: 3,
+          type: "PLANNER_RESPONSE",
+          created_at: "2026-11-21T10:20:00Z",
+          tool_calls: [{ name: "schedule", args: { DurationSeconds: 30, Prompt: "Check PR #14 build status" } }]
+        })
+      ].join("\n") + "\n"
+    );
+    const ciHealthRes = await checkContextHealth({ conversationId: ciHealthConv });
+    assert.ok(!ciHealthRes.isError, ciHealthRes.error);
+    assert.equal(ciHealthRes.metrics.pollingViolations, 0, "Per-PR remote CI buckets + 15-min decay must report 0 pollingViolations (§3.2)");
+    assert.equal(ciHealthRes.metrics.legalChecks, 3, "All 3 remote CI checks across PR #14, PR #15, and decayed PR #14 must be legal");
+    console.log("✓ Wave 2 + Boost Pass PR13-RUN-001, PR13-RUN-007 & FRIC-RUN-004 classifier & health parity verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });
