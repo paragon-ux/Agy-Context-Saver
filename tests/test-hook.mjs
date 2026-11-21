@@ -2884,10 +2884,15 @@ console.log("\n--- Group K: Day-1 Launch Remediation Regressions (RUN-001, RUN-0
       );
       assert.equal(gitRewrite.decision, "allow");
       const catRewrite = runHook(
-        { toolCall: { name: "run_command", args: { CommandLine: "cat package.json", WaitMsBeforeAsync: 5000 } } },
+        { toolCall: { name: "run_command", args: { CommandLine: "cat .system_generated/steps/1/output.txt", WaitMsBeforeAsync: 5000 } } },
         spacedOffPathEnv
       );
       assert.equal(catRewrite.decision, "allow");
+      assert.match(
+        catRewrite.overwrite?.CommandLine || "",
+        /\bread\s+\.system_generated\/steps\/1\/output\.txt/,
+        `Spillover cat must rewrite to local RTK read on all platforms: ${catRewrite.overwrite?.CommandLine}`
+      );
       const grepRewrite = runHook(
         { toolCall: { name: "run_command", args: { CommandLine: 'rtk grep -rnE "foo" src/', WaitMsBeforeAsync: 5000 } } },
         spacedOffPathEnv
@@ -2927,7 +2932,7 @@ console.log("\n--- Group K: Day-1 Launch Remediation Regressions (RUN-001, RUN-0
       if (process.platform === "win32") {
         for (const [label, res] of [
           ["git status", gitRewrite],
-          ["cat package.json", catRewrite],
+          ["cat spillover", catRewrite],
           ["rtk grep", grepRewrite]
         ]) {
           const cmdLine = res.overwrite?.CommandLine || "";
