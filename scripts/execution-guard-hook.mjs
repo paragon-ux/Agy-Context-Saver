@@ -45,40 +45,115 @@ function resolveHookPath(p) {
 }
 
 const HOOK_DEDUP_TTL_MS = 5000;
-const HOOK_SAME_ARG_CROSS_SCRIPT_MS = 500;
+const HOOK_SAME_ARG_CROSS_SCRIPT_MS = 2500;
+const SESSION_LOCK_STALE_MS = 3000;
+const SESSION_LOCK_WAIT_MS = 800;
 const MAX_SAFE_SLICE_LINES = 150;
 const MAX_FULL_FILE_LINES = 800;
 const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes)
+const STATELESS_READ_TOOLS = new Set(["read_file", "view_file", "grep_search", "find_by_name", "list_dir"]);
+const HOOK_SURFACE = (() => {
+  for (const arg of process.argv.slice(2)) {
+    if (arg.startsWith("--surface=")) return arg.slice("--surface=".length).trim().toLowerCase();
+  }
+  return "";
+})();
+const SLEEP_WAIT_ARR = new Int32Array(new SharedArrayBuffer(4));
+let activeSessionLockPath = null;
 let dedupRecordCtx = null;
 
-function respond(obj) {
-  if (dedupRecordCtx && dedupRecordCtx.convId) {
+function releaseSessionLock() {
+  if (!activeSessionLockPath) return;
+  const toRemove = activeSessionLockPath;
+  activeSessionLockPath = null;
+  try { fs.unlinkSync(toRemove); } catch {}
+}
+
+process.on("exit", releaseSessionLock);
+
+function acquireSessionLock(convId) {
+  if (!convId || convId === "global") return false;
+  ensureStateDir();
+  const safeId = String(convId).replace(/[^a-zA-Z0-9_-]/g, "_");
+  const lockPath = path.join(getStateDir(), `agy-session-${safeId}.lock`);
+  const deadline = Date.now() + SESSION_LOCK_WAIT_MS;
+  while (true) {
     try {
-      const latest = getSessionState(dedupRecordCtx.convId);
-      const now = Date.now();
-      let outSig = dedupRecordCtx.rawSig;
-      if (obj && obj.overwrite && typeof obj.overwrite === "object") {
-        try {
-          const parsedRaw = JSON.parse(dedupRecordCtx.rawSig);
-          outSig = JSON.stringify({ ...parsedRaw, ...obj.overwrite });
-        } catch {}
+      const fd = fs.openSync(lockPath, "wx");
+      try { fs.writeFileSync(fd, `${process.pid}:${Date.now()}\n`, "utf-8"); } catch {}
+      try { fs.closeSync(fd); } catch {}
+      activeSessionLockPath = lockPath;
+      return true;
+    } catch (err) {
+      if (!err || err.code !== "EEXIST") return false;
+      try {
+        const st = fs.statSync(lockPath);
+        if ((Date.now() - st.mtimeMs) > SESSION_LOCK_STALE_MS) {
+          try { fs.unlinkSync(lockPath); } catch {}
+          continue;
+        }
+      } catch {
+        continue;
       }
-      const prevList = Array.isArray(latest.recentHookCalls) ? latest.recentHookCalls : [];
-      const freshList = prevList.filter((e) => e && typeof e.ts === "number" && (now - e.ts) < HOOK_DEDUP_TTL_MS);
-      freshList.push({
-        ts: now,
-        callId: dedupRecordCtx.callId || "",
-        stepIdx: dedupRecordCtx.stepIdx !== undefined ? dedupRecordCtx.stepIdx : null,
-        toolName: dedupRecordCtx.toolName,
-        scriptPath: dedupRecordCtx.scriptPath,
-        rawSig: dedupRecordCtx.rawSig,
-        outSig,
-        response: obj
-      });
-      latest.recentHookCalls = freshList.slice(-8);
-      saveSessionState(dedupRecordCtx.convId, latest, { updatePollTime: false });
+      if (Date.now() >= deadline) return false;
+      try { Atomics.wait(SLEEP_WAIT_ARR, 0, 0, 15); } catch { return false; }
+    }
+  }
+}
+
+function buildDedupEntry(obj, now) {
+  let outSig = dedupRecordCtx.rawSig;
+  if (obj && obj.overwrite && typeof obj.overwrite === "object") {
+    try {
+      const parsedRaw = JSON.parse(dedupRecordCtx.rawSig);
+      outSig = JSON.stringify({ ...parsedRaw, ...obj.overwrite });
     } catch {}
   }
+  return {
+    ts: now,
+    callId: dedupRecordCtx.callId || "",
+    stepIdx: dedupRecordCtx.stepIdx !== undefined ? dedupRecordCtx.stepIdx : null,
+    toolName: dedupRecordCtx.toolName,
+    scriptPath: dedupRecordCtx.scriptPath,
+    rawSig: dedupRecordCtx.rawSig,
+    outSig,
+    response: obj
+  };
+}
+
+function respond(obj, persistOpts = null) {
+  const skipDedupRecord = Boolean(persistOpts && persistOpts.skipDedupRecord);
+  const hasSessionToSave = Boolean(persistOpts && persistOpts.sessionToSave);
+  try {
+    if (hasSessionToSave) {
+      const targetConvId = persistOpts.convId || (dedupRecordCtx && dedupRecordCtx.convId) || "global";
+      const entry = persistOpts.sessionToSave;
+      if (dedupRecordCtx && dedupRecordCtx.convId && !skipDedupRecord) {
+        const now = Date.now();
+        const prevList = Array.isArray(entry.recentHookCalls) ? entry.recentHookCalls : [];
+        const freshList = prevList.filter((e) => e && typeof e.ts === "number" && (now - e.ts) < HOOK_DEDUP_TTL_MS);
+        freshList.push(buildDedupEntry(obj, now));
+        entry.recentHookCalls = freshList.slice(-8);
+      }
+      saveSessionState(targetConvId, entry, { updatePollTime: Boolean(persistOpts.updatePollTime) });
+    } else if (dedupRecordCtx && dedupRecordCtx.convId && !skipDedupRecord) {
+      const isStatelessAllow =
+        STATELESS_READ_TOOLS.has(dedupRecordCtx.toolName) &&
+        obj &&
+        obj.decision === "allow" &&
+        !obj.overwrite;
+      if (!isStatelessAllow) {
+        const latest = getSessionState(dedupRecordCtx.convId);
+        const now = Date.now();
+        const prevList = Array.isArray(latest.recentHookCalls) ? latest.recentHookCalls : [];
+        const freshList = prevList.filter((e) => e && typeof e.ts === "number" && (now - e.ts) < HOOK_DEDUP_TTL_MS);
+        freshList.push(buildDedupEntry(obj, now));
+        latest.recentHookCalls = freshList.slice(-8);
+        saveSessionState(dedupRecordCtx.convId, latest, { updatePollTime: false });
+      }
+    }
+  } catch {}
+  releaseSessionLock();
   process.stdout.write(JSON.stringify(obj) + "\n");
   process.exit(0);
 }
@@ -2476,6 +2551,7 @@ function getCallerLineage(convId) {
     if (
       session.lineage.isSwarmChild ||
       session.lineage.isTopLevelUserSession ||
+      session.lineage.lineageFinalized ||
       (targetStat &&
         targetStat.size === session.lineage.fileSize &&
         targetStat.mtimeMs === session.lineage.fileMtimeMs)
@@ -2539,6 +2615,7 @@ function getCallerLineage(convId) {
   let rosterName = null;
   let launchDirective = null;
   let line0Parsed = false;
+  let lineageFinalized = false;
 
   const lines = headStr.split(/\r?\n/).filter((l) => l.trim()).slice(0, MAX_HEADER_LINES);
   for (let i = 0; i < lines.length; i++) {
@@ -2604,6 +2681,8 @@ function getCallerLineage(convId) {
         }
       }
     } else if (i > 0) {
+      // Once a non-SYSTEM step (e.g., PLANNER_RESPONSE) appears after startup messages, Step 0/1 lineage is immutable (IND-RUN-004)
+      lineageFinalized = true;
       break;
     }
   }
@@ -2616,6 +2695,7 @@ function getCallerLineage(convId) {
     fileSize: targetStat ? targetStat.size : 0,
     fileMtimeMs: targetStat ? targetStat.mtimeMs : 0,
     transcriptFound: lines.length > 0 && line0Parsed,
+    lineageFinalized: Boolean(lineageFinalized || isTopLevelUserSession || isSwarmChild),
     isTopLevelUserSession,
     isChildSession,
     isSwarmChild,
@@ -5060,21 +5140,73 @@ function isSubagentPollSchedule(args = {}) {
 
 /**
  * Prunes expired, completed (`getTaskState() === "COMPLETED"`), and excess per-task backoff buckets.
+ * Loads the conversation transcript tail ONCE per invocation (at most one full-file fallback) instead of
+ * looping per-key `getTaskState()` disk reads (PR13-RUN-006).
  */
 function pruneTaskBackoff(session, convId, now = Date.now()) {
   if (!session.taskBackoff || typeof session.taskBackoff !== "object" || Array.isArray(session.taskBackoff)) {
     session.taskBackoff = {};
     return;
   }
+  const entries = Object.entries(session.taskBackoff);
+  let convTranscript = null;
+  let convTasksDir = null;
+  if (convId && convId !== "global" && entries.length > 0) {
+    for (const bDir of getBrainDirs()) {
+      const sysDir = path.join(bDir, convId, ".system_generated");
+      const candTranscript = path.join(sysDir, "logs", "transcript.jsonl");
+      const candTasksDir = path.join(sysDir, "tasks");
+      if (fs.existsSync(candTranscript) || fs.existsSync(candTasksDir)) {
+        if (fs.existsSync(candTranscript)) convTranscript = candTranscript;
+        convTasksDir = candTasksDir;
+        break;
+      }
+    }
+  }
+  const tail = convTranscript ? readTail(convTranscript, TASK_TAIL_BYTES) : null;
+  let fullTextLoaded = false;
+  let fullText = null;
+  const getFullTextOnce = () => {
+    if (!fullTextLoaded) {
+      fullTextLoaded = true;
+      if (convTranscript && tail && !tail.whole) {
+        try { fullText = fs.readFileSync(convTranscript, "utf-8"); } catch {}
+      }
+    }
+    return fullText;
+  };
+
   const kept = [];
-  for (const [key, entry] of Object.entries(session.taskBackoff)) {
+  for (const [key, entry] of entries) {
     if (!entry || typeof entry !== "object") continue;
     const activityTs = Math.max(entry.lastPollTime || 0, entry.lastSeenTime || 0);
     if (activityTs > 0 && (now - activityTs) >= STATE_TTL_MS) continue;
     if (convId && convId !== "global" && !BACKOFF_UUID_RE.test(key)) {
       try {
         const strippedId = key.replace(/^task-/i, "");
-        const state = getTaskState({ id: strippedId, token: `tasks/${key}.log` }, convId);
+        const taskName = /^task-/i.test(key) ? key : `task-${strippedId}`;
+        let state = null;
+        if (tail) {
+          state = scanTaskMarkers(tail.text, taskName);
+          if (!state && !tail.whole) {
+            const full = getFullTextOnce();
+            if (full) state = scanTaskMarkers(full, taskName);
+          }
+        }
+        if (!state && convTasksDir) {
+          const candidates = [
+            path.join(convTasksDir, `${taskName}.log`),
+            path.join(convTasksDir, `${key}.log`),
+            path.join(convTasksDir, `${strippedId}.log`)
+          ];
+          for (const logPath of candidates) {
+            try {
+              const st = fs.statSync(logPath);
+              state = (now - st.mtimeMs) > TASK_QUIET_MS ? "COMPLETED" : "RUNNING";
+              break;
+            } catch {}
+          }
+        }
         if (state === "COMPLETED") continue;
       } catch {}
     }
@@ -5113,14 +5245,16 @@ function denyRunningTask(taskId, convId, taskToken = "") {
     bucket.lastSeenTime = now;
   }
   session.denials++;
-  saveSessionState(convId, session, { updatePollTime: false });
 
   const effectiveDenials = bucket ? Math.max(bucket.denials, session.denials) : session.denials;
   if (effectiveDenials >= 5) {
-    respond({
-      decision: "force_ask",
-      reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: reading task log '${taskId}' attempted prematurely ${effectiveDenials} times during active backoff window. User confirmation required to proceed.`
-    });
+    respond(
+      {
+        decision: "force_ask",
+        reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: reading task log '${taskId}' attempted prematurely ${effectiveDenials} times during active backoff window. User confirmation required to proceed.`
+      },
+      { convId, sessionToSave: session, updatePollTime: false }
+    );
   }
 
   const currentPollCount = bucket ? bucket.pollCount : session.pollCount;
@@ -5133,10 +5267,13 @@ function denyRunningTask(taskId, convId, taskToken = "") {
   const condTarget = taskKey || `task-${taskId}`;
   const condExample = convId && convId !== "global" ? `${convId}/${condTarget}` : condTarget;
 
-  respond({
-    decision: "deny",
-    reason: `Antigravity Execution Governance: Task '${taskId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. Diagnostic check #${currentPollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${remainingSec}s remaining). Keep a conditioned watchdog armed via schedule(DurationSeconds=${requiredBackoffSec}, TimerCondition="${condExample}") so Reactive Wakeup (<SYSTEM_MESSAGE>) notifies you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
-  });
+  respond(
+    {
+      decision: "deny",
+      reason: `Antigravity Execution Governance: Task '${taskId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. Diagnostic check #${currentPollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${remainingSec}s remaining). Keep a conditioned watchdog armed via schedule(DurationSeconds=${requiredBackoffSec}, TimerCondition="${condExample}") so Reactive Wakeup (<SYSTEM_MESSAGE>) notifies you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
+    },
+    { convId, sessionToSave: session, updatePollTime: false }
+  );
 }
 
 // ============================================================================
@@ -5339,14 +5476,20 @@ try {
 
   isGovernedTool = true;
 
-  // Dual-hook idempotency deduplication when payload.conversationId is present (coordinator plugin + global hooks.json)
+  // Dual-hook idempotency deduplication when payload.conversationId is present (coordinator plugin + global hooks.json).
+  // Stateful tools (`manage_task`, `schedule`) hold a brief `wx` session lock across dedup + atomic state persistence (IND-RUN-001).
   if (payload.conversationId) {
+    if (toolName === "manage_task" || toolName === "schedule") {
+      acquireSessionLock(convId);
+    }
     const callId = String(toolCall.id || payload.toolUseId || payload.tool_use_id || "").trim();
     const stepIdx = payload.stepIdx !== undefined ? payload.stepIdx : payload.step_index;
     const inSig = JSON.stringify(args || {});
     let currentScriptPath = "";
     try {
-      currentScriptPath = tryRealpath(fileURLToPath(import.meta.url));
+      // Key cross-surface dedup on non-realpath script path + explicit `--surface=` flag so symlinked dual surfaces stay distinct (IND-SCRIPT-001)
+      const rawScriptPath = fileURLToPath(import.meta.url);
+      currentScriptPath = HOOK_SURFACE ? `${rawScriptPath}::${HOOK_SURFACE}` : rawScriptPath;
     } catch {}
     const now = Date.now();
     const prevState = getSessionState(convId);
@@ -5369,7 +5512,7 @@ try {
         matchedCall.response.decision === "allow"
           ? { decision: "allow" }
           : matchedCall.response;
-      respond(replay);
+      respond(replay, { skipDedupRecord: true });
     }
     dedupRecordCtx = {
       convId,
@@ -5700,13 +5843,22 @@ try {
       if (agyTranscriptCheck.isAccessDenial) {
         const session = getSessionState(convId);
         session.transcriptDenials = (session.transcriptDenials || 0) + 1;
-        saveSessionState(convId, session, { updatePollTime: false });
         if (session.transcriptDenials >= 5) {
-          respond({
-            decision: "force_ask",
-            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: restricted session '${convId}' attempted forbidden 'agy-context transcript' access ${session.transcriptDenials} times. ${agyTranscriptCheck.reason}`
-          });
+          respond(
+            {
+              decision: "force_ask",
+              reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: restricted session '${convId}' attempted forbidden 'agy-context transcript' access ${session.transcriptDenials} times. ${agyTranscriptCheck.reason}`
+            },
+            { convId, sessionToSave: session, updatePollTime: false }
+          );
         }
+        respond(
+          {
+            decision: "deny",
+            reason: agyTranscriptCheck.reason
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
       }
       respond({
         decision: "deny",
@@ -6317,23 +6469,28 @@ try {
         bucket.lastSeenTime = now;
       }
       session.denials++;
-      saveSessionState(convId, session, { updatePollTime: false });
 
       const effectiveDenials = bucket ? Math.max(bucket.denials, session.denials) : session.denials;
       if (effectiveDenials >= 5) {
-        respond({
-          decision: "force_ask",
-          reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: manage_task('${action}') called prematurely ${effectiveDenials} times during active backoff window across tasks [${session.taskIds.join(", ")}]. User confirmation required to proceed.`
-        });
+        respond(
+          {
+            decision: "force_ask",
+            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: manage_task('${action}') called prematurely ${effectiveDenials} times during active backoff window across tasks [${session.taskIds.join(", ")}]. User confirmation required to proceed.`
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
       }
 
       const remainingSec = Math.max(1, Math.ceil((Math.max(requiredBackoffMs, displayRequiredSec * 1000) - elapsedMs) / 1000));
       const condTarget = taskKey || "task-X";
       const condExample = convId && convId !== "global" ? `${convId}/${condTarget}` : condTarget;
-      respond({
-        decision: "deny",
-        reason: `Antigravity Execution Governance: Proportional Backoff Active (Level ${stateRef.pollCount}${taskKey ? ` for '${taskKey}'` : ""}, ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Diagnostic check #${stateRef.pollCount + 1} requires at least ${displayRequiredSec}s elapsed since previous check (${elapsedSec}s elapsed, ${remainingSec}s remaining). Keep a conditioned watchdog armed via schedule(DurationSeconds=${Math.max(30, displayRequiredSec)}, TimerCondition="${condExample}") so Reactive Wakeup (<SYSTEM_MESSAGE>) wakes you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
-      });
+      respond(
+        {
+          decision: "deny",
+          reason: `Antigravity Execution Governance: Proportional Backoff Active (Level ${stateRef.pollCount}${taskKey ? ` for '${taskKey}'` : ""}, ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Diagnostic check #${stateRef.pollCount + 1} requires at least ${displayRequiredSec}s elapsed since previous check (${elapsedSec}s elapsed, ${remainingSec}s remaining). Keep a conditioned watchdog armed via schedule(DurationSeconds=${Math.max(30, displayRequiredSec)}, TimerCondition="${condExample}") so Reactive Wakeup (<SYSTEM_MESSAGE>) wakes you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
+        },
+        { convId, sessionToSave: session, updatePollTime: false }
+      );
     }
 
     // Backoff window satisfied! Allow diagnostic check and advance level:
@@ -6349,8 +6506,7 @@ try {
       bucket.denials = 0;
     }
     session.denials = 0;
-    saveSessionState(convId, session);
-    respond({ decision: "allow" });
+    respond({ decision: "allow" }, { convId, sessionToSave: session, updatePollTime: true });
   }
 
   if (toolName === "schedule") {
@@ -6360,19 +6516,24 @@ try {
     if (isSwarmPollSchedule(args)) {
       const session = getSessionState(convId);
       session.denials++;
-      saveSessionState(convId, session, { updatePollTime: false });
       if (session.denials >= 5) {
-        respond({
-          decision: "force_ask",
-          reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: /swarm schedule polling attempted ${session.denials} times. Use 'swarm_wait' for '/swarm' (the dedicated 'swarm_monitor' daemon cron checks for stalls). User confirmation required to proceed.`
-        });
+        respond(
+          {
+            decision: "force_ask",
+            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: /swarm schedule polling attempted ${session.denials} times. Use 'swarm_wait' for '/swarm' (the dedicated 'swarm_monitor' daemon cron checks for stalls). User confirmation required to proceed.`
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
       }
-      respond({
-        decision: "deny",
-        reason:
-          "Antigravity Execution Governance: Using one-shot 'schedule' timers to poll a '/swarm' board or squad is strictly prohibited. " +
-          "Call 'swarm_wait' directly without a 'schedule' timer (it sleeps at zero token cost and wakes immediately when any board message arrives, while the dedicated 'swarm_monitor' daemon cron handles stall detection)."
-      });
+      respond(
+        {
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Using one-shot 'schedule' timers to poll a '/swarm' board or squad is strictly prohibited. " +
+            "Call 'swarm_wait' directly without a 'schedule' timer (it sleeps at zero token cost and wakes immediately when any board message arrives, while the dedicated 'swarm_monitor' daemon cron handles stall detection)."
+        },
+        { convId, sessionToSave: session, updatePollTime: false }
+      );
     }
 
     if (isSubagentPollSchedule(args)) {
@@ -6392,24 +6553,29 @@ try {
           bucket.lastSeenTime = now;
         }
         session.denials++;
-        saveSessionState(convId, session, { updatePollTime: false });
 
         const effectiveDenials = bucket ? Math.max(bucket.denials, session.denials) : session.denials;
         if (effectiveDenials >= 5) {
-          respond({
-            decision: "force_ask",
-            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: direct subagent schedule polling denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredSubagentSec} and TimerCondition="<subagentConvId>", or confirm with the user to proceed.`
-          });
+          respond(
+            {
+              decision: "force_ask",
+              reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: direct subagent schedule polling denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredSubagentSec} and TimerCondition="<subagentConvId>", or confirm with the user to proceed.`
+            },
+            { convId, sessionToSave: session, updatePollTime: false }
+          );
         }
 
         const condHint = rawCond && hasValidCond ? rawCond : (subKey || "<subagentConvId>");
         const cause = !hasValidCond
           ? "Unconditioned subagent polling timers are prohibited."
           : `Direct subagent stall watchdog duration too short (${duration}s < 30s minimum).`;
-        respond({
-          decision: "deny",
-          reason: `Antigravity Execution Governance: ${cause} (${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). For direct invoke_subagent stall safety, retry 'schedule' with DurationSeconds >= ${requiredSubagentSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost if the subagent finishes normally.`
-        });
+        respond(
+          {
+            decision: "deny",
+            reason: `Antigravity Execution Governance: ${cause} (${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). For direct invoke_subagent stall safety, retry 'schedule' with DurationSeconds >= ${requiredSubagentSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost if the subagent finishes normally.`
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
       }
 
       // Valid conditioned direct-subagent stall watchdog (>= 30s): auto-clamp 30..required-1 up to requiredSubagentSec
@@ -6421,11 +6587,13 @@ try {
         bucket.denials = 0;
       }
       session.denials = 0;
-      saveSessionState(convId, session);
       if (clamped) {
-        respond({ decision: "allow", overwrite: { DurationSeconds: requiredSubagentSec } });
+        respond(
+          { decision: "allow", overwrite: { DurationSeconds: requiredSubagentSec } },
+          { convId, sessionToSave: session, updatePollTime: true }
+        );
       }
-      respond({ decision: "allow" });
+      respond({ decision: "allow" }, { convId, sessionToSave: session, updatePollTime: true });
     }
 
     if (isTaskPollSchedule(args)) {
@@ -6450,23 +6618,28 @@ try {
           bucket.lastSeenTime = now;
         }
         session.denials++;
-        saveSessionState(convId, session, { updatePollTime: false });
 
         const effectiveDenials = bucket ? Math.max(bucket.denials, session.denials) : session.denials;
         if (effectiveDenials >= 5) {
-          respond({
-            decision: "force_ask",
-            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: schedule polling timer denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} and TimerCondition="${condHint}", or confirm with the user to proceed.`
-          });
+          respond(
+            {
+              decision: "force_ask",
+              reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: schedule polling timer denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} and TimerCondition="${condHint}", or confirm with the user to proceed.`
+            },
+            { convId, sessionToSave: session, updatePollTime: false }
+          );
         }
 
         const cause = !hasValidCond
           ? "Unconditioned task polling timers are prohibited because they do not auto-cancel when the task finishes."
           : `Task watchdog timer duration too short (${duration}s < 15s minimum).`;
-        respond({
-          decision: "deny",
-          reason: `Antigravity Execution Governance: ${cause} (Level ${stateRef.pollCount}${taskKey ? ` for '${taskKey}'` : ""}, ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost on normal completion while protecting against stalls.`
-        });
+        respond(
+          {
+            decision: "deny",
+            reason: `Antigravity Execution Governance: ${cause} (Level ${stateRef.pollCount}${taskKey ? ` for '${taskKey}'` : ""}, ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost on normal completion while protecting against stalls.`
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
       }
 
       // Conditioned task watchdog with DurationSeconds >= 15: auto-clamp up to requiredBackoffSec instead of dropping monitoring
@@ -6479,11 +6652,13 @@ try {
         bucket.denials = 0;
       }
       session.denials = 0;
-      saveSessionState(convId, session);
       if (duration < requiredBackoffSec) {
-        respond({ decision: "allow", overwrite: { DurationSeconds: requiredBackoffSec } });
+        respond(
+          { decision: "allow", overwrite: { DurationSeconds: requiredBackoffSec } },
+          { convId, sessionToSave: session, updatePollTime: true }
+        );
       }
-      respond({ decision: "allow" });
+      respond({ decision: "allow" }, { convId, sessionToSave: session, updatePollTime: true });
     }
 
     // Non-polling timers (e.g. user-requested reminders) are allowed

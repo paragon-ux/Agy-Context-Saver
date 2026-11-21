@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -3400,6 +3400,139 @@ console.log("\n--- Group L: Wave 0 Trust-Boundary Closure (IND-SEC-001..005, FRI
   } finally {
     fs.rmSync(w0Dir, { recursive: true, force: true });
   }
+}
+
+// ============================================================================
+// GROUP M: v2.1.2 Wave 1 Dual-Hook Atomicity, Surface Dedup & Perf (IND-RUN-001, IND-SCRIPT-001, PR13-RUN-006, IND-RUN-004)
+// ============================================================================
+console.log("\n--- Group M: Wave 1 Dual-Hook Atomicity, Surface Dedup & Perf ---");
+{
+  function runHookAsync(payload, extraArgs = [], customEnv = process.env) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [hookScript, ...extraArgs], { env: customEnv });
+      let out = "";
+      let err = "";
+      child.stdout.on("data", (d) => { out += d; });
+      child.stderr.on("data", (d) => { err += d; });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code !== 0) return reject(new Error(`Hook exited ${code}: ${err}`));
+        try { resolve(JSON.parse(out.trim())); } catch (e) { reject(e); }
+      });
+      child.stdin.end(JSON.stringify(payload));
+    });
+  }
+
+  // M.1: IND-RUN-001 & IND-SCRIPT-001 - Simultaneous plugin + global hook calls without callId/stepIdx must dedup cleanly via --surface + wx lock
+  const concConv = "conv-w1-concurrent-dual-hook";
+  const concPayloadManage = {
+    conversationId: concConv,
+    toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-conc-1" } }
+  };
+  const [m1, m2] = await Promise.all([
+    runHookAsync(concPayloadManage, ["--surface=plugin"]),
+    runHookAsync(concPayloadManage, ["--surface=global"])
+  ]);
+  assert.equal(m1.decision, "allow", "Concurrent dual-hook Check #1 (plugin) must allow");
+  assert.equal(m2.decision, "allow", "Concurrent dual-hook Check #1 (global) must replay allow (IND-RUN-001)");
+  const afterConcManage = JSON.parse(fs.readFileSync(path.join(stateDir, `agy-session-${concConv}.json`), "utf-8"));
+  assert.equal(afterConcManage.taskBackoff["task-conc-1"].pollCount, 1, "Concurrent dual-hook Check #1 must increment pollCount exactly once");
+
+  const concPayloadSched = {
+    conversationId: concConv,
+    toolCall: {
+      name: "schedule",
+      args: { DurationSeconds: 45, Prompt: "Check status of task-conc-2", TimerCondition: `${concConv}/task-conc-2` }
+    }
+  };
+  const [s1, s2] = await Promise.all([
+    runHookAsync(concPayloadSched, ["--surface=plugin"]),
+    runHookAsync(concPayloadSched, ["--surface=global"])
+  ]);
+  assert.equal(s1.decision, "allow", "Concurrent dual-hook Watchdog #1 (plugin) must allow");
+  assert.equal(s2.decision, "allow", "Concurrent dual-hook Watchdog #1 (global) must replay allow");
+  const afterConcSched = JSON.parse(fs.readFileSync(path.join(stateDir, `agy-session-${concConv}.json`), "utf-8"));
+  assert.equal(afterConcSched.taskBackoff["task-conc-2"].pollCount, 2, "Concurrent dual-hook schedule must advance pollCount exactly once");
+  assert.equal(fs.existsSync(path.join(stateDir, `agy-session-${concConv}.lock`)), false, "Session lockfile must be cleaned up on exit");
+
+  // M.2: FRIC-RUN-008 - Stateless read_file allow skips session-file writes completely
+  const statelessConv = "conv-w1-stateless-read";
+  const statelessFile = path.join(stateDir, `agy-session-${statelessConv}.json`);
+  try { fs.unlinkSync(statelessFile); } catch {}
+  const statRes = runHook({
+    conversationId: statelessConv,
+    toolCall: { name: "read_file", args: { Path: path.resolve(repoRoot, "package.json"), StartLine: 1, EndLine: 50 } }
+  });
+  assert.equal(statRes.decision, "allow");
+  assert.equal(fs.existsSync(statelessFile), false, "Stateless read_file allow must not create/rewrite session JSON (FRIC-RUN-008)");
+
+  // M.3: IND-RUN-004 - Direct invoke_subagent child lineage stays cached across transcript growth
+  const directParent = "conv-w1-direct-parent";
+  const directChild = "conv-w1-direct-child";
+  const directChildLogs = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", directChild, ".system_generated", "logs");
+  fs.mkdirSync(directChildLogs, { recursive: true });
+  const directChildTx = path.join(directChildLogs, "transcript.jsonl");
+  fs.writeFileSync(
+    directChildTx,
+    [
+      JSON.stringify({
+        step_index: 0,
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] sender=${directParent} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: self-only]\nInspect src/`
+      }),
+      JSON.stringify({ step_index: 1, type: "PLANNER_RESPONSE", content: "Starting work" })
+    ].join("\n") + "\n"
+  );
+  runHook({
+    conversationId: directChild,
+    toolCall: { name: "run_command", args: { CommandLine: "echo step1", WaitMsBeforeAsync: 5000 } }
+  });
+  const directSessPath = path.join(stateDir, `agy-session-${directChild}.json`);
+  const cachedBeforeGrow = JSON.parse(fs.readFileSync(directSessPath, "utf-8"));
+  assert.equal(cachedBeforeGrow.lineage?.parentConvId, directParent);
+  assert.equal(cachedBeforeGrow.lineage?.lineageFinalized, true);
+  const firstRecordedSize = cachedBeforeGrow.lineage.fileSize;
+  fs.appendFileSync(directChildTx, JSON.stringify({ step_index: 2, type: "PLANNER_RESPONSE", content: "X".repeat(2048) }) + "\n");
+  runHook({
+    conversationId: directChild,
+    toolCall: { name: "run_command", args: { CommandLine: "echo step2", WaitMsBeforeAsync: 5000 } }
+  });
+  const cachedAfterGrow = JSON.parse(fs.readFileSync(directSessPath, "utf-8"));
+  assert.equal(
+    cachedAfterGrow.lineage.fileSize,
+    firstRecordedSize,
+    "Direct invoke_subagent child lineage must remain cached across transcript growth (IND-RUN-004)"
+  );
+
+  // M.4: PR13-RUN-006 - Single-read pruneTaskBackoff cleanly prunes 20 completed buckets while keeping 20 active
+  const bulkPruneConv = "conv-w1-bulk-prune";
+  const bulkSys = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", bulkPruneConv, ".system_generated");
+  fs.mkdirSync(path.join(bulkSys, "logs"), { recursive: true });
+  const txLines = [];
+  const taskBackoff = {};
+  const tNow = Date.now() - 5000;
+  for (let i = 1; i <= 40; i++) {
+    const tid = `task-bulk-${i}`;
+    taskBackoff[tid] = { pollCount: 2, lastPollTime: tNow, denials: 0, lastSeenTime: tNow };
+    txLines.push(JSON.stringify({ step_index: i * 2 - 1, content: `Tool is running as a background task with task id: ${bulkPruneConv}/${tid}\nTask logs: tasks/${tid}.log` }));
+    if (i <= 20) {
+      txLines.push(JSON.stringify({ step_index: i * 2, content: `Task id "${bulkPruneConv}/${tid}" finished with result:\nOK` }));
+    }
+  }
+  fs.writeFileSync(path.join(bulkSys, "logs", "transcript.jsonl"), txLines.join("\n") + "\n");
+  const bulkSessPath = path.join(stateDir, `agy-session-${bulkPruneConv}.json`);
+  fs.writeFileSync(bulkSessPath, JSON.stringify({ pollCount: 0, denials: 0, taskIds: [], taskBackoff, lastPollTime: tNow, lastSeenTime: tNow, recentHookCalls: [] }));
+  const bulkRes = runHook({
+    conversationId: bulkPruneConv,
+    toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-bulk-fresh" } }
+  });
+  assert.equal(bulkRes.decision, "allow");
+  const afterBulk = JSON.parse(fs.readFileSync(bulkSessPath, "utf-8"));
+  assert.equal(afterBulk.taskBackoff["task-bulk-1"], undefined, "Completed bulk task-bulk-1 must be pruned (PR13-RUN-006)");
+  assert.equal(afterBulk.taskBackoff["task-bulk-20"], undefined, "Completed bulk task-bulk-20 must be pruned (PR13-RUN-006)");
+  assert.ok(afterBulk.taskBackoff["task-bulk-21"], "Running bulk task-bulk-21 must stay in taskBackoff");
+  assert.ok(afterBulk.taskBackoff["task-bulk-40"], "Running bulk task-bulk-40 must stay in taskBackoff");
+  console.log("✓ IND-RUN-001, FRIC-RUN-008, IND-SCRIPT-001, PR13-RUN-006 & IND-RUN-004 verified");
 }
 
 hermetic.cleanup();

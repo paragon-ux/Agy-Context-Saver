@@ -466,6 +466,10 @@ export function detectExistingInstallation(options = {}) {
   const pluginHookScript = path.join(pluginDest, "scripts", "execution-guard-hook.mjs");
   const scriptExists = fs.existsSync(pluginHookScript);
   const mirroredHookExists = fs.existsSync(destHook);
+  let mirroredHookIsSymlink = false;
+  try {
+    mirroredHookIsSymlink = fs.lstatSync(destHook).isSymbolicLink();
+  } catch {}
   let mirroredHookStale = false;
   if (mirroredHookExists && fs.existsSync(sourceHook)) {
     try {
@@ -550,6 +554,7 @@ export function detectExistingInstallation(options = {}) {
         pluginHookRegistered,
         globalHookRegistered,
         mirroredHookExists,
+        mirroredHookIsSymlink,
         mirroredHookStale,
         legacyHookPresent,
         corrupt: hookCorrupt,
@@ -1136,12 +1141,50 @@ export async function runInstall(options = {}) {
   }
 
   // 2. Dual-surface hook governance (plugin hooks.json + global hooks.json for /swarm workers):
-  //    Mirror execution-guard-hook.mjs to ~/.gemini/config/scripts/execution-guard-hook.mjs and register
-  //    "agy-context-saver" in ~/.gemini/config/hooks.json so native /swarm workers (which load global hooks.json
-  //    rather than plugin hooks.json) execute PreToolUse reliably alongside coordinator idempotency deduplication.
+  //    Link (when plugin is symlinked) or copy execution-guard-hook.mjs to ~/.gemini/config/scripts/execution-guard-hook.mjs
+  //    and register "agy-context-saver" in ~/.gemini/config/hooks.json with explicit --surface=global identity (IND-SCRIPT-001).
   await fsPromises.mkdir(scriptsDir, { recursive: true });
-  const hookUpdated = await safeCopyFileIfChanged(sourceHook, destHook);
-  log(`[OK] Mirrored hook script ${hookUpdated ? "updated" : "verified"}: ${destHook}`);
+  let pluginIsSymlinkNow = false;
+  try {
+    pluginIsSymlinkNow = fs.lstatSync(pluginDest).isSymbolicLink();
+  } catch {}
+  let hookUpdated = false;
+  let hookLinkMode = "copy";
+  if (pluginIsSymlinkNow && !mustCopyPlugin) {
+    let destHookLst = null;
+    try {
+      destHookLst = fs.lstatSync(destHook);
+    } catch {}
+    let alreadyLinked = false;
+    if (destHookLst && destHookLst.isSymbolicLink()) {
+      try {
+        alreadyLinked = fs.realpathSync(destHook) === fs.realpathSync(sourceHook);
+      } catch {}
+    }
+    if (alreadyLinked) {
+      hookLinkMode = "symlink";
+    } else {
+      try {
+        if (destHookLst) await fsPromises.unlink(destHook);
+        fs.symlinkSync(sourceHook, destHook, "file");
+        hookUpdated = true;
+        hookLinkMode = "symlink";
+      } catch {
+        // Fall back to mirrored copy when file symlinks are unavailable (e.g. unprivileged Windows)
+        hookUpdated = await safeCopyFileIfChanged(sourceHook, destHook);
+        hookLinkMode = "copy";
+      }
+    }
+  } else {
+    try {
+      if (fs.lstatSync(destHook).isSymbolicLink()) {
+        await fsPromises.unlink(destHook);
+      }
+    } catch {}
+    hookUpdated = await safeCopyFileIfChanged(sourceHook, destHook);
+    hookLinkMode = "copy";
+  }
+  log(`[OK] Mirrored hook script (${hookLinkMode}) ${hookUpdated ? "updated" : "verified"}: ${destHook}`);
 
   const hookMatcher = getExpectedHookMatcher();
   const nextHooks = validatedHooks ? { ...validatedHooks } : {};
@@ -1154,7 +1197,7 @@ export async function runInstall(options = {}) {
         hooks: [
           {
             type: "command",
-            command: `node "${destHookNormalized}"`,
+            command: `node "${destHookNormalized}" --surface=global`,
             timeout: 10
           }
         ]

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ./scripts/execution-guard-hook.mjs",
+            "command": "node ./scripts/execution-guard-hook.mjs --surface=plugin",
             "timeout": 10
           }
         ]
