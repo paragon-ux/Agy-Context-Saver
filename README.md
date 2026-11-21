@@ -21,7 +21,7 @@ npx --package=agy-context-saver agy-context setup
 npx --package=agy-context-saver agy-context status
 ```
 
-Reload Antigravity Desktop IDE or start a new session after setup finishes so the hook, rules, and skill activate. For shell PATH configuration, local checkout setup, v1.x upgrades, and clean uninstallation, see the [Installation and setup guide](https://paragon-ux.github.io/Agy-Context-Saver/installation/).
+Reload Antigravity Desktop IDE or start a new session after setup or uninstall finishes so hook registrations activate or clear from memory cleanly. For shell PATH configuration, local checkout setup, v1.x upgrades, and clean uninstallation, see the [Installation and setup guide](https://paragon-ux.github.io/Agy-Context-Saver/installation/).
 
 ## How Agy-Context-Saver guards a default session
 

@@ -45,10 +45,10 @@ try {
     assertSupportedNodeVersion,
     runInstall,
     runUninstall,
+    runRestoreBackups,
     detectExistingInstallation,
     formatWindowsCmdShim,
-    formatWindowsNodeCmdWrapper,
-    installWindowsNodeCmdWrapper,
+    cleanupLegacyWindowsNodeCmd,
     isDirOnPath,
     formatPathOnboardingLines,
     isManagedAgyShimFile,
@@ -56,14 +56,20 @@ try {
   } = await import("../scripts/install-register.mjs");
   const {
     pluginDest,
+    pluginHookScriptNormalized,
     destHook,
     hooksJsonPath,
     hooksBakPath,
+    legacyHooksBakPath,
     mcpJsonPath,
     mcpBakPath,
     antigravityMcpRootDir,
     antigravityBinDir
   } = resolveProfilePaths();
+
+  // Seed a legacy standalone mirrored hook script to verify runInstall removes it (Decision A2)
+  fs.mkdirSync(path.dirname(destHook), { recursive: true });
+  fs.writeFileSync(destHook, "// legacy standalone hook mirror\n", "utf-8");
 
   // --- 1. Upgrade / Fresh Install Sweeps Legacy Hook & All agy-context-saver* MCP Entries (ACS-HOOK-11) ---
   console.log("--- 1. Install & Legacy MCP/Hook Sweep (ACS-HOOK-11) ---");
@@ -72,13 +78,25 @@ try {
   const initial = detectExistingInstallation();
   assert.equal(initial.isComplete, true, "Installation must be complete and healthy");
   assert.equal(initial.details.mcp.clean, true, "Zero legacy agy-context-saver* MCP configs/schemas may remain");
-  assert.ok(fs.existsSync(hooksBakPath), "hooks.json.bak must exist after pruning legacy hook keys");
-  assert.ok(fs.existsSync(mcpBakPath), "mcp_config.json.bak must exist after stripping legacy MCP keys");
+  assert.match(hooksBakPath, /hooks\.json\.agy-context-saver\.bak$/, "hooks backup must be namespaced (1B.4)");
+  assert.ok(fs.existsSync(hooksBakPath), "hooks.json.agy-context-saver.bak must exist after pruning legacy hook keys");
+  assert.equal(fs.existsSync(legacyHooksBakPath), false, "Install must not create unnamespaced legacy hooks.json.bak (1B.4)");
+  assert.ok(fs.existsSync(mcpBakPath), "mcp_config.json.agy-context-saver.bak must exist after stripping legacy MCP keys");
 
   const installedHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf-8"));
   assert.equal(installedHooks["execution-guard"], undefined, "Legacy execution-guard key must be pruned");
-  assert.ok(fs.existsSync(destHook), "Mirrored hook script must be installed for /swarm workers");
-  assert.ok(installedHooks["agy-context-saver"]?.PreToolUse?.[0]?.hooks?.[0]?.command?.includes("execution-guard-hook.mjs"), "Global agy-context-saver hook must be registered for /swarm workers");
+  assert.equal(fs.existsSync(destHook), false, "Legacy standalone mirrored hook script must be removed on install (Decision A2)");
+  assert.equal(initial.details.hook.legacyMirrorPresent, false);
+  assert.equal(initial.details.hook.mirroredHookExists, false);
+  assert.equal(initial.details.hook.scriptExists, true);
+  const installedHookCmd = installedHooks["agy-context-saver"]?.PreToolUse?.[0]?.hooks?.[0]?.command || "";
+  assert.ok(installedHookCmd.includes("execution-guard-hook.mjs"), "Global agy-context-saver hook must be registered");
+  assert.equal(installedHookCmd.includes("--surface="), false, "Global hook must not use legacy --surface= flag (Decision A2)");
+  const normCase = (s) => (os.platform() === "win32" || os.platform() === "darwin" ? s.toLowerCase() : s);
+  assert.ok(
+    normCase(installedHookCmd.replace(/\\/g, "/")).includes(normCase(pluginHookScriptNormalized)),
+    "Global hook command must point directly at pluginDest/scripts/execution-guard-hook.mjs (Decision A2)"
+  );
   assert.ok(installedHooks["foreign-preservation-hook"], "Foreign hook must be preserved");
 
   const installedMcp = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
@@ -147,16 +165,17 @@ try {
   await runInstall({ silent: true });
   assert.equal(fs.existsSync(path.join(pluginDest, "stale-copy-file.txt")), false, "runInstall() must refresh stale copied pluginDest rather than leaving old files");
 
-  // Windows .cmd shim avoids parenthesized %errorlevel% cmd parse-time bug and uses chcp 65001 >nul matching install.ps1 (L46)
+  // Windows .cmd shim avoids parenthesized %errorlevel% cmd parse-time bug and uses chcp 65001 >nul (L46)
   const cmdShimText = formatWindowsCmdShim(path.join(pluginDest, "bin", "agy-context.mjs"));
   assert.match(cmdShimText, /chcp 65001 >nul/);
   assert.match(cmdShimText, /if errorlevel 1 goto :fallback/);
   assert.match(cmdShimText, /:fallback/);
   assert.doesNotMatch(cmdShimText, /if %errorlevel% equ 0 \(/i);
   const ps1Text = fs.readFileSync(new URL("../install.ps1", import.meta.url), "utf8");
-  assert.match(ps1Text, /chcp 65001 >nul/);
-  assert.match(ps1Text, /\[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
   assert.doesNotMatch(ps1Text, /-Encoding ASCII/);
+  // A-Win1: install.ps1 no longer writes a node.cmd wrapper; delegates cleanly to scripts/install-register.mjs
+  assert.doesNotMatch(ps1Text, /WriteAllText[\s\S]*node\.cmd/i);
+  assert.match(ps1Text, /install-register\.mjs/);
   // ACS-BOOST-SCRIPT-001: install.ps1 checks $env:ProgramFiles and ${env:ProgramFiles(x86)} and fails closed via Write-Error + exit 1 when node is missing
   assert.match(ps1Text, /\$env:ProgramFiles[\s\S]*nodejs\\node\.exe/);
   assert.match(ps1Text, /\$\{env:ProgramFiles\(x86\)\}[\s\S]*nodejs\\node\.exe/);
@@ -391,7 +410,7 @@ try {
       );
 
       // UX-ACS-013: Partial installation prints Next step hint in non-JSON mode
-      fs.unlinkSync(path.join(uxConfigDir, "scripts", "execution-guard-hook.mjs"));
+      fs.unlinkSync(path.join(uxConfigDir, "plugins", "agy-context-saver", "scripts", "execution-guard-hook.mjs"));
       const partialStatus = spawnSync(process.execPath, [installScriptPath, "--status"], {
         env: onPathEnv,
         encoding: "utf-8"
@@ -400,13 +419,18 @@ try {
       assert.match(partialStatus.stdout, /Overall Status:\s*PARTIAL INSTALLATION/);
       assert.match(partialStatus.stdout, /Next step:\s*run 'npx --package=agy-context-saver agy-context setup'/);
 
-      // UX-ACS-001: Uninstall removes managed rtk shim cleanly
+      // UX-ACS-001 + PT-SCRIPT-002: Uninstall removes managed rtk shim cleanly and emits Antigravity reload notice
       const uninstallManaged = spawnSync(process.execPath, [installScriptPath, "--uninstall"], {
         env: emptyPathEnv,
         encoding: "utf-8"
       });
       assert.equal(uninstallManaged.status, 0, uninstallManaged.stderr || uninstallManaged.stdout);
       assert.equal(fs.existsSync(managedRtkShim), false, "Uninstall must remove Agy-managed rtk shim");
+      assert.match(
+        uninstallManaged.stdout,
+        /Reload Antigravity Desktop IDE or start a new session/,
+        "PT-SCRIPT-002: uninstall must emit post-uninstall Antigravity reload notice"
+      );
 
       // UX-ACS-R2-001: Stale/dangling managed rtk shim cleanup when transitioning to --allow-degraded or external system rtk
       {
@@ -764,26 +788,147 @@ try {
         }
       }
 
-      // UX-ACS-006: Cross-platform unit verification of Windows node.cmd wrapper parity & backup preservation
-      const winNodeWrapText = formatWindowsNodeCmdWrapper("C:\\Program Files\\nodejs\\node.exe", "C:\\Users\\Dev\\.gemini\\config\\scripts\\execution-guard-hook.mjs");
-      assert.match(winNodeWrapText, /chcp 65001 >nul/);
-      assert.match(winNodeWrapText, /REM agy-context-saver-managed/);
-      assert.match(winNodeWrapText, /execution-guard-hook\.mjs/);
-      const fakeWinCfg = path.join(uxProfile, "win-node-parity");
+      // A-Win1: cleanupLegacyWindowsNodeCmd unit + runInstall / runUninstall retirement tests (never creates node.cmd)
+      const fakeWinCfg = path.join(uxProfile, "win-node-cleanup");
       fs.mkdirSync(fakeWinCfg, { recursive: true });
       const origUserNodeCmd = "@echo off\r\nREM user-owned-node-cmd\r\n";
-      fs.writeFileSync(path.join(fakeWinCfg, "node.cmd"), origUserNodeCmd, "utf-8");
-      await installWindowsNodeCmdWrapper({
-        geminiConfigDir: fakeWinCfg,
-        destHook: path.join(fakeWinCfg, "scripts", "execution-guard-hook.mjs"),
-        nodeExe: "C:\\Program Files\\nodejs\\node.exe"
+      const managedNodeCmd = "@echo off\r\nREM agy-context-saver-managed\r\n";
+      const fakeNodeCmd = path.join(fakeWinCfg, "node.cmd");
+      const fakeNodeBak = path.join(fakeWinCfg, "node.cmd.bak");
+      // Unmanaged user node.cmd must be preserved untouched
+      fs.writeFileSync(fakeNodeCmd, origUserNodeCmd, "utf-8");
+      assert.equal(await cleanupLegacyWindowsNodeCmd({ geminiConfigDir: fakeWinCfg }), false);
+      assert.equal(fs.readFileSync(fakeNodeCmd, "utf-8"), origUserNodeCmd);
+      // Managed node.cmd + node.cmd.bak -> removes managed wrapper and restores backup
+      fs.writeFileSync(fakeNodeCmd, managedNodeCmd, "utf-8");
+      fs.writeFileSync(fakeNodeBak, origUserNodeCmd, "utf-8");
+      assert.equal(await cleanupLegacyWindowsNodeCmd({ geminiConfigDir: fakeWinCfg }), true);
+      assert.equal(fs.readFileSync(fakeNodeCmd, "utf-8"), origUserNodeCmd);
+      assert.equal(fs.existsSync(fakeNodeBak), false);
+      // Managed node.cmd without backup -> removes managed wrapper cleanly
+      fs.writeFileSync(fakeNodeCmd, managedNodeCmd, "utf-8");
+      assert.equal(await cleanupLegacyWindowsNodeCmd({ geminiConfigDir: fakeWinCfg }), true);
+      assert.equal(fs.existsSync(fakeNodeCmd), false);
+
+      // Verify both runInstall and runUninstall clean up legacy managed node.cmd, restore node.cmd.bak, and never create a new node.cmd
+      const uxNodeCmd = path.join(uxConfigDir, "node.cmd");
+      const uxNodeBak = path.join(uxConfigDir, "node.cmd.bak");
+      fs.mkdirSync(uxConfigDir, { recursive: true });
+      fs.writeFileSync(uxNodeCmd, managedNodeCmd, "utf-8");
+      fs.writeFileSync(uxNodeBak, origUserNodeCmd, "utf-8");
+      const installCleanNode = runCopySetup(emptyPathEnv, "allowDegraded: true");
+      assert.equal(installCleanNode.status, 0, installCleanNode.stderr || installCleanNode.stdout);
+      assert.equal(fs.readFileSync(uxNodeCmd, "utf-8"), origUserNodeCmd, "A-Win1: runInstall must restore node.cmd.bak over legacy managed node.cmd");
+      assert.equal(fs.existsSync(uxNodeBak), false, "A-Win1: runInstall must consume node.cmd.bak on restore");
+      fs.unlinkSync(uxNodeCmd);
+      const installNoNode = runCopySetup(emptyPathEnv, "allowDegraded: true");
+      assert.equal(installNoNode.status, 0, installNoNode.stderr || installNoNode.stdout);
+      assert.equal(fs.existsSync(uxNodeCmd), false, "A-Win1: runInstall must never create a new node.cmd");
+      // Also verify runUninstall cleans a legacy managed node.cmd and restores node.cmd.bak
+      fs.writeFileSync(uxNodeCmd, managedNodeCmd, "utf-8");
+      fs.writeFileSync(uxNodeBak, origUserNodeCmd, "utf-8");
+      const uninstallCleanNode = spawnSync(process.execPath, [installScriptPath, "--uninstall"], {
+        env: emptyPathEnv,
+        encoding: "utf-8"
       });
-      assert.equal(fs.readFileSync(path.join(fakeWinCfg, "node.cmd.bak"), "utf-8"), origUserNodeCmd);
-      assert.match(fs.readFileSync(path.join(fakeWinCfg, "node.cmd"), "utf-8"), /REM agy-context-saver-managed/);
+      assert.equal(uninstallCleanNode.status, 0, uninstallCleanNode.stderr || uninstallCleanNode.stdout);
+      assert.equal(fs.readFileSync(uxNodeCmd, "utf-8"), origUserNodeCmd, "A-Win1: runUninstall must restore node.cmd.bak over legacy managed node.cmd");
+      assert.equal(fs.existsSync(uxNodeBak), false);
+      assert.match(uninstallCleanNode.stdout, /Reload Antigravity Desktop IDE or start a new session/);
     } finally {
       fs.rmSync(uxProfile, { recursive: true, force: true });
     }
-    console.log("✓ Managed RTK shim, PATH onboarding, GIT_CONFIG_GLOBAL safety, Windows node.cmd parity, and status hints verified");
+    console.log("✓ Managed RTK shim, PATH onboarding, GIT_CONFIG_GLOBAL safety, A-Win1 legacy node.cmd cleanup, PT-SCRIPT-002 reload notice, and status hints verified");
+  }
+
+  // --- 6. 1B.4 Namespaced Backups, Legacy Ownership Gating, Fail-Closed Corrupt Backups & Key-Scoped Merge-Restore ---
+  console.log("\n--- 6. 1B.4 Backup Namespacing, Ownership Gating, Fail-Closed Validation & Key-Scoped Merge-Restore ---");
+  {
+    const b4Profile = fs.mkdtempSync(path.join(os.tmpdir(), "agy-1b4-backups-"));
+    const prevProfile = process.env.AGY_TEST_PROFILE_DIR;
+    process.env.AGY_TEST_PROFILE_DIR = b4Profile;
+    try {
+      const p = resolveProfilePaths();
+      fs.mkdirSync(p.geminiConfigDir, { recursive: true });
+      assert.match(p.hooksBakPath, /hooks\.json\.agy-context-saver\.bak$/);
+      assert.match(p.mcpBakPath, /mcp_config\.json\.agy-context-saver\.bak$/);
+
+      // 6a. Key-scoped merge-restore preserves post-install foreign hooks and foreign MCP servers
+      fs.writeFileSync(p.hooksJsonPath, JSON.stringify({
+        "execution-guard": { PreToolUse: [{ matcher: "legacy", hooks: [] }] },
+        "pre-install-foreign-hook": { PreToolUse: [] }
+      }, null, 2), "utf-8");
+      fs.writeFileSync(p.mcpJsonPath, JSON.stringify({
+        mcpServers: {
+          "agy-context-saver": { command: "node", args: ["old-mcp.js"] },
+          "pre-install-foreign-mcp": { command: "node", args: ["keep.js"] }
+        }
+      }, null, 2), "utf-8");
+
+      await runInstall({ silent: true, allowDegraded: true });
+      assert.ok(fs.existsSync(p.hooksBakPath), "1B.4: install must create namespaced hooks.json.agy-context-saver.bak");
+      assert.equal(fs.existsSync(p.legacyHooksBakPath), false, "1B.4: install must not create unnamespaced hooks.json.bak");
+      assert.ok(fs.existsSync(p.mcpBakPath), "1B.4: install must create namespaced mcp_config.json.agy-context-saver.bak");
+
+      // Simulate user installing a brand-new foreign plugin/MCP AFTER agy-context-saver setup
+      const liveHooksAfterInstall = JSON.parse(fs.readFileSync(p.hooksJsonPath, "utf-8"));
+      liveHooksAfterInstall["post-install-foreign-hook"] = { PreToolUse: [{ matcher: "run_command", hooks: [] }] };
+      fs.writeFileSync(p.hooksJsonPath, JSON.stringify(liveHooksAfterInstall, null, 2), "utf-8");
+
+      const liveMcpAfterInstall = JSON.parse(fs.readFileSync(p.mcpJsonPath, "utf-8"));
+      liveMcpAfterInstall.mcpServers["post-install-foreign-mcp"] = { command: "node", args: ["post.js"] };
+      fs.writeFileSync(p.mcpJsonPath, JSON.stringify(liveMcpAfterInstall, null, 2), "utf-8");
+
+      await runUninstall({ silent: true, restoreBackups: true });
+      const mergedHooks = JSON.parse(fs.readFileSync(p.hooksJsonPath, "utf-8"));
+      assert.deepEqual(mergedHooks["execution-guard"], { PreToolUse: [{ matcher: "legacy", hooks: [] }] }, "1B.4: legacy execution-guard key restored from backup");
+      assert.equal(mergedHooks["agy-context-saver"], undefined, "1B.4: agy-context-saver key absent when absent from backup");
+      assert.ok(mergedHooks["pre-install-foreign-hook"], "1B.4: pre-install foreign hook preserved");
+      assert.ok(mergedHooks["post-install-foreign-hook"], "1B.4: post-install foreign hook preserved on key-scoped merge-restore");
+
+      const mergedMcp = JSON.parse(fs.readFileSync(p.mcpJsonPath, "utf-8"));
+      assert.deepEqual(mergedMcp.mcpServers["agy-context-saver"], { command: "node", args: ["old-mcp.js"] }, "1B.4: legacy agy-context-saver MCP key restored");
+      assert.ok(mergedMcp.mcpServers["pre-install-foreign-mcp"], "1B.4: pre-install foreign MCP preserved");
+      assert.ok(mergedMcp.mcpServers["post-install-foreign-mcp"], "1B.4: post-install foreign MCP preserved on key-scoped merge-restore");
+
+      // 6b. Fail-closed corrupt namespaced backup rejection BEFORE mutating any file
+      const snapshotHooks = JSON.stringify({ "stay-intact": { PreToolUse: [] } }, null, 2);
+      const snapshotMcp = JSON.stringify({ mcpServers: { "stay-intact-mcp": { command: "node" } } }, null, 2);
+      fs.writeFileSync(p.hooksJsonPath, snapshotHooks, "utf-8");
+      fs.writeFileSync(p.mcpJsonPath, snapshotMcp, "utf-8");
+      fs.writeFileSync(p.hooksBakPath, "{ corrupt hooks backup", "utf-8");
+      await assert.rejects(() => runRestoreBackups({ silent: true }), /Configuration error|invalid JSON/i, "1B.4: corrupt hooks backup must fail closed");
+      assert.equal(fs.readFileSync(p.hooksJsonPath, "utf-8"), snapshotHooks, "1B.4: live hooks.json must stay untouched on corrupt backup");
+      assert.equal(fs.readFileSync(p.mcpJsonPath, "utf-8"), snapshotMcp, "1B.4: live mcp_config.json must stay untouched even when mcp backup is valid");
+
+      // 6c. Legacy unnamespaced hooks.json.bak ownership gating (ignores foreign-only, restores owned, fails closed on corrupt owned)
+      fs.rmSync(p.hooksBakPath, { force: true });
+      fs.rmSync(p.mcpBakPath, { force: true });
+      fs.writeFileSync(p.legacyHooksBakPath, JSON.stringify({ "unrelated-plugin": { PreToolUse: [] } }), "utf-8");
+      const foreignOnlyRestored = await runRestoreBackups({ silent: true });
+      assert.equal(foreignOnlyRestored, false, "1B.4: foreign-only legacy hooks.json.bak must be ignored");
+      assert.equal(fs.readFileSync(p.hooksJsonPath, "utf-8"), snapshotHooks, "1B.4: live hooks.json untouched when legacy backup is foreign-only");
+
+      fs.writeFileSync(p.legacyHooksBakPath, '{ "execution-guard": { corrupt', "utf-8");
+      await assert.rejects(() => runRestoreBackups({ silent: true }), /Configuration error|invalid JSON/i, "1B.4: corrupt owned legacy hooks.json.bak must fail closed");
+      assert.equal(fs.readFileSync(p.hooksJsonPath, "utf-8"), snapshotHooks);
+
+      fs.writeFileSync(p.legacyHooksBakPath, JSON.stringify({
+        "execution-guard": { PreToolUse: [{ matcher: "from-legacy-bak", hooks: [] }] },
+        "old-foreign-in-bak": { PreToolUse: [] }
+      }), "utf-8");
+      const ownedLegacyRestored = await runRestoreBackups({ silent: true });
+      assert.equal(ownedLegacyRestored, true, "1B.4: owned legacy hooks.json.bak must restore owned keys");
+      const afterLegacyRestore = JSON.parse(fs.readFileSync(p.hooksJsonPath, "utf-8"));
+      assert.deepEqual(afterLegacyRestore["execution-guard"], { PreToolUse: [{ matcher: "from-legacy-bak", hooks: [] }] });
+      assert.ok(afterLegacyRestore["stay-intact"], "1B.4: live foreign hook preserved during legacy backup restore");
+      assert.equal(afterLegacyRestore["old-foreign-in-bak"], undefined, "1B.4: unrelated foreign keys inside backup must not clobber live hooks.json");
+    } finally {
+      if (prevProfile === undefined) delete process.env.AGY_TEST_PROFILE_DIR;
+      else process.env.AGY_TEST_PROFILE_DIR = prevProfile;
+      fs.rmSync(b4Profile, { recursive: true, force: true });
+    }
+    console.log("✓ 1B.4 namespaced backups, legacy ownership gating, fail-closed corrupt backup rejection, and key-scoped merge-restore verified");
   }
 } finally {
   try {

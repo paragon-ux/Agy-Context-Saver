@@ -1,7 +1,7 @@
 # Product Roadmap
 
 `Agy-Context-Saver` focuses on three responsibilities for Google Antigravity (`agy`):
-1. **Shell and file output control:** Offloads verbose shell commands and workspace searches to `RTK (>= 1.1.0)` and requires bounded `read_file` line slices (`<= 150` lines, or `1..TotalLines` on files `<= 800` lines and `<= 45 KiB`).
+1. **Shell and file output control:** Pre-gates noisy shell runners (`pytest`, `cargo`, `go`, `vitest`, `jest`, `tsc`, `eslint`, `ruff`, `docker`, `kubectl`, `git status`/`push`/`pull`/`fetch`) through `RTK (>= 1.1.0)` via `AGY_RTK_MODE=pregate|off`, keeps native workspace discovery (`grep_search`, `find_by_name`, `list_dir`) and precision CLI tools (`rg`, `grep`, `find`, `ls`, `wc`, `diff`, `git diff`/`show`/`log`, workspace `cat`/`head`/`tail`) unblocked and lossless, and applies the unified `read_file` preset (files `<= 300` lines and `<= 24 KiB` plus safe media auto-allowed, bounded slices up to `300` lines, explicit `1..TotalLines` audits up to `800` lines and `45 KiB`, and bounded reads up to `150` lines on spillovers and completed task logs).
 2. **Lifecycle and state governance:** Enforces Reactive Wakeup backoff on `manage_task` and `schedule`, blocks direct access to `.system_generated/` and `<stateDir>/`, expands unset `WaitMsBeforeAsync` to `10s`, and governs child transcript access via `agy-context transcript access` and `[agy-transcript-access: deny|self-only|allow]`.
 3. **CLI transcript forensics:** Provides `agy-context transcript` (`read`, `query`, `step`, `health`, `list`, `export`, `access`) and `agy-context` (`status`, `setup`, `uninstall`, `restore-backups`) with zero MCP tool schema overhead. Multi-agent cohort planning and SHA-256 evidence bundling live in the separate [Agy-Squad](https://paragon-ux.github.io/Agy-Squad/) repository.
 
@@ -38,8 +38,8 @@
    - Triage edge cases surfaced by `agy-context status` and `agy-context transcript health` across Linux, macOS, and Windows.
    - Validate hook latency and CLI ergonomics against new Antigravity releases and model backends.
 2. **Multi-plugin and `/swarm` stress testing:**
-   - Verify co-existence with third-party hooks in `hooks.json` and external MCP servers in `mcp_config.json` without config contention.
-   - Stress-test concurrent `/swarm` cohorts (`Agy-Squad` specialists and flat `audit-<id>` integrity auditors) to keep hook dispatch overhead minimal.
+   - Verify co-existence with third-party hooks in `hooks.json` and external MCP servers in `mcp_config.json` without config contention (including validated, non-clobbering `.agy-context-saver.bak` key-merge restores).
+   - Stress-test concurrent `/swarm` cohorts (multi-agent specialists and reviewer workers) under the single global hook surface and lazy-loaded 3-module hook split (`scripts/hook/{file,shell,task}-guard.mjs`) to keep hook dispatch overhead minimal.
 3. **Editor status visibility:**
    - Keep `rules/AGENTS.md`, `skills/context-governance/SKILL.md`, and `plugin.json` prompts concise and aligned with Antigravity UI panels.
 
@@ -50,6 +50,6 @@
 1. **Standalone skills for specialized workflows:**
    - Keep high-ceremony workflows (compliance ledgers, blind evaluation harnesses) in opt-in Antigravity skills rather than the core hook.
 2. **Zero-dependency standard library runtime:**
-   - Maintain zero runtime npm dependencies (`fs`, `path`, `os`, `readline`, `child_process`, `crypto`), streaming transcripts line-by-line with cached RTK resolution and lazy `rg` discovery.
+   - Maintain zero runtime npm dependencies (`fs`, `path`, `os`, `readline`, `child_process`, `crypto`), streaming transcripts in a single pass with modular lazy-loaded hook guards and cached RTK resolution.
 3. **Automated drift detection and repair:**
-   - Use `agy-context setup` (`scripts/install-register.mjs`) to detect and repair hook or shim drift while preserving `.bak` configuration backups.
+   - Use `agy-context setup` (`scripts/install-register.mjs`) to detect and repair hook or shim drift while preserving namespaced `.agy-context-saver.bak` configuration backups.

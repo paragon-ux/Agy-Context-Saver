@@ -52,7 +52,40 @@ console.log("\n--- Probe 2: Hook Fast-Path Bypass & RTK Delegation Latency ---")
     assert.equal(out.decision, "allow");
   }
   const fastElapsed = performance.now() - t0;
-  console.log(`✓ 15x fast-path non-governed bypasses executed in ${fastElapsed.toFixed(1)}ms`);
+  assert.ok(
+    fastElapsed < 15000,
+    `15x fast-path non-governed bypasses exceeded conservative 15000ms ceiling (${fastElapsed.toFixed(1)}ms)`
+  );
+  console.log(`✓ 15x fast-path non-governed bypasses executed in ${fastElapsed.toFixed(1)}ms (< 15000ms ceiling)`);
+
+  // Verify session state stays compact (zero recentHookCalls / writtenFiles bloat after large write_file calls)
+  const { getStateDir } = await import("../scripts/state-dir.mjs");
+  const bloatConvId = `conv-perf-compact-${Date.now()}`;
+  const largeBody = "console.log('payload');\n".repeat(1000);
+  for (let i = 0; i < 5; i++) {
+    const wfOut = runHook({
+      conversationId: bloatConvId,
+      cwd: hermetic.profileDir,
+      toolCall: { name: "write_file", args: { Path: `scratch/sample-${i}.mjs`, Content: largeBody } }
+    });
+    assert.equal(wfOut.decision, "allow");
+  }
+  const mtOut = runHook({
+    conversationId: bloatConvId,
+    toolCall: { name: "manage_task", args: { Action: "status", TaskId: `${bloatConvId}/task-1` } }
+  });
+  assert.equal(mtOut.decision, "allow");
+  const sessionStatePath = path.join(getStateDir(), `agy-session-${bloatConvId}.json`);
+  assert.ok(fs.existsSync(sessionStatePath), "Expected per-conversation session state file");
+  const sessionStateRaw = fs.readFileSync(sessionStatePath, "utf-8");
+  const sessionState = JSON.parse(sessionStateRaw);
+  assert.equal(sessionState.recentHookCalls, undefined, "Session state must not persist recentHookCalls bloat");
+  assert.equal(sessionState.writtenFiles, undefined, "Session state must not persist writtenFiles bloat");
+  assert.ok(
+    Buffer.byteLength(sessionStateRaw, "utf-8") < 4096,
+    `Session state file should stay compact (< 4096 bytes), got ${Buffer.byteLength(sessionStateRaw, "utf-8")} bytes`
+  );
+  console.log(`✓ Session state stayed compact (${Buffer.byteLength(sessionStateRaw, "utf-8")} bytes, zero recentHookCalls/writtenFiles bloat)`);
 
   const t1 = performance.now();
   for (let i = 0; i < 10; i++) {

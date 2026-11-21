@@ -1,23 +1,21 @@
 # CLI & Hook Reference
 
-`Agy-Context-Saver` (`v2.1.1`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs`), paired with **RTK (`>= 1.1.0`)**.
+`Agy-Context-Saver` (`v2.1.2`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the single global `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs` routing dynamically to `scripts/hook/{file,shell,task}-guard.mjs`), paired with **RTK (`>= 1.1.0`)** via the Narrow High-ROI Pre-Gate (`AGY_RTK_MODE=pregate|off`, default `pregate`).
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
 ---
 
-## 3-Tier Workspace File & Codebase Inspection
+## Workspace File Bounds & Output Inspection
 
-Unbounded `read_file` calls on workspace files are blocked by the `PreToolUse` hook. Use the 3-tier workflow below:
+Native `grep_search`, `find_by_name`, and `list_dir` run directly on workspace paths (while staying blocked on `.system_generated/` and `getStateDir()`). `read_file` and output inspection guardrails:
 
-| Tier | Target | Governed Workflow |
-| :--- | :--- | :--- |
-| **Tier 1: Search & discovery** | Pattern or file discovery | `rtk grep -rnE "<pattern>" <path>` (`~80`-char line / `25`-match compact view; implicit `grep` stays unrewritten for lossless output) / `rtk find <path>` / `rtk ls <path>` |
-| **Tier 2: `read_file` (bounded slice)** | `1-150` line slice | Pass `StartLine` and `EndLine` (`<= 150` lines) to preserve 1-indexed line numbers for `edit_file` and `write_file` |
-| **Tier 2: `read_file` (full-file read)** | Files $\le 800$ lines and $\le 45\text{ KiB}$ | Pass explicit `StartLine: 1, EndLine: <TotalLines>`; partial slices of `151-800` lines are denied |
-| **Tier 3: Spillovers & task logs** | `.system_generated/steps/<step>/output.txt` & completed `tasks/<taskId>.log` | Bounded `read_file` ($\le 150\text{L}$) on step spillovers or single unchained `rtk read <path>` (`cat`, and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; explicit `rtk read` needed for bare `tail`, quoted/spaced or Windows backslash `head`/`tail`, env prefixes, and `UNKNOWN` logs; `--head-lines 150` / `--tail-lines 150` required on `>45 KiB` files; not for editable workspace code, while `read_many_files` routes editable files to bounded `read_file` and logs/spillovers to `rtk read`) |
-
-Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass through Safe Harbor without slice bounds.
+| Target | Enforced Guardrail |
+| :--- | :--- |
+| **Small workspace files & media** | Files $\le 300$ lines and $\le 24\text{ KiB}$, safe multimodal media (`.png`, `.jpg`, `.webp`, `.pdf`, audio/video), and Antigravity special files (`SKILL.md`, `AGENTS.md`, own brain artifacts, `swarm_view/`, `.gemini/config/`) need no line bounds. |
+| **Large workspace files (bounded slice)** | Pass `StartLine` and/or `EndLine` ($\le 300$ lines, EOF-clamped via $1\text{ MiB}$ newline scan, single-bound supported) to `read_file` / `view_file`. `read_many_files` and `ByteOffset`-only reads are denied. |
+| **Medium workspace files (full-file audit)** | Files $\le 800$ lines and $\le 45\text{ KiB}$ allow explicit `StartLine: 1, EndLine >= TotalLines`. |
+| **Spillovers & completed task logs** | Both `.system_generated/steps/<step>/output.txt` spillovers and `COMPLETED` `tasks/<taskId>.log` files allow bounded `read_file` ($\le 150\text{L}$) or single unchained `rtk read <path>` (`cat` and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; `--head-lines 150` / `--tail-lines 150` required above `45 KiB`; `RUNNING` task logs are always denied). |
 
 ---
 
@@ -30,7 +28,7 @@ Streams `transcript.jsonl` to report step counts, user turns, tool call counts, 
 
 | Flag / Argument | Value | Required | Description |
 | :--- | :---: | :---: | :--- |
-| `[<id>]` / `--id` | `<uuid>` | No* | Conversation UUID as positional arg or `--id`. (*Required when `>= 2` active `/swarm` sessions ran in the last 5 minutes.) |
+| `[<id>]` / `--id` | `<uuid>` | No* | Conversation UUID as positional arg or `--id`. (*Inside Antigravity sessions, `PreToolUse` auto-injects `--id <callerConvId>` in both `open` and `self-only` modes when omitted or `current`; required only in direct external CLI shells when `>= 2` sessions ran in the last 5 minutes without `GEMINI_CONVERSATION_ID`.) |
 | `--file` | `<path>` | No | Explicit path to `transcript.jsonl` inside Antigravity's brain roots (`antigravity`, `antigravity-cli`, `antigravity-ide`; disabled under `self-only` mode outside caller's session). |
 | `--json` | `(none)` | No | Output JSON instead of Markdown. |
 
@@ -217,7 +215,7 @@ See [Lifecycle Governance](governance.md#parent-transcript-access-control) for f
 
 ## 8. `agy-context status`, `setup`, `uninstall` & `restore-backups`
 
-Audits, synchronizes, or removes the plugin link, `PreToolUse` hook, CLI shims, RTK configuration, and stale MCP entries:
+Audits, synchronizes, removes, or restores validated non-clobbering backups for the plugin link, single global `PreToolUse` hook, CLI shims, RTK configuration, and stale MCP entries (reload Antigravity Desktop IDE or start a new session after `setup` or `uninstall` so hook registrations activate or clear from memory cleanly):
 
 ```bash
 agy-context status [--json]
@@ -231,7 +229,7 @@ Sample `agy-context status` output:
 ```text
 Checking Agy-Context-Saver installation status...
 - Native Plugin Link: ACTIVE (~/.gemini/config/plugins/agy-context-saver)
-- Execution Governor Hook (agy-context-saver): ACTIVE (plugin + global hooks.json)
+- Execution Governor Hook (agy-context-saver): ACTIVE (global hooks.json)
 - CLI Shim (agy-context): INSTALLED (~/.gemini/antigravity/bin)
 - RTK Command Optimizer (>= 1.1.0): INSTALLED (rtk 1.1.0)
 - MCP Cleanup: CLEAN (0 duplicate MCP configs/schemas)

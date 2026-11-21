@@ -24,8 +24,8 @@ npx --package=agy-context-saver agy-context setup
 ```
 
 This command performs five steps:
-1. Links or copies the package into your active Antigravity plugins directory (`~/.gemini/config/plugins/agy-context-saver`) and registers the `agy-context-saver` `PreToolUse` hook in both the plugin `hooks.json` and global `~/.gemini/config/hooks.json` (ensuring coverage across top-level sessions, subagents, and `/swarm` workers). On Windows, it also installs the managed `~/.gemini/config/node.cmd` wrapper (backing up any existing unmanaged `node.cmd` to `node.cmd.bak`), matching `install.ps1`.
-2. Prunes legacy `execution-guard` entries from global `hooks.json` after creating an automatic `.bak` backup.
+1. Links or copies the package into your active Antigravity plugins directory (`~/.gemini/config/plugins/agy-context-saver`) and registers a single `agy-context-saver` `PreToolUse` hook in global `~/.gemini/config/hooks.json` pointing directly into `~/.gemini/config/plugins/agy-context-saver/scripts/execution-guard-hook.mjs` (the plugin's `hooks.json` is `{}` so sessions spawn 1 Node process per governed tool call with full coverage across top-level sessions, subagents, and `/swarm` workers). Global `hooks.json` invokes `node` directly without creating a Windows `~/.gemini/config/node.cmd` wrapper, and `setup` automatically removes any legacy `~/.gemini/config/scripts/execution-guard-hook.mjs` mirror or legacy managed Windows `node.cmd` wrapper (restoring `node.cmd.bak` if present) left over from earlier v2.x releases.
+2. Prunes legacy `execution-guard` entries from global `hooks.json` after creating a namespaced `hooks.json.agy-context-saver.bak` backup (restores validate JSON and key-merge without clobbering other installed plugins' hooks or MCP servers).
 3. Retires default MCP registration by removing legacy `agy-context-saver*` keys from `mcp_config.json` and sweeping stale schema caches under `~/.gemini/antigravity/mcp/agy-context-saver*` while preserving all third-party MCP servers.
 4. Installs executable `agy-context` and `agy-context-saver` shims into `~/.gemini/antigravity/bin/` (plus a managed `rtk` shim when local plugin-bundled `rtk` is provisioned and no compatible `rtk` is on `PATH`).
 5. Verifies `rtk >= 1.1.0` and sets `suppress_hook_warning = true` in RTK's configuration without touching global Git settings.
@@ -109,7 +109,7 @@ You can also run the platform installer scripts directly:
 
 ## Health Auditing & Verification
 
-Audit all v2.0.x integration layers from your shell:
+Audit all v2.1.x integration layers from your shell:
 
 ```bash
 agy-context status
@@ -122,7 +122,7 @@ Output:
 Checking Agy-Context-Saver installation status...
 
 - Native Plugin Link: ACTIVE (~/.gemini/config/plugins/agy-context-saver)
-- Execution Governor Hook (agy-context-saver): ACTIVE (plugin + global hooks.json)
+- Execution Governor Hook (agy-context-saver): ACTIVE (global hooks.json)
 - CLI Shim (agy-context): INSTALLED (~/.gemini/antigravity/bin)
 - RTK Command Optimizer (>= 1.1.0): INSTALLED (rtk 1.1.0)
 - MCP Cleanup: CLEAN (0 duplicate MCP configs/schemas)
@@ -144,13 +144,18 @@ Remove `Agy-Context-Saver` without disturbing foreign hooks, third-party MCP ser
 # Standard clean uninstallation (preserves non-Agy configurations)
 agy-context uninstall
 
-# Clean uninstallation with full backup file restoration
+# Clean uninstallation with validated, non-clobbering backup restoration
 agy-context uninstall --restore-backups
 
 # Zero-PATH fallback via npx (works from any directory)
 npx --package=agy-context-saver agy-context uninstall
 npx --package=agy-context-saver agy-context uninstall --restore-backups
 ```
+
+> [!IMPORTANT]
+> **Reload Antigravity after `uninstall`:** After `agy-context uninstall` finishes, reload Antigravity Desktop IDE or start a new session so cached in-memory `PreToolUse` hook registrations clear cleanly before running further tool calls.
+
+Uninstall removes the global `agy-context-saver` hook entry, plugin link, CLI shims, and hook state directory, and automatically cleans up any legacy `~/.gemini/config/scripts/execution-guard-hook.mjs` mirror or legacy managed Windows `~/.gemini/config/node.cmd` wrapper (restoring `node.cmd.bak` if present). When `--restore-backups` (or `agy-context restore-backups`) is run, namespaced backups (`hooks.json.agy-context-saver.bak`, `mcp_config.json.agy-context-saver.bak`) are validated as JSON objects and key-merge restored without clobbering other installed plugins' hooks or MCP servers.
 
 From a local `Agy-Context-Saver` repository checkout:
 
@@ -163,4 +168,4 @@ node scripts/install-register.mjs --uninstall --restore-backups
 
 To prevent restricted subagents or `/swarm` workers from disabling governance mid-run, `PreToolUse` blocks restricted child sessions from:
 - Running plugin lifecycle commands (`setup`, `install`, `uninstall`, `restore-backups`, `--setup`, `--install`, `--uninstall`, `--restore-backups`) via `agy-context` or `scripts/install-register.mjs`.
-- Mutating installed or repository governance files (`~/.gemini/config/plugins/agy-context-saver/`, `~/.gemini/config/scripts/execution-guard-hook.mjs`, `hooks.json`, and `<stateDir>/transcript-access.json`) via file tools, shell redirects, in-place editors (`sed -i`, `perl`, `chmod`, `ln`, `dd`, `patch`), or script interpreters.
+- Mutating installed or repository governance files (`~/.gemini/config/plugins/agy-context-saver/`, `~/.gemini/config/hooks.json`, and `<stateDir>/transcript-access.json`) via file tools or shell writes.

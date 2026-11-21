@@ -35,21 +35,28 @@ assert.ok(fs.existsSync(pluginDest), `Native plugin link missing at ${pluginDest
 assert.ok(fs.existsSync(pluginHooksPath), `Plugin hooks.json missing at ${pluginHooksPath}`);
 
 const pluginHooks = JSON.parse(fs.readFileSync(pluginHooksPath, "utf-8"));
-assert.ok(pluginHooks["agy-context-saver"], "Plugin hooks.json must define 'agy-context-saver'");
-const hookCmd = pluginHooks["agy-context-saver"].PreToolUse[0].hooks[0].command;
-assert.equal(hookCmd.includes("ANTIGRAVITY_PLUGIN_ROOT"), false, "Plugin hooks.json must not reference unexpanded ANTIGRAVITY_PLUGIN_ROOT");
-const hookMatcher = pluginHooks["agy-context-saver"].PreToolUse[0].matcher;
+assert.deepEqual(pluginHooks, {}, "Plugin hooks.json must be empty '{}' under Decision A2 single-surface registration");
+
+// Global hooks.json must prune legacy execution-guard, point directly at pluginDest/scripts/execution-guard-hook.mjs,
+// remove any legacy standalone mirror, and preserve foreign hooks (Decision A2)
+const legacyMirrorHook = path.join(geminiConfigDir, "scripts", "execution-guard-hook.mjs");
+assert.equal(fs.existsSync(legacyMirrorHook), false, `Legacy standalone mirrored hook must be removed on install: ${legacyMirrorHook}`);
+const globalHooks = JSON.parse(fs.readFileSync(globalHooksJsonPath, "utf-8"));
+assert.equal(globalHooks["execution-guard"], undefined, "Legacy execution-guard must not be in global hooks.json");
+const hookCmd = globalHooks["agy-context-saver"]?.PreToolUse?.[0]?.hooks?.[0]?.command;
+assert.ok(hookCmd, "agy-context-saver must register in global hooks.json");
+assert.equal(hookCmd.includes("ANTIGRAVITY_PLUGIN_ROOT"), false, "Global hooks.json must not reference unexpanded ANTIGRAVITY_PLUGIN_ROOT");
+assert.equal(hookCmd.includes("--surface="), false, "Global hooks.json must not pass --surface= under single-surface Decision A2");
+const expectedPluginHookNorm = path.join(pluginDest, "scripts", "execution-guard-hook.mjs").replace(/\\/g, "/");
+const normalizeForCompare = (s) => (os.platform() === "win32" || os.platform() === "darwin" ? s.toLowerCase() : s);
+assert.ok(
+  normalizeForCompare(hookCmd.replace(/\\/g, "/")).includes(normalizeForCompare(expectedPluginHookNorm)),
+  `Global hooks.json must point directly at pluginDest hook script (${expectedPluginHookNorm}), got: ${hookCmd}`
+);
+const hookMatcher = globalHooks["agy-context-saver"].PreToolUse[0].matcher;
 for (const tool of ["manage_task", "schedule", "run_command", "read_file", "edit_file", "write_file", "grep_search", "find_by_name", "list_dir"]) {
   assert.ok(hookMatcher.includes(tool), `Matcher includes ${tool}`);
 }
-
-// Global hooks.json must prune legacy execution-guard, register agy-context-saver for /swarm workers, and preserve foreign hooks
-const mirroredHook = path.join(geminiConfigDir, "scripts", "execution-guard-hook.mjs");
-assert.ok(fs.existsSync(mirroredHook), `Mirrored global hook script missing at ${mirroredHook}`);
-const globalHooks = JSON.parse(fs.readFileSync(globalHooksJsonPath, "utf-8"));
-assert.equal(globalHooks["execution-guard"], undefined, "Legacy execution-guard must not be in global hooks.json");
-assert.ok(globalHooks["agy-context-saver"]?.PreToolUse?.[0]?.hooks?.[0]?.command?.includes("execution-guard-hook.mjs"), "agy-context-saver must register in global hooks.json for /swarm workers");
-assert.equal(globalHooks["agy-context-saver"]?.PreToolUse?.[0]?.matcher, hookMatcher, "Global hooks.json matcher must match plugin hooks.json");
 assert.ok(globalHooks["waymark-continuity"], "Foreign hook waymark-continuity must remain preserved");
 
 // Default MCP retired cleanly
@@ -60,7 +67,7 @@ if (fs.existsSync(antigravityMcpRootDir)) {
   const stale = fs.readdirSync(antigravityMcpRootDir).filter((n) => n.startsWith("agy-context-saver"));
   assert.deepEqual(stale, [], "Zero agy-context-saver* MCP schema directories may remain");
 }
-console.log("✓ Plugin + global hooks.json active for coordinator & /swarm workers; zero duplicate MCP configs; foreign entries preserved");
+console.log("✓ Single-surface global hooks.json active (plugin hooks.json empty, legacy mirror absent); zero duplicate MCP configs; foreign entries preserved");
 
 // --- 2. Detection & RTK Config ---
 console.log("\n--- 2. Installer Status & RTK Config Verification ---");
@@ -70,9 +77,11 @@ assert.equal(detection.isInstalled, true);
 assert.equal(detection.isComplete, true);
 assert.equal(detection.details.plugin.exists, true);
 assert.equal(detection.details.hook.registered, true);
-assert.equal(detection.details.hook.pluginHookRegistered, true);
 assert.equal(detection.details.hook.globalHookRegistered, true);
-assert.equal(detection.details.hook.mirroredHookExists, true);
+assert.equal(detection.details.hook.pluginHookRegistered, false);
+assert.equal(detection.details.hook.legacyMirrorPresent, false);
+assert.equal(detection.details.hook.mirroredHookExists, false);
+assert.equal(detection.details.hook.scriptExists, true);
 assert.equal(detection.details.cliShim.exists, true);
 assert.equal(detection.details.mcp.clean, true);
 assert.ok(detection.details.rtk, "RTK >= 1.1.0 must be detected");
@@ -102,23 +111,28 @@ const shimQuery = spawnSync(process.execPath, [cliScript, "transcript", "query",
 assert.equal(shimQuery.status, 0);
 assert.match(shimQuery.stdout, /Step 3/);
 
-// Run hook from pluginDest (matching Antigravity's plugin hooks.json cwd contract!)
+// Run the registered global hook command from pluginDest (preserving Windows quoting via /d /s /c + windowsVerbatimArguments)
 const hookPayload = JSON.stringify({
   toolCall: { name: "run_command", args: { CommandLine: "git status" } }
 });
-const shellCmd = process.platform === "win32" ? "cmd.exe" : "sh";
-const shellArgs = process.platform === "win32" ? ["/c", hookCmd] : ["-c", hookCmd];
-const hookRes = spawnSync(shellCmd, shellArgs, {
-  cwd: pluginDest,
-  input: hookPayload,
-  encoding: "utf-8"
-});
-assert.equal(hookRes.status, 0, `Plugin hooks.json command failed in ${pluginDest}: ${hookRes.stderr}`);
+const hookRes = process.platform === "win32"
+  ? spawnSync(process.env.ComSpec || process.env.COMSPEC || "cmd.exe", ["/d", "/s", "/c", `"${hookCmd}"`], {
+      cwd: pluginDest,
+      input: hookPayload,
+      encoding: "utf-8",
+      windowsVerbatimArguments: true
+    })
+  : spawnSync("sh", ["-c", hookCmd], {
+      cwd: pluginDest,
+      input: hookPayload,
+      encoding: "utf-8"
+    });
+assert.equal(hookRes.status, 0, `Global hooks.json command failed in ${pluginDest}: ${hookRes.stderr}`);
 const parsedHookOut = JSON.parse(hookRes.stdout.trim());
 assert.equal(parsedHookOut.decision, "allow");
 assert.equal(parsedHookOut.overwrite?.CommandLine, "rtk git status");
 assert.equal(parsedHookOut.overwrite?.WaitMsBeforeAsync, 10000);
-console.log("✓ Installed CLI shim and plugin hooks.json relative execution verified");
+console.log("✓ Installed CLI shim and global hooks.json execution verified");
 
 // Status on an uninstalled/incomplete profile must exit non-zero (both CLI and direct install-register.mjs --status)
 const installScript = path.resolve(__dirname, "../scripts/install-register.mjs");
@@ -162,20 +176,21 @@ try {
   assert.equal(staleParsed.details.plugin.isCopyFallback, true);
   assert.equal(staleParsed.details.plugin.versionMismatch, true);
 
-  // Stale mirrored hook script mismatch must also fail status check independently of version mismatch
+  // Missing pluginDest hook script must fail status check independently of version mismatch (Decision A2)
   const repoPkgVersion = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../package.json"), "utf8")).version;
   fs.writeFileSync(stalePkgPath, JSON.stringify({ ...stalePkg, version: repoPkgVersion }, null, 2));
-  const staleMirroredHookPath = path.join(staleCopyProfile, ".gemini", "config", "scripts", "execution-guard-hook.mjs");
-  fs.appendFileSync(staleMirroredHookPath, "\n// stale-hook-marker\n");
-  const staleHookStatus = spawnSync(process.execPath, [cliScript, "status", "--json"], {
+  const stalePluginHookPath = path.join(stalePluginDir, "scripts", "execution-guard-hook.mjs");
+  fs.unlinkSync(stalePluginHookPath);
+  const missingHookStatus = spawnSync(process.execPath, [cliScript, "status", "--json"], {
     encoding: "utf-8",
     env: staleEnv
   });
-  assert.notEqual(staleHookStatus.status, 0, "Stale mirrored hook script must fail status check");
-  const staleHookParsed = JSON.parse(staleHookStatus.stdout);
-  assert.equal(staleHookParsed.details.plugin.versionMismatch, false);
-  assert.equal(staleHookParsed.details.hook.mirroredHookStale, true);
-  assert.equal(staleHookParsed.isComplete, false);
+  assert.notEqual(missingHookStatus.status, 0, "Missing plugin hook script must fail status check");
+  const missingHookParsed = JSON.parse(missingHookStatus.stdout);
+  assert.equal(missingHookParsed.details.plugin.versionMismatch, false);
+  assert.equal(missingHookParsed.details.hook.scriptExists, false);
+  assert.equal(missingHookParsed.details.hook.registered, false);
+  assert.equal(missingHookParsed.isComplete, false);
 } finally {
   fs.rmSync(staleCopyProfile, { recursive: true, force: true });
 }
@@ -226,17 +241,17 @@ assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
       const dynPaths = resolveProfilePaths();
       assert.ok(dynPaths.pluginDest.startsWith(w3Profile), "resolveProfilePaths() must dynamically reflect AGY_TEST_PROFILE_DIR (S2-DEP-006)");
 
-      // S2-DEP-001: legacy MCP stripping creates namespaced mcp_config.json.agy-context-saver.bak without touching foreign mcp_config.json.agy-squad.bak
-      const agySquadBak = path.join(dynPaths.geminiConfigDir, "mcp_config.json.agy-squad.bak");
-      fs.writeFileSync(agySquadBak, JSON.stringify({ mcpServers: { "agy-squad": { command: "node" } } }), "utf8");
+      // S2-DEP-001: legacy MCP stripping creates namespaced mcp_config.json.agy-context-saver.bak without touching foreign companion backups
+      const companionBak = path.join(dynPaths.geminiConfigDir, "mcp_config.json.companion-plugin.bak");
+      fs.writeFileSync(companionBak, JSON.stringify({ mcpServers: { "companion-plugin": { command: "node" } } }), "utf8");
       fs.writeFileSync(dynPaths.mcpJsonPath, JSON.stringify({ mcpServers: { "agy-context-saver": { command: "node" }, other: { command: "x" } } }), "utf8");
       const reSync = spawnSync(process.execPath, [installScript], { encoding: "utf-8", env: w3Env });
       assert.equal(reSync.status, 0, reSync.stderr || reSync.stdout);
       assert.ok(fs.existsSync(dynPaths.mcpBakPath), "Must create namespaced mcp_config.json.agy-context-saver.bak (S2-DEP-001)");
       assert.match(dynPaths.mcpBakPath, /mcp_config\.json\.agy-context-saver\.bak$/);
-      assert.ok(fs.existsSync(agySquadBak), "Companion mcp_config.json.agy-squad.bak must remain untouched");
+      assert.ok(fs.existsSync(companionBak), "Companion mcp_config.json.companion-plugin.bak must remain untouched");
 
-      // S2-SCRIPT-006: malformed hooks.json, mcp_config.json, and config.json all fail closed BEFORE removing pluginDest or destHook
+      // S2-SCRIPT-006: malformed hooks.json, mcp_config.json, and config.json all fail closed BEFORE removing pluginDest or pluginHookScript
       for (const [cfgPath, badBody, label] of [
         [dynPaths.hooksJsonPath, "{ malformed json", "hooks.json"],
         [dynPaths.mcpJsonPath, "{ malformed mcp", "mcp_config.json"],
@@ -247,7 +262,7 @@ assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
         fs.writeFileSync(cfgPath, badBody, "utf8");
         await assert.rejects(() => runUninstall({ silent: true }), /Configuration error|invalid JSON|must contain a JSON object/i);
         assert.ok(fs.existsSync(dynPaths.pluginDest), `Fail-closed runUninstall must preserve pluginDest when ${label} is malformed (S2-SCRIPT-006)`);
-        assert.ok(fs.existsSync(dynPaths.destHook), `Fail-closed runUninstall must preserve destHook when ${label} is malformed (S2-SCRIPT-006)`);
+        assert.ok(fs.existsSync(dynPaths.pluginHookScript), `Fail-closed runUninstall must preserve pluginHookScript when ${label} is malformed (S2-SCRIPT-006)`);
         if (prevExists) fs.writeFileSync(cfgPath, savedBody, "utf8");
         else fs.rmSync(cfgPath, { force: true });
       }
@@ -402,12 +417,17 @@ assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
       assert.ok(fs.lstatSync(installed).isDirectory(), "npm setup must make a persistent plugin copy");
       const marker = path.join(installed, "preserve-on-repeat.txt");
       fs.writeFileSync(marker, "installed source");
-      const registration = path.join(cfg, "scripts", "execution-guard-hook.mjs");
-      fs.unlinkSync(registration);
+      const globalHooksFile = path.join(cfg, "hooks.json");
+      const legacyMirror = path.join(cfg, "scripts", "execution-guard-hook.mjs");
+      assert.equal(fs.existsSync(legacyMirror), false, "npm setup must not install legacy standalone mirror (Decision A2)");
+      fs.mkdirSync(path.dirname(legacyMirror), { recursive: true });
+      fs.writeFileSync(legacyMirror, "// stale legacy mirror\n", "utf8");
+      fs.unlinkSync(globalHooksFile);
       ok(shim(installedShim, "setup"));
       ok(shim(installedShim, "setup"));
       assert.equal(fs.readFileSync(marker, "utf8"), "installed source");
-      assert.ok(fs.existsSync(registration), "repeat setup should repair its registration");
+      assert.ok(fs.existsSync(globalHooksFile), "repeat setup should repair global hooks.json registration");
+      assert.equal(fs.existsSync(legacyMirror), false, "repeat setup should remove legacy standalone mirror");
       const status = shim(installedShim, "status", "--json");
       ok(status);
       assert.equal(JSON.parse(status.stdout).isComplete, true);
@@ -422,7 +442,8 @@ assert.equal(JSON.parse(completeDirectJson.stdout).isComplete, true);
 
       ok(shim(installedShim, "uninstall"));
       assert.equal(fs.existsSync(installed), false);
-      assert.equal(fs.existsSync(registration), false);
+      assert.equal(fs.existsSync(legacyMirror), false);
+      assert.equal(JSON.parse(fs.readFileSync(globalHooksFile, "utf8"))["agy-context-saver"], undefined);
       assert.equal(fs.existsSync(installedShim), false);
       if (win) assert.equal(fs.existsSync(`${installedShim}.cmd`), false);
       assert.deepEqual(JSON.parse(fs.readFileSync(mcp, "utf8")), foreign);

@@ -278,15 +278,21 @@ try {
   assert.equal(cmdRelBigSpillTail.decision, "allow");
   assert.equal(cmdRelBigSpillTail.overwrite?.CommandLine, "rtk read .system_generated/steps/103/output.txt --tail-lines 150");
 
-  // PR9-RUN-002: Bounce-loop suppression (no read_file mention on task-log denial; read_file on >45 KiB includes --head-lines/--tail-lines)
-  assert.equal(cmdBigCat.reason.includes("read_file"), false, ">45 KiB task-log denial must not suggest read_file");
-  const rfBigCompleted = invokeHook({
+  // PR9-RUN-002 + v2.1.2 Boost Pass: symmetrical bounded read_file (<=150L) allowed on COMPLETED task log;
+  // unbounded read_file on >45 KiB completed task log denied with --head-lines/--tail-lines guidance
+  assert.equal(cmdBigCat.reason.includes("read_file"), false, ">45 KiB shell task-log denial focuses on rtk read bounds");
+  const rfBigCompletedBounded = invokeHook({
     conversationId: convLive,
     toolCall: { name: "read_file", args: { Path: bigLogTok, StartLine: 1, EndLine: 150 } }
   });
-  assert.equal(rfBigCompleted.decision, "deny");
-  assert.match(rfBigCompleted.reason, /--tail-lines 150/);
-  assert.match(rfBigCompleted.reason, /--head-lines 150/);
+  assert.equal(rfBigCompletedBounded.decision, "allow", "Bounded read_file <=150L on COMPLETED task log allowed symmetrically with spillovers");
+  const rfBigCompletedUnbounded = invokeHook({
+    conversationId: convLive,
+    toolCall: { name: "read_file", args: { Path: bigLogTok } }
+  });
+  assert.equal(rfBigCompletedUnbounded.decision, "deny");
+  assert.match(rfBigCompletedUnbounded.reason, /--tail-lines 150/);
+  assert.match(rfBigCompletedUnbounded.reason, /--head-lines 150/);
 
   const rfBigSpillUnbounded = invokeHook({
     conversationId: convLive,
