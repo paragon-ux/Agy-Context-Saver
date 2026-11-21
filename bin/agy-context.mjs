@@ -11,25 +11,24 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateSafeExportOutPath } from "../lib/path-guards.mjs";
+import {
+  consumeTranscriptAccessGrant,
+  manageTranscriptAccessPolicy
+} from "../lib/access-policy.mjs";
 import {
   readTranscript,
   queryTranscript,
   getStepDetail,
   checkContextHealth,
-  getBrainDir,
-  getBrainDirs,
-  getProfileHomeDir,
   listTranscriptConversations,
   exportSanitizedTranscript,
-  manageTranscriptAccessPolicy,
-  consumeTranscriptAccessGrant,
   INLINE_SAFE_CHARS,
   MAX_BOUNDED_READ_STEPS,
   MAX_DEEP_OUTPUT_CHARS,
   MAX_FIELD_CHARS,
   utf8SliceToBytes
 } from "../lib/transcript-core.mjs";
-import { getStateDir } from "../scripts/state-dir.mjs";
 import {
   assertSupportedNodeVersion,
   runInstall,
@@ -84,302 +83,238 @@ Run 'agy-context <command> --help' or 'agy-context transcript <subcommand> --hel
 `);
 }
 
+const COMMON_DEEP_OPTS = [
+  "  --full                 Opt into 512 KB deep output tier",
+  "  --max-chars <N>        Override UTF-8 output budget (up to 524288 bytes)",
+  "  --out, --output <path> Write output to a safe .md/.json/.txt file",
+  "  --file <path>          Explicit transcript .jsonl path inside Antigravity brain roots",
+  "  --json                 Emit structured JSON output"
+];
+
+const HELP_ALIASES = {
+  outline: "read", summary: "read",
+  grep: "query", search: "query", find: "query", tools: "query",
+  stats: "health", info: "health",
+  ls: "list", dump: "export", policy: "access", install: "setup"
+};
+
+const SUBCOMMAND_HELP = {
+  transcript: {
+    title: "transcript",
+    usage: "agy-context transcript <subcommand> [options]",
+    section: "Subcommands:",
+    body: [
+      "  read [id]            Stream recent conversation turns (--outline, --full, --out)",
+      "  query [pat] [id]     Search turns and tool calls (aliases: grep, search, find, tools)",
+      "  step <N|N..M> [id]   Extract untruncated fields for a step, list, or range",
+      "  health [id]          Check turn counts, byte size, RTK, and polling (stats, info)",
+      "  list                 List recent conversations with optional lineage (alias: ls)",
+      "  export [id]          Export sanitized transcript index (--sanitized, alias: dump)",
+      "  access               View or update child transcript access policy (alias: policy)"
+    ],
+    examples: ["agy-context transcript health", "agy-context transcript read --last-turns 3"],
+    footer: "Run 'agy-context transcript <subcommand> --help' for full options."
+  },
+  read: {
+    title: "transcript read (aliases: outline, summary)",
+    usage: "agy-context transcript read [<id>] [options]",
+    body: [
+      "  --id <uuid>            Conversation UUID (or pass as first positional argument)",
+      "  --mode <compact|full>  Read transcript.jsonl (default) or transcript_full.jsonl",
+      "  --last-turns <N>       Trailing turns to show (default: 3; aliases: --last, --tail)",
+      "  --offset <N>           0-indexed forward step offset for pagination",
+      "  --limit <N>            Maximum steps to return (default: 50, max: 200; 500 in outline)",
+      "  --outline, --summary   Delegate to 1-line-per-step outline (accepts --start, --end)",
+      "  --include-tools        Include tool names/args in outline mode",
+      "  --full-args            Show untruncated tool arguments in outline mode",
+      "  --include-thinking     Include model thinking blocks",
+      ...COMMON_DEEP_OPTS
+    ],
+    examples: ["agy-context transcript read --last-turns 3", "agy-context transcript read --outline --start 0 --end 50"]
+  },
+  query: {
+    title: "transcript query (aliases: grep, search, find, tools)",
+    usage: "agy-context transcript query [<pattern>] [<id>] [options]",
+    body: [
+      "  --query <regex>        Case-insensitive regex or substring pattern (or positional #1)",
+      "  --id <uuid>            Conversation UUID (or positional #2)",
+      "  --roles <csv>          Filter roles: user,assistant,subagent,tool,system,generic,error,all",
+      "  --mode <mode>          auto (default), compact, or full",
+      "  --start <N> / --end <N> Inclusive step_index bounds",
+      "  --last-turns <N>       Restrict search to last N turns (aliases: --last, --tail)",
+      "  --limit <N>            Maximum matching steps to return",
+      "  --summary, --outline   Print 1-line timeline bullets with tool and error tags",
+      "  --include-tools        Search and display tool call names and arguments",
+      "  --full-args            Print full tool call arguments",
+      "  --field <spec>         content|thinking|tool_calls|tool_args|tool_args:<Key>|all",
+      "  --include-thinking     Search and include model thinking blocks",
+      ...COMMON_DEEP_OPTS
+    ],
+    examples: [
+      'agy-context transcript grep "verification failed" --limit 5',
+      'agy-context transcript tools "run_command" --field tool_args:CommandLine'
+    ]
+  },
+  step: {
+    title: "transcript step",
+    usage: "agy-context transcript step [<N|N,M|N-M|N..M>] [<id>] [options]",
+    body: [
+      "  --step <spec>          Step index, comma list (2,8,14), or range (2-10 / 2..10)",
+      "  --start <N> / --end <N> Inclusive step range when --step is omitted",
+      "  --id <uuid>            Conversation UUID (or positional #2)",
+      "  --field <spec>         content|thinking|tool_calls|tool_args|tool_args:<Key>|all",
+      "  --head <N>             Return first N lines (alias: --head-lines)",
+      "  --tail <N>             Return last N lines (alias: --tail-lines)",
+      "  --line-start <N>       1-indexed start line for slice extraction",
+      "  --line-end <N>         1-indexed inclusive end line for slice extraction",
+      ...COMMON_DEEP_OPTS
+    ],
+    examples: [
+      "agy-context transcript step 10..15 --field content --tail 40",
+      "agy-context transcript step --step 42 --full --out ./step-42.md"
+    ]
+  },
+  health: {
+    title: "transcript health (aliases: stats, info)",
+    usage: "agy-context transcript health [<id>] [options]",
+    body: [
+      "  --id <uuid>            Conversation UUID (or pass as first positional argument)",
+      "  --file <path>          Explicit transcript .jsonl path inside Antigravity brain roots",
+      "  --json                 Emit structured JSON health metrics"
+    ],
+    examples: ["agy-context transcript health", "agy-context transcript stats --json"]
+  },
+  list: {
+    title: "transcript list (alias: ls)",
+    usage: "agy-context transcript list [options]",
+    body: [
+      "  --limit <N>            Maximum conversations to show (default: 10, or 50 w/ --parent)",
+      "  --parent <uuid>        Filter strictly to child sessions of a parent conversation",
+      "  --lineage              Include sessionKind, stepCount, parentConvId, and @rosterName",
+      "  --json                 Emit structured JSON output"
+    ],
+    examples: ["agy-context transcript list --limit 5", "agy-context transcript ls --parent current --lineage --json"]
+  },
+  export: {
+    title: "transcript export (alias: dump)",
+    usage: "agy-context transcript export [<id>] --sanitized [options]",
+    body: [
+      "  --sanitized            Required: redact tool payload bodies and secrets",
+      "  --id <uuid[,uuid...]>  One or more conversation UUIDs (repeatable or comma-separated)",
+      "  --parent <uuid>        Export all child sessions belonging to a parent UUID",
+      "  --start <N> / --end <N> Inclusive step_index bounds",
+      "  --limit <N>            Maximum steps retained per session (default: 150, max: 500)",
+      ...COMMON_DEEP_OPTS
+    ],
+    examples: [
+      "agy-context transcript export --sanitized --out ./transcript-export.md",
+      "agy-context transcript dump --parent current --sanitized --json"
+    ]
+  },
+  access: {
+    title: "transcript access (alias: policy)",
+    usage: "agy-context transcript access [status|off|on|reset|self-only] [options]",
+    body: [
+      "  --status               Show active parent policy and recent launchRestrictions",
+      "  --off, --deny-children Deny transcript access to all child sessions",
+      "  --on, --reset          Clear parent CLI policy overrides (keeps Tier 4 launch locks)",
+      "  --self-only            Restrict child sessions to their own conversation transcript",
+      "  --mode <mode>          Explicit cohort default: open | allowlist | self-only | deny",
+      "  --allow <list>         Comma-separated allowed session IDs or @roster* globs",
+      "  --deny <list>          Comma-separated denied session IDs or @roster* globs",
+      "  --ttl <sec>            Policy expiration time in seconds (default: 3600)",
+      "  --json                 Emit structured JSON output"
+    ],
+    examples: [
+      "agy-context transcript access --status",
+      "agy-context transcript policy --mode allowlist --allow @reviewer-*"
+    ]
+  },
+  status: {
+    title: "status",
+    usage: "agy-context status [options]",
+    body: ["  --json                 Emit structured JSON installation and policy status"],
+    examples: ["agy-context status", "agy-context status --json"]
+  },
+  setup: {
+    title: "setup (alias: install)",
+    usage: "agy-context setup [options]",
+    body: [
+      "  --check, -c            Read-only preflight validation (writes zero files)",
+      "  --allow-degraded       Install hook-only governance even if RTK provisioning fails"
+    ],
+    examples: ["agy-context setup", "agy-context setup --check"]
+  },
+  uninstall: {
+    title: "uninstall",
+    usage: "agy-context uninstall [options]",
+    body: ["  --restore-backups      Restore pre-install .bak hook and MCP configuration files"],
+    examples: ["agy-context uninstall", "agy-context uninstall --restore-backups"]
+  },
+  "restore-backups": {
+    title: "restore-backups",
+    usage: "agy-context restore-backups",
+    section: "Description:",
+    body: [
+      "  Restores namespaced hooks.json.agy-context-saver.bak (or legacy hooks.json.bak) and",
+      "  mcp_config.json backup entries via validated key-scoped merge."
+    ],
+    examples: ["agy-context restore-backups", "agy-context uninstall --restore-backups"]
+  }
+};
+
 function printSubcommandHelp(topic) {
-  const version = getVersion();
   const key = String(topic || "").toLowerCase();
-  const canonicalMap = {
-    outline: "read",
-    summary: "read",
-    grep: "query",
-    search: "query",
-    find: "query",
-    tools: "query",
-    stats: "health",
-    info: "health",
-    ls: "list",
-    dump: "export",
-    policy: "access",
-    install: "setup"
-  };
-  const resolved = canonicalMap[key] || key;
-
-  const docs = {
-    transcript: `Agy-Context-Saver CLI (v${version}) - transcript
-
-Usage:
-  agy-context transcript <subcommand> [options]
-
-Subcommands:
-  read [id]            Stream recent conversation turns (--outline, --full, --out)
-  query [pat] [id]     Search turns and tool calls (aliases: grep, search, find, tools)
-  step <N|N..M> [id]   Extract untruncated fields for a step, list, or range
-  health [id]          Check turn counts, byte size, RTK, and polling (stats, info)
-  list                 List recent conversations with optional lineage (alias: ls)
-  export [id]          Export sanitized transcript index (--sanitized, alias: dump)
-  access               View or update child transcript access policy (alias: policy)
-
-Examples:
-  agy-context transcript health
-  agy-context transcript read --last-turns 3
-
-Run 'agy-context transcript <subcommand> --help' for full options.`,
-
-    read: `Agy-Context-Saver CLI (v${version}) - transcript read (aliases: outline, summary)
-
-Usage:
-  agy-context transcript read [<id>] [options]
-
-Options:
-  --id <uuid>            Conversation UUID (or pass as first positional argument)
-  --mode <compact|full>  Read transcript.jsonl (default) or transcript_full.jsonl
-  --last-turns <N>       Trailing turns to show (default: 3; aliases: --last, --tail)
-  --offset <N>           0-indexed forward step offset for pagination
-  --limit <N>            Maximum steps to return (default: 50, max: 200; 500 in outline)
-  --outline, --summary   Delegate to 1-line-per-step outline (accepts --start, --end)
-  --include-tools        Include tool names/args in outline mode
-  --full-args            Show untruncated tool arguments in outline mode
-  --include-thinking     Include model thinking blocks
-  --full                 Opt into 512 KB deep output tier (bypasses inline clamps)
-  --max-chars <N>        Override UTF-8 output budget (up to 524288 bytes)
-  --out, --output <path> Write output to a safe .md/.json/.txt file
-  --file <path>          Explicit transcript .jsonl path inside Antigravity brain roots
-  --json                 Emit structured JSON output
-
-Examples:
-  agy-context transcript read --last-turns 3
-  agy-context transcript read --outline --start 0 --end 50`,
-
-    query: `Agy-Context-Saver CLI (v${version}) - transcript query
-Aliases: grep, search, find, tools
-
-Usage:
-  agy-context transcript query [<pattern>] [<id>] [options]
-
-Options:
-  --query <regex>        Case-insensitive regex or substring pattern (or positional #1)
-  --id <uuid>            Conversation UUID (or positional #2)
-  --roles <csv>          Filter roles: user,assistant,subagent,tool,system,generic,error,all
-  --mode <mode>          auto (default), compact, or full
-  --start <N> / --end <N> Inclusive step_index bounds
-  --last-turns <N>       Restrict search to last N turns (aliases: --last, --tail)
-  --limit <N>            Maximum matching steps to return
-  --summary, --outline   Print 1-line timeline bullets with tool and error tags
-  --include-tools        Search and display tool call names and arguments
-  --full-args            Print full tool call arguments
-  --field <spec>         content|thinking|tool_calls|tool_args|tool_args:<Key>|all
-  --include-thinking     Search and include model thinking blocks
-  --full                 Opt into 512 KB deep output tier
-  --max-chars <N>        Override UTF-8 output budget (up to 524288 bytes)
-  --out, --output <path> Write output to a safe .md/.json/.txt file
-  --file <path>          Explicit transcript .jsonl path inside Antigravity brain roots
-  --json                 Emit structured JSON output
-
-Examples:
-  agy-context transcript grep "verification failed" --limit 5
-  agy-context transcript tools "run_command" --field tool_args:CommandLine`,
-
-    step: `Agy-Context-Saver CLI (v${version}) - transcript step
-
-Usage:
-  agy-context transcript step [<N|N,M|N-M|N..M>] [<id>] [options]
-
-Options:
-  --step <spec>          Step index, comma list (2,8,14), or range (2-10 / 2..10)
-  --start <N> / --end <N> Inclusive step range when --step is omitted
-  --id <uuid>            Conversation UUID (or positional #2)
-  --field <spec>         content|thinking|tool_calls|tool_args|tool_args:<Key>|all
-  --head <N>             Return first N lines (alias: --head-lines)
-  --tail <N>             Return last N lines (alias: --tail-lines)
-  --line-start <N>       1-indexed start line for slice extraction
-  --line-end <N>         1-indexed inclusive end line for slice extraction
-  --full                 Opt into 512 KB deep output tier
-  --max-chars <N>        Override UTF-8 output budget (up to 524288 bytes)
-  --out, --output <path> Write output to a safe .md/.json/.txt file
-  --file <path>          Explicit transcript .jsonl path inside Antigravity brain roots
-  --json                 Emit structured JSON output
-
-Examples:
-  agy-context transcript step 10..15 --field content --tail 40
-  agy-context transcript step --step 42 --full --out ./step-42.md`,
-
-    health: `Agy-Context-Saver CLI (v${version}) - transcript health (aliases: stats, info)
-
-Usage:
-  agy-context transcript health [<id>] [options]
-
-Options:
-  --id <uuid>            Conversation UUID (or pass as first positional argument)
-  --file <path>          Explicit transcript .jsonl path inside Antigravity brain roots
-  --json                 Emit structured JSON health metrics
-
-Examples:
-  agy-context transcript health
-  agy-context transcript stats --json`,
-
-    list: `Agy-Context-Saver CLI (v${version}) - transcript list (alias: ls)
-
-Usage:
-  agy-context transcript list [options]
-
-Options:
-  --limit <N>            Maximum conversations to show (default: 10, or 50 w/ --parent)
-  --parent <uuid>        Filter strictly to child sessions of a parent conversation
-  --lineage              Include sessionKind, stepCount, parentConvId, and @rosterName
-  --json                 Emit structured JSON output
-
-Examples:
-  agy-context transcript list --limit 5
-  agy-context transcript ls --parent current --lineage --json`,
-
-    export: `Agy-Context-Saver CLI (v${version}) - transcript export (alias: dump)
-
-Usage:
-  agy-context transcript export [<id>] --sanitized [options]
-
-Options:
-  --sanitized            Required: redact tool payload bodies and secrets
-  --id <uuid[,uuid...]>  One or more conversation UUIDs (repeatable or comma-separated)
-  --parent <uuid>        Export all child sessions belonging to a parent UUID
-  --start <N> / --end <N> Inclusive step_index bounds
-  --limit <N>            Maximum steps retained per session (default: 150, max: 500)
-  --full                 Opt into 512 KB deep stdout tier
-  --max-chars <N>        Override UTF-8 output budget (up to 524288 bytes)
-  --out, --output <path> Write sanitized index to a safe .md/.json/.txt file
-  --file <path>          Explicit single-session transcript .jsonl path
-  --json                 Emit structured JSON output
-
-Examples:
-  agy-context transcript export --sanitized --out ./transcript-export.md
-  agy-context transcript dump --parent current --sanitized --json`,
-
-    access: `Agy-Context-Saver CLI (v${version}) - transcript access (alias: policy)
-
-Usage:
-  agy-context transcript access [status|off|on|reset|self-only] [options]
-
-Options:
-  --status               Show active parent policy and recent launchRestrictions
-  --off, --deny-children Deny transcript access to all child sessions
-  --on, --reset          Clear parent CLI policy overrides (keeps Tier 4 launch locks)
-  --self-only            Restrict child sessions to their own conversation transcript
-  --mode <mode>          Explicit cohort default: open | allowlist | self-only | deny
-  --allow <list>         Comma-separated allowed session IDs or @roster* globs
-  --deny <list>          Comma-separated denied session IDs or @roster* globs
-  --ttl <sec>            Policy expiration time in seconds (default: 3600)
-  --json                 Emit structured JSON output
-
-Examples:
-  agy-context transcript access --status
-  agy-context transcript policy --mode allowlist --allow @audit-squad*`,
-
-    status: `Agy-Context-Saver CLI (v${version}) - status
-
-Usage:
-  agy-context status [options]
-
-Options:
-  --json                 Emit structured JSON installation and policy status
-
-Examples:
-  agy-context status
-  agy-context status --json`,
-
-    setup: `Agy-Context-Saver CLI (v${version}) - setup (alias: install)
-
-Usage:
-  agy-context setup [options]
-
-Options:
-  --check, -c            Read-only preflight validation (writes zero files)
-  --allow-degraded       Install hook-only governance even if RTK provisioning fails
-
-Examples:
-  agy-context setup
-  agy-context setup --check`,
-
-    uninstall: `Agy-Context-Saver CLI (v${version}) - uninstall
-
-Usage:
-  agy-context uninstall [options]
-
-Options:
-  --restore-backups      Restore pre-install .bak hook and MCP configuration files
-
-Examples:
-  agy-context uninstall
-  agy-context uninstall --restore-backups`,
-
-    "restore-backups": `Agy-Context-Saver CLI (v${version}) - restore-backups
-
-Usage:
-  agy-context restore-backups
-
-Description:
-  Restores pre-install hooks.json.bak and mcp_config.json backup files when present.
-
-Examples:
-  agy-context restore-backups
-  agy-context uninstall --restore-backups`
-  };
-
-  if (docs[resolved]) {
-    console.log(`${docs[resolved]}\n`);
+  const doc = SUBCOMMAND_HELP[HELP_ALIASES[key] || key];
+  if (!doc) {
+    printHelp();
     return;
   }
-  printHelp();
+  const lines = [
+    `Agy-Context-Saver CLI (v${getVersion()}) - ${doc.title}`,
+    "",
+    "Usage:",
+    `  ${doc.usage}`,
+    "",
+    doc.section || "Options:",
+    ...doc.body,
+    "",
+    "Examples:",
+    ...doc.examples.map((ex) => `  ${ex}`)
+  ];
+  if (doc.footer) lines.push("", doc.footer);
+  console.log(`${lines.join("\n")}\n`);
 }
 
 function parseFlags(argv, spec) {
+  const booleans = spec.booleans instanceof Set ? spec.booleans : new Set(spec.booleans || []);
+  const values = spec.values instanceof Set ? spec.values : new Set(spec.values || []);
+  const multiValues = spec.multiValues instanceof Set ? spec.multiValues : new Set(spec.multiValues || []);
   const opts = {};
   const positional = [];
 
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
-    if (!token.startsWith("-") || token === "-") {
-      positional.push(token);
-      continue;
-    }
-
-    if (token === "-h") {
-      opts.help = true;
-      continue;
-    }
-    if (token === "-v") {
-      opts.version = true;
-      continue;
-    }
+    if (!token.startsWith("-") || token === "-") { positional.push(token); continue; }
+    if (token === "-h") { opts.help = true; continue; }
+    if (token === "-v") { opts.version = true; continue; }
     if (token === "-c") {
-      if (!spec.booleans.has("check")) {
-        throw new Error(`Unknown flag '-c' for this command.`);
-      }
+      if (!booleans.has("check")) throw new Error("Unknown flag '-c' for this command.");
       opts.check = true;
       continue;
     }
-
-    if (!token.startsWith("--")) {
-      throw new Error(`Unknown option '${token}'.`);
-    }
+    if (!token.startsWith("--")) throw new Error(`Unknown option '${token}'.`);
 
     const eqIdx = token.indexOf("=");
     const key = eqIdx === -1 ? token.slice(2) : token.slice(2, eqIdx);
     const inlineVal = eqIdx === -1 ? null : token.slice(eqIdx + 1);
 
-    if (key === "help") {
-      if (inlineVal !== null) {
-        throw new Error(`Boolean flag '--help' does not accept value '${inlineVal}'.`);
-      }
-      opts.help = true;
+    if (key === "help" || key === "version") {
+      if (inlineVal !== null) throw new Error(`Boolean flag '--${key}' does not accept value '${inlineVal}'.`);
+      opts[key] = true;
       continue;
     }
-    if (key === "version") {
-      if (inlineVal !== null) {
-        throw new Error(`Boolean flag '--version' does not accept value '${inlineVal}'.`);
-      }
-      opts.version = true;
-      continue;
-    }
-
-    if (spec.booleans.has(key)) {
+    if (booleans.has(key)) {
       if (inlineVal !== null) {
         if (inlineVal !== "true" && inlineVal !== "false") {
           throw new Error(`Boolean flag '--${key}' does not accept value '${inlineVal}'.`);
@@ -390,32 +325,20 @@ function parseFlags(argv, spec) {
       }
       continue;
     }
-
-    if (spec.multiValues && spec.multiValues.has(key)) {
+    if (multiValues.has(key) || values.has(key)) {
       let val = inlineVal;
       if (val === null) {
-        if (i + 1 >= argv.length) {
-          throw new Error(`Missing value for flag '--${key}'.`);
-        }
+        if (i + 1 >= argv.length) throw new Error(`Missing value for flag '--${key}'.`);
         val = argv[++i];
       }
-      if (!Array.isArray(opts[key])) opts[key] = [];
-      opts[key].push(val);
-      continue;
-    }
-
-    if (spec.values.has(key)) {
-      let val = inlineVal;
-      if (val === null) {
-        if (i + 1 >= argv.length) {
-          throw new Error(`Missing value for flag '--${key}'.`);
-        }
-        val = argv[++i];
+      if (multiValues.has(key)) {
+        if (!Array.isArray(opts[key])) opts[key] = [];
+        opts[key].push(val);
+      } else {
+        opts[key] = val;
       }
-      opts[key] = val;
       continue;
     }
-
     throw new Error(`Unknown flag '--${key}'.`);
   }
 
@@ -423,18 +346,14 @@ function parseFlags(argv, spec) {
 }
 
 function assertCleanHelp(opts, positional) {
-  const extraKeys = Object.keys(opts).filter((k) => k !== "help");
-  if (extraKeys.length > 0 || positional.length > 0) {
+  if (Object.keys(opts).some((k) => k !== "help") || positional.length > 0) {
     throw new Error("Conflicting flags: '--help' cannot be combined with operational flags or arguments.");
   }
 }
 
 function parseOptionalInt(val, flagName) {
   if (val === undefined) return undefined;
-  if (typeof val === "boolean" || (typeof val === "string" && val.trim() === "")) {
-    throw new Error(`Flag '--${flagName}' must be an integer (received: '${val}').`);
-  }
-  const num = Number(val);
+  const num = typeof val === "boolean" || (typeof val === "string" && val.trim() === "") ? NaN : Number(val);
   if (!Number.isFinite(num) || !Number.isInteger(num)) {
     throw new Error(`Flag '--${flagName}' must be an integer (received: '${val}').`);
   }
@@ -443,17 +362,13 @@ function parseOptionalInt(val, flagName) {
 
 function parseNonNegInt(val, flagName) {
   const num = parseOptionalInt(val, flagName);
-  if (num !== undefined && num < 0) {
-    throw new Error(`Flag '--${flagName}' must be a non-negative integer (received: '${val}').`);
-  }
+  if (num !== undefined && num < 0) throw new Error(`Flag '--${flagName}' must be a non-negative integer (received: '${val}').`);
   return num;
 }
 
 function parsePositiveInt(val, flagName) {
   const num = parseOptionalInt(val, flagName);
-  if (num !== undefined && num <= 0) {
-    throw new Error(`Flag '--${flagName}' must be a positive integer (received: '${val}').`);
-  }
+  if (num !== undefined && num <= 0) throw new Error(`Flag '--${flagName}' must be a positive integer (received: '${val}').`);
   return num;
 }
 
@@ -464,162 +379,17 @@ function validateExplicitFileFlag(fileArg) {
     throw new Error(`Invalid --file '${fileArg}': must be an existing .jsonl transcript file.`);
   }
   const resolved = path.resolve(trimmed);
-  if (!fs.existsSync(resolved)) {
-    throw new Error(`Transcript file not found at --file '${resolved}'.`);
-  }
+  if (!fs.existsSync(resolved)) throw new Error(`Transcript file not found at --file '${resolved}'.`);
   const real = fs.realpathSync(resolved);
-  if (!fs.statSync(real).isFile()) {
-    throw new Error(`Invalid --file '${resolved}': target is not a regular file.`);
-  }
+  if (!fs.statSync(real).isFile()) throw new Error(`Invalid --file '${resolved}': target is not a regular file.`);
   return real;
-}
-
-function normalizeWinDevicePath(p) {
-  let s = String(p || "");
-  if (/^\\\\\?\\UNC\\/i.test(s)) {
-    return "\\\\" + s.slice(8);
-  }
-  if (/^\\\\[?.]\\/.test(s)) {
-    return s.slice(4);
-  }
-  return s;
-}
-
-function hasUncOrDevicePrefix(p) {
-  const s = String(p || "").trim();
-  return /^(?:\\\\|\/\/)/.test(s) || /^[\\/]{2}[?.][\\/]/.test(s);
-}
-
-function isInsideDirCaseAware(targetPath, baseDir) {
-  const cleanTarget = normalizeWinDevicePath(targetPath);
-  const cleanBase = normalizeWinDevicePath(baseDir);
-  if (hasUncOrDevicePrefix(cleanTarget) || hasUncOrDevicePrefix(cleanBase)) {
-    return false;
-  }
-  const norm = (p) => (process.platform === "win32" || process.platform === "darwin" ? p.toLowerCase() : p);
-  const rel = path.relative(norm(cleanBase), norm(cleanTarget));
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
-function isProtectedBenchmarkOutPath(targetPath) {
-  if (!targetPath || typeof targetPath !== "string") return false;
-  const normalized = targetPath.replace(/\\/g, "/");
-  return (
-    /(?:^|\/)(?:benchmarks?|evaluators?|evaluation|scoring|ground_truth|prompt_templates)(?:\/|$)/i.test(normalized) ||
-    /(?:^|\/)(?:eval_[^/]+\.(?:py|json|toml)|bench_[^/]+\.(?:py|json|toml))$/i.test(normalized)
-  );
-}
-
-function isProtectedInternalOutPath(targetPath) {
-  if (!targetPath || typeof targetPath !== "string") return false;
-  const normalized = targetPath.replace(/\\/g, "/");
-  return (
-    /(?:^|\/)\.system_generated(?:\/|$)/i.test(normalized) ||
-    /(?:^|\/)\.git(?:\/|$)/i.test(normalized) ||
-    /\/\.gemini\/(?:config|antigravity(?:-cli|-ide)?)\/(?:hooks\.json(?:\.bak)?|mcp_config\.json|config\.json)$/i.test(normalized) ||
-    /\/\.gemini\/config\/scripts\/execution-guard-hook\.mjs$/i.test(normalized) ||
-    /(?:^|\/)hooks\.json$/i.test(normalized) ||
-    isProtectedBenchmarkOutPath(normalized)
-  );
-}
-
-function resolveWithExistingAncestor(targetPath) {
-  const absTarget = path.resolve(targetPath);
-  if (fs.existsSync(absTarget)) {
-    try { return fs.realpathSync(absTarget); } catch { return absTarget; }
-  }
-  const missingTail = [];
-  let probe = absTarget;
-  while (probe && !fs.existsSync(probe)) {
-    const parent = path.dirname(probe);
-    if (parent === probe) break;
-    missingTail.unshift(path.basename(probe));
-    probe = parent;
-  }
-  let baseReal = probe;
-  if (fs.existsSync(probe)) {
-    try { baseReal = fs.realpathSync(probe); } catch {}
-  }
-  return missingTail.length > 0 ? path.join(baseReal, ...missingTail) : baseReal;
-}
-
-function validateSafeExportOutPath(outArg) {
-  if (outArg === undefined) return undefined;
-  const trimmed = String(outArg).trim();
-  if (!trimmed || trimmed.includes("\0")) {
-    throw new Error(`Invalid --out path '${outArg}'.`);
-  }
-  if (hasUncOrDevicePrefix(trimmed)) {
-    throw new Error(`Invalid --out path '${outArg}': UNC and device paths are prohibited.`);
-  }
-  const segments = trimmed.split(/[\\/]/);
-  if (segments.includes("..")) {
-    throw new Error(`Invalid --out path '${outArg}': '..' traversal is prohibited.`);
-  }
-  if (!/\.(?:md|json|txt)$/i.test(trimmed)) {
-    throw new Error(`Invalid --out path '${outArg}': must end with .md, .json, or .txt.`);
-  }
-  const abs = path.resolve(trimmed);
-  if (hasUncOrDevicePrefix(abs)) {
-    throw new Error(`Invalid --out path '${outArg}': UNC and device paths are prohibited.`);
-  }
-  if (isProtectedInternalOutPath(abs)) {
-    throw new Error(`Refusing '--out' inside protected internal, governance, or benchmark directory: '${abs}'.`);
-  }
-
-  const profileHome = getProfileHomeDir();
-  const protectedRoots = [
-    getStateDir(),
-    path.join(profileHome, ".gemini", "config"),
-    path.join(profileHome, ".gemini", "antigravity", "bin"),
-    path.join(profileHome, ".gemini", "antigravity", "mcp"),
-    path.join(profileHome, ".gemini", "antigravity-cli", "bin"),
-    path.join(profileHome, ".gemini", "antigravity-cli", "mcp"),
-    path.join(profileHome, ".gemini", "antigravity-ide", "bin"),
-    path.join(profileHome, ".gemini", "antigravity-ide", "mcp")
-  ].map((p) => resolveWithExistingAncestor(p));
-
-  let absLst = null;
-  try {
-    absLst = fs.lstatSync(abs);
-  } catch {}
-
-  if (absLst) {
-    if (absLst.isSymbolicLink() || !absLst.isFile()) {
-      throw new Error(`Invalid --out path '${abs}': refusing symlink or non-regular file.`);
-    }
-    const realTarget = fs.realpathSync(abs);
-    if (hasUncOrDevicePrefix(realTarget) || isProtectedInternalOutPath(realTarget)) {
-      throw new Error(`Refusing '--out' inside protected internal, governance, or benchmark directory: '${realTarget}'.`);
-    }
-    for (const pr of protectedRoots) {
-      if (isInsideDirCaseAware(realTarget, pr)) {
-        throw new Error(`Refusing '--out' inside protected governance/state directory: '${realTarget}'.`);
-      }
-    }
-  } else {
-    const resolvedTarget = resolveWithExistingAncestor(abs);
-    if (hasUncOrDevicePrefix(resolvedTarget) || isProtectedInternalOutPath(resolvedTarget)) {
-      throw new Error(`Refusing '--out' inside protected internal, governance, or benchmark directory: '${resolvedTarget}'.`);
-    }
-    for (const pr of protectedRoots) {
-      if (isInsideDirCaseAware(resolvedTarget, pr)) {
-        throw new Error(`Refusing '--out' inside protected governance/state directory: '${resolvedTarget}'.`);
-      }
-    }
-  }
-  return abs;
 }
 
 let pendingErrorGrantContext = null;
 
 function emitError(message, asJson = false, extra = {}) {
   consumeTranscriptAccessGrant(pendingErrorGrantContext || undefined);
-  if (asJson) {
-    console.error(JSON.stringify({ isError: true, error: message, ...extra }, null, 2));
-  } else {
-    console.error(`Error: ${message}`);
-  }
+  console.error(asJson ? JSON.stringify({ isError: true, error: message, ...extra }, null, 2) : `Error: ${message}`);
   process.exit(1);
 }
 
@@ -628,8 +398,7 @@ function resolveOutFlag(opts) {
     throw new Error("Conflicting '--out' and '--output' values provided.");
   }
   const rawOut = opts.out !== undefined ? opts.out : opts.output;
-  const safeOutPath = validateSafeExportOutPath(rawOut);
-  return { rawOut, safeOutPath };
+  return { rawOut, safeOutPath: validateSafeExportOutPath(rawOut) };
 }
 
 function parseMaxCharsFlag(opts) {
@@ -645,10 +414,15 @@ function parseMaxCharsFlag(opts) {
 function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryStart, summaryEnd, summaryDirection } = {}) {
   const encode = (obj, indent) => JSON.stringify(obj, null, indent) + "\n";
   const fits = (text) => Buffer.byteLength(text, "utf8") <= maxBytes;
-  const pretty = encode(payload, 2);
-  if (fits(pretty)) return { content: pretty };
-  const compact = encode(payload);
-  if (fits(compact)) return { content: compact };
+  const tryFit = (obj, includeMeta = true) => {
+    for (const indent of [2, undefined]) {
+      const content = encode(obj, indent);
+      if (fits(content)) return includeMeta ? { content, metadata: obj } : { content };
+    }
+    return null;
+  };
+  const direct = tryFit(payload, false);
+  if (direct) return direct;
 
   const key = Array.isArray(payload.items) ? "items" : "steps";
   const entries = payload[key];
@@ -670,69 +444,41 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryS
       (!hasBackwardSummaryCursor && (summaryEnd !== undefined || payload.nextCursor?.start !== undefined));
     const stepNumber = (entry) => Number(entry.step_index ?? entry._ordinal ?? 0);
 
+    const computeCursor = (retained, count) => {
+      if (isBatch) {
+        const pending = entries.slice(count || 1).map((entry) => entry.stepIndex);
+        if (payload.nextCursor) pending.push(payload.nextCursor.step);
+        return pending.length ? { step: pending.join(",") } : undefined;
+      }
+      if (isRead && forward) {
+        if (count > 0) return { offset: retained.at(-1)._fileOrd + 1, limit: readPageSize };
+        return entries.length > 1 || payload.nextCursor ? { offset: entries[0]._fileOrd + 1, limit: readPageSize } : undefined;
+      }
+      if (isRead) {
+        const ord = count ? retained[0]._fileOrd : entries.at(-1)._fileOrd;
+        return ord > 0 ? { offset: 0, limit: Math.min(MAX_BOUNDED_READ_STEPS, ord) } : undefined;
+      }
+      if (forward) {
+        if (count > 0 || entries.length > 1) {
+          return {
+            start: stepNumber(entries[count || 1]),
+            end: payload.nextCursor?.start !== undefined ? payload.nextCursor.end : summaryEnd
+          };
+        }
+        return payload.nextCursor?.start !== undefined ? { ...payload.nextCursor } : undefined;
+      }
+      const nextEnd = stepNumber(count ? retained[0] : entries.at(-1)) - 1;
+      const minStart = payload.nextCursor?.start ?? summaryStart ?? 0;
+      return nextEnd >= minStart ? (minStart > 0 ? { start: minStart, end: nextEnd } : { end: nextEnd }) : undefined;
+    };
+
     const build = (count) => {
       const retained = forward ? entries.slice(0, count) : entries.slice(entries.length - count);
       const page = { ...payload, [key]: retained, clamped: true, ...meta(count) };
       if (count < total) {
-        if (isBatch) {
-          const skipIdx = count > 0 ? count : 1;
-          const pending = entries.slice(skipIdx).map((entry) => entry.stepIndex);
-          if (payload.nextCursor) pending.push(payload.nextCursor.step);
-          if (pending.length > 0) {
-            page.nextCursor = { step: pending.join(",") };
-          } else {
-            delete page.nextCursor;
-          }
-        } else if (isRead && forward) {
-          if (count > 0) {
-            page.nextCursor = {
-              offset: retained.at(-1)._fileOrd + 1,
-              limit: readPageSize
-            };
-          } else if (entries.length > 1 || payload.nextCursor) {
-            page.nextCursor = {
-              offset: entries[0]._fileOrd + 1,
-              limit: readPageSize
-            };
-          } else {
-            delete page.nextCursor;
-          }
-        } else if (isRead && count) {
-          const first = retained[0]._fileOrd;
-          if (first > 0) {
-            const limit = Math.min(MAX_BOUNDED_READ_STEPS, first);
-            page.nextCursor = { offset: 0, limit };
-          } else {
-            delete page.nextCursor;
-          }
-        } else if (isRead) {
-          const lastOrd = entries.at(-1)._fileOrd;
-          if (lastOrd > 0) {
-            page.nextCursor = { offset: 0, limit: Math.min(MAX_BOUNDED_READ_STEPS, lastOrd) };
-          } else {
-            delete page.nextCursor;
-          }
-        } else if (forward) {
-          if (count > 0 || entries.length > 1) {
-            const nextIdx = count > 0 ? count : 1;
-            page.nextCursor = {
-              start: stepNumber(entries[nextIdx]),
-              end: payload.nextCursor?.start !== undefined ? payload.nextCursor.end : summaryEnd
-            };
-          } else if (payload.nextCursor?.start !== undefined) {
-            page.nextCursor = { ...payload.nextCursor };
-          } else {
-            delete page.nextCursor;
-          }
-        } else {
-          const nextEnd = count ? stepNumber(retained[0]) - 1 : stepNumber(entries.at(-1)) - 1;
-          const minStart = payload.nextCursor?.start ?? summaryStart ?? 0;
-          if (nextEnd >= minStart) {
-            page.nextCursor = minStart > 0 ? { start: minStart, end: nextEnd } : { end: nextEnd };
-          } else {
-            delete page.nextCursor;
-          }
-        }
+        const cursor = computeCursor(retained, count);
+        if (cursor) page.nextCursor = cursor;
+        else delete page.nextCursor;
       }
       if (isBatch) {
         page.data = payload.data.slice(0, count);
@@ -763,25 +509,15 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryS
     }
     const compactCount = fitCount();
     const page = build(compactCount);
-    if (compactCount === 0) {
-      const prettyZero = encode(page, 2);
-      if (fits(prettyZero)) return { content: prettyZero, metadata: page };
-    }
-    const content = encode(page);
-    if (fits(content)) return { content, metadata: page };
+    const fitted = compactCount === 0
+      ? tryFit(page)
+      : (fits(encode(page)) ? { content: encode(page), metadata: page } : null);
+    if (fitted) return fitted;
   } else if (payload.stepIndex !== undefined) {
     // A single step can carry its selected field without duplicating the entire raw step.
     const { step, data, ...header } = payload;
-    const selected = { ...header, data, clamped: true, ...meta(1) };
-    const prettySelected = encode(selected, 2);
-    if (fits(prettySelected)) return { content: prettySelected, metadata: selected };
-    const content = encode(selected);
-    if (fits(content)) return { content, metadata: selected };
-    const summary = { ...header, clamped: true, ...meta(0) };
-    const prettySummary = encode(summary, 2);
-    if (fits(prettySummary)) return { content: prettySummary, metadata: summary };
-    const summaryContent = encode(summary);
-    if (fits(summaryContent)) return { content: summaryContent, metadata: summary };
+    const fitted = tryFit({ ...header, data, clamped: true, ...meta(1) }) || tryFit({ ...header, clamped: true, ...meta(0) });
+    if (fitted) return fitted;
   }
 
   throw new Error(`The ${maxBytes}-byte budget is too small for transcript JSON metadata. Increase --max-chars or narrow the selection.`);
@@ -834,153 +570,111 @@ function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, {
 
   const bytesWritten = Buffer.byteLength(content, "utf8");
   if (asJson) {
-    const {
-      text,
-      steps,
-      items,
-      sessions,
-      step,
-      data,
-      _serializedJson,
-      _serializedMarkdown,
-      _summaryDirection,
-      ...compactMeta
-    } = metadata ?? res;
-    console.log(JSON.stringify({
-      ...compactMeta,
-      outputPath: safeOutPath,
-      bytesWritten,
-      charsWritten: content.length
-    }, null, 2));
+    const { text, steps, items, sessions, step, data, _serializedJson, _serializedMarkdown, _summaryDirection, ...compactMeta } = metadata ?? res;
+    console.log(JSON.stringify({ ...compactMeta, outputPath: safeOutPath, bytesWritten, charsWritten: content.length }, null, 2));
   } else {
     console.log(customMessage || `[OK] Wrote ${label} (${bytesWritten} bytes) to: ${safeOutPath}`);
   }
 }
 
 function emitTranscriptResult(res, asJson, rawOut, safeOutPath, options) {
-  if (res.isError) {
-    emitError(res.text, asJson, res.candidates ? { candidates: res.candidates } : {});
+  if (res.isError) emitError(res.text, asJson, res.candidates ? { candidates: res.candidates } : {});
+  if (safeOutPath) writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson, options);
+  else process.stdout.write(serializeTranscriptResult(res, asJson, options.maxBytes, options).content);
+}
+
+function parseTranscriptSubcommand(sub, rest, spec) {
+  pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
+  const { opts, positional } = parseFlags(rest, spec);
+  if (opts.help) {
+    assertCleanHelp(opts, positional);
+    consumeTranscriptAccessGrant({ subcommand: sub });
+    printSubcommandHelp(sub);
+    process.exit(0);
   }
-  if (safeOutPath) {
-    writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson, options);
-  } else {
-    process.stdout.write(serializeTranscriptResult(res, asJson, options.maxBytes, options).content);
+  return { opts, positional };
+}
+
+function assertNoExtraPositionals(sub, positional) {
+  if (positional.length > 0) {
+    throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
   }
 }
 
-async function handleTranscriptCommand(argv) {
-  const sub = argv[0];
-  if (!sub || sub === "--help" || sub === "-h" || sub === "help") {
-    if (argv.length > 1) {
-      throw new Error("Conflicting flags: '--help' cannot be combined with operational flags or arguments.");
-    }
-    printSubcommandHelp("transcript");
-    process.exit(0);
+function parseStepRange(opts) {
+  const startStep = parseNonNegInt(opts.start, "start");
+  const endStep = parseNonNegInt(opts.end, "end");
+  if (startStep !== undefined && endStep !== undefined && endStep < startStep) {
+    throw new Error(`Invalid step range '--start ${startStep} --end ${endStep}': '--end' must be >= '--start'.`);
   }
+  return { startStep, endStep };
+}
 
-  const rest = argv.slice(1);
-  pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
+function parseOutputOptions(opts, { stepMode = false } = {}) {
+  const explicitFile = validateExplicitFileFlag(opts.file);
+  const { rawOut, safeOutPath } = resolveOutFlag(opts);
+  const parsedMaxChars = parseMaxCharsFlag(opts);
+  const isFull = Boolean(opts.full);
+  const effectiveMaxChars = stepMode
+    ? (parsedMaxChars ?? (safeOutPath && !isFull ? MAX_DEEP_OUTPUT_CHARS : undefined))
+    : (parsedMaxChars ?? (safeOutPath || isFull ? MAX_DEEP_OUTPUT_CHARS : INLINE_SAFE_CHARS));
+  return { explicitFile, rawOut, safeOutPath, isFull, effectiveMaxChars };
+}
 
-  if (sub === "read" || sub === "outline" || sub === "summary") {
-    pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
-    const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["include-thinking", "outline", "summary", "include-tools", "full-args", "full", "json"]),
-      values: new Set(["id", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "max-chars", "out", "output", "file"])
+const parseLastTurns = (opts) => parseNonNegInt(opts["last-turns"] ?? opts.last ?? opts.tail, "last-turns");
+
+const ACCESS_POSITIONAL_FLAGS = {
+  status: "status", off: "off", deny: "off", lock: "off",
+  on: "on", open: "on", reset: "on", unlock: "on", "self-only": "self-only"
+};
+
+const TRANSCRIPT_HANDLERS = {
+  async read(sub, rest) {
+    const { opts, positional } = parseTranscriptSubcommand(sub, rest, {
+      booleans: ["include-thinking", "outline", "summary", "include-tools", "full-args", "full", "json"],
+      values: ["id", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "max-chars", "out", "output", "file"]
     });
-    if (opts.help) {
-      assertCleanHelp(opts, positional);
-      consumeTranscriptAccessGrant({ subcommand: sub });
-      printSubcommandHelp(sub);
-      process.exit(0);
-    }
-    if (opts.id === undefined && positional.length === 1) {
-      opts.id = positional.shift();
-    }
+    if (opts.id === undefined && positional.length === 1) opts.id = positional.shift();
     pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
-    if (positional.length > 0) {
-      throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
-    }
-    const explicitFile = validateExplicitFileFlag(opts.file);
-    const { rawOut, safeOutPath } = resolveOutFlag(opts);
-    const parsedMaxChars = parseMaxCharsFlag(opts);
-    const isFull = Boolean(opts.full);
-    const effectiveMaxChars = parsedMaxChars ?? (safeOutPath || isFull ? MAX_DEEP_OUTPUT_CHARS : INLINE_SAFE_CHARS);
+    assertNoExtraPositionals(sub, positional);
+    const { explicitFile, rawOut, safeOutPath, isFull, effectiveMaxChars } = parseOutputOptions(opts);
     const limit = parsePositiveInt(opts.limit, "limit");
 
     if (sub === "outline" || sub === "summary" || opts.outline || opts.summary) {
-      const startStep = parseNonNegInt(opts.start, "start");
-      const endStep = parseNonNegInt(opts.end, "end");
-      if (startStep !== undefined && endStep !== undefined && endStep < startStep) {
-        throw new Error(`Invalid step range '--start ${startStep} --end ${endStep}': '--end' must be >= '--start'.`);
-      }
+      const { startStep, endStep } = parseStepRange(opts);
       const res = await queryTranscript({
-        conversationId: opts.id,
-        filePath: explicitFile,
-        startStep: startStep !== undefined ? startStep : 0,
-        endStep: endStep !== undefined ? endStep : 999999,
-        maxResults: limit !== undefined ? limit : ((isFull || safeOutPath) ? 2000 : 500),
-        summaryOnly: true,
-        includeToolCalls: true,
-        fullArgs: Boolean(opts["full-args"]),
-        full: isFull,
-        maxOutputChars: effectiveMaxChars,
-        includeThinking: Boolean(opts["include-thinking"]),
-        allowExternalPaths: false,
-        subcommand: sub
+        conversationId: opts.id, filePath: explicitFile, startStep: startStep ?? 0, endStep: endStep ?? 999999,
+        maxResults: limit ?? ((isFull || safeOutPath) ? 2000 : 500), summaryOnly: true, includeToolCalls: true,
+        fullArgs: Boolean(opts["full-args"]), full: isFull, maxOutputChars: effectiveMaxChars,
+        includeThinking: Boolean(opts["include-thinking"]), allowExternalPaths: false, subcommand: sub
       });
-      emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
-        label: `transcript ${sub}`,
-        maxBytes: effectiveMaxChars,
-        summaryStart: startStep ?? 0,
-        summaryEnd: endStep ?? 999999
+      return emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
+        label: `transcript ${sub}`, maxBytes: effectiveMaxChars, summaryStart: startStep ?? 0, summaryEnd: endStep ?? 999999
       });
-      return;
     }
 
     const mode = opts.mode || "compact";
     if (mode !== "compact" && mode !== "full") {
       throw new Error(`Invalid --mode '${mode}' for 'transcript read' (expected 'compact' or 'full').`);
     }
-    const rawLastTurns = opts["last-turns"] !== undefined ? opts["last-turns"] : (opts.last !== undefined ? opts.last : opts.tail);
-    const lastTurns = parseNonNegInt(rawLastTurns, "last-turns");
+    const lastTurns = parseLastTurns(opts);
     const offset = parseNonNegInt(opts.offset, "offset");
-
     const res = await readTranscript({
-      conversationId: opts.id,
-      filePath: explicitFile,
-      mode,
-      lastTurns: lastTurns !== undefined ? lastTurns : 3,
-      offset,
-      limit,
-      includeThinking: Boolean(opts["include-thinking"]),
-      full: isFull,
-      maxOutputChars: effectiveMaxChars,
-      allowExternalPaths: false
+      conversationId: opts.id, filePath: explicitFile, mode, lastTurns: lastTurns ?? 3, offset, limit,
+      includeThinking: Boolean(opts["include-thinking"]), full: isFull, maxOutputChars: effectiveMaxChars, allowExternalPaths: false
     });
-
     emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
-      label: `transcript read (${res.mode})`,
-      maxBytes: effectiveMaxChars,
+      label: `transcript read (${res.mode})`, maxBytes: effectiveMaxChars,
       readPageSize: offset !== undefined || limit !== undefined ? Math.min(MAX_BOUNDED_READ_STEPS, limit ?? 50) : undefined
     });
-    return;
-  }
+  },
 
-  if (sub === "query" || sub === "grep" || sub === "search" || sub === "find" || sub === "tools") {
-    pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
-    const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["summary", "outline", "include-tools", "full-args", "include-thinking", "full", "json"]),
-      values: new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "last", "tail", "limit", "field", "max-chars", "out", "output", "file"])
+  async query(sub, rest) {
+    const { opts, positional } = parseTranscriptSubcommand(sub, rest, {
+      booleans: ["summary", "outline", "include-tools", "full-args", "include-thinking", "full", "json"],
+      values: ["id", "query", "roles", "mode", "start", "end", "last-turns", "last", "tail", "limit", "field", "max-chars", "out", "output", "file"]
     });
-    if (opts.help) {
-      assertCleanHelp(opts, positional);
-      consumeTranscriptAccessGrant({ subcommand: sub });
-      printSubcommandHelp(sub);
-      process.exit(0);
-    }
-    if (sub === "grep" || sub === "search" || sub === "find") {
-      opts["include-tools"] = true;
-    }
+    if (sub === "grep" || sub === "search" || sub === "find") opts["include-tools"] = true;
     if (sub === "tools") {
       if (!opts.roles) opts.roles = "assistant";
       if (!opts.field) opts.field = "tool_args";
@@ -991,471 +685,239 @@ async function handleTranscriptCommand(argv) {
         if (opts.end === undefined) opts.end = "999999";
       }
     }
-    if (opts.query === undefined && positional.length >= 1) {
-      opts.query = positional.shift();
-    }
-    if (opts.id === undefined && positional.length >= 1) {
-      opts.id = positional.shift();
-    }
+    if (opts.query === undefined && positional.length >= 1) opts.query = positional.shift();
+    if (opts.id === undefined && positional.length >= 1) opts.id = positional.shift();
     pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
-    const isFull = Boolean(opts.full);
     const { rawOut, safeOutPath } = resolveOutFlag(opts);
-    const parsedMaxChars = parseMaxCharsFlag(opts);
-    const effectiveMaxChars = parsedMaxChars ?? (safeOutPath || isFull ? MAX_DEEP_OUTPUT_CHARS : INLINE_SAFE_CHARS);
-    if (positional.length > 0) {
-      throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
-    }
+    const isFull = Boolean(opts.full);
+    const effectiveMaxChars = parseMaxCharsFlag(opts) ?? (safeOutPath || isFull ? MAX_DEEP_OUTPUT_CHARS : INLINE_SAFE_CHARS);
+    assertNoExtraPositionals(sub, positional);
     const mode = opts.mode || "auto";
     if (mode !== "auto" && mode !== "compact" && mode !== "full") {
       throw new Error(`Invalid --mode '${mode}' for 'transcript query' (expected 'auto', 'compact', or 'full').`);
     }
-    const explicitFile = validateExplicitFileFlag(opts.file);
-    const startStep = parseNonNegInt(opts.start, "start");
-    const endStep = parseNonNegInt(opts.end, "end");
-    if (startStep !== undefined && endStep !== undefined && endStep < startStep) {
-      throw new Error(`Invalid step range '--start ${startStep} --end ${endStep}': '--end' must be >= '--start'.`);
-    }
-    const rawLastTurns = opts["last-turns"] !== undefined ? opts["last-turns"] : (opts.last !== undefined ? opts.last : opts.tail);
-    const lastTurns = parseNonNegInt(rawLastTurns, "last-turns");
-    const maxResults = parsePositiveInt(opts.limit, "limit");
-    const roles = opts.roles
-      ? opts.roles.split(",").map((r) => r.trim()).filter(Boolean)
-      : ["all"];
-
+    const { startStep, endStep } = parseStepRange(opts);
+    const roles = opts.roles ? opts.roles.split(",").map((r) => r.trim()).filter(Boolean) : ["all"];
     const res = await queryTranscript({
-      conversationId: opts.id,
-      filePath: explicitFile,
-      query: opts.query,
-      roles,
-      mode,
-      startStep,
-      endStep,
-      lastTurns,
-      maxResults,
-      summaryOnly: Boolean(opts.summary || opts.outline),
-      includeToolCalls: Boolean(opts["include-tools"]),
-      fullArgs: Boolean(opts["full-args"]),
-      full: isFull,
-      maxOutputChars: effectiveMaxChars,
-      field: opts.field,
-      includeThinking: Boolean(opts["include-thinking"]),
-      allowExternalPaths: false,
-      subcommand: sub
+      conversationId: opts.id, filePath: validateExplicitFileFlag(opts.file), query: opts.query, roles, mode,
+      startStep, endStep, lastTurns: parseLastTurns(opts), maxResults: parsePositiveInt(opts.limit, "limit"),
+      summaryOnly: Boolean(opts.summary || opts.outline), includeToolCalls: Boolean(opts["include-tools"]),
+      fullArgs: Boolean(opts["full-args"]), full: isFull, maxOutputChars: effectiveMaxChars,
+      field: opts.field, includeThinking: Boolean(opts["include-thinking"]), allowExternalPaths: false, subcommand: sub
     });
-
     emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
-      label: `transcript ${sub}`,
-      maxBytes: effectiveMaxChars,
+      label: `transcript ${sub}`, maxBytes: effectiveMaxChars,
       summaryStart: (opts.summary || opts.outline) ? startStep : undefined,
       summaryEnd: (opts.summary || opts.outline) && startStep !== undefined ? endStep : undefined
     });
-    return;
-  }
+  },
 
-  if (sub === "step") {
-    pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
-    const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["json", "full"]),
-      values: new Set(["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "line-start", "line-end", "max-chars", "out", "output", "file"])
+  async step(sub, rest) {
+    const { opts, positional } = parseTranscriptSubcommand(sub, rest, {
+      booleans: ["json", "full"],
+      values: ["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "line-start", "line-end", "max-chars", "out", "output", "file"]
     });
-    if (opts.help) {
-      assertCleanHelp(opts, positional);
-      consumeTranscriptAccessGrant({ subcommand: sub });
-      printSubcommandHelp("step");
-      process.exit(0);
-    }
-    if (opts.step === undefined && positional.length >= 1) {
-      opts.step = positional.shift();
-    }
-    if (opts.id === undefined && positional.length >= 1) {
-      opts.id = positional.shift();
-    }
+    if (opts.step === undefined && positional.length >= 1) opts.step = positional.shift();
+    if (opts.id === undefined && positional.length >= 1) opts.id = positional.shift();
     pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
-    if (positional.length > 0) {
-      throw new Error(`Unexpected positional arguments for 'transcript step': ${positional.join(" ")}`);
-    }
-    const startStep = parseNonNegInt(opts.start, "start");
-    const endStep = parseNonNegInt(opts.end, "end");
-    if (startStep !== undefined && endStep !== undefined && endStep < startStep) {
-      throw new Error(`Invalid step range '--start ${startStep} --end ${endStep}': '--end' must be >= '--start'.`);
-    }
-    const tailLines = parsePositiveInt(opts["tail-lines"] !== undefined ? opts["tail-lines"] : opts.tail, "tail");
-    const headLines = parsePositiveInt(opts["head-lines"] !== undefined ? opts["head-lines"] : opts.head, "head");
+    assertNoExtraPositionals(sub, positional);
+    const { startStep, endStep } = parseStepRange(opts);
+    const tailLines = parsePositiveInt(opts["tail-lines"] ?? opts.tail, "tail");
+    const headLines = parsePositiveInt(opts["head-lines"] ?? opts.head, "head");
     const lineStart = parsePositiveInt(opts["line-start"], "line-start");
     const lineEnd = parsePositiveInt(opts["line-end"], "line-end");
     if (lineStart !== undefined && lineEnd !== undefined && lineEnd < lineStart) {
       throw new Error(`Invalid line slice '--line-start ${lineStart} --line-end ${lineEnd}': '--line-end' must be >= '--line-start'.`);
     }
     if (opts.step === undefined && startStep === undefined && endStep === undefined) {
-      throw new Error(`Missing required flag '--step <N|N,M|N-M>' (or '--start N --end M') for 'transcript step'.`);
+      throw new Error("Missing required flag '--step <N|N,M|N-M>' (or '--start N --end M') for 'transcript step'.");
     }
-    const explicitFile = validateExplicitFileFlag(opts.file);
-    const { rawOut, safeOutPath } = resolveOutFlag(opts);
-    const parsedMaxChars = parseMaxCharsFlag(opts);
-    const isFull = Boolean(opts.full);
-    const effectiveMaxChars = parsedMaxChars ?? (safeOutPath && !isFull ? MAX_DEEP_OUTPUT_CHARS : undefined);
-
+    const { explicitFile, rawOut, safeOutPath, isFull, effectiveMaxChars } = parseOutputOptions(opts, { stepMode: true });
     const res = await getStepDetail({
-      conversationId: opts.id,
-      filePath: explicitFile,
-      stepIndex: opts.step,
-      startStep,
-      endStep,
-      field: opts.field || "all",
-      headLines,
-      tailLines,
-      lineStart,
-      lineEnd,
-      full: isFull,
-      maxOutputChars: effectiveMaxChars,
-      allowExternalPaths: false
+      conversationId: opts.id, filePath: explicitFile, stepIndex: opts.step, startStep, endStep,
+      field: opts.field || "all", headLines, tailLines, lineStart, lineEnd,
+      full: isFull, maxOutputChars: effectiveMaxChars, allowExternalPaths: false
     });
-
     emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
-      label: "transcript step",
-      maxBytes: effectiveMaxChars ?? (isFull ? MAX_DEEP_OUTPUT_CHARS : MAX_FIELD_CHARS)
+      label: "transcript step", maxBytes: effectiveMaxChars ?? (isFull ? MAX_DEEP_OUTPUT_CHARS : MAX_FIELD_CHARS)
     });
-    return;
-  }
+  },
 
-  if (sub === "health" || sub === "stats" || sub === "info") {
-    const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["json"]),
-      values: new Set(["id", "file"])
-    });
-    if (opts.help) {
-      assertCleanHelp(opts, positional);
-      printSubcommandHelp(sub);
-      process.exit(0);
-    }
-    if (opts.id === undefined && positional.length === 1) {
-      opts.id = positional.shift();
-    }
-    if (positional.length > 0) {
-      throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
-    }
-    const explicitFile = validateExplicitFileFlag(opts.file);
-
+  async health(sub, rest) {
+    const { opts, positional } = parseTranscriptSubcommand(sub, rest, { booleans: ["json"], values: ["id", "file"] });
+    if (opts.id === undefined && positional.length === 1) opts.id = positional.shift();
+    pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
+    assertNoExtraPositionals(sub, positional);
     const res = await checkContextHealth({
-      conversationId: opts.id,
-      filePath: explicitFile,
-      allowExternalPaths: false
+      conversationId: opts.id, filePath: validateExplicitFileFlag(opts.file), allowExternalPaths: false
     });
-
-    if (res.isError) {
-      emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
-    }
+    if (res.isError) emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
     if (opts.json) {
       const { text, reportText, ...payload } = res;
       console.log(JSON.stringify(payload, null, 2));
     } else {
       console.log(res.reportText);
     }
-    return;
-  }
+  },
 
-  if (sub === "list" || sub === "ls") {
-    const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["json", "lineage"]),
-      values: new Set(["limit", "parent"])
-    });
-    if (opts.help) {
-      assertCleanHelp(opts, positional);
-      printSubcommandHelp(sub);
-      process.exit(0);
-    }
-    if (positional.length > 0) {
-      throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
-    }
+  async list(sub, rest) {
+    const { opts, positional } = parseTranscriptSubcommand(sub, rest, { booleans: ["json", "lineage"], values: ["limit", "parent"] });
+    assertNoExtraPositionals(sub, positional);
     if (opts.parent !== undefined && !String(opts.parent).trim()) {
       throw new Error("Flag '--parent' must be a non-empty conversation ID or 'current'.");
     }
-    const parsedLimit = parseOptionalInt(opts.limit, "limit");
-    if (parsedLimit !== undefined && parsedLimit <= 0) {
-      throw new Error(`Flag '--limit' must be a positive integer (received: '${opts.limit}').`);
-    }
-    const limit = parsedLimit ?? (opts.parent !== undefined ? 50 : 10);
-    const listed = listTranscriptConversations({
-      limit,
-      parentId: opts.parent,
-      includeLineage: Boolean(opts.lineage)
-    });
-    if (listed.isError) {
-      emitError(listed.text || listed.error, Boolean(opts.json));
+    const limit = parsePositiveInt(opts.limit, "limit") ?? (opts.parent !== undefined ? 50 : 10);
+    const listed = listTranscriptConversations({ limit, parentId: opts.parent, includeLineage: Boolean(opts.lineage) });
+    if (listed.isError) emitError(listed.text || listed.error, Boolean(opts.json));
+    if (opts.json) {
+      console.log(JSON.stringify({
+        total: listed.total,
+        ...(listed.parentFilter ? { parentFilter: listed.parentFilter } : {}),
+        ...(listed.includeLineage ? { includeLineage: true } : {}),
+        conversations: listed.conversations
+      }, null, 2));
+      return;
     }
     const dirLabel = listed.brainDirs.length === 1 ? listed.brainDirs[0] : listed.brainDirs.join(", ");
-    if (opts.json) {
-      console.log(
-        JSON.stringify(
-          {
-            total: listed.total,
-            ...(listed.parentFilter ? { parentFilter: listed.parentFilter } : {}),
-            ...(listed.includeLineage ? { includeLineage: true } : {}),
-            conversations: listed.conversations
-          },
-          null,
-          2
-        )
-      );
-    } else {
-      const parentLabel = listed.parentFilter ? ` [parent: ${listed.parentFilter}]` : "";
-      const lines = [`Recent Conversations (${listed.conversations.length} of ${listed.total} in ${dirLabel})${parentLabel}:`];
-      for (const item of listed.conversations) {
-        if (listed.includeLineage) {
-          const rosterStr = item.rosterName ? `@${item.rosterName}` : "none";
-          const parentStr = item.parentConvId || "none";
-          lines.push(
-            `- ${item.conversationId} | kind: ${item.sessionKind} | steps: ${item.stepCount} | parent: ${parentStr} | roster: ${rosterStr} | updated: ${item.updatedAt} | ${(item.bytes / 1024).toFixed(1)} KB`
-          );
-        } else {
-          lines.push(`- ${item.conversationId} | updated: ${item.updatedAt} | ${(item.bytes / 1024).toFixed(1)} KB`);
-        }
-      }
-      console.log(lines.join("\n"));
+    const parentLabel = listed.parentFilter ? ` [parent: ${listed.parentFilter}]` : "";
+    const lines = [`Recent Conversations (${listed.conversations.length} of ${listed.total} in ${dirLabel})${parentLabel}:`];
+    for (const item of listed.conversations) {
+      lines.push(listed.includeLineage
+        ? `- ${item.conversationId} | kind: ${item.sessionKind} | steps: ${item.stepCount} | parent: ${item.parentConvId || "none"} | roster: ${item.rosterName ? `@${item.rosterName}` : "none"} | updated: ${item.updatedAt} | ${(item.bytes / 1024).toFixed(1)} KB`
+        : `- ${item.conversationId} | updated: ${item.updatedAt} | ${(item.bytes / 1024).toFixed(1)} KB`);
     }
-    return;
-  }
+    console.log(lines.join("\n"));
+  },
 
-  if (sub === "export" || sub === "dump") {
-    pendingErrorGrantContext = { subcommand: sub, targetConvId: null };
-    const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["sanitized", "full", "json"]),
-      values: new Set(["parent", "start", "end", "limit", "max-chars", "out", "output", "file"]),
-      multiValues: new Set(["id"])
+  async export(sub, rest) {
+    const { opts, positional } = parseTranscriptSubcommand(sub, rest, {
+      booleans: ["sanitized", "full", "json"],
+      values: ["parent", "start", "end", "limit", "max-chars", "out", "output", "file"],
+      multiValues: ["id"]
     });
-    if (opts.help) {
-      assertCleanHelp(opts, positional);
-      consumeTranscriptAccessGrant({ subcommand: sub });
-      printSubcommandHelp(sub);
-      process.exit(0);
-    }
-    if ((!opts.id || opts.id.length === 0) && !opts.parent && !opts.file && positional.length >= 1) {
-      opts.id = [positional.shift()];
-    }
-    const exportIdsForGrant = (opts.id || [])
-      .flatMap((id) => String(id || "").split(","))
-      .map((id) => id.trim())
-      .filter(Boolean);
-    const exportTargetConvId = opts.parent
-      ? `parent:${String(opts.parent).trim()}`
-      : exportIdsForGrant.length === 1
-        ? exportIdsForGrant[0]
-        : exportIdsForGrant.length > 1
-          ? `multi:${[...new Set(exportIdsForGrant)].sort().join(",")}`
-          : null;
-    pendingErrorGrantContext = { subcommand: sub, targetConvId: exportTargetConvId };
-    if (positional.length > 0) {
-      throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
-    }
+    if ((!opts.id || opts.id.length === 0) && !opts.parent && !opts.file && positional.length >= 1) opts.id = [positional.shift()];
+    const exportIds = (opts.id || []).flatMap((id) => String(id || "").split(",")).map((id) => id.trim()).filter(Boolean);
+    pendingErrorGrantContext = {
+      subcommand: sub,
+      targetConvId: opts.parent
+        ? `parent:${String(opts.parent).trim()}`
+        : exportIds.length === 1 ? exportIds[0] : exportIds.length > 1 ? `multi:${[...new Set(exportIds)].sort().join(",")}` : null
+    };
+    assertNoExtraPositionals(sub, positional);
     if (opts.parent !== undefined && !String(opts.parent).trim()) {
       throw new Error("Flag '--parent' must be a non-empty conversation ID or 'current'.");
     }
-    const { rawOut, safeOutPath } = resolveOutFlag(opts);
-    const explicitFile = validateExplicitFileFlag(opts.file);
-    const parsedMaxChars = parseMaxCharsFlag(opts);
-    const isFull = Boolean(opts.full);
-    const effectiveMaxChars = parsedMaxChars ?? (safeOutPath || isFull ? MAX_DEEP_OUTPUT_CHARS : INLINE_SAFE_CHARS);
-    const startStep = parseOptionalInt(opts.start, "start");
-    const endStep = parseOptionalInt(opts.end, "end");
-    if (startStep !== undefined && startStep < 0) {
-      throw new Error(`Flag '--start' must be a non-negative integer (received: '${opts.start}').`);
-    }
-    if (endStep !== undefined && endStep < 0) {
-      throw new Error(`Flag '--end' must be a non-negative integer (received: '${opts.end}').`);
-    }
-    if (startStep !== undefined && endStep !== undefined && endStep < startStep) {
-      throw new Error(`Invalid step range '--start ${startStep} --end ${endStep}': '--end' must be >= '--start'.`);
-    }
-    const limit = parseOptionalInt(opts.limit, "limit");
-    if (limit !== undefined && limit <= 0) {
-      throw new Error(`Flag '--limit' must be a positive integer (received: '${opts.limit}').`);
-    }
-
+    const { explicitFile, rawOut, safeOutPath, effectiveMaxChars } = parseOutputOptions(opts);
+    const { startStep, endStep } = parseStepRange(opts);
     const asJson = Boolean(opts.json);
     const res = await exportSanitizedTranscript({
-      conversationIds: opts.id || [],
-      parentId: opts.parent,
-      filePath: explicitFile,
-      sanitized: Boolean(opts.sanitized),
-      startStep,
-      endStep,
-      limit,
-      maxOutputChars: effectiveMaxChars,
-      outputFormat: asJson ? "json" : "markdown",
-      allowExternalPaths: false
+      conversationIds: opts.id || [], parentId: opts.parent, filePath: explicitFile, sanitized: Boolean(opts.sanitized),
+      startStep, endStep, limit: parsePositiveInt(opts.limit, "limit"),
+      maxOutputChars: effectiveMaxChars, outputFormat: asJson ? "json" : "markdown", allowExternalPaths: false
     });
-
     emitTranscriptResult(res, asJson, rawOut, safeOutPath, {
       label: "sanitized transcript export",
-      customMessage: safeOutPath
-        ? `[OK] Exported sanitized transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}`
-        : undefined,
+      customMessage: safeOutPath ? `[OK] Exported sanitized transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}` : undefined,
       maxBytes: effectiveMaxChars
     });
-    return;
-  }
+  },
 
-  if (sub === "access" || sub === "policy") {
-    const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["status", "off", "deny-children", "on", "reset", "self-only", "json"]),
-      values: new Set(["mode", "allow", "deny", "ttl"])
+  async access(sub, rest) {
+    const { opts, positional } = parseTranscriptSubcommand(sub, rest, {
+      booleans: ["status", "off", "deny-children", "on", "reset", "self-only", "json"],
+      values: ["mode", "allow", "deny", "ttl"]
     });
-    if (opts.help) {
-      assertCleanHelp(opts, positional);
-      printSubcommandHelp(sub);
-      process.exit(0);
-    }
     if (positional.length === 1 && !opts.status && !opts.off && !opts["deny-children"] && !opts.on && !opts.reset && !opts["self-only"] && opts.mode === undefined) {
-      const p0 = positional[0].toLowerCase();
-      if (p0 === "status") opts.status = true;
-      else if (p0 === "off" || p0 === "deny" || p0 === "lock") opts.off = true;
-      else if (p0 === "on" || p0 === "open" || p0 === "reset" || p0 === "unlock") opts.on = true;
-      else if (p0 === "self-only") opts["self-only"] = true;
-      else throw new Error(`Unexpected positional argument '${positional[0]}' for 'transcript ${sub}'.`);
+      const mapped = ACCESS_POSITIONAL_FLAGS[positional[0].toLowerCase()];
+      if (!mapped) throw new Error(`Unexpected positional argument '${positional[0]}' for 'transcript ${sub}'.`);
+      opts[mapped] = true;
       positional.shift();
     }
-    if (positional.length > 0) {
-      throw new Error(`Unexpected positional arguments for 'transcript ${sub}': ${positional.join(" ")}`);
-    }
-
+    assertNoExtraPositionals(sub, positional);
     const hasMutationFlag =
-      Boolean(opts.off) ||
-      Boolean(opts["deny-children"]) ||
-      Boolean(opts.on) ||
-      Boolean(opts.reset) ||
-      Boolean(opts["self-only"]) ||
-      opts.mode !== undefined ||
-      opts.allow !== undefined ||
-      opts.deny !== undefined ||
-      opts.ttl !== undefined;
-
+      Boolean(opts.off || opts["deny-children"] || opts.on || opts.reset || opts["self-only"]) ||
+      opts.mode !== undefined || opts.allow !== undefined || opts.deny !== undefined || opts.ttl !== undefined;
     const res = manageTranscriptAccessPolicy({
       status: Boolean(opts.status) || !hasMutationFlag,
-      off: Boolean(opts.off),
-      denyChildren: Boolean(opts["deny-children"]),
-      on: Boolean(opts.on),
-      reset: Boolean(opts.reset),
-      selfOnly: Boolean(opts["self-only"]),
-      mode: opts.mode,
-      allow: opts.allow,
-      deny: opts.deny,
-      ttl: opts.ttl
+      off: Boolean(opts.off), denyChildren: Boolean(opts["deny-children"]), on: Boolean(opts.on),
+      reset: Boolean(opts.reset), selfOnly: Boolean(opts["self-only"]),
+      mode: opts.mode, allow: opts.allow, deny: opts.deny, ttl: opts.ttl
     });
-
     if (opts.json) {
       const { text, ...payload } = res;
       console.log(JSON.stringify(payload, null, 2));
     } else {
       console.log(res.text);
     }
-    return;
   }
+};
 
-  throw new Error(`Unknown transcript subcommand '${sub}'. Expected read, query, step, health, list, export, or access.`);
+async function handleTranscriptCommand(argv) {
+  const sub = argv[0];
+  if (!sub || sub === "--help" || sub === "-h" || sub === "help") {
+    if (argv.length > 1) {
+      throw new Error("Conflicting flags: '--help' cannot be combined with operational flags or arguments.");
+    }
+    printSubcommandHelp("transcript");
+    process.exit(0);
+  }
+  const canonical = HELP_ALIASES[sub] || sub;
+  const handler = TRANSCRIPT_HANDLERS[canonical];
+  if (!handler) {
+    throw new Error(`Unknown transcript subcommand '${sub}'. Expected read, query, step, health, list, export, or access.`);
+  }
+  await handler(sub, argv.slice(1));
+}
+
+function parseLifecycleCmd(cmdLabel, rest, booleans = []) {
+  const { opts, positional } = parseFlags(rest, { booleans: new Set(booleans), values: new Set() });
+  if (opts.help) {
+    assertCleanHelp(opts, positional);
+    printSubcommandHelp(cmdLabel);
+    process.exit(0);
+  }
+  if (positional.length > 0) {
+    throw new Error(`Unexpected arguments for '${cmdLabel}': ${positional.join(" ")}`);
+  }
+  return opts;
 }
 
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help") {
-    if (argv.length > 1) {
-      throw new Error("Conflicting flags: '--help' cannot be combined with operational flags or arguments.");
-    }
+    if (argv.length > 1) throw new Error("Conflicting flags: '--help' cannot be combined with operational flags or arguments.");
     printHelp();
     process.exit(0);
   }
   if (argv[0] === "--version" || argv[0] === "-v") {
-    if (argv.length > 1) {
-      throw new Error("Conflicting flags: '--version' cannot be combined with operational flags or arguments.");
-    }
+    if (argv.length > 1) throw new Error("Conflicting flags: '--version' cannot be combined with operational flags or arguments.");
     console.log(getVersion());
     process.exit(0);
   }
 
   assertSupportedNodeVersion();
+  const [cmd, ...rest] = argv;
 
-  const cmd = argv[0];
-  const rest = argv.slice(1);
-
-  if (cmd === "transcript") {
-    await handleTranscriptCommand(rest);
-    return;
-  }
-
+  if (cmd === "transcript") return handleTranscriptCommand(rest);
   if (cmd === "status" || cmd === "--status") {
-    const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["json"]),
-      values: new Set()
-    });
-    if (opts.help) {
-      assertCleanHelp(opts, positional);
-      printSubcommandHelp("status");
-      process.exit(0);
-    }
-    if (positional.length > 0) {
-      throw new Error(`Unexpected arguments for 'status': ${positional.join(" ")}`);
-    }
+    const opts = parseLifecycleCmd("status", rest, ["json"]);
     const status = runStatus({ silent: Boolean(opts.json) });
-    if (opts.json) {
-      console.log(JSON.stringify(status, null, 2));
-    }
-    if (!status.isComplete) {
-      process.exitCode = 1;
-    }
+    if (opts.json) console.log(JSON.stringify(status, null, 2));
+    if (!status.isComplete) process.exitCode = 1;
     return;
   }
-
   if (cmd === "setup" || cmd === "install" || cmd === "--install") {
-    const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["check", "allow-degraded"]),
-      values: new Set()
-    });
-    if (opts.help) {
-      assertCleanHelp(opts, positional);
-      printSubcommandHelp("setup");
-      process.exit(0);
-    }
-    if (positional.length > 0) {
-      throw new Error(`Unexpected arguments for 'setup': ${positional.join(" ")}`);
-    }
-    await runInstall({
-      checkOnly: Boolean(opts.check),
-      allowDegraded: Boolean(opts["allow-degraded"])
-    });
+    const opts = parseLifecycleCmd("setup", rest, ["check", "allow-degraded"]);
+    await runInstall({ checkOnly: Boolean(opts.check), allowDegraded: Boolean(opts["allow-degraded"]) });
     return;
   }
-
   if (cmd === "uninstall" || cmd === "--uninstall") {
-    const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(["restore-backups"]),
-      values: new Set()
-    });
-    if (opts.help) {
-      assertCleanHelp(opts, positional);
-      printSubcommandHelp("uninstall");
-      process.exit(0);
-    }
-    if (positional.length > 0) {
-      throw new Error(`Unexpected arguments for 'uninstall': ${positional.join(" ")}`);
-    }
-    await runUninstall({
-      restoreBackups: Boolean(opts["restore-backups"])
-    });
+    const opts = parseLifecycleCmd("uninstall", rest, ["restore-backups"]);
+    await runUninstall({ restoreBackups: Boolean(opts["restore-backups"]) });
     return;
   }
-
   if (cmd === "restore-backups" || cmd === "--restore-backups") {
-    const { opts, positional } = parseFlags(rest, {
-      booleans: new Set(),
-      values: new Set()
-    });
-    if (opts.help) {
-      assertCleanHelp(opts, positional);
-      printSubcommandHelp("restore-backups");
-      process.exit(0);
-    }
-    if (positional.length > 0) {
-      throw new Error(`Unexpected arguments for 'restore-backups': ${positional.join(" ")}`);
-    }
+    parseLifecycleCmd("restore-backups", rest);
     await runRestoreBackups();
     return;
   }

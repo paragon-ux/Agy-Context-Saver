@@ -253,7 +253,7 @@ try {
     const batchConv = "conv-batch-range";
     const batchLogs = path.join(brainDir, batchConv, ".system_generated", "logs");
     fs.mkdirSync(batchLogs, { recursive: true });
-    const longCommand = "mkdir -p scratch/agy-squad/live-w2/squad-squad1/specialist-1 && sed -n '1,15p' scripts/state-dir.mjs > scratch/agy-squad/live-w2/squad-squad1/specialist-1/slice-a.txt && echo FULL_ARGS_END_MARKER_OK";
+    const longCommand = "mkdir -p scratch/multi-agent/live-w2/team-alpha/specialist-1 && sed -n '1,15p' scripts/state-dir.mjs > scratch/multi-agent/live-w2/team-alpha/specialist-1/slice-a.txt && echo FULL_ARGS_END_MARKER_OK";
     const batchSteps = Array.from({ length: 12 }, (_, idx) => ({
       step_index: idx + 1,
       type: "PLANNER_RESPONSE",
@@ -884,7 +884,7 @@ try {
       assert.notEqual(unsanitizedExport.status, 0, "export without --sanitized must fail closed");
       assert.match(unsanitizedExport.stderr, /--sanitized/);
 
-      // 2b. Redaction before 36-char tool truncation, L6 non-priority body key omission, --start/--end, malformed lines, and empty transcript
+      // 2b. Redaction before 36-char tool truncation, non-priority body key omission, --start/--end, malformed lines, and empty transcript
       const secretEdgeConv = "secret-edge-conv";
       writeConvLines(brainDir, secretEdgeConv, [
         {
@@ -958,7 +958,7 @@ try {
         assert.equal(listedIds.includes("symlinked-outside-conv"), false, "list must exclude symlinked conversation dirs");
       }
 
-      // 3. transcript export --parent <parentUuid> --sanitized --out <path> produces L6-safe index
+      // 3. transcript export --parent <parentUuid> --sanitized --out <path> produces sanitized index
       const scratchOut = path.join(tempHome, "scratch-export", "transcript-index.md");
       const parentExportCli = runCli(
         ["transcript", "export", "--parent", parentUuid, "--sanitized", "--out", scratchOut],
@@ -1288,7 +1288,7 @@ try {
     const clampConv = "acs-run-transcript-clamp";
     const clampLogs = path.join(brainDir, clampConv, ".system_generated", "logs");
     fs.mkdirSync(clampLogs, { recursive: true });
-    const longToolArg = "scratch/agy-squad/squad-skill_and_pr_review_audit/specialist-1/report.md";
+    const longToolArg = "scratch/multi-agent/team-skill_and_pr_review_audit/specialist-1/report.md";
     const clampSteps = [
       {
         step_index: 1,
@@ -1396,7 +1396,7 @@ try {
     const longThinking = "THINK_START " + "T".repeat(4500) + " THINK_END_MARKER";
     const longSingleLine = "LONG_LINE_START_" + "L".repeat(1250) + "_LONG_LINE_END";
     const multiLineScript = Array.from({ length: 12 }, (_, idx) => `line_${idx + 1}: echo STEP_LINE_${idx + 1}`).join("\n") + "\n" + "CMD_TAIL_KEEP_" + "X".repeat(2500);
-    const longPathArg = "/home/paragon-ux/Antigravity/Agy-Squad/scratch/very_long_nested_directory_name/specialist-1/target_report.md";
+    const longPathArg = "/home/paragon-ux/Antigravity/Sample-Repo/scratch/very_long_nested_directory_name/specialist-1/target_report.md";
     const mediumShortArg = "alpha_beta_gamma_delta_epsilon_zeta_eta_theta_iota_kappa_lambda_mu_nu_xi_omicron_pi_rho_sigma"; // ~95 chars (<256 B)
 
     const compactLines = [];
@@ -3159,9 +3159,9 @@ try {
   // --- Wave 2 + Boost Pass PR13-RUN-001, PR13-RUN-007 & FRIC-RUN-004: Schedule & Backoff Classifier Parity ---
   {
     assert.equal(
-      isSwarmPollSchedule({ Prompt: "Check Agy-Squad tests on task-9", TimerCondition: "conv-1/task-9" }),
+      isSwarmPollSchedule({ Prompt: "Check project tests on task-9", TimerCondition: "conv-1/task-9" }),
       false,
-      "Conditioned task-* watchdog mentioning Squad must not classify as swarm poll (PR13-RUN-001)"
+      "Conditioned task-* watchdog must not classify as swarm poll (PR13-RUN-001)"
     );
     assert.equal(
       isRemoteCiPollSchedule({ DurationSeconds: 45, Prompt: "Check GitHub Actions CI & CodeQL status" }),
@@ -3169,14 +3169,14 @@ try {
       "Remote CI schedule must classify cleanly (FRIC-RUN-004)"
     );
     assert.equal(
-      isRemoteCiPollSchedule({ DurationSeconds: 60, Prompt: "Check status of Agy-Squad GitHub Actions CI workflow" }),
+      isRemoteCiPollSchedule({ DurationSeconds: 60, Prompt: "Check status of Sample-App GitHub Actions CI workflow" }),
       true,
-      "Agy-Squad GitHub Actions CI prompt must classify as remote CI (FRIC-RUN-004 Boost)"
+      "GitHub Actions CI prompt must classify as remote CI (FRIC-RUN-004 Boost)"
     );
     assert.equal(
-      isSwarmPollSchedule({ DurationSeconds: 60, Prompt: "Check status of Agy-Squad GitHub Actions CI workflow" }),
+      isSwarmPollSchedule({ DurationSeconds: 60, Prompt: "Check status of Sample-App GitHub Actions CI workflow" }),
       false,
-      "Agy-Squad GitHub Actions CI prompt must not classify as swarm poll (FRIC-RUN-004 Boost)"
+      "GitHub Actions CI prompt must not classify as swarm poll (FRIC-RUN-004 Boost)"
     );
     assert.equal(
       isRemoteCiPollSchedule({ DurationSeconds: 60, Prompt: "Check on PR #14 build status" }),
@@ -3234,6 +3234,144 @@ try {
     assert.equal(ciHealthRes.metrics.pollingViolations, 0, "Per-PR remote CI buckets + 15-min decay must report 0 pollingViolations (§3.2)");
     assert.equal(ciHealthRes.metrics.legalChecks, 3, "All 3 remote CI checks across PR #14, PR #15, and decayed PR #14 must be legal");
     console.log("✓ Wave 2 + Boost Pass PR13-RUN-001, PR13-RUN-007 & FRIC-RUN-004 classifier & health parity verified");
+  }
+
+  // --- 15. Wave 3 Regressions (PT-SEC-001, PT-SVC-001, PT-RUN-004, PT-INFO-001, 1B.3) ---
+  console.log("\n--- 15. Wave 3 Regressions (PT-SEC-001, PT-SVC-001, PT-RUN-004, PT-INFO-001, 1B.3) ---");
+  {
+    // PT-SEC-001: Dangling intermediate symlink `--out scratch/link/out.md -> <profile>/.gemini/config/newdir` rejected
+    const ptSecWs = path.join(tempHome, "pt-sec-001-ws");
+    const ptSecScratch = path.join(ptSecWs, "scratch");
+    const danglingLink = path.join(ptSecScratch, "link");
+    const protectedNewDir = path.join(tempHome, ".gemini", "config", "newdir");
+    fs.mkdirSync(ptSecScratch, { recursive: true });
+    let madeDangling = false;
+    try {
+      fs.symlinkSync(protectedNewDir, danglingLink, os.platform() === "win32" ? "junction" : "dir");
+      madeDangling = true;
+    } catch (err) {
+      if (err?.code !== "EPERM") throw err;
+    }
+    if (madeDangling) {
+      const danglingOut = path.join(danglingLink, "out.md");
+      const resExport = runCli(["transcript", "export", "--id", "conv-codeql-sec", "--sanitized", "--out", danglingOut], testEnv);
+      assert.notEqual(resExport.status, 0, "PT-SEC-001: dangling intermediate symlink into ~/.gemini/config/newdir must be rejected");
+      assert.match(resExport.stderr, /Refusing '--out'|protected/i);
+      assert.equal(fs.existsSync(protectedNewDir), false, "PT-SEC-001: protected newdir must never be created");
+    }
+
+    // PT-SVC-001: 600+ truncated steps in queryTranscript(..., { mode: "auto" }) returns accurate matches with single-pass transcript_full.jsonl read
+    const convSvc = "conv-pt-svc-001-batch";
+    const svcLogs = path.join(brainDir, convSvc, ".system_generated", "logs");
+    fs.mkdirSync(svcLogs, { recursive: true });
+    const compactRows = [];
+    const fullRows = [];
+    const hitSteps = new Set([10, 325, 650]);
+    for (let i = 1; i <= 650; i++) {
+      const base = {
+        step_index: i,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: new Date(1760000000000 + i * 1000).toISOString()
+      };
+      compactRows.push(JSON.stringify({ ...base, content: `Compact truncated filler step ${i}`, truncated_fields: ["content"] }));
+      fullRows.push(JSON.stringify({
+        ...base,
+        content: hitSteps.has(i) ? `Full payload step ${i} PT_SVC_001_UNIQUE_NEEDLE` : `Full payload step ${i} routine text`
+      }));
+    }
+    fs.writeFileSync(path.join(svcLogs, "transcript.jsonl"), compactRows.join("\n") + "\n", "utf-8");
+    fs.writeFileSync(path.join(svcLogs, "transcript_full.jsonl"), fullRows.join("\n") + "\n", "utf-8");
+
+    const origCreateReadStream = fs.createReadStream;
+    let fullStreamOpens = 0;
+    fs.createReadStream = function wrappedCreateReadStream(filePathArg, ...rest) {
+      if (String(filePathArg).endsWith("transcript_full.jsonl")) fullStreamOpens++;
+      return origCreateReadStream.call(this, filePathArg, ...rest);
+    };
+    let svcQuery;
+    try {
+      svcQuery = await queryTranscript({
+        conversationId: convSvc,
+        query: "PT_SVC_001_UNIQUE_NEEDLE",
+        mode: "auto",
+        maxResults: 20
+      });
+    } finally {
+      fs.createReadStream = origCreateReadStream;
+    }
+    assert.ok(!svcQuery.isError, svcQuery.text);
+    assert.equal(fullStreamOpens, 1, `PT-SVC-001: transcript_full.jsonl must be read in a single streaming pass (got ${fullStreamOpens})`);
+    assert.equal(svcQuery.displayedCount, 3, "PT-SVC-001: all 3 hydrated matches across 650 truncated steps must be returned");
+    for (const s of hitSteps) {
+      assert.ok(svcQuery.text.includes(`Full payload step ${s} PT_SVC_001_UNIQUE_NEEDLE`), `PT-SVC-001: missing match for step ${s}`);
+    }
+
+    // PT-RUN-004: scanRecentLaunchRestrictions() unlinks expired agy-session-*.json (> 1h mtime) while preserving fresh ones and agy-session-governance-state.json
+    const stateDir = getStateDir();
+    fs.mkdirSync(stateDir, { recursive: true });
+    const expiredJson = path.join(stateDir, "agy-session-expired-pt004.json");
+    const expiredLock = path.join(stateDir, "agy-session-expired-pt004.lock");
+    const freshJson = path.join(stateDir, "agy-session-fresh-pt004.json");
+    const govStateJson = path.join(stateDir, "agy-session-governance-state.json");
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+
+    fs.writeFileSync(expiredJson, JSON.stringify({ conversationId: "expired-pt004", lineage: { isChildSession: true, launchDirective: "deny" } }), "utf-8");
+    fs.utimesSync(expiredJson, twoHoursAgo, twoHoursAgo);
+    fs.writeFileSync(expiredLock, "123:0\n", "utf-8");
+    fs.utimesSync(expiredLock, twoHoursAgo, twoHoursAgo);
+    fs.writeFileSync(govStateJson, JSON.stringify({ global: { pollCount: 0 } }), "utf-8");
+    fs.utimesSync(govStateJson, twoHoursAgo, twoHoursAgo);
+    fs.writeFileSync(freshJson, JSON.stringify({
+      conversationId: "fresh-pt004",
+      lastSeenTime: Date.now(),
+      lineage: { isChildSession: true, parentConvId: "parent-pt004", launchDirective: "deny" }
+    }), "utf-8");
+
+    try {
+      const scanRes = scanRecentLaunchRestrictions();
+      assert.equal(fs.existsSync(expiredJson), false, "PT-RUN-004: expired agy-session-*.json (>1h) must be unlinked");
+      assert.equal(fs.existsSync(expiredLock), false, "PT-RUN-004: expired agy-session-*.lock (>1h) must be unlinked");
+      assert.equal(fs.existsSync(freshJson), true, "PT-RUN-004: fresh agy-session-*.json must be preserved");
+      assert.equal(fs.existsSync(govStateJson), true, "PT-RUN-004: agy-session-governance-state.json must never be unlinked");
+      assert.ok(scanRes.sessions.some((s) => s.conversationId === "fresh-pt004"), "PT-RUN-004: fresh restricted child must be reported");
+    } finally {
+      for (const f of [expiredJson, expiredLock, freshJson]) { try { fs.unlinkSync(f); } catch {} }
+    }
+
+    // PT-INFO-001: health / list / access --help consume matching grants (without stealing mismatched grants)
+    const grantsDir = path.join(stateDir, "grants");
+    const listGrantFiles = () => (fs.existsSync(grantsDir) ? fs.readdirSync(grantsDir).filter((f) => f.startsWith("grant-") && f.endsWith(".json")) : []);
+    for (const f of listGrantFiles()) { try { fs.unlinkSync(path.join(grantsDir, f)); } catch {} }
+    for (const sub of ["health", "list", "access"]) {
+      recordTranscriptHookGrant({ callerConvId: "conv-pt-info-001", subcommand: sub, mode: "open" });
+      assert.equal(listGrantFiles().length, 1, `PT-INFO-001: expected 1 pending grant for '${sub}'`);
+      const helpRes = runCli(["transcript", sub, "--help"], testEnv);
+      assert.equal(helpRes.status, 0, helpRes.stderr);
+      assert.equal(listGrantFiles().length, 0, `PT-INFO-001: 'transcript ${sub} --help' must consume matching grant`);
+    }
+    recordTranscriptHookGrant({ callerConvId: "conv-pt-info-001", subcommand: "read", mode: "open" });
+    const nonStealingHelp = runCli(["transcript", "health", "--help"], testEnv);
+    assert.equal(nonStealingHelp.status, 0, nonStealingHelp.stderr);
+    assert.equal(listGrantFiles().length, 1, "PT-INFO-001: 'health --help' must not steal a pending 'read' grant");
+    consumeTranscriptAccessGrant({ subcommand: "read" });
+    assert.equal(listGrantFiles().length, 0);
+
+    // 1B.3: exportSanitizedTranscript emits sanitized: true and does NOT emit l6Safe
+    const sanitizedJsonRes = await exportSanitizedTranscript({ conversationIds: ["conv-codeql-sec"], sanitized: true, outputFormat: "json" });
+    assert.ok(!sanitizedJsonRes.isError, sanitizedJsonRes.text);
+    assert.equal(sanitizedJsonRes.sanitized, true, "1B.3: exportSanitizedTranscript result must emit sanitized: true");
+    assert.equal(Object.prototype.hasOwnProperty.call(sanitizedJsonRes, "l6Safe"), false, "1B.3: exportSanitizedTranscript result must NOT emit l6Safe");
+    const parsedSanitized = JSON.parse(sanitizedJsonRes._serializedJson);
+    assert.equal(parsedSanitized.sanitized, true, "1B.3: serialized JSON must emit sanitized: true");
+    assert.equal(Object.prototype.hasOwnProperty.call(parsedSanitized, "l6Safe"), false, "1B.3: serialized JSON must NOT emit l6Safe");
+    const cliSanitizedJson = runCli(["transcript", "export", "--id", "conv-codeql-sec", "--sanitized", "--json"], testEnv);
+    assert.equal(cliSanitizedJson.status, 0, cliSanitizedJson.stderr);
+    const parsedCliSanitized = JSON.parse(cliSanitizedJson.stdout);
+    assert.equal(parsedCliSanitized.sanitized, true);
+    assert.equal("l6Safe" in parsedCliSanitized, false);
+
+    console.log("✓ Wave 3 regressions (PT-SEC-001, PT-SVC-001, PT-RUN-004, PT-INFO-001, 1B.3) verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

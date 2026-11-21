@@ -48,7 +48,7 @@ Run all four stages before tagging a release:
 node scripts/release-preflight.mjs
 node scripts/install-register.mjs --check
 ```
-`scripts/release-preflight.mjs` checks `package.json` metadata, `hooks.json` matcher coverage (`read_file`, `edit_file`, `write_file`, `run_command`), `lib/transcript-core.mjs` and `bin/agy-context.mjs` entrypoints, absence of legacy root `mcp/` or `mcp_config.json`, `docs/publishing.md` test suite count parity (12 suites), `SECURITY.md`/`CONTRIBUTING.md`/`CODE_OF_CONDUCT.md` presence, `MIN_RTK_VERSION >= 1.1.0`, and zero runtime npm dependencies. `node scripts/install-register.mjs --check` validates RTK `>= 1.1.0` and user config syntax without writing to disk.
+`scripts/release-preflight.mjs` checks `package.json` metadata, `plugin.json` and `hooks.json` validity, `lib/transcript-core.mjs`, `bin/agy-context.mjs`, and modular `lib/` + `scripts/hook/` runtime entrypoints, absence of legacy root `mcp/` or `mcp_config.json`, `docs/publishing.md` test suite count parity (12 suites), `SECURITY.md`/`CONTRIBUTING.md`/`CODE_OF_CONDUCT.md` presence, `MIN_RTK_VERSION >= 1.1.0`, and zero runtime npm dependencies. `node scripts/install-register.mjs --check` validates RTK `>= 1.1.0` and user config syntax without writing to disk.
 
 ### Stage 2: Automated test matrix
 ```bash
@@ -72,7 +72,7 @@ Runs all 12 test suites in isolated temporary profiles:
 ```bash
 npm run verify:package
 ```
-Runs `node tests/verify-package.mjs --self-test` and validates `npm pack --dry-run --json` against the whitelisted files in `package.json` (`34` files).
+Runs `node tests/verify-package.mjs --self-test` and validates `npm pack --dry-run --json` against the whitelisted files in `package.json` (covering the modular `lib/` and `scripts/hook/` runtime layout while excluding internal `docs/plans/`, `docs/reviews/`, and `tests/`).
 
 ### Stage 4: Documentation build
 ```bash

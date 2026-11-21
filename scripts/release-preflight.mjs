@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_HOOK_MATCHER } from './install-register.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const root = path.resolve(path.dirname(__filename), '..');
@@ -129,10 +130,18 @@ export function runReleasePreflight() {
 
     const requiredPackageFiles = [
       'lib/transcript-core.mjs',
+      'lib/path-guards.mjs',
+      'lib/access-policy.mjs',
+      'lib/backoff.mjs',
       'bin/agy-context.mjs',
       'scripts/install-register.mjs',
       'scripts/provision-rtk.mjs',
       'scripts/rtk-run.mjs',
+      'scripts/execution-guard-hook.mjs',
+      'scripts/hook/common.mjs',
+      'scripts/hook/file-guard.mjs',
+      'scripts/hook/shell-guard.mjs',
+      'scripts/hook/task-guard.mjs',
       'plugin.json',
       'hooks.json',
       'README.md',
@@ -151,20 +160,34 @@ export function runReleasePreflight() {
     if (hooksText) {
       try {
         const pluginHooks = JSON.parse(hooksText);
-        const hookCmd = pluginHooks?.['agy-context-saver']?.PreToolUse?.[0]?.hooks?.[0]?.command ?? '';
-        const hookMatcher = pluginHooks?.['agy-context-saver']?.PreToolUse?.[0]?.matcher ?? '';
-        if (!hookCmd) {
-          errors.push('hooks.json must define "agy-context-saver".PreToolUse[0].hooks[0].command.');
-        } else if (hookCmd.includes('ANTIGRAVITY_PLUGIN_ROOT')) {
-          errors.push('hooks.json command must not use unexpanded ${ANTIGRAVITY_PLUGIN_ROOT}; use ./scripts/execution-guard-hook.mjs (cwd is plugin root).');
-        }
-        for (const tool of ['read_file', 'edit_file', 'write_file', 'run_command']) {
-          if (!hookMatcher.includes(tool)) {
-            errors.push(`hooks.json PreToolUse matcher must include ${tool}.`);
+        if (!pluginHooks || typeof pluginHooks !== 'object' || Array.isArray(pluginHooks)) {
+          errors.push('hooks.json must contain a JSON object.');
+        } else {
+          const hasActivePreToolUse =
+            (Array.isArray(pluginHooks.PreToolUse) && pluginHooks.PreToolUse.length > 0) ||
+            Object.values(pluginHooks).some(
+              (entry) =>
+                entry &&
+                typeof entry === 'object' &&
+                !Array.isArray(entry) &&
+                Array.isArray(entry.PreToolUse) &&
+                entry.PreToolUse.length > 0
+            );
+          if (hasActivePreToolUse) {
+            errors.push(
+              'hooks.json must not define active PreToolUse hook entries under Decision A2 (hooks register exclusively in ~/.gemini/config/hooks.json).'
+            );
           }
         }
       } catch (error) {
         errors.push(`hooks.json is not valid JSON: ${error.message}`);
+      }
+    }
+
+    const matcherTools = new Set(String(DEFAULT_HOOK_MATCHER ?? '').split('|').map((t) => t.trim()).filter(Boolean));
+    for (const tool of ['read_file', 'edit_file', 'write_file', 'multi_replace_file_content', 'run_command', 'manage_task', 'schedule']) {
+      if (!matcherTools.has(tool)) {
+        errors.push(`scripts/install-register.mjs DEFAULT_HOOK_MATCHER must include ${tool}.`);
       }
     }
 

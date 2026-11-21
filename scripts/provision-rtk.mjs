@@ -4,6 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { quoteForCmd } from "./rtk-run.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -11,7 +12,6 @@ const binDir = path.join(repoRoot, "bin");
 
 export const RTK_VERSION = "v1.1.0";
 export const MIN_RTK_VERSION = "1.1.0";
-export const MIN_COMPATIBLE_RTK_VERSION = MIN_RTK_VERSION;
 export const MANAGED_SHIM_MARKER = "agy-context-saver-managed";
 
 export function quotePowerShellSingle(value) {
@@ -41,23 +41,17 @@ export function isCompatibleRtkVersion(versionStr) {
   return major > 1 || (major === 1 && minor >= 1);
 }
 
+const RTK_PLATFORM_ASSETS = {
+  "win32:x64": { asset: "rtk-x86_64-pc-windows-msvc.zip", exeName: "rtk.exe", isZip: true },
+  "darwin:arm64": { asset: "rtk-aarch64-apple-darwin.tar.gz", exeName: "rtk", isZip: false },
+  "darwin:x64": { asset: "rtk-x86_64-apple-darwin.tar.gz", exeName: "rtk", isZip: false },
+  "linux:x64": { asset: "rtk-x86_64-unknown-linux-musl.tar.gz", exeName: "rtk", isZip: false },
+  "linux:arm64": { asset: "rtk-aarch64-unknown-linux-gnu.tar.gz", exeName: "rtk", isZip: false }
+};
+
 export function getRtkPlatformAsset({ platform = os.platform(), arch = os.arch() } = {}) {
-  if (platform === "win32" && arch === "x64") {
-    return { asset: "rtk-x86_64-pc-windows-msvc.zip", exeName: "rtk.exe", isZip: true };
-  }
-  if (platform === "darwin" && arch === "arm64") {
-    return { asset: "rtk-aarch64-apple-darwin.tar.gz", exeName: "rtk", isZip: false };
-  }
-  if (platform === "darwin" && arch === "x64") {
-    return { asset: "rtk-x86_64-apple-darwin.tar.gz", exeName: "rtk", isZip: false };
-  }
-  if (platform === "linux" && arch === "x64") {
-    return { asset: "rtk-x86_64-unknown-linux-musl.tar.gz", exeName: "rtk", isZip: false };
-  }
-  if (platform === "linux" && arch === "arm64") {
-    return { asset: "rtk-aarch64-unknown-linux-gnu.tar.gz", exeName: "rtk", isZip: false };
-  }
-  return null;
+  const entry = RTK_PLATFORM_ASSETS[`${platform}:${arch}`];
+  return entry ? { ...entry } : null;
 }
 
 export function formatManualRtkInstallInstructions() {
@@ -86,34 +80,6 @@ export function isDirectoryWritable(dirPath) {
   }
 }
 
-function quoteWinCmdArg(arg) {
-  const str = String(arg);
-  if (!str) return '""';
-  if (!/[\s"&|<>^()%!]/.test(str)) return str;
-  let out = '"';
-  let pendingBackslashes = 0;
-  for (let i = 0; i < str.length; i++) {
-    const ch = str[i];
-    if (ch === "\\") {
-      pendingBackslashes++;
-    } else if (ch === '"') {
-      out += "\\".repeat(pendingBackslashes * 2 + 1) + '"';
-      pendingBackslashes = 0;
-    } else {
-      if (pendingBackslashes > 0) {
-        out += "\\".repeat(pendingBackslashes);
-        pendingBackslashes = 0;
-      }
-      out += ch;
-    }
-  }
-  if (pendingBackslashes > 0) {
-    out += "\\".repeat(pendingBackslashes * 2);
-  }
-  out += '"';
-  return out;
-}
-
 function runCmdShimSync(bin, args, platformExec = execFileSync) {
   if (/["\r\n]/.test(String(bin))) {
     throw new Error(`Unsafe command path: ${bin}`);
@@ -123,7 +89,7 @@ function runCmdShimSync(bin, args, platformExec = execFileSync) {
     process.env.COMSPEC ||
     path.join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", "cmd.exe");
   const quotedBin = /[\\/\s&|<>^()%!]/.test(bin) ? `"${bin}"` : bin;
-  const quotedArgs = args.map(quoteWinCmdArg).join(" ");
+  const quotedArgs = args.map(quoteForCmd).join(" ");
   const cmdLine = quotedArgs ? `"${quotedBin} ${quotedArgs}"` : `"${quotedBin}"`;
   return platformExec(comspec, ["/d", "/s", "/c", cmdLine], {
     encoding: "utf-8",
@@ -166,7 +132,7 @@ export function verifyLocalRtkBinary(binPath, options = {}) {
   }
 }
 
-function isManagedRtkShimFile(filePath) {
+export function isManagedShimFile(filePath) {
   try {
     const st = fs.lstatSync(filePath);
     if (!st.isFile() || st.isSymbolicLink() || st.size > 4096) return false;
@@ -175,23 +141,18 @@ function isManagedRtkShimFile(filePath) {
     return false;
   }
 }
+export const isManagedRtkShimFile = isManagedShimFile;
 
-function normalizePathDir(dirPath, platform) {
+export function normalizePathDir(dirPath, platform = os.platform()) {
   if (!dirPath || typeof dirPath !== "string") return "";
   let trimmed = dirPath.trim().replace(/^"(.*)"$/, "$1");
   if (!trimmed) return "";
-  if (trimmed === "~") {
-    trimmed = os.homedir();
-  } else if (/^~[\\/]/.test(trimmed)) {
-    trimmed = path.join(os.homedir(), trimmed.slice(2));
-  }
+  if (trimmed === "~") trimmed = os.homedir();
+  else if (/^~[\\/]/.test(trimmed)) trimmed = path.join(os.homedir(), trimmed.slice(2));
   const resolved = path.resolve(trimmed);
   const root = path.parse(resolved).root;
-  let normalized = resolved === root ? resolved : resolved.replace(/[\\/]+$/, "");
-  if (platform === "win32" || platform === "darwin") {
-    normalized = normalized.toLowerCase();
-  }
-  return normalized;
+  const normalized = resolved === root ? resolved : resolved.replace(/[\\/]+$/, "");
+  return platform === "win32" || platform === "darwin" ? normalized.toLowerCase() : normalized;
 }
 
 function isSameDir(dirA, dirB, platform) {
@@ -217,27 +178,17 @@ function scanPathForRtk({ platform, pathEnv, antigravityBinDir }) {
   for (const rawEntry of String(pathEnv || "").split(delim)) {
     let dir = rawEntry.trim().replace(/^"(.*)"$/, "$1");
     if (!dir) continue;
-    if (dir === "~") {
-      dir = os.homedir();
-    } else if (/^~[\\/]/.test(dir)) {
-      dir = path.join(os.homedir(), dir.slice(2));
-    }
+    if (dir === "~") dir = os.homedir();
+    else if (/^~[\\/]/.test(dir)) dir = path.join(os.homedir(), dir.slice(2));
     const isManagedDir = isSameDir(dir, antigravityBinDir, platform);
     for (const ext of exts) {
       const candidate = path.join(dir, `rtk${ext}`);
       try {
-        const st = fs.statSync(candidate);
-        if (!st.isFile()) continue;
-        if (platform !== "win32") {
-          fs.accessSync(candidate, fs.constants.X_OK);
-        }
-        const isManaged = isManagedDir && isManagedRtkShimFile(candidate);
-        if (!firstHit) {
-          firstHit = { path: candidate, isManaged };
-        }
-        if (!isManaged && !firstExternalHit) {
-          firstExternalHit = candidate;
-        }
+        if (!fs.statSync(candidate).isFile()) continue;
+        if (platform !== "win32") fs.accessSync(candidate, fs.constants.X_OK);
+        const isManaged = isManagedDir && isManagedShimFile(candidate);
+        if (!firstHit) firstHit = { path: candidate, isManaged };
+        if (!isManaged && !firstExternalHit) firstExternalHit = candidate;
         break;
       } catch {}
     }
@@ -473,25 +424,15 @@ export function getRtkConfigPath(options = {}) {
   const env = options.env || process.env;
   const homeDir = options.homeDir || os.homedir();
   const profileHome = options.profileHome !== undefined ? options.profileHome : env.AGY_TEST_PROFILE_DIR;
+  const base = profileHome || homeDir;
 
-  if (profileHome) {
-    if (platform === "win32") {
-      return path.join(profileHome, "AppData", "Roaming", "rtk", "config.toml");
-    }
-    if (platform === "darwin") {
-      return path.join(profileHome, "Library", "Application Support", "rtk", "config.toml");
-    }
-    return path.join(profileHome, ".config", "rtk", "config.toml");
-  }
   if (platform === "win32") {
-    const appData = env.APPDATA || path.join(homeDir, "AppData", "Roaming");
-    return path.join(appData, "rtk", "config.toml");
+    return path.join(profileHome ? path.join(base, "AppData", "Roaming") : (env.APPDATA || path.join(base, "AppData", "Roaming")), "rtk", "config.toml");
   }
   if (platform === "darwin") {
-    return path.join(homeDir, "Library", "Application Support", "rtk", "config.toml");
+    return path.join(base, "Library", "Application Support", "rtk", "config.toml");
   }
-  const configHome = env.XDG_CONFIG_HOME || path.join(homeDir, ".config");
-  return path.join(configHome, "rtk", "config.toml");
+  return path.join(profileHome ? path.join(base, ".config") : (env.XDG_CONFIG_HOME || path.join(base, ".config")), "rtk", "config.toml");
 }
 
 export function updateRtkConfigToml(content) {
@@ -573,29 +514,20 @@ export function updateRtkConfigToml(content) {
 export function ensureRtkConfigured(options = {}) {
   const log = options.silent ? () => {} : console.log;
   const configPath = getRtkConfigPath(options);
-  const configDir = path.dirname(configPath);
-
   try {
-    if (!fs.existsSync(configDir)) {
-      fs.mkdirSync(configDir, { recursive: true });
-    }
-
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
     if (!fs.existsSync(configPath)) {
-      const defaultContent = `[hooks]\nsuppress_hook_warning = true\n`;
-      fs.writeFileSync(configPath, defaultContent, "utf-8");
+      fs.writeFileSync(configPath, "[hooks]\nsuppress_hook_warning = true\n", "utf-8");
       log(`✓ Initialized RTK configuration with suppress_hook_warning = true at ${configPath}`);
-    } else {
-      const content = fs.readFileSync(configPath, "utf-8");
-      const result = updateRtkConfigToml(content);
-      if (result.changed) {
-        fs.writeFileSync(configPath, result.content, "utf-8");
-        log(`✓ Configured suppress_hook_warning = true in ${configPath}`);
-      }
+      return;
+    }
+    const result = updateRtkConfigToml(fs.readFileSync(configPath, "utf-8"));
+    if (result.changed) {
+      fs.writeFileSync(configPath, result.content, "utf-8");
+      log(`✓ Configured suppress_hook_warning = true in ${configPath}`);
     }
   } catch (err) {
-    if (!options.silent) {
-      console.warn(`[WARN] Could not standardize RTK config: ${err.message}`);
-    }
+    if (!options.silent) console.warn(`[WARN] Could not standardize RTK config: ${err.message}`);
   }
 }
 

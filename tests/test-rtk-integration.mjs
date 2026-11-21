@@ -98,6 +98,31 @@ try {
   }
   console.log("✓ Narrow High-ROI Pre-Gate verified across high-ROI runners vs lossless inspection/piped commands");
 
+  // 2c. Decision B1: AGY_RTK_MODE=pregate|off (no `all` mode; unrecognized values fall back to pregate)
+  {
+    const offGit = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: "git status", WaitMsBeforeAsync: 5000 } } },
+      { ...testEnv, AGY_RTK_MODE: "off" }
+    );
+    assert.equal(offGit.decision, "allow");
+    assert.equal(offGit.overwrite?.CommandLine, undefined, "AGY_RTK_MODE=off must disable non-internal RTK rewrites");
+
+    const legacyAllLs = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: "ls -la", WaitMsBeforeAsync: 5000 } } },
+      { ...testEnv, AGY_RTK_MODE: "all" }
+    );
+    assert.equal(legacyAllLs.decision, "allow");
+    assert.equal(legacyAllLs.overwrite?.CommandLine, undefined, "Decision B1: AGY_RTK_MODE=all must not exist (falls back to pregate; ls stays untouched)");
+
+    const legacyAllGit = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: "git status", WaitMsBeforeAsync: 5000 } } },
+      { ...testEnv, AGY_RTK_MODE: "all" }
+    );
+    assert.equal(legacyAllGit.decision, "allow");
+    assert.equal(legacyAllGit.overwrite?.CommandLine, "rtk git status");
+    console.log("✓ Decision B1 (AGY_RTK_MODE=pregate|off, no `all` mode) verified");
+  }
+
   // 3. Real `rtk hook antigravity` never mutates `agy-context transcript` invocations (including list --parent/--lineage and export --sanitized)
   for (const cmd of [
     "agy-context transcript health --id 1234",
@@ -113,44 +138,32 @@ try {
   }
   console.log("✓ 'agy-context transcript' (health, list --parent/--lineage, export --sanitized) passes through rtk unrewritten");
 
-  // 4. Absent host `rg` check (strip host rg from PATH, keeping RTK dir)
+  // 4. PT-RUN-002: Bare `rg` and `grep` pass through untouched & lossless even when host `rg` is absent from PATH
   let rtkExeDir = path.join(tempDir, "shim-bin");
   if (hostRtk) {
     const resolvedWhich = spawnSync(process.platform === "win32" ? "where" : "which", ["rtk"], { encoding: "utf-8" });
     const firstExe = resolvedWhich.status === 0 ? resolvedWhich.stdout.trim().split(/\r?\n/)[0] : hostRtk.path;
     rtkExeDir = path.dirname(path.isAbsolute(firstExe) ? firstExe : hostRtk.path);
   }
-  const rgExts = process.platform === "win32" ? [".exe", ".cmd", ".bat"] : [""];
-  const rtkSharesDirWithRg = rgExts.some((ext) => fs.existsSync(path.join(rtkExeDir, `rg${ext}`)));
-  if (!rtkSharesDirWithRg) {
-    const noRgEnv = withEnvPath(rtkExeDir, testEnv);
-    const rgFallback = runHook(
-      { toolCall: { name: "run_command", args: { CommandLine: 'rg -n "GOVERNED_TOOLS" scripts/', WaitMsBeforeAsync: 5000 } } },
+  const noRgEnv = withEnvPath(rtkExeDir, testEnv);
+  for (const searchCmd of [
+    "rg -n foo scripts/",
+    'rg -n "GOVERNED_TOOLS" scripts/',
+    'FOO=1 rg -n "GOVERNED_TOOLS" scripts/',
+    'grep -rn "GOVERNED_TOOLS" scripts/'
+  ]) {
+    const res = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: searchCmd, WaitMsBeforeAsync: 5000 } } },
       noRgEnv
     );
-    assert.equal(rgFallback.decision, "allow");
-    assert.match(rgFallback.overwrite?.CommandLine || "", /^grep\b/, "Bare rg must map to lossless grep when rg is absent");
-    assert.equal((rgFallback.overwrite?.CommandLine || "").includes("rtk rg"), false, "Must never emit rtk rg when rg is absent");
-    console.log(`✓ Absent 'rg' binary guarded -> '${rgFallback.overwrite?.CommandLine}'`);
-
-    const envRgFallback = runHook(
-      { toolCall: { name: "run_command", args: { CommandLine: 'FOO=1 rg -n "GOVERNED_TOOLS" scripts/', WaitMsBeforeAsync: 5000 } } },
-      noRgEnv
+    assert.equal(res.decision, "allow", `Search command '${searchCmd}' must be allowed`);
+    assert.equal(
+      res.overwrite?.CommandLine,
+      undefined,
+      `PT-RUN-002: '${searchCmd}' must pass through untouched and lossless without rg->grep transpilation or rtk wrapping`
     );
-    assert.equal(envRgFallback.decision, "allow");
-    assert.match(envRgFallback.overwrite?.CommandLine || "", /^FOO=1 grep\b/);
-    assert.equal((envRgFallback.overwrite?.CommandLine || "").includes("rtk rg"), false);
-    console.log(`✓ Env-prefixed absent 'rg' guarded -> '${envRgFallback.overwrite?.CommandLine}'`);
-
-    const explicitRtkRgFallback = runHook(
-      { toolCall: { name: "run_command", args: { CommandLine: 'rtk rg -n "GOVERNED_TOOLS" scripts/', WaitMsBeforeAsync: 5000 } } },
-      noRgEnv
-    );
-    assert.equal(explicitRtkRgFallback.decision, "allow");
-    assert.match(explicitRtkRgFallback.overwrite?.CommandLine || "", /^rtk grep\b/, "Explicit rtk rg must map to rtk grep when rg is absent");
-    assert.equal((explicitRtkRgFallback.overwrite?.CommandLine || "").includes("rtk rg"), false);
-    console.log(`✓ Explicit 'rtk rg' guarded when rg absent -> '${explicitRtkRgFallback.overwrite?.CommandLine}'`);
   }
+  console.log("✓ PT-RUN-002: Bare `rg` and `grep` pass through untouched and lossless even when host `rg` is absent");
 
   // 5. Real `rtk 1.1.0` / shim `cat`/`head`/`tail` rewrite parity + Check 3/4 operand enforcement
   const convRtk = "conv-rtk-int-read";

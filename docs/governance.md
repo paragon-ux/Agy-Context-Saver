@@ -1,6 +1,6 @@
 # Lifecycle Governance & Hooks
 
-The `PreToolUse` hook (`agy-context-saver`, implemented in `scripts/execution-guard-hook.mjs`) evaluates tool calls before Antigravity executes shell commands, file reads/writes, or background task checks.
+The single global `PreToolUse` hook (`agy-context-saver`, registered in `~/.gemini/config/hooks.json` and routed via `scripts/execution-guard-hook.mjs` into lazy-loaded `scripts/hook/{file,shell,task}-guard.mjs` modules) evaluates tool calls before Antigravity executes shell commands, file reads/writes, or background task checks.
 
 ![PreToolUse hook interception flow](assets/hook-interception-flow.svg)
 
@@ -37,7 +37,7 @@ $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5
 
 ### Layer 2: Narrow High-ROI RTK Pre-Gate, File Bounds & Transcript Governance
 
-1. **Narrow High-ROI RTK Pre-Gate:** `run_command` segments delegate to `rtk hook antigravity` only for noisy test, build, lint, container, and `git status`/`push`/`pull`/`fetch` runners (plus scoped internal spillover/completed task-log `cat`/`head`/`tail` reads), configurable via `AGY_RTK_MODE=pregate|off|all` (default `pregate`; `2>&1` and `2>/dev/null` stderr redirects pass through). Precision inspection commands (`find`, `grep`, `rg`, `ls`, `wc`, `diff`, `ps`, `git diff`/`show`/`log`, workspace `cat`/`head`/`tail`), pipes, stdout/file redirects, and machine-readable flags (`--json`, `--porcelain`, `git status -sb`, `-o json`, etc.) run natively without spawning `rtk`.
+1. **Narrow High-ROI RTK Pre-Gate:** `run_command` segments delegate to `rtk hook antigravity` only for noisy test, build, lint, container, and `git status`/`push`/`pull`/`fetch` runners (plus scoped internal spillover/completed task-log `cat`/`head`/`tail` reads), configurable via `AGY_RTK_MODE=pregate|off` (default `pregate`; `2>&1` and `2>/dev/null` stderr redirects pass through). Precision inspection commands (`find`, `grep`, `rg`, `ls`, `wc`, `diff`, `ps`, `git diff`/`show`/`log`, workspace `cat`/`head`/`tail`), pipes, stdout/file redirects, and machine-readable flags (`--json`, `--porcelain`, `git status -sb`, `-o json`, etc.) run natively and losslessly without spawning `rtk`.
 2. **Workspace file bounds & native discovery:** Native `grep_search`, `find_by_name`, and `list_dir` are allowed on workspace paths (while remaining blocked on `.system_generated/`, `getStateDir()`, and protected brain roots). For `read_file` / `view_file`: small files (`<= 300` lines and `<= 24 KiB`), safe workspace multimodal media (`.png`, `.jpg`, `.webp`, `.pdf`, audio/video), and Antigravity special files (`SKILL.md`, `AGENTS.md`, own brain artifacts, `swarm_view/`, `.gemini/config/`) pass without slice bounds; larger files accept bounded slices up to `300` lines (EOF-clamped via `1 MiB` newline scan, single-bound supported) or explicit full-file audits (`StartLine: 1, EndLine >= TotalLines`) when `<= 800` lines and `<= 45 KiB`. `read_many_files` and `ByteOffset`-only reads remain denied.
 3. **Step output spillovers:** `.system_generated/steps/<step>/output.txt` files are readable via bounded `read_file(StartLine, EndLine <= 150)` or a single unchained `rtk read <path>` command (`cat`, and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; explicit `--head-lines 150` / `--tail-lines 150` required above `45 KiB`). Cross-conversation spillovers, task logs, and brain artifacts are isolated under Parent Transcript Access Control.
 4. **Transcript and state protection:** Direct file or shell access (including via `multi_replace_file_content` or symlinks) to `.system_generated/logs/transcript*` and `getStateDir()` (`~/.local/state/agy-context-saver` on POSIX or `%LOCALAPPDATA%\agy-context-saver` on Windows) is blocked. Authorized sessions inspect transcripts via unchained `agy-context transcript` commands (`open` and `self-only` modes auto-inject `--id <convId>` when omitted or `current`).
@@ -70,8 +70,8 @@ agy-context transcript access --off
 # Restrict children to reading only their own conversation transcript (shorthand: self-only)
 agy-context transcript access --self-only
 
-# Allow Agy-Squad flat auditors via @roster* prefix globs while blocking other children
-agy-context transcript access --mode allowlist --allow @audit-squad*,@verifier
+# Allow designated reviewer workers via @roster* prefix globs while blocking other children
+agy-context transcript access --mode allowlist --allow @reviewer-*,@verifier
 
 # Deny specific workers or set a custom TTL in seconds
 agy-context transcript access --mode open --deny @worker* --ttl 1800
@@ -97,21 +97,21 @@ The lineage parser checks only the first non-empty line of the child's initial a
 | :---: | :--- | :--- |
 | **1** | **Policy Owner** | Parent session (`ownerId`) always has full read and policy mutation access |
 | **2** | **Explicit CLI `--deny`** | Denies matching `<convId>` or `@roster*` prefix glob immediately |
-| **3** | **Explicit CLI `--allow`** | Allows matching `<convId>` or `@roster*` prefix glob (such as `@audit-squad*`) |
+| **3** | **Explicit CLI `--allow`** | Allows matching `<convId>` or `@roster*` prefix glob (such as `@reviewer-*`) |
 | **4** | **First-Line Launch Directive** | Applies `[agy-transcript-access: deny \| self-only \| allow]` from child launch brief |
 | **5** | **Cohort Default Mode** | Applies base policy mode (`open`, `allowlist`, `self-only`, or `deny`) |
 
 ### 4. Stale-Lock Protection & Runtime Hardening
 
-- **1-hour TTL, immutable Tier 4 directives, and status visibility:** Parent CLI policies live under `policies[ownerId]` in `<stateDir>/transcript-access.json` with a 3600-second default TTL. Running `--on` / `--reset` clears the parent's `policies[ownerId]` overrides (Tiers 2, 3, and 5) without erasing Tier 4 `[agy-transcript-access: deny | self-only]` launch directives stored on child session files. Both `agy-context transcript access --status` and `agy-context status` preserve parent policy fields and append `launchRestrictions` disclosing recently active (`300s` window) launch-restricted child sessions alongside `policies[ownerId]`.
+- **1-hour TTL, immutable Tier 4 directives, and status visibility:** Parent CLI policies live under `policies[ownerId]` in `<stateDir>/transcript-access.json` with a 3600-second default TTL (expired per-conversation `agy-session-*.json` files are also automatically pruned past TTL). Running `--on` / `--reset` clears the parent's `policies[ownerId]` overrides (Tiers 2, 3, and 5) without erasing Tier 4 `[agy-transcript-access: deny | self-only]` launch directives stored on child session files. Both `agy-context transcript access --status` and `agy-context status` preserve parent policy fields and append `launchRestrictions` disclosing recently active (`300s` window) launch-restricted child sessions alongside `policies[ownerId]`.
 - **Top-level session bypass:** A root user conversation (`Step 0` is `USER_INPUT` without a `<SYSTEM_MESSAGE>` `sender=<parentConvId>` header) is never restricted by another session's policy.
-- **Single-use capability grants and `--file` containment:** When a restriction is active, `PreToolUse` writes a 10-second single-use atomic grant file under `<stateDir>/grants/` (`grant-*.json` for reads binding `callerConvId`, canonical `subcommand`, `targetConvId`, and `mode`; `mut-*.json` for policy mutations binding `callerConvId`). `lib/transcript-core.mjs` atomically claims (`renameSync`) and verifies all bound fields, unlinks the claimed grant upon resolution and on any subcommand-matched early error, and independently restricts `--file` to `<brainDir>/<callerConvId>` in `self-only` mode and `<brainDir>` under any active policy or launch restriction. These controls provide application-layer `PreToolUse` and CLI defense-in-depth rather than an OS-kernel sandbox.
-- **Child lifecycle and file protection:** Restricted children cannot run `setup`, `install`, `uninstall`, or `restore-backups`, and cannot modify `~/.gemini/config/plugins/agy-context-saver/`, `~/.gemini/config/scripts/execution-guard-hook.mjs`, `hooks.json`, or `<stateDir>/transcript-access.json`.
+- **Single-use capability grants and `--file` containment:** When a restriction is active, `PreToolUse` writes a 10-second single-use atomic grant file under `<stateDir>/grants/` (`grant-*.json` for reads binding `callerConvId`, canonical `subcommand`, `targetConvId`, and `mode`; `mut-*.json` for policy mutations binding `callerConvId`). `lib/access-policy.mjs` and `lib/transcript-core.mjs` atomically claim (`renameSync`) and verify all bound fields, unlink the claimed grant upon resolution and on any subcommand-matched early error, and independently restrict `--file` to `<brainDir>/<callerConvId>` in `self-only` mode and `<brainDir>` under any active policy or launch restriction (using shared symlink-following `lib/path-guards.mjs`). These controls provide application-layer `PreToolUse` and CLI defense-in-depth rather than an OS-kernel sandbox.
+- **Child lifecycle and file protection:** Restricted children cannot run `setup`, `install`, `uninstall`, or `restore-backups`, and cannot modify `~/.gemini/config/plugins/agy-context-saver/`, `~/.gemini/config/hooks.json`, or `<stateDir>/transcript-access.json`.
 
 ---
 
 ## Safety Invariants
 
-1. **Foreign configuration preservation:** Existing third-party hooks in `~/.gemini/config/hooks.json` and third-party MCP servers in `~/.gemini/config/mcp_config.json` remain untouched during setup and uninstall.
-2. **Timestamped backups:** Modifying global `hooks.json` or cleaning stale `agy-context-saver*` entries from `mcp_config.json` writes `.bak` backups first.
+1. **Foreign configuration preservation:** Existing third-party hooks in `~/.gemini/config/hooks.json` and third-party MCP servers in `~/.gemini/config/mcp_config.json` remain untouched during setup, uninstall, and backup restoration.
+2. **Namespaced, non-clobbering backups:** Modifying global `hooks.json` or cleaning stale `agy-context-saver*` entries from `mcp_config.json` writes namespaced backups (`hooks.json.agy-context-saver.bak` and `mcp_config.json.agy-context-saver.bak`) first; restores validate JSON before key-merging so other installed plugins' hooks and MCP servers are never overwritten.
 3. **Fail-closed on governed tools:** If an unexpected error occurs while evaluating a governed tool (`run_command`, `read_file`, `edit_file`, `write_file`, `manage_task`, `schedule`), the hook returns `decision: "deny"`.
