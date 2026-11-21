@@ -8,6 +8,7 @@ import {
   CircularRingBuffer,
   cleanMessageContent,
   extractConvId,
+  getCompiledRegex,
   readTranscript,
   queryTranscript,
   getStepDetail,
@@ -113,7 +114,7 @@ try {
     assert.ok(cleaned.includes("[Embedded Media/Binary Omitted]"), "data:image must be stripped");
     assert.ok(cleaned.includes("[Binary/Base64 Payload Omitted]"), "raw >=256 base64 must be stripped");
     assert.ok(cleaned.includes(sha256), "Hex SHA-256 must NOT be corrupted");
-    assert.ok(cleaned.includes("https://example.com/"), "URL tokens must NOT be treated as base64");
+    assert.ok(cleaned.includes(longUrlToken), "URL tokens must NOT be treated as base64");
     assert.ok(cleaned.includes("my_very_long_snake_case_identifier_"), "Long snake_case identifiers must NOT be stripped");
     assert.ok(cleaned.includes("Actual useful message survives!"));
 
@@ -3020,6 +3021,57 @@ try {
       "extractConvId must match mixed-case brain root on win32 (RUN-006)"
     );
     console.log("✓ RUN-005 (silent health --json with legacy RTK) and RUN-006 (darwin/win32 case folding) verified");
+  }
+
+  // --- CodeQL Security & Linear-Time Regressions (#1, #6, #9-#15) ---
+  console.log("\n--- 13. CodeQL Security & Linear-Time Regressions (#1, #6, #9-#15) ---");
+  {
+    // #9: data:image/...;base64,... stays linear-time on repeated `data:image/` runs
+    const evilDataImg = "data:image/".repeat(20_000) + "base64";
+    const tImg = performance.now();
+    cleanMessageContent(evilDataImg, 4000);
+    assert.ok(performance.now() - tImg < 200, "cleanMessageContent data:image stripping must stay linear-time");
+
+    // #10-#14: stripSummaryStepBoilerplate stays linear-time on spillover repeats and trailing newline runs
+    const spillPrefix =
+      "The tool's output was truncated due to being too long. You can find the full output in a file at file:///steps/0/output.txt";
+    const tSpill = performance.now();
+    stripSummaryStepBoilerplate(spillPrefix + "/steps/0/output.txt".repeat(20_000));
+    assert.ok(performance.now() - tSpill < 200, "stripSummaryStepBoilerplate spill banner must stay linear-time");
+
+    const tTrail = performance.now();
+    stripSummaryStepBoilerplate("\n".repeat(100) + "a", { stripWrappers: true });
+    assert.ok(performance.now() - tTrail < 50, "stripSummaryStepBoilerplate closing-tag stripping must not backtrack exponentially");
+    assert.equal(stripSummaryStepBoilerplate("<USER_REQUEST>\nHello\n\n</USER_REQUEST>\n", { stripWrappers: true }), "Hello");
+
+    // #6 & #15: sanitized export escapes `\` before `|` and summary query handles >50 consecutive `\n` in USER_INPUT linearly
+    const convCodeql = "conv-codeql-sec";
+    const codeqlLogs = path.join(brainDir, convCodeql, ".system_generated", "logs");
+    fs.mkdirSync(codeqlLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(codeqlLogs, "transcript.jsonl"),
+      [
+        JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "<USER_REQUEST>\n" + "\n".repeat(100) + "a\\|b" }),
+        JSON.stringify({ step_index: 1, type: "PLANNER_RESPONSE", content: "grep 'foo\\|bar' src/" })
+      ].join("\n") + "\n",
+      "utf-8"
+    );
+    const tQuery = performance.now();
+    const qRes = await queryTranscript({ conversationId: convCodeql, summaryOnly: true });
+    assert.ok(performance.now() - tQuery < 500, "queryTranscript USER_INPUT summary stripping must not backtrack exponentially");
+    assert.equal(qRes.isError, undefined);
+
+    const expRes = await exportSanitizedTranscript({ conversationIds: [convCodeql], sanitized: true });
+    assert.equal(expRes.isError, undefined);
+    assert.ok(expRes.text.includes("foo\\\\\\|bar"), `Sanitized table cell must escape backslashes before pipes: ${expRes.text}`);
+
+    // #1: overlong query patterns fall back to literal regex safely while normal regex queries keep working
+    const normalRx = getCompiledRegex("foo|bar");
+    assert.ok(normalRx.test("BAR"));
+    const hugeRx = getCompiledRegex("(a+)+".repeat(150));
+    assert.equal(hugeRx.test("aaaaaaaaaa"), false, "Overlong regex patterns must fall back to literal matching");
+    assert.equal(hugeRx.test("(a+)+".repeat(150)), true);
+    console.log("✓ CodeQL regressions (#1, #6, #9-#15) verified in linear time");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

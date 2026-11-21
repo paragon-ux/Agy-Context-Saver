@@ -52,10 +52,32 @@ export function resolveLocalRtkExecutable({
   return "rtk";
 }
 
-function quoteForCmd(arg) {
+export function quoteForCmd(arg) {
   const str = String(arg);
   if (!str) return '""';
-  return /[\s"&|<>^()%!]/.test(str) ? `"${str.replace(/"/g, '\\"')}"` : str;
+  if (!/[\s"&|<>^()%!]/.test(str)) return str;
+  let out = '"';
+  let pendingBackslashes = 0;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (ch === "\\") {
+      pendingBackslashes++;
+    } else if (ch === '"') {
+      out += "\\".repeat(pendingBackslashes * 2 + 1) + '"';
+      pendingBackslashes = 0;
+    } else {
+      if (pendingBackslashes > 0) {
+        out += "\\".repeat(pendingBackslashes);
+        pendingBackslashes = 0;
+      }
+      out += ch;
+    }
+  }
+  if (pendingBackslashes > 0) {
+    out += "\\".repeat(pendingBackslashes * 2);
+  }
+  out += '"';
+  return out;
 }
 
 export function runRtkPassthrough(args, options = {}) {

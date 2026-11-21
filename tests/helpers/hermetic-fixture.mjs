@@ -229,6 +229,34 @@ export function seedHermeticConversationFixture(profileDir, convId = HERMETIC_CO
 /**
  * Cross-platform helper to invoke `rtk` CLI in tests (supports both native binary and .cmd shim on Windows).
  */
+function quoteWinCmdArg(arg) {
+  const str = String(arg);
+  if (!str) return '""';
+  if (!/[\s"&|<>^()%!]/.test(str)) return str;
+  let out = '"';
+  let pendingBackslashes = 0;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (ch === "\\") {
+      pendingBackslashes++;
+    } else if (ch === '"') {
+      out += "\\".repeat(pendingBackslashes * 2 + 1) + '"';
+      pendingBackslashes = 0;
+    } else {
+      if (pendingBackslashes > 0) {
+        out += "\\".repeat(pendingBackslashes);
+        pendingBackslashes = 0;
+      }
+      out += ch;
+    }
+  }
+  if (pendingBackslashes > 0) {
+    out += "\\".repeat(pendingBackslashes * 2);
+  }
+  out += '"';
+  return out;
+}
+
 export function runRtkCli(args, options = {}) {
   const res = spawnSync("rtk", args, { encoding: "utf-8", ...options });
   if (process.platform === "win32" && res.error && (res.error.code === "ENOENT" || res.error.code === "EINVAL")) {
@@ -236,7 +264,7 @@ export function runRtkCli(args, options = {}) {
       process.env.ComSpec ||
       process.env.COMSPEC ||
       path.join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", "cmd.exe");
-    const quotedArgs = args.map((a) => (/\s|["&|<>^]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ");
+    const quotedArgs = args.map(quoteWinCmdArg).join(" ");
     return spawnSync(comspec, ["/d", "/s", "/c", `rtk ${quotedArgs}`], { encoding: "utf-8", ...options });
   }
   return res;

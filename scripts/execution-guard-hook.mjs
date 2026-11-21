@@ -1047,6 +1047,34 @@ function isTrustedLocalRtkLauncherPath(candidatePath) {
   return false;
 }
 
+function quoteWinCmdArg(arg) {
+  const str = String(arg);
+  if (!str) return '""';
+  if (!/[\s"&|<>^()%!]/.test(str)) return str;
+  let out = '"';
+  let pendingBackslashes = 0;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (ch === "\\") {
+      pendingBackslashes++;
+    } else if (ch === '"') {
+      out += "\\".repeat(pendingBackslashes * 2 + 1) + '"';
+      pendingBackslashes = 0;
+    } else {
+      if (pendingBackslashes > 0) {
+        out += "\\".repeat(pendingBackslashes);
+        pendingBackslashes = 0;
+      }
+      out += ch;
+    }
+  }
+  if (pendingBackslashes > 0) {
+    out += "\\".repeat(pendingBackslashes * 2);
+  }
+  out += '"';
+  return out;
+}
+
 function spawnRtk(bin, args, opts = {}) {
   if (!bin) return { error: Object.assign(new Error("ENOENT"), { code: "ENOENT" }), status: null, stdout: "", stderr: "" };
   const baseEnv = opts.env || process.env;
@@ -1061,7 +1089,7 @@ function spawnRtk(bin, args, opts = {}) {
       mergedEnv.COMSPEC ||
       path.join(mergedEnv.SystemRoot || mergedEnv.windir || "C:\\Windows", "System32", "cmd.exe");
     const quotedBin = /\s/.test(bin) ? `"${bin}"` : bin;
-    const quotedArgs = args.map((a) => (/\s|["&|<>^]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ");
+    const quotedArgs = args.map(quoteWinCmdArg).join(" ");
     return spawnSync(comspec, ["/d", "/s", "/c", `"${quotedBin} ${quotedArgs}"`], { ...spawnOpts, windowsVerbatimArguments: true });
   }
   return spawnSync(bin, args, spawnOpts);
@@ -4608,7 +4636,7 @@ function formatRtkPrefixForWrapperQuote(rtkPrefix, outerQuote, wrapperPrefix = "
     if (!rtkPrefix.includes("'")) {
       return rtkPrefix.replace(/"/g, "'");
     }
-    return rtkPrefix.replace(/"/g, '\\"');
+    return rtkPrefix.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   }
   if (outerQuote === "'") {
     return rtkPrefix.includes("'") ? rtkPrefix.replace(/'/g, "'\\''") : rtkPrefix;
@@ -5278,19 +5306,52 @@ try {
       "dd",
       "patch"
     ]);
+    const stripSedSlashAddresses = (input) => {
+      let out = "";
+      let i = 0;
+      let unclosed = false;
+      while (i < input.length) {
+        if (input[i] === "/" && !unclosed) {
+          let j = i + 1;
+          let closed = false;
+          while (j < input.length) {
+            if (input[j] === "\\") {
+              j += 2;
+              continue;
+            }
+            if (input[j] === "/") {
+              closed = true;
+              j++;
+              break;
+            }
+            j++;
+          }
+          if (closed) {
+            out += "/";
+            i = j;
+            continue;
+          }
+          unclosed = true;
+        }
+        out += input[i];
+        i++;
+      }
+      return out;
+    };
+
     const extractSedWriteTargets = (expr) => {
       if (!expr || typeof expr !== "string") return [];
       const found = [];
       // 1. Substitution commands with `w <file>` flag: `s/pat/rep/w file`
-      const substWriteRe = /s([^\s\\])(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[a-zA-Z0-9]*w\s+([^\s;'"]+)/g;
+      const substWriteRe = /s([^\s\\])(?:\\.|(?!\1)[^\\])*\1(?:\\.|(?!\1)[^\\])*\1[a-zA-Z0-9]*w\s+([^\s;'"]+)/g;
       let sm;
       while ((sm = substWriteRe.exec(expr)) !== null) {
         if (sm[2]) found.push(sm[2]);
       }
       // 2. Strip `s`/`y` bodies so words like `new foo` inside patterns never false-match, then find standalone `w <file>`
-      const stripped = expr
-        .replace(/[sy]([^\s\\])(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[a-zA-Z0-9]*/g, "")
-        .replace(/\/(?:\\.|[^/])*\//g, "/");
+      const stripped = stripSedSlashAddresses(
+        expr.replace(/[sy]([^\s\\])(?:\\.|(?!\1)[^\\])*\1(?:\\.|(?!\1)[^\\])*\1[a-zA-Z0-9]*/g, "")
+      );
       const cmdWriteRe = /(?:^|[;\n}\d$/!,])\s*w\s+([^\s;'"]+)/g;
       let cm;
       while ((cm = cmdWriteRe.exec(stripped)) !== null) {

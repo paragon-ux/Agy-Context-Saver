@@ -86,6 +86,34 @@ export function isDirectoryWritable(dirPath) {
   }
 }
 
+function quoteWinCmdArg(arg) {
+  const str = String(arg);
+  if (!str) return '""';
+  if (!/[\s"&|<>^()%!]/.test(str)) return str;
+  let out = '"';
+  let pendingBackslashes = 0;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (ch === "\\") {
+      pendingBackslashes++;
+    } else if (ch === '"') {
+      out += "\\".repeat(pendingBackslashes * 2 + 1) + '"';
+      pendingBackslashes = 0;
+    } else {
+      if (pendingBackslashes > 0) {
+        out += "\\".repeat(pendingBackslashes);
+        pendingBackslashes = 0;
+      }
+      out += ch;
+    }
+  }
+  if (pendingBackslashes > 0) {
+    out += "\\".repeat(pendingBackslashes * 2);
+  }
+  out += '"';
+  return out;
+}
+
 function runCmdShimSync(bin, args, platformExec = execFileSync) {
   if (/["\r\n]/.test(String(bin))) {
     throw new Error(`Unsafe command path: ${bin}`);
@@ -95,9 +123,7 @@ function runCmdShimSync(bin, args, platformExec = execFileSync) {
     process.env.COMSPEC ||
     path.join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", "cmd.exe");
   const quotedBin = /[\\/\s&|<>^()%!]/.test(bin) ? `"${bin}"` : bin;
-  const quotedArgs = args
-    .map((a) => (/\s|["&|<>^()%!]/.test(String(a)) ? `"${String(a).replace(/"/g, '\\"')}"` : String(a)))
-    .join(" ");
+  const quotedArgs = args.map(quoteWinCmdArg).join(" ");
   const cmdLine = quotedArgs ? `"${quotedBin} ${quotedArgs}"` : `"${quotedBin}"`;
   return platformExec(comspec, ["/d", "/s", "/c", cmdLine], {
     encoding: "utf-8",

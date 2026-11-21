@@ -3159,6 +3159,25 @@ console.log("\n--- Group K: Day-1 Launch Remediation Regressions (RUN-001, RUN-0
     }
     console.log("✓ RUN-004: Read-only sed/perl and cp sources allowed while in-place sed/perl and cp destinations stay guarded");
   }
+
+  // K.5: CodeQL #3 (Windows cmd backslash-before-quote escaping) & #16 (sed slash-address linear scanning)
+  {
+    const { quoteForCmd } = await import("../scripts/rtk-run.mjs");
+    assert.equal(quoteForCmd("--version"), "--version");
+    assert.equal(quoteForCmd("C:\\My Dir\\"), '"C:\\My Dir\\\\"');
+    assert.equal(quoteForCmd('a\\"b c'), '"a\\\\\\"b c"');
+    assert.equal(quoteForCmd("\\\\server\\share\\my file"), '"\\\\server\\share\\my file"');
+
+    // #16: unclosed sed slash address with many `\.` pairs must complete in linear time (was >25s at N=28)
+    const evilSed = `sed -n '/${"\\.".repeat(60)}' src/app.js`;
+    const tSed = performance.now();
+    const sedRes = runHook({
+      toolCall: { name: "run_command", args: { CommandLine: evilSed, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.ok(performance.now() - tSed < 2000, "PreToolUse hook must parse unclosed sed expressions in linear time");
+    assert.equal(sedRes.decision, "allow");
+    console.log("✓ CodeQL #3 (quoteForCmd CRT backslash escaping) and #16 (linear sed address scanner) verified");
+  }
 }
 
 hermetic.cleanup();
