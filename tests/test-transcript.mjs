@@ -3122,6 +3122,15 @@ try {
       consumeTranscriptAccessGrant({ subcommand: "query", targetConvId: t4Parent });
       const survivingRead = await readTranscript({ conversationId: t4Parent, lastTurns: 1 });
       assert.ok(!survivingRead.isError, "Mismatched subcommand error-path consume must not steal pending read grant (IND-SEC-004)");
+
+      // Boost Pass IND-SEC-004: internal lib/transcript-core.mjs error paths (export/step) must NOT steal a pending 'read' grant
+      recordTranscriptHookGrant({ callerConvId: t4Parent, subcommand: "read", targetConvId: t4Parent, mode: "open" });
+      const badExport = await exportSanitizedTranscript({ conversationIds: [t4Parent], sanitized: false });
+      assert.equal(badExport.isError, true);
+      const badStep = await getStepDetail({ conversationId: t4Parent, stepIndex: "not-a-step" });
+      assert.equal(badStep.isError, true);
+      const survivingRead2 = await readTranscript({ conversationId: t4Parent, lastTurns: 1 });
+      assert.ok(!survivingRead2.isError, "Internal export/step error paths must pass { subcommand } and never steal a pending read grant");
     } finally {
       if (prevEnvConv !== undefined) process.env.GEMINI_CONVERSATION_ID = prevEnvConv;
       try { fs.unlinkSync(t4ChildState); } catch {}
@@ -3129,7 +3138,24 @@ try {
     console.log("✓ IND-SEC-004: Tier 4 grant enforcement without GEMINI_CONVERSATION_ID & subcommand-bound grant cleanup verified");
   }
 
-  // --- Wave 2 PR13-RUN-001 & FRIC-RUN-004: Schedule Classifier Parity ---
+  // --- Boost Pass FRIC-SEC-001 SYNC-MIRROR: >512 KiB Step 0 USER_INPUT lineage classification ---
+  {
+    const hugeConv = "conv-boost-huge-step0";
+    const hugeLogs = path.join(tempHome, ".gemini", "antigravity", "brain", hugeConv, ".system_generated", "logs");
+    fs.mkdirSync(hugeLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(hugeLogs, "transcript.jsonl"),
+      JSON.stringify({ step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", content: "A".repeat(600000) }) + "\n",
+      "utf-8"
+    );
+    const listed = listTranscriptConversations({ limit: 50, includeLineage: true });
+    const found = listed.conversations.find((c) => c.conversationId === hugeConv);
+    assert.ok(found, "Huge Step 0 conversation must appear in listTranscriptConversations");
+    assert.equal(found.sessionKind, "top-level", ">512 KiB Step 0 USER_INPUT must classify as top-level (FRIC-SEC-001 SYNC-MIRROR)");
+    console.log("✓ Boost Pass FRIC-SEC-001 SYNC-MIRROR (>512 KiB Step 0 lineage) verified");
+  }
+
+  // --- Wave 2 + Boost Pass PR13-RUN-001, PR13-RUN-007 & FRIC-RUN-004: Schedule & Backoff Classifier Parity ---
   {
     assert.equal(
       isSwarmPollSchedule({ Prompt: "Check Agy-Squad tests on task-9", TimerCondition: "conv-1/task-9" }),
@@ -3142,11 +3168,36 @@ try {
       "Remote CI schedule must classify cleanly (FRIC-RUN-004)"
     );
     assert.equal(
+      isRemoteCiPollSchedule({ DurationSeconds: 60, Prompt: "Check status of Agy-Squad GitHub Actions CI workflow" }),
+      true,
+      "Agy-Squad GitHub Actions CI prompt must classify as remote CI (FRIC-RUN-004 Boost)"
+    );
+    assert.equal(
+      isSwarmPollSchedule({ DurationSeconds: 60, Prompt: "Check status of Agy-Squad GitHub Actions CI workflow" }),
+      false,
+      "Agy-Squad GitHub Actions CI prompt must not classify as swarm poll (FRIC-RUN-004 Boost)"
+    );
+    assert.equal(
+      isRemoteCiPollSchedule({ DurationSeconds: 60, Prompt: "Check on PR #14 build status" }),
+      true,
+      "PR #14 build status prompt must classify as remote CI"
+    );
+    assert.equal(
+      isRemoteCiPollSchedule({ DurationSeconds: 60, Prompt: "Check status of deployment job" }),
+      true,
+      "Deployment job status prompt must classify as remote CI"
+    );
+    assert.equal(
       isRemoteCiPollSchedule({ DurationSeconds: 45, Prompt: "Check background task-4 status", TimerCondition: "conv-1/task-4" }),
       false,
       "Local task watchdog must not classify as remote CI"
     );
-    console.log("✓ Wave 2 PR13-RUN-001 & FRIC-RUN-004 schedule classifier parity verified");
+    assert.equal(
+      extractTaskBackoffKey("manage_task", { TaskId: "2239" }),
+      "task-2239",
+      "Bare numeric TaskId '2239' must normalize to 'task-2239' (PR13-RUN-007)"
+    );
+    console.log("✓ Wave 2 + Boost Pass PR13-RUN-001, PR13-RUN-007 & FRIC-RUN-004 classifier parity verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

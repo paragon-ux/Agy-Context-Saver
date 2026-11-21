@@ -3616,7 +3616,7 @@ console.log("\n--- Group N: Wave 2 Narrow RTK Pre-Gate, 300L/24KiB read_file & E
       ["pytest tests/unit", /^rtk pytest\b/],
       ["cargo test --lib", /^rtk cargo test\b/],
       ["git -C /tmp/repo status", /^rtk git -C \/tmp\/repo status$/],
-      ["npm test", /^rtk npm test$/]
+      ["npm run test", /^rtk npm run test$/]
     ]) {
       const res = runHook({ toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } });
       assert.equal(res.decision, "allow");
@@ -3868,6 +3868,357 @@ console.log("\n--- Group O: Wave 3 Command-Position Precision, Gh Prose & Polish
   assert.match(alphaSched.reason, /task-build_1a/, "Alphanumeric task-* ID must be extracted from schedule prompt (PR13-RUN-007)");
 
   console.log("✓ PR13-RUN-003..007, FRIC-RUN-005..009 & IND-RUN-003 verified");
+}
+
+// ============================================================================
+// GROUP P: v2.1.2 Boost Pass Regressions (P1 Discovery Security, Pre-Gate Calibration,
+//          read_file Zero-Bounce, Remote CI Agy-Squad, Shell Prose & Atomic Locks)
+// ============================================================================
+console.log("\n--- Group P: v2.1.2 Boost Pass Regressions ---");
+{
+  const boostDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-boost-v212-"));
+  try {
+    // P.1: P1 Discovery Security (DirectoryPath/SearchDirectory + Ancestor Roots + Cross-Conv Isolation)
+    const pParent = "conv-boost-p1-parent";
+    const pChild = "conv-boost-p1-child";
+    const pParentDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", pParent);
+    const pChildDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", pChild);
+    fs.mkdirSync(path.join(pParentDir, ".system_generated", "logs"), { recursive: true });
+    fs.mkdirSync(path.join(pParentDir, "scratch"), { recursive: true });
+    fs.mkdirSync(path.join(pChildDir, ".system_generated", "logs"), { recursive: true });
+    fs.mkdirSync(path.join(pChildDir, "scratch"), { recursive: true });
+    fs.writeFileSync(path.join(pParentDir, ".system_generated", "logs", "transcript.jsonl"), JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "parent" }) + "\n");
+    fs.writeFileSync(path.join(pParentDir, "scratch", "secret.txt"), "parent-secret\n");
+    fs.writeFileSync(
+      path.join(pChildDir, ".system_generated", "logs", "transcript.jsonl"),
+      JSON.stringify({
+        step_index: 0,
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] sender=${pParent} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: deny]\nDo work`
+      }) + "\n"
+    );
+
+    const sysgenSym = path.join(boostDir, "link_to_sysgen_logs");
+    let createdSysSym = false;
+    try {
+      fs.symlinkSync(path.join(pParentDir, ".system_generated", "logs"), sysgenSym, process.platform === "win32" ? "junction" : "dir");
+      createdSysSym = true;
+    } catch {}
+    if (createdSysSym) {
+      assert.equal(
+        runHook({ conversationId: pParent, toolCall: { name: "list_dir", args: { DirectoryPath: sysgenSym } } }).decision,
+        "deny",
+        "list_dir(DirectoryPath=symlink->.system_generated/logs) must be denied (P1 SEC)"
+      );
+      assert.equal(
+        runHook({ conversationId: pParent, toolCall: { name: "find_by_name", args: { SearchDirectory: sysgenSym, Pattern: "*" } } }).decision,
+        "deny",
+        "find_by_name(SearchDirectory=symlink->.system_generated/logs) must be denied (P1 SEC)"
+      );
+    }
+
+    // Restricted child cannot enumerate parent scratch via DirectoryPath / SearchDirectory
+    assert.equal(
+      runHook({ conversationId: pChild, toolCall: { name: "list_dir", args: { DirectoryPath: path.join(pParentDir, "scratch") } } }).decision,
+      "deny",
+      "Restricted child list_dir(DirectoryPath=<parent>/scratch) must be denied (P1 SEC)"
+    );
+    assert.equal(
+      runHook({ conversationId: pChild, toolCall: { name: "find_by_name", args: { SearchDirectory: path.join(pParentDir, "scratch"), Pattern: "*" } } }).decision,
+      "deny",
+      "Restricted child find_by_name(SearchDirectory=<parent>/scratch) must be denied (P1 SEC)"
+    );
+    // Own scratch remains allowed
+    assert.equal(
+      runHook({ conversationId: pChild, toolCall: { name: "list_dir", args: { DirectoryPath: path.join(pChildDir, "scratch") } } }).decision,
+      "allow",
+      "Child list_dir on its own scratch dir must remain allowed"
+    );
+    // Ancestor-root protection on brainRoot, ~/.gemini/antigravity, stateDir, and recursive search on <convId>
+    const brainRoot = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain");
+    assert.equal(
+      runHook({ conversationId: pParent, toolCall: { name: "list_dir", args: { DirectoryPath: brainRoot } } }).decision,
+      "deny",
+      "list_dir on brain root must be denied"
+    );
+    assert.equal(
+      runHook({ conversationId: pParent, toolCall: { name: "find_by_name", args: { SearchDirectory: pParentDir, Pattern: "*.jsonl" } } }).decision,
+      "deny",
+      "Recursive find_by_name on <brain>/<convId> (contains .system_generated) must be denied"
+    );
+    assert.equal(
+      runHook({ conversationId: pParent, toolCall: { name: "grep_search", args: { SearchPath: path.dirname(stateDir), Query: "grant" } } }).decision,
+      "deny",
+      "Recursive grep_search on parent of getStateDir() must be denied"
+    );
+    // Normal workspace discovery passes cleanly
+    assert.equal(
+      runHook({ conversationId: pParent, toolCall: { name: "list_dir", args: { DirectoryPath: repoRoot } } }).decision,
+      "allow",
+      "Workspace list_dir(DirectoryPath=repoRoot) must be allowed"
+    );
+    assert.equal(
+      runHook({ conversationId: pParent, toolCall: { name: "find_by_name", args: { SearchDirectory: repoRoot, Pattern: "*.mjs" } } }).decision,
+      "allow",
+      "Workspace find_by_name(SearchDirectory=repoRoot) must be allowed"
+    );
+
+    // P.2: P2 RUN - uv run rtk local-prefix substitution & AGY_RTK_MODE=off spillover parity
+    const uvProfile = path.join(boostDir, "uv-profile");
+    const uvEmptyBin = path.join(boostDir, "uv-empty-bin");
+    const uvPluginBin = path.join(uvProfile, ".gemini", "config", "plugins", "agy-context-saver", "bin");
+    const uvPluginScripts = path.join(uvProfile, ".gemini", "config", "plugins", "agy-context-saver", "scripts");
+    fs.mkdirSync(uvEmptyBin, { recursive: true });
+    fs.mkdirSync(uvPluginBin, { recursive: true });
+    fs.mkdirSync(uvPluginScripts, { recursive: true });
+    fs.copyFileSync(path.resolve(path.dirname(hookScript), "rtk-run.mjs"), path.join(uvPluginScripts, "rtk-run.mjs"));
+    createRtkShim(uvPluginBin, "1.1.0");
+    const uvOffPathEnv = withEnvPath(uvEmptyBin, { ...process.env, AGY_TEST_PROFILE_DIR: uvProfile });
+    const uvRunRes = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: "uv run pytest tests/", WaitMsBeforeAsync: 5000 } } },
+      uvOffPathEnv
+    );
+    assert.equal(uvRunRes.decision, "allow");
+    const uvCmd = uvRunRes.overwrite?.CommandLine || "";
+    assert.match(uvCmd, /^uv run /, "uv run pytest must keep leading uv run");
+    assert.equal(/^uv run rtk\b/.test(uvCmd), false, `Off-PATH plugin-local uv run must substitute local rtkPrefix, got: ${uvCmd}`);
+    assert.match(uvCmd, /(?:bin\/rtk|rtk-run\.mjs).*pytest/, `Off-PATH uv run must reference local rtk binary/launcher, got: ${uvCmd}`);
+
+    const offSpillRes = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: "cat .system_generated/steps/1/output.txt", WaitMsBeforeAsync: 5000 } } },
+      { ...process.env, AGY_RTK_MODE: "off" }
+    );
+    assert.equal(offSpillRes.decision, "allow", `AGY_RTK_MODE=off must preserve spillover cat -> rtk read parity (${offSpillRes.reason || ""})`);
+    assert.match(offSpillRes.overwrite?.CommandLine || "", /\bread\s+\.system_generated\/steps\/1\/output\.txt/);
+
+    // P.3: Pre-Gate calibration (stderr redirects, python -m, narrowed npm/uv/docker compose, 10+ machine flags)
+    for (const [cmd, expectedRe] of [
+      ["pytest tests/ 2>&1", /^rtk pytest tests\/ 2>&1$/],
+      ["pytest tests/ 2>/dev/null", /^rtk pytest tests\/ 2>\/dev\/null$/],
+      ["python3 -m pytest tests/", /^rtk pytest tests\/$/],
+      ["python -m mypy src/", /^rtk mypy src\/$/],
+      ["npm run test:unit", /^rtk npm run test:unit$/],
+      ["pnpm run build", /^rtk pnpm run build$/],
+      ["docker compose ps", /^rtk docker compose ps$/]
+    ]) {
+      const res = runHook({ toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } });
+      assert.equal(res.decision, "allow");
+      assert.match(res.overwrite?.CommandLine || "", expectedRe, `Calibrated Pre-Gate must delegate '${cmd}', got: ${res.overwrite?.CommandLine}`);
+    }
+    for (const skipCmd of [
+      "npm test",
+      "npm run preflight",
+      "npm run verify:package",
+      "yarn test",
+      "uv run python script.py",
+      "docker compose up -d",
+      "pytest tests/ > /tmp/out.txt 2>&1",
+      "git status -sb",
+      "go test -json ./...",
+      "go vet -json ./...",
+      "cargo build --message-format=json",
+      "kubectl get pods -o=json",
+      "kubectl get pods -oname",
+      "docker ps -q",
+      "docker ps -aq",
+      "eslint --format json src/",
+      "ruff check --output-format json src/",
+      "vitest run --reporter=json",
+      "pip list --format json",
+      "mypy --output json src/"
+    ]) {
+      const res = runHook({ toolCall: { name: "run_command", args: { CommandLine: skipCmd, WaitMsBeforeAsync: 5000 } } });
+      assert.equal(res.decision, "allow");
+      assert.equal(res.overwrite?.CommandLine, undefined, `Calibrated Pre-Gate must leave '${skipCmd}' untouched, got: ${res.overwrite?.CommandLine}`);
+    }
+
+    // P.4: read_file zero-bounce (~ expansion, 1 MiB EOF-clamping, single-bound, ENOENT, symmetrical COMPLETED task log)
+    const tildeSmallRel = path.join(hermetic.profileDir, "tilde-small.txt");
+    fs.writeFileSync(tildeSmallRel, "line1\nline2\n", "utf-8");
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: "~/tilde-small.txt" } } }).decision,
+      "allow",
+      "Small tilde-path file must auto-allow via expandLeadingTilde in getFileMetrics"
+    );
+
+    const large120k = path.join(boostDir, "large-2000.js");
+    fs.writeFileSync(large120k, Array.from({ length: 2000 }, (_, i) => `const line_${i + 1} = "${"x".repeat(50)}";`).join("\n") + "\n", "utf-8");
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: large120k, StartLine: 1850, EndLine: 2200 } } }).decision,
+      "allow",
+      "EOF-clamped slice on >45 KiB (<= 1 MiB) file (2000-1850+1 = 151 <= 300) must allow"
+    );
+    const largeOversizedDeny = runHook({ toolCall: { name: "read_file", args: { Path: large120k, StartLine: 1, EndLine: 600 } } });
+    assert.equal(largeOversizedDeny.decision, "deny");
+    assert.match(largeOversizedDeny.reason, /2000 lines, .* KiB > 45 KiB/, "Oversized slice on >45 KiB file must include exact TotalLines");
+    // Single-bound EndLine-only and StartLine-only
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: large120k, EndLine: 150 } } }).decision,
+      "allow",
+      "Single-bound EndLine=150 (<= 300) must allow"
+    );
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: large120k, StartLine: 1850 } } }).decision,
+      "allow",
+      "Single-bound StartLine=1850 with 151 remaining lines (<= 300) must allow"
+    );
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: large120k, StartLine: 1 } } }).decision,
+      "deny",
+      "Single-bound StartLine=1 on 2000-line file must deny"
+    );
+    // Non-existent workspace file passes through to native ENOENT; dangling symlink into .system_generated stays denied
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: path.join(boostDir, "NO_SUCH_FILE_BOOST.md") } } }).decision,
+      "allow",
+      "Non-existent workspace file must pass through to native ENOENT after Checks 2c/2d"
+    );
+    const danglingSysLink = path.join(boostDir, "dangling-sys.log");
+    let createdDangling = false;
+    try {
+      fs.symlinkSync(path.join(pParentDir, ".system_generated", "logs", "does-not-exist.jsonl"), danglingSysLink);
+      createdDangling = true;
+    } catch {}
+    if (createdDangling) {
+      assert.equal(
+        runHook({ toolCall: { name: "read_file", args: { Path: danglingSysLink } } }).decision,
+        "deny",
+        "Dangling symlink into .system_generated must remain denied"
+      );
+    }
+    // Symmetrical COMPLETED task-log bounded read_file (<= 150L) allowed even with RTK installed
+    const compConv = "conv-boost-comp-task";
+    const compSys = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", compConv, ".system_generated");
+    fs.mkdirSync(path.join(compSys, "logs"), { recursive: true });
+    fs.mkdirSync(path.join(compSys, "tasks"), { recursive: true });
+    const compLog = path.join(compSys, "tasks", "task-done-boost.log");
+    fs.writeFileSync(compLog, "line1\nline2\n");
+    fs.writeFileSync(
+      path.join(compSys, "logs", "transcript.jsonl"),
+      [
+        JSON.stringify({ step_index: 1, content: `Tool is running as a background task with task id: ${compConv}/task-done-boost\nTask logs: tasks/task-done-boost.log` }),
+        JSON.stringify({ step_index: 2, content: `Task id "${compConv}/task-done-boost" finished with result:\nOK` })
+      ].join("\n") + "\n"
+    );
+    assert.equal(
+      runHook({ conversationId: compConv, toolCall: { name: "read_file", args: { Path: compLog, StartLine: 1, EndLine: 150 } } }).decision,
+      "allow",
+      "Bounded read_file (<= 150L) on COMPLETED task log must allow symmetrically with spillovers"
+    );
+    assert.equal(
+      runHook({ conversationId: compConv, toolCall: { name: "read_file", args: { Path: compLog } } }).decision,
+      "deny",
+      "Unbounded read_file on COMPLETED task log must remain denied"
+    );
+
+    // P.5: Remote CI Agy-Squad collision, per-PR buckets & shell prose precision
+    const ciBoostConv = "conv-boost-ci-squad";
+    const agySquadCi = runHook({
+      conversationId: ciBoostConv,
+      toolCall: { name: "schedule", args: { DurationSeconds: 60, Prompt: "Check status of Agy-Squad GitHub Actions CI workflow" } }
+    });
+    assert.equal(agySquadCi.decision, "allow", "Agy-Squad GitHub Actions CI schedule must not be blocked as a /swarm poll");
+    const pr14Ci = runHook({
+      conversationId: ciBoostConv,
+      toolCall: { name: "schedule", args: { DurationSeconds: 30, Prompt: "Check on PR #14 build status" } }
+    });
+    assert.equal(pr14Ci.decision, "allow", "PR #14 build status must classify as remote CI");
+    const pr15Ci = runHook({
+      conversationId: ciBoostConv,
+      toolCall: { name: "schedule", args: { DurationSeconds: 30, Prompt: "Check on PR #15 build status" } }
+    });
+    assert.equal(pr15Ci.decision, "allow", "PR #15 gets its own remote-ci:pr-15 bucket without inheriting PR #14 backoff");
+    assert.equal(pr15Ci.overwrite, undefined, "PR #15 first check at 30s must not clamp to 75s from PR #14");
+    assert.equal(
+      runHook({ conversationId: ciBoostConv, toolCall: { name: "schedule", args: { DurationSeconds: 60, Prompt: "Check status of deployment job" } } }).decision,
+      "allow",
+      "Deployment job status must classify as remote CI"
+    );
+    assert.equal(
+      runHook({ conversationId: ciBoostConv, toolCall: { name: "schedule", args: { DurationSeconds: 60, Prompt: "Poll swarm board for worker status" } } }).decision,
+      "deny",
+      "Actual swarm board polling must remain denied"
+    );
+
+    // Shell prose & command-position mutation precision
+    for (const allowedBoostCmd of [
+      'git log --grep=".system_generated" -n 5',
+      'git log -S "agy-context transcript" --oneline',
+      'gh -R paragon-ux/Agy-Context-Saver pr create --title "Fix .system_generated" --body "Uses agy-context transcript read"',
+      'gh pr close 14 -c "Verified via agy-context transcript health"',
+      `node -e "console.log('use agy-context transcript read')"`,
+      'git -C ~/.gemini/config/plugins/agy-context-saver log --grep="rm" -n 3'
+    ]) {
+      const res = runHook({ toolCall: { name: "run_command", args: { CommandLine: allowedBoostCmd, WaitMsBeforeAsync: 5000 } } });
+      assert.equal(res.decision, "allow", `Benign shell prose / read-only git must be allowed: ${allowedBoostCmd} (${res.reason || ""})`);
+    }
+    for (const deniedBoostMut of [
+      "ln -s /home/u/.gemini/config ./cfg-link",
+      "mv $HOME/.gemini/config/scripts /tmp/bak",
+      'node -e "execSync(\'agy-context transcript read\')"'
+    ]) {
+      const res = runHook({ toolCall: { name: "run_command", args: { CommandLine: deniedBoostMut, WaitMsBeforeAsync: 5000 } } });
+      assert.equal(res.decision, "deny", `Protected mutation / exec smuggling must stay denied: ${deniedBoostMut}`);
+    }
+
+    // P.6: Stateless run_command skip, PR13-RUN-004 Check #1 wording, PR13-RUN-007 bare numeric TaskId, PR13-RUN-008 auto-canceled timer
+    const statelessRunConv = "conv-boost-stateless-run";
+    const statelessRunFile = path.join(stateDir, `agy-session-${statelessRunConv}.json`);
+    try { fs.unlinkSync(statelessRunFile); } catch {}
+    const statelessRunRes = runHook({
+      conversationId: statelessRunConv,
+      toolCall: { name: "run_command", args: { CommandLine: "echo boost-ok", WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(statelessRunRes.decision, "allow");
+    assert.equal(fs.existsSync(statelessRunFile), false, "Truly stateless run_command allow must skip session JSON disk write");
+
+    // PR13-RUN-004 Check #1 wording on untouched RUNNING task & PR13-RUN-007 bare numeric TaskId symmetry
+    const runTaskConv = "conv-boost-run-pr13";
+    const runTaskSys = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", runTaskConv, ".system_generated");
+    fs.mkdirSync(path.join(runTaskSys, "logs"), { recursive: true });
+    fs.mkdirSync(path.join(runTaskSys, "tasks"), { recursive: true });
+    fs.writeFileSync(path.join(runTaskSys, "tasks", "task-2239.log"), "running...\n");
+    fs.writeFileSync(
+      path.join(runTaskSys, "logs", "transcript.jsonl"),
+      [
+        JSON.stringify({ step_index: 1, content: `Tool is running as a background task with task id: ${runTaskConv}/task-2239\nTask logs: tasks/task-2239.log` }),
+        JSON.stringify({ step_index: 2, content: `Tool is running as a background task with task id: ${runTaskConv}/task-parent-1\nTask logs: tasks/task-parent-1.log` }),
+        JSON.stringify({ step_index: 3, content: `Tool is running as a background task with task id: ${runTaskConv}/task-timer-9\nTask Description: Timer: 45s (TimerCondition: ${runTaskConv}/task-parent-1)` }),
+        JSON.stringify({ step_index: 4, content: `Task id "${runTaskConv}/task-parent-1" finished with result:\nDone` })
+      ].join("\n") + "\n"
+    );
+    const check1RunDeny = runHook({
+      conversationId: runTaskConv,
+      toolCall: { name: "run_command", args: { CommandLine: "rtk read tasks/task-2239.log", WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(check1RunDeny.decision, "deny");
+    assert.equal(check1RunDeny.reason.includes("Diagnostic check #1 requires at least 30s elapsed"), false, "Untouched RUNNING task denial must not claim Check #1 requires 30s (PR13-RUN-004)");
+    assert.match(check1RunDeny.reason, /Check #1 \(immediate, 0s\)/i);
+
+    // Bare numeric TaskId "2239" must normalize to "task-2239" bucket (PR13-RUN-007)
+    const bareManageRes = runHook({
+      conversationId: runTaskConv,
+      toolCall: { name: "manage_task", args: { Action: "status", TaskId: "2239" } }
+    });
+    assert.equal(bareManageRes.decision, "allow");
+    const runTaskSess = JSON.parse(fs.readFileSync(path.join(stateDir, `agy-session-${runTaskConv}.json`), "utf-8"));
+    assert.ok(runTaskSess.taskBackoff["task-2239"], "Bare numeric TaskId '2239' must normalize to 'task-2239' bucket (PR13-RUN-007)");
+    assert.equal(runTaskSess.taskBackoff["2239"], undefined, "Bare numeric TaskId '2239' must not create a separate '2239' bucket");
+
+    // PR13-RUN-008: Auto-canceled one-shot timer (task-timer-9 watching finished task-parent-1) pruned as COMPLETED
+    runTaskSess.taskBackoff["task-timer-9"] = { pollCount: 3, lastPollTime: Date.now() - 1000, denials: 0, lastSeenTime: Date.now() - 1000 };
+    fs.writeFileSync(path.join(stateDir, `agy-session-${runTaskConv}.json`), JSON.stringify(runTaskSess));
+    runHook({
+      conversationId: runTaskConv,
+      toolCall: { name: "manage_task", args: { Action: "status", TaskId: "task-fresh-after-timer" } }
+    });
+    const prunedSess = JSON.parse(fs.readFileSync(path.join(stateDir, `agy-session-${runTaskConv}.json`), "utf-8"));
+    assert.equal(prunedSess.taskBackoff["task-timer-9"], undefined, "Auto-canceled conditioned timer must be pruned as COMPLETED (PR13-RUN-008)");
+
+    console.log("✓ Group P: All v2.1.2 Boost Pass security, Pre-Gate, read_file, remote CI, prose & atomicity regressions verified");
+  } finally {
+    fs.rmSync(boostDir, { recursive: true, force: true });
+  }
 }
 
 hermetic.cleanup();

@@ -66,7 +66,18 @@ function rewriteSingleSegment(seg) {
   if (m) return envPrefix + "rtk read " + m[4] + " --tail-lines " + (m[1] || m[2] || m[3]);
   m = body.match(/^(?:rg|grep|select-string)\\s+([\\s\\S]+)$/i);
   if (m) return envPrefix + (/^rg\\b/i.test(body) ? "rtk rg " : "rtk grep ") + m[1].trim();
-  if (/^(?:git|pytest|cargo|vitest|jest|tsc|eslint|ruff|find|ls|wc|diff|ps)\\b/i.test(body) || /^npm\\s+(?:test|run\\s+test)\\b/i.test(body)) {
+  m = body.match(/^uv\\s+run\\s+((?:pytest|ruff|mypy|ty)\\b[\\s\\S]*)$/i);
+  if (m) return envPrefix + "uv run rtk " + m[1].trim();
+  m = body.match(/^uv\\s+run\\s+python3?\\s+-m\\s+(pytest|mypy)(?:\\s+([\\s\\S]*))?$/i);
+  if (m) return envPrefix + "uv run rtk " + m[1] + (m[2] ? " " + m[2].trim() : "");
+  m = body.match(/^python3?\\s+-m\\s+(pytest|mypy)(?:\\s+([\\s\\S]*))?$/i);
+  if (m) return envPrefix + "rtk " + m[1] + (m[2] ? " " + m[2].trim() : "");
+  if (
+    /^(?:git|pytest|cargo|go|vitest|jest|tsc|eslint|ruff|mypy|ty|docker|kubectl|oc|pip3?|find|ls|wc|diff|ps)\\b/i.test(body) ||
+    /^npm\\s+(?:run|lint)\\b/i.test(body) ||
+    /^pnpm\\s+(?:run|install|i|outdated|lint|tsc|list)\\b/i.test(body) ||
+    /^bun\\s+(?:test|run|build|install|add)\\b/i.test(body)
+  ) {
     return envPrefix + "rtk " + body;
   }
   return t;

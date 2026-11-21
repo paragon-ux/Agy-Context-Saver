@@ -4,27 +4,37 @@
  * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.1.2)
  *
  * Closed Execution Topology & Governance Invariants:
- * 1. RTK Transparent Command Optimization:
- *    - Delegates command rewriting to `rtk hook antigravity` (>= 1.1.0) via stdin JSON.
- *    - Reverts lossy `rtk wc` / `rtk ls` / `rtk diff` rewrites unless explicitly requested.
- *    - Never emits `rtk rg` when `rg` is absent on PATH (maps safe invocations to `rtk grep`
- *      with explicit path, or strips `rtk ` when rg-only flags are used).
+ * 1. Narrow High-ROI RTK Pre-Gate (`AGY_RTK_MODE=pregate|off|all`, default `pregate`):
+ *    - Delegates only high-ROI noisy test/build/lint/container/git-sync commands to
+ *      `rtk hook antigravity` (>= 1.1.0), leaving precision inspection tools (`find`, `grep`,
+ *      `rg`, `ls`, `wc`, `diff`, `ps`, `git diff`/`show`/`log`, workspace `cat`/`head`/`tail`),
+ *      pipelines, stdout/file redirects, and machine-readable outputs untouched and lossless.
+ *    - Defensively reverts lossy implicit rewrites under `AGY_RTK_MODE=all` and preserves
+ *      explicit `rtk ...` + scoped spillover/completed task-log `rtk read` parity.
+ *    - Never emits `rtk rg` when `rg` is absent on PATH and rewrites off-PATH local `rtk`
+ *      (including `uv run rtk ...`) to the local binary / `rtk-run.mjs` launcher.
  *    - Sets WaitMsBeforeAsync=10000 only when `!isDaemon && waitMs === undefined`.
- * 2. Hard-Routed Native File/Search Inspection (LH-07):
- *    - read_file & view_file -> Symmetrical Safe Harbor + Hybrid Slice (<= 150 lines, or
- *      explicit full-file StartLine=1..EndLine=TotalLines when <= 800 lines & <= 45 KiB);
- *      bounded read_file (<= 150 lines) allowed on `.system_generated/steps/<n>/output.txt`.
- *    - read_many_files, grep_search, find_by_name, list_dir -> Hard-routed to RTK CLI.
+ * 2. Native File & Discovery Governance (LH-07):
+ *    - `read_file` & `view_file` -> Unified `300L / 24 KiB` omitted-bound auto-allow,
+ *      `<= 300`-line slices (EOF-clamped via `1 MiB` newline scan + single-bound support),
+ *      `<= 800L / 45 KiB` explicit full-file audits, safe workspace multimodal media exempt,
+ *      and symmetrical `<= 150`-line slices on step spillovers & `COMPLETED` task logs.
+ *    - `grep_search`, `find_by_name`, `list_dir` -> Unblocked on workspace paths after
+ *      canonicalized internal-state, ancestor-root, and cross-conversation checks (`2c`/`2d`).
+ *    - `read_many_files` -> Denied to prevent unbounded multi-file context dumps.
  * 3. Root-Based Antigravity Internal State Protection (LH-02):
  *    - Quote/heredoc-aware shell parser (`splitShellSegments`) protects `.system_generated/`
- *      without false-blocking heredoc prose, `echo`/`printf`, or literal search patterns.
+ *      and `getStateDir()` without false-blocking heredoc prose, `echo`/`printf`, `git commit`/`tag`/`log --grep`,
+ *      `gh` body/title/notes/field prose, or literal search patterns.
  *    - Allows strictly single unchained `rtk read <spillover|completed task log>` and
  *      `agy-context transcript (read|query|step|health|list|export|access) ...` within `<brainDir>`.
  * 4. Closed Lifecycle Governance (LH-03, LH-04, LH-05, LH-06):
- *    - Session-wide ledger with proportional backoff and 5-denial `force_ask` circuit breaker.
- * 5. Benchmark & Evaluator Mutation Protection (LH-09):
- *    - Requires user approval (`force_ask`) for `edit_file`, `write_file`,
- *      `replace_file_content`, `write_to_file`, and destructive shell commands.
+ *    - Session-wide ledger with per-task exponential backoff (`0s -> 30s -> 75s -> 188s -> 469s -> 600s`),
+ *      remote CI backoff (`PR`/`workflow`-scoped), `wx`-locked dual-hook deduplication, and 5-denial `force_ask` circuit breaker.
+ * 5. Benchmark & Governance Mutation Protection (LH-09):
+ *    - Blocks direct mutations of installed hooks/shims and requires user approval (`force_ask`)
+ *      for `edit_file`, `write_file`, `replace_file_content`, `multi_replace_file_content`,
+ *      `write_to_file`, and destructive shell commands targeting protected benchmark artifacts.
  * 6. Fail-Closed on Governed Operations (LH-10).
  */
 
@@ -53,7 +63,9 @@ const MAX_SMALL_AUTO_ALLOW_LINES = 300;
 const MAX_SMALL_AUTO_ALLOW_BYTES = 24 * 1024; // 24 KiB omitted-bound auto-allow cap
 const MAX_SPILLOVER_SLICE_LINES = 150;
 const MAX_FULL_FILE_LINES = 800;
-const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes)
+const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes) full-file audit ceiling
+const MAX_LINE_COUNT_SCAN_BYTES = 1024 * 1024; // 1 MiB fast newline scan for EOF-clamping & exact TotalLines
+const REMOTE_CI_BUCKET_TTL_MS = 15 * 60 * 1000; // 15-minute idle decay for remote CI backoff buckets
 const SAFE_MULTIMODAL_MEDIA_RE = /\.(?:png|jpe?g|gif|webp|bmp|ico|pdf|mp3|wav|ogg|flac|m4a|mp4|webm|mov)$/i;
 const STATELESS_READ_TOOLS = new Set(["read_file", "view_file", "grep_search", "find_by_name", "list_dir"]);
 const HOOK_SURFACE = (() => {
@@ -80,6 +92,7 @@ function acquireSessionLock(convId) {
   ensureStateDir();
   const safeId = String(convId).replace(/[^a-zA-Z0-9_-]/g, "_");
   const lockPath = path.join(getStateDir(), `agy-session-${safeId}.lock`);
+  if (activeSessionLockPath === lockPath) return true;
   const deadline = Date.now() + SESSION_LOCK_WAIT_MS;
   while (true) {
     try {
@@ -102,6 +115,39 @@ function acquireSessionLock(convId) {
       if (Date.now() >= deadline) return false;
       try { Atomics.wait(SLEEP_WAIT_ARR, 0, 0, 15); } catch { return false; }
     }
+  }
+}
+
+function findMatchingRecentHookCall(session, ctx, now = Date.now()) {
+  if (!session || !ctx) return null;
+  const recent = Array.isArray(session.recentHookCalls) ? session.recentHookCalls : [];
+  return (
+    recent.find((e) => {
+      if (!e || typeof e.ts !== "number" || (now - e.ts) >= HOOK_DEDUP_TTL_MS) return false;
+      if (ctx.callId && e.callId && e.callId === ctx.callId) return true;
+      const argMatch = ctx.rawSig === e.rawSig || ctx.rawSig === e.outSig;
+      if (!argMatch || e.toolName !== ctx.toolName) return false;
+      if (ctx.stepIdx !== undefined && ctx.stepIdx !== null && e.stepIdx === ctx.stepIdx) return true;
+      if (ctx.scriptPath && e.scriptPath && e.scriptPath !== ctx.scriptPath && (now - e.ts) < HOOK_SAME_ARG_CROSS_SCRIPT_MS) {
+        return true;
+      }
+      return false;
+    }) || null
+  );
+}
+
+function replayMatchedHookCallIfAny(convId) {
+  if (!dedupRecordCtx || !convId || convId === "global" || dedupRecordCtx.convId !== convId) return;
+  const prevState = getSessionState(convId);
+  const matchedCall = findMatchingRecentHookCall(prevState, dedupRecordCtx, Date.now());
+  if (matchedCall && matchedCall.response) {
+    const replay =
+      dedupRecordCtx.rawSig === matchedCall.outSig &&
+      matchedCall.rawSig !== matchedCall.outSig &&
+      matchedCall.response.decision === "allow"
+        ? { decision: "allow" }
+        : matchedCall.response;
+    respond(replay, { skipDedupRecord: true });
   }
 }
 
@@ -304,17 +350,105 @@ function matchesRawProtectedInternalState(targetPath) {
   return false;
 }
 
+function hasNonCanonicalAgyTranscriptInvocation(text, depth = 0) {
+  if (!text || typeof text !== "string" || depth > 4) return false;
+  if (!/agy-context(?:-saver)?/i.test(text) || !/\btranscript\b/i.test(text)) return false;
+
+  // Catch interpreter spawn/exec calls invoking `agy-context transcript` from inline code or scripts
+  if (
+    /\b(?:exec|execSync|execFile|execFileSync|spawn|spawnSync|popen|system|subprocess)\b[^\n;]{0,240}\bagy-context(?:-saver)?(?:\.(?:m?js|cmd|exe|bat))?[\s'",\]]+transcript\b/i.test(
+      text
+    )
+  ) {
+    return true;
+  }
+
+  const segs = splitShellSegments(text);
+  for (const seg of segs) {
+    const trimmed = String(seg.text || "").trim();
+    if (!trimmed) continue;
+
+    // Inspect embedded subshells `$(...)` / backticks recursively
+    for (const sub of seg.subshells || []) {
+      if (hasNonCanonicalAgyTranscriptInvocation(sub, depth + 1)) return true;
+    }
+
+    // Unwrap shell wrappers (`bash -c "..."`, `sh -c "..."`, `cmd /c "..."`)
+    const wrap = unwrapShellWrapper(trimmed);
+    if (wrap && wrap.inner) {
+      if (hasNonCanonicalAgyTranscriptInvocation(wrap.inner, depth + 1)) return true;
+    }
+
+    const { body } = splitEnvPrefix(trimmed);
+    const tokens = tokenizeShellWordsDetailed(body || trimmed);
+    if (tokens.length < 2) continue;
+
+    let idx = 0;
+    while (idx < tokens.length) {
+      const val = tokens[idx].value;
+      const cmd = normalizeCmdName(val);
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx].raw)) {
+        idx++;
+        continue;
+      }
+      if (cmd === "env" || cmd === "sudo" || cmd === "command" || cmd === "exec" || cmd === "nohup") {
+        idx++;
+        while (idx < tokens.length && tokens[idx].value.startsWith("-")) idx++;
+        continue;
+      }
+      if (cmd === "timeout") {
+        idx++;
+        while (idx < tokens.length && tokens[idx].value.startsWith("-")) idx++;
+        if (idx < tokens.length) idx++; // skip duration
+        continue;
+      }
+      if (cmd === "xargs") {
+        idx++;
+        while (idx < tokens.length && tokens[idx].value.startsWith("-")) {
+          const fl = tokens[idx].value;
+          idx++;
+          if ((fl === "-I" || fl === "-n" || fl === "-L" || fl === "-P" || fl === "-d") && idx < tokens.length) idx++;
+        }
+        continue;
+      }
+      break;
+    }
+    if (idx >= tokens.length) continue;
+
+    let cmdTok = tokens[idx].value;
+    let cmdName = normalizeCmdName(cmdTok);
+    let afterCmdIdx = idx + 1;
+    if (cmdName === "node" && afterCmdIdx < tokens.length) {
+      while (afterCmdIdx < tokens.length && tokens[afterCmdIdx].value.startsWith("-")) afterCmdIdx++;
+      if (afterCmdIdx < tokens.length) {
+        cmdTok = tokens[afterCmdIdx].value;
+        cmdName = normalizeCmdName(cmdTok);
+        afterCmdIdx++;
+      }
+    }
+
+    const isAgyCli =
+      cmdName === "agy-context" ||
+      cmdName === "agy-context-saver" ||
+      /(?:^|[\/\\])agy-context(?:-saver)?(?:\.(?:m?js|cmd|exe|bat))?$/i.test(cmdTok);
+    if (!isAgyCli) continue;
+
+    let subIdx = afterCmdIdx;
+    while (subIdx < tokens.length && tokens[subIdx].value.startsWith("-")) subIdx++;
+    if (subIdx < tokens.length && tokens[subIdx].value.toLowerCase() === "transcript") {
+      return true;
+    }
+  }
+  return false;
+}
+
 function getProtectedShellOperationReason(text, options = {}) {
   if (!text || typeof text !== "string") return null;
   if (isProtectedInternalState(text)) return "internal-state";
 
   // Non-canonical or wrapped agy-context transcript invocations that did not pass checkAgyContextTranscriptCommand.
-  // Check invocation boundaries (not arbitrary quoted prose payloads) and return a specific diagnostic reason (IND-RUN-003, FRIC-RUN-007).
-  if (
-    /(?:^|[\s;|&(])(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*)(?:(?:node(?:\.exe)?\s+)?(?:[^\s;|&'"()]*[\/\\])?)agy-context(?:-saver)?(?:\.(?:m?js|cmd|exe|bat))?\s+(?:-[^\s;|&'"]+\s+)*transcript(?:\s|$|[;|&)])/i.test(
-      text
-    )
-  ) {
+  // Check parsed command-position invocations (not quoted prose payloads) and return a specific diagnostic reason (IND-RUN-003, FRIC-RUN-007).
+  if (options.checkNonCanonical !== false && hasNonCanonicalAgyTranscriptInvocation(text)) {
     return "non-canonical-cli";
   }
 
@@ -915,16 +1049,43 @@ function scanTaskMarkers(text, taskName) {
     text.includes(`/${taskName}" finished`) ||
     text.includes(`/${taskName}\\" was canceled`) ||
     text.includes(`/${taskName}" was canceled`) ||
+    text.includes(`/${taskName}\\" was cancelled`) ||
+    text.includes(`/${taskName}" was cancelled`) ||
     text.includes(`/${taskName}\\" cancelled.`) ||
-    text.includes(`/${taskName}" cancelled.`)
+    text.includes(`/${taskName}" cancelled.`) ||
+    text.includes(`/${taskName}\\" canceled.`) ||
+    text.includes(`/${taskName}" canceled.`) ||
+    text.includes(`/${taskName} has already finished`)
   ) {
     return "COMPLETED";
   }
   const hasOneShotTimerLaunch =
     text.includes(`/${taskName}\\nTask Description: Timer:`) ||
     text.includes(`/${taskName}\nTask Description: Timer:`);
-  if (hasOneShotTimerLaunch && text.includes(`/${taskName} priority=`)) {
-    return "COMPLETED";
+  if (hasOneShotTimerLaunch) {
+    if (text.includes(`/${taskName} priority=`)) {
+      return "COMPLETED";
+    }
+    // Detect auto-canceled conditioned timers when their watched TimerCondition target task has finished (PR13-RUN-008)
+    const launchMarker = text.includes(`/${taskName}\\nTask Description: Timer:`)
+      ? `/${taskName}\\nTask Description: Timer:`
+      : `/${taskName}\nTask Description: Timer:`;
+    const launchIdx = text.lastIndexOf(launchMarker);
+    if (launchIdx !== -1) {
+      const windowSlice = text.slice(Math.max(0, launchIdx - 400), Math.min(text.length, launchIdx + 600));
+      const condMatch = windowSlice.match(/TimerCondition[^/\n]{0,80}\/(task-[a-z0-9_-]+)/i);
+      if (condMatch && condMatch[1] && condMatch[1].toLowerCase() !== taskName.toLowerCase()) {
+        const condTask = condMatch[1];
+        if (
+          text.includes(`/${condTask}\\" finished`) ||
+          text.includes(`/${condTask}" finished`) ||
+          text.includes(`/${condTask}\\" was canceled`) ||
+          text.includes(`/${condTask}" was canceled`)
+        ) {
+          return "COMPLETED";
+        }
+      }
+    }
   }
   if (text.includes(`/${taskName}\\nTask `) || text.includes(`/${taskName}\nTask `)) return "RUNNING";
   return null;
@@ -1981,14 +2142,20 @@ function normalizeSessionTrackedPath(targetPath) {
   }
 }
 
-function recordSessionWrittenFile(convId = "global", targetPath) {
-  const norm = normalizeSessionTrackedPath(targetPath);
-  if (!norm) return;
+function prepareSessionWithWrittenFiles(convId = "global", targetPaths = []) {
+  const norms = [];
+  for (const tp of targetPaths) {
+    const norm = normalizeSessionTrackedPath(tp);
+    if (norm && !norms.includes(norm)) norms.push(norm);
+  }
+  if (norms.length === 0) return null;
+  acquireSessionLock(convId);
   const session = getSessionState(convId);
   const existing = Array.isArray(session.writtenFiles) ? session.writtenFiles : [];
-  if (existing.includes(norm)) return;
-  session.writtenFiles = existing.slice(-199).concat([norm]);
-  saveSessionState(convId, session, { updatePollTime: false });
+  const toAdd = norms.filter((n) => !existing.includes(n));
+  if (toAdd.length === 0) return null;
+  session.writtenFiles = existing.concat(toAdd).slice(-200);
+  return session;
 }
 
 function wasFileWrittenInSession(convId = "global", targetPath) {
@@ -3708,10 +3875,53 @@ function getInspectableTextForSegment(seg, opts = {}) {
       for (const r of redirs) kept.push(r);
       return kept.join(" ");
     }
+    if (gitSub === "log" || gitSub === "rev-list" || gitSub === "shortlog") {
+      const isUnquotedRedirect = (t) =>
+        Boolean(t && !t.quoted && (REDIRECT_OP_REGEX.test(t.raw) || REDIRECT_ATTACHED_REGEX.test(t.raw)));
+      const kept = [];
+      if (envPrefix && envPrefix.trim()) {
+        kept.push(envPrefix.trim());
+      }
+      let afterDoubleDash = false;
+      for (let i = 0; i < detailed.length; i++) {
+        const tok = detailed[i];
+        if (i <= subIdx) {
+          kept.push(tok.value);
+          continue;
+        }
+        if (isUnquotedRedirect(tok)) {
+          kept.push(tok.raw);
+          if (!tok.quoted && REDIRECT_OP_REGEX.test(tok.raw) && i + 1 < detailed.length) {
+            kept.push(detailed[++i].value);
+          }
+          continue;
+        }
+        if (!afterDoubleDash && tok.value === "--") {
+          afterDoubleDash = true;
+          kept.push(tok.value);
+          continue;
+        }
+        if (!afterDoubleDash) {
+          const v = tok.value;
+          if (v === "--grep" || v === "-S" || v === "-G") {
+            if (i + 1 < detailed.length && !isUnquotedRedirect(detailed[i + 1])) i++;
+            continue;
+          }
+          if (v.startsWith("--grep=") || (v.startsWith("-S") && v.length > 2) || (v.startsWith("-G") && v.length > 2)) {
+            continue;
+          }
+        }
+        kept.push(tok.value);
+      }
+      const redirs = extractRedirectTargets(allTokens);
+      for (const r of redirs) kept.push(r);
+      return kept.join(" ");
+    }
   }
 
-  // GitHub CLI (`gh` / `rtk gh`) prose-flag handler: skip literal string payloads in `pr`/`issue`/`release`
-  // (`-b`/`--body`, `-t`/`--title`, `-n`/`--notes`) and `api` (`-f`/`--raw-field` always literal; `-F`/`--field`
+  // GitHub CLI (`gh` / `rtk gh`) prose-flag handler: skip global flags before subcommand (`-R`/`--repo`/`--hostname`),
+  // skip literal string payloads in `pr`/`issue`/`release` (`-b`/`--body`, `-t`/`--title`, `-n`/`--notes`,
+  // `-c`/`--comment`, `--subject`, attached short forms) and `api` (`-f`/`--raw-field` always literal; `-F`/`--field`
   // literal only when value after `=` does NOT start with `@`), while strictly keeping `--body-file`, `--notes-file`,
   // `--input`, `-F k=@file`, redirects, and subshells inspected (FRIC-RUN-006, IND-RUN-003).
   let ghBaseIdx = -1;
@@ -3723,7 +3933,21 @@ function getInspectableTextForSegment(seg, opts = {}) {
     ghBaseIdx = 2;
   }
   if (ghBaseIdx !== -1 && ghBaseIdx + 1 < detailed.length) {
-    const ghSub = normalizeCmdName(detailed[ghBaseIdx + 1].value);
+    const ghGlobalValueFlags = new Set(["-R", "--repo", "--hostname"]);
+    let ghSubIdx = ghBaseIdx + 1;
+    while (ghSubIdx < detailed.length) {
+      const gv = detailed[ghSubIdx].value;
+      if (ghGlobalValueFlags.has(gv)) {
+        ghSubIdx += 2;
+        continue;
+      }
+      if (gv.startsWith("-")) {
+        ghSubIdx++;
+        continue;
+      }
+      break;
+    }
+    const ghSub = ghSubIdx < detailed.length ? normalizeCmdName(detailed[ghSubIdx].value) : "";
     if (ghSub === "pr" || ghSub === "issue" || ghSub === "release" || ghSub === "api") {
       const isUnquotedRedirect = (t) =>
         Boolean(t && !t.quoted && (REDIRECT_OP_REGEX.test(t.raw) || REDIRECT_ATTACHED_REGEX.test(t.raw)));
@@ -3738,7 +3962,7 @@ function getInspectableTextForSegment(seg, opts = {}) {
       let afterDoubleDash = false;
       for (let i = 0; i < detailed.length; i++) {
         const tok = detailed[i];
-        if (i <= ghBaseIdx + 1) {
+        if (i <= ghSubIdx) {
           kept.push(tok.value);
           continue;
         }
@@ -3781,11 +4005,28 @@ function getInspectableTextForSegment(seg, opts = {}) {
             }
           } else {
             // pr / issue / release
-            if (v === "-b" || v === "--body" || v === "-t" || v === "--title" || v === "-n" || v === "--notes") {
+            if (
+              v === "-b" ||
+              v === "--body" ||
+              v === "-t" ||
+              v === "--title" ||
+              v === "-n" ||
+              v === "--notes" ||
+              v === "-c" ||
+              v === "--comment" ||
+              v === "--subject"
+            ) {
               if (i + 1 < detailed.length && !isUnquotedRedirect(detailed[i + 1])) i++;
               continue;
             }
-            if (v.startsWith("--body=") || v.startsWith("--title=") || v.startsWith("--notes=")) {
+            if (
+              v.startsWith("--body=") ||
+              v.startsWith("--title=") ||
+              v.startsWith("--notes=") ||
+              v.startsWith("--comment=") ||
+              v.startsWith("--subject=") ||
+              (!v.startsWith("--") && /^-[btnc].+/.test(v))
+            ) {
               continue;
             }
           }
@@ -4988,7 +5229,6 @@ const RTK_HIGH_ROI_DIRECT_CMDS = new Set([
   "phpunit",
   "pest",
   "paratest",
-  "phpt",
   "rspec",
   "mvn",
   "mvnd",
@@ -4998,6 +5238,7 @@ const RTK_HIGH_ROI_DIRECT_CMDS = new Set([
   "eslint",
   "ruff",
   "mypy",
+  "ty",
   "prettier",
   "phpstan",
   "rubocop",
@@ -5007,37 +5248,43 @@ const RTK_HIGH_ROI_DIRECT_CMDS = new Set([
   "pint"
 ]);
 
+// Empirically calibrated against live `rtk >= 1.1.0`: only commands/subcommands RTK actually rewrites
 const RTK_HIGH_ROI_SUBCMDS = {
-  cargo: new Set(["test", "nextest", "build", "check", "clippy", "install", "update"]),
+  cargo: new Set(["test", "build", "check", "clippy", "install"]),
   go: new Set(["test", "build", "vet"]),
-  dotnet: new Set(["test", "build", "restore", "format"]),
-  npm: new Set(["test", "t", "run", "build", "install", "i", "ci", "add", "update", "audit", "outdated", "lint", "typecheck", "check"]),
-  pnpm: new Set(["test", "t", "run", "build", "install", "i", "ci", "add", "update", "audit", "outdated", "lint", "typecheck", "check"]),
-  yarn: new Set(["test", "run", "build", "install", "add", "upgrade", "audit", "outdated", "lint", "typecheck", "check"]),
-  bun: new Set(["test", "run", "build", "install", "i", "add", "update", "lint", "typecheck", "check"]),
-  deno: new Set(["test", "run", "compile", "install", "lint", "check", "fmt"]),
+  dotnet: new Set(["build", "restore"]),
+  npm: new Set(["run", "lint"]),
+  pnpm: new Set(["run", "install", "i", "outdated", "lint", "tsc", "list"]),
+  bun: new Set(["test", "run", "build", "install", "add"]),
+  deno: new Set(["test", "compile", "install", "lint", "check"]),
   npx: new Set(["tsc", "eslint", "vitest", "jest", "playwright", "prettier", "prisma", "next", "ng"]),
   bunx: new Set(["tsc", "eslint", "vitest", "jest", "playwright", "prettier", "prisma", "next", "ng"]),
-  uv: new Set(["run", "sync", "pip", "pytest", "ruff", "mypy"]),
-  pip: new Set(["install", "list", "check"]),
-  pip3: new Set(["install", "list", "check"]),
-  next: new Set(["build", "lint"]),
-  ng: new Set(["build", "test", "lint"]),
+  uv: new Set(["run", "sync", "pip"]),
+  pip: new Set(["install", "list", "outdated"]),
+  pip3: new Set(["install", "list", "outdated"]),
+  next: new Set(["build"]),
+  ng: new Set(["build"]),
   prisma: new Set(["generate", "migrate", "db"]),
-  docker: new Set(["build", "compose", "ps", "images", "logs", "pull", "push"]),
-  kubectl: new Set(["get", "logs", "describe", "apply", "rollout"]),
-  oc: new Set(["get", "logs", "describe", "apply", "rollout"]),
-  git: new Set(["status", "push", "pull", "fetch", "clone", "submodule"])
+  docker: new Set(["build", "compose", "ps", "images", "logs"]),
+  kubectl: new Set(["get", "logs", "describe", "apply"]),
+  oc: new Set(["get", "logs", "describe", "apply"]),
+  git: new Set(["status", "push", "pull", "fetch"])
 };
+
+const RTK_HIGH_ROI_PKG_RUN_SCRIPT_RE =
+  /^(?:test|tests|build|compile|lint|check|typecheck|type-check|tsc|e2e|ci|format|fmt|vitest|jest|playwright|pytest|coverage|cov|verify-types)(?:$|[:_-])/i;
+const RTK_HIGH_ROI_UV_RUN_CMDS = new Set(["pytest", "ruff", "mypy", "ty"]);
+const RTK_HIGH_ROI_PYTHON_MODULES = new Set(["pytest", "mypy"]);
+const RTK_HIGH_ROI_DOCKER_COMPOSE_SUBS = new Set(["ps", "logs", "build"]);
 
 const RTK_RUNNER_VALUE_FLAGS = {
   git: new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"]),
   npm: new Set(["--prefix", "-C", "--cwd", "--workspace", "-w"]),
   pnpm: new Set(["--dir", "-C", "--filter", "-F", "--prefix"]),
-  yarn: new Set(["--cwd"]),
   bun: new Set(["--cwd"]),
   npx: new Set(["-p", "--package", "-c", "--call"]),
   bunx: new Set(["-p", "--package"]),
+  uv: new Set(["--directory", "--project", "--python", "-p", "--with", "--group"]),
   docker: new Set(["-H", "--host", "--context", "--config", "-l", "--log-level"]),
   kubectl: new Set(["-n", "--namespace", "--context", "--kubeconfig", "--cluster", "--user"]),
   oc: new Set(["-n", "--namespace", "--context", "--kubeconfig", "--cluster", "--user"])
@@ -5050,34 +5297,66 @@ function getAgyRtkMode() {
   return "pregate";
 }
 
+const MACHINE_FORMAT_VALUE_RE =
+  /^(?:json|jsonl|ndjson|yaml|yml|sarif|checkstyle|junit|tap|xml|csv|tsv|jsonpath|custom-columns|go-template|name|compact|unix|concise|rdjson|gitlab|github|blob|dot|short)(?:[=:]|$)/i;
+
 function hasMachineReadableOutputFlag(cmd0, subcmd, tokens) {
   for (let i = 1; i < tokens.length; i++) {
     const v = tokens[i].value;
     const low = v.toLowerCase();
     if (
       low === "--json" ||
+      low === "-json" ||
       low === "--porcelain" ||
       low.startsWith("--porcelain=") ||
-      low === "--format=json" ||
-      low === "--output=json" ||
-      low === "--output=yaml" ||
-      low === "--output=jsonpath" ||
       low === "--raw" ||
       low === "-ojson" ||
-      low === "-oyaml"
+      low === "-oyaml" ||
+      low === "-oname" ||
+      low.startsWith("-ojsonpath") ||
+      low.startsWith("-ocustom-columns") ||
+      low.startsWith("-ogo-template") ||
+      low.startsWith("-o=") ||
+      (low.startsWith("--format=") && MACHINE_FORMAT_VALUE_RE.test(low.slice("--format=".length))) ||
+      (low.startsWith("--output=") && MACHINE_FORMAT_VALUE_RE.test(low.slice("--output=".length))) ||
+      (low.startsWith("--output-format=") && MACHINE_FORMAT_VALUE_RE.test(low.slice("--output-format=".length))) ||
+      (low.startsWith("--out-format=") && MACHINE_FORMAT_VALUE_RE.test(low.slice("--out-format=".length))) ||
+      (low.startsWith("--message-format=") && MACHINE_FORMAT_VALUE_RE.test(low.slice("--message-format=".length))) ||
+      (low.startsWith("--reporter=") && MACHINE_FORMAT_VALUE_RE.test(low.slice("--reporter=".length)))
     ) {
       return true;
     }
-    if ((low === "-o" || low === "--output") && i + 1 < tokens.length) {
+    if (
+      (low === "-o" ||
+        low === "--output" ||
+        low === "--format" ||
+        low === "-f" ||
+        low === "--output-format" ||
+        low === "--out-format" ||
+        low === "--message-format" ||
+        low === "--reporter") &&
+      i + 1 < tokens.length
+    ) {
       const nextLow = tokens[i + 1].value.toLowerCase();
-      if (/^(?:json|yaml|jsonpath|custom-columns|go-template|name)(?:=|$)/i.test(nextLow)) {
+      if (MACHINE_FORMAT_VALUE_RE.test(nextLow)) {
         return true;
       }
     }
-    if (cmd0 === "docker" && (low === "--format" || low.startsWith("--format="))) {
-      return true;
+    if (cmd0 === "docker") {
+      if (
+        low === "--format" ||
+        low.startsWith("--format=") ||
+        low === "--quiet" ||
+        (!v.startsWith("--") && /^-[a-zA-Z]*q[a-zA-Z]*$/.test(v))
+      ) {
+        return true;
+      }
     }
-    if (cmd0 === "git" && subcmd === "status" && (v === "-s" || v === "--short" || v === "-z" || low.startsWith("--porcelain"))) {
+    if (
+      cmd0 === "git" &&
+      subcmd === "status" &&
+      (v === "--short" || low.startsWith("--porcelain") || (!v.startsWith("--") && /^-[a-zA-Z]*[sz][a-zA-Z]*$/.test(v)))
+    ) {
       return true;
     }
   }
@@ -5085,25 +5364,52 @@ function hasMachineReadableOutputFlag(cmd0, subcmd, tokens) {
 }
 
 /**
+ * Strips harmless stderr-only redirects (`2>&1`, `2>/dev/null`, `2>NUL`) while returning `null`
+ * if any stdout, file, or stdin redirect is present (so redirected output stays untouched & lossless).
+ */
+function filterAllowedStderrRedirects(tokens) {
+  const clean = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (!t.quoted && (REDIRECT_OP_REGEX.test(t.raw) || REDIRECT_ATTACHED_REGEX.test(t.raw))) {
+      if (t.raw === "2>&" && i + 1 < tokens.length && tokens[i + 1].value === "1") {
+        i++;
+        continue;
+      }
+      if (t.raw === "2>" && i + 1 < tokens.length && /^(?:\/dev\/null|nul)$/i.test(tokens[i + 1].value)) {
+        i++;
+        continue;
+      }
+      if (/^2>&1$/i.test(t.raw) || /^2>(?:\/dev\/null|nul)$/i.test(t.raw)) {
+        continue;
+      }
+      return null;
+    }
+    clean.push(t);
+  }
+  return clean;
+}
+
+/**
  * Narrow High-ROI RTK Pre-Gate (v2.1.2):
  * Decides before spawning `rtk hook antigravity` whether a standalone shell segment should be
  * compressed via RTK. Precision/inspection commands (`find`, `grep`, `rg`, `ls`, `wc`, `diff`,
  * workspace `cat`/`head`/`tail`, `ps`, `git diff`/`show`/`log`, `gh`, `curl`, `node`, `python`),
- * pipelines, redirects, and machine-readable outputs return `false` (0 RTK subprocess spawns).
+ * pipelines, stdout/file redirects, and machine-readable outputs return `false` (0 RTK subprocess spawns).
+ * Harmless stderr redirects (`2>&1`, `2>/dev/null`) are allowed through.
  */
-function shouldDelegateSegmentToRtk(segText, { inPipeline = false, hasWriteRedirect = false, allowInternalReadRewrite = false } = {}) {
+function shouldDelegateSegmentToRtk(segText, { inPipeline = false, allowInternalReadRewrite = false } = {}) {
   const trimmed = String(segText || "").trim();
-  if (!trimmed || inPipeline || hasWriteRedirect) return false;
+  if (!trimmed || inPipeline) return false;
   const { body } = splitEnvPrefix(trimmed);
   const target = (body || trimmed).trim();
   if (!target) return false;
   if (matchRtkInvocation(target)) return false;
 
-  const tokens = tokenizeShellWordsDetailed(target);
-  if (tokens.length === 0) return false;
-  if (tokens.some((t) => !t.quoted && (REDIRECT_OP_REGEX.test(t.raw) || REDIRECT_ATTACHED_REGEX.test(t.raw)))) {
-    return false;
-  }
+  const rawTokens = tokenizeShellWordsDetailed(target);
+  if (rawTokens.length === 0) return false;
+  const tokens = filterAllowedStderrRedirects(rawTokens);
+  if (!tokens || tokens.length === 0) return false;
 
   const cmd0 = normalizeCmdName(tokens[0].value);
   if (!cmd0) return false;
@@ -5121,6 +5427,21 @@ function shouldDelegateSegmentToRtk(segText, { inPipeline = false, hasWriteRedir
     const sub = tokens[1] ? normalizeCmdName(tokens[1].value) : "";
     if (sub === "test" || sub.startsWith("test:")) {
       return !hasMachineReadableOutputFlag(cmd0, sub, tokens);
+    }
+    return false;
+  }
+
+  // `python -m pytest` / `python3 -m mypy` -> `rtk pytest` / `rtk mypy`
+  if (cmd0 === "python" || cmd0 === "python3") {
+    let idx = 1;
+    while (idx < tokens.length && tokens[idx].value.startsWith("-") && tokens[idx].value !== "-m") {
+      idx++;
+    }
+    if (tokens[idx]?.value === "-m" && idx + 1 < tokens.length) {
+      const mod = normalizeCmdName(tokens[idx + 1].value);
+      if (RTK_HIGH_ROI_PYTHON_MODULES.has(mod)) {
+        return !hasMachineReadableOutputFlag(mod, "", tokens.slice(idx + 1));
+      }
     }
     return false;
   }
@@ -5144,6 +5465,52 @@ function shouldDelegateSegmentToRtk(segText, { inPipeline = false, hasWriteRedir
   }
   const sub = subIdx < tokens.length ? normalizeCmdName(tokens[subIdx].value) : "";
   if (!sub || !allowedSubs.has(sub)) return false;
+
+  // Narrow `<pkg> run <script>` to noisy test/build/lint/typecheck/ci scripts so diagnostic scripts stay lossless
+  if ((cmd0 === "npm" || cmd0 === "pnpm" || cmd0 === "bun") && sub === "run") {
+    let scriptIdx = subIdx + 1;
+    while (scriptIdx < tokens.length && tokens[scriptIdx].value.startsWith("-") && tokens[scriptIdx].value !== "--") {
+      scriptIdx++;
+    }
+    const scriptName = scriptIdx < tokens.length ? tokens[scriptIdx].value : "";
+    if (!scriptName || !RTK_HIGH_ROI_PKG_RUN_SCRIPT_RE.test(scriptName)) {
+      return false;
+    }
+  }
+
+  // Narrow `uv run <runner>` to noisy runners (`pytest`, `ruff`, `mypy`, `ty`, `python[3] -m pytest|mypy`)
+  if (cmd0 === "uv" && sub === "run") {
+    let runIdx = subIdx + 1;
+    while (runIdx < tokens.length && tokens[runIdx].value.startsWith("-")) {
+      const fl = tokens[runIdx].value;
+      runIdx += valueFlags.has(fl) ? 2 : 1;
+    }
+    if (runIdx >= tokens.length) return false;
+    const runCmd = normalizeCmdName(tokens[runIdx].value);
+    if (RTK_HIGH_ROI_UV_RUN_CMDS.has(runCmd)) {
+      return !hasMachineReadableOutputFlag(runCmd, "", tokens.slice(runIdx));
+    }
+    if ((runCmd === "python" || runCmd === "python3") && tokens[runIdx + 1]?.value === "-m" && runIdx + 2 < tokens.length) {
+      const mod = normalizeCmdName(tokens[runIdx + 2].value);
+      if (RTK_HIGH_ROI_PYTHON_MODULES.has(mod)) {
+        return !hasMachineReadableOutputFlag(mod, "", tokens.slice(runIdx + 2));
+      }
+    }
+    return false;
+  }
+
+  // Narrow `docker compose` to high-ROI read/build subcommands (`ps`, `logs`, `build`; skip `up`/`down`/`exec`)
+  if (cmd0 === "docker" && sub === "compose") {
+    let compIdx = subIdx + 1;
+    while (compIdx < tokens.length && tokens[compIdx].value.startsWith("-")) {
+      const fl = tokens[compIdx].value;
+      compIdx += (fl === "-f" || fl === "--file" || fl === "-p" || fl === "--project-name" || fl === "--env-file") ? 2 : 1;
+    }
+    const compSub = compIdx < tokens.length ? normalizeCmdName(tokens[compIdx].value) : "";
+    if (!compSub || !RTK_HIGH_ROI_DOCKER_COMPOSE_SUBS.has(compSub)) {
+      return false;
+    }
+  }
 
   return !hasMachineReadableOutputFlag(cmd0, sub, tokens);
 }
@@ -5208,7 +5575,6 @@ function rewriteCommandViaRtkPreGate(rawCmd, rtk, ctx = {}) {
     if (
       !shouldDelegateSegmentToRtk(trimmed, {
         inPipeline,
-        hasWriteRedirect: Boolean(seg.hasWriteRedirect),
         allowInternalReadRewrite: Boolean(ctx.allowInternalReadRewrite && segs.length === 1)
       })
     ) {
@@ -5255,6 +5621,10 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
 
   const rtkMatch = matchRtkInvocation(effMatchTarget);
   if (!rtkMatch) {
+    // Handle `uv run rtk ...` emitted by `rtk >= 1.1.0` for plugin-local off-PATH RTK installs
+    if (rtkPrefix && rtkPrefix !== "rtk" && /^uv(?:\.exe)?\s+run\s+rtk(?:\.exe|\.cmd|\.bat)?(?=\s)/i.test(effMatchTarget)) {
+      return `${effEnvPrefix}${effMatchTarget.replace(/^(uv(?:\.exe)?\s+run\s+)rtk(?:\.exe|\.cmd|\.bat)?(?=\s)/i, (_, pfx) => `${pfx}${rtkPrefix}`)}`;
+    }
     // When host `rg` is absent, rewrite bare `rg` to lossless `grep`/`find`
     if (!rgAvailable && /^rg(?:\.exe)?(?=\s|$)/i.test(effMatchTarget)) {
       const mapped = rewriteRtkRgSegment("", effMatchTarget, { inPipeline });
@@ -5433,7 +5803,8 @@ function extractTaskBackoffKey(toolName, args = {}) {
     const taskMatch = raw.match(/(?:^|\/)(task-[a-z0-9_-]+)$/i);
     if (taskMatch) return taskMatch[1].toLowerCase();
     const tail = raw.includes("/") ? raw.slice(raw.lastIndexOf("/") + 1).trim() : raw;
-    return tail ? tail.toLowerCase() : null;
+    if (!tail) return null;
+    return /^\d+$/.test(tail) ? `task-${tail}` : tail.toLowerCase();
   }
 
   if (toolName === "schedule") {
@@ -5444,7 +5815,7 @@ function extractTaskBackoffKey(toolName, args = {}) {
       if (taskMatch) return taskMatch[1].toLowerCase();
       if (BACKOFF_UUID_RE.test(cond)) return condLower;
       const tail = cond.includes("/") ? cond.slice(cond.lastIndexOf("/") + 1).trim() : cond;
-      if (tail) return tail.toLowerCase();
+      if (tail) return /^\d+$/.test(tail) ? `task-${tail}` : tail.toLowerCase();
     }
     const prompt = cleanGovernanceArg(args.Prompt || args.prompt);
     const promptTask = prompt.match(/\b(task-[a-z0-9_-]+)\b/i);
@@ -5505,6 +5876,42 @@ function isTaskPollSchedule(args = {}) {
 }
 
 /**
+ * Detects backoff-compliant remote CI `schedule` timers (e.g., waiting on GitHub Actions / CodeQL / `gh pr checks` / PR builds / deployments)
+ * where no local `task-X` `TimerCondition` exists (FRIC-RUN-004).
+ * Evaluated ahead of `isSwarmPollSchedule` so repo names containing `squad` (e.g. `Agy-Squad`) are not misclassified as `/swarm` board polls.
+ * Keep identical to lib/transcript-core.mjs `isRemoteCiPollSchedule`.
+ */
+function isRemoteCiPollSchedule(args = {}) {
+  const isDaemon = args.IsDaemon === true || args.isDaemon === true;
+  const cron = String(args.CronExpression || args.cronExpression || "").trim();
+  if (isDaemon && cron) return false;
+
+  const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
+  const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
+  if (/(?:^|\/)task-[a-z0-9_-]+$/i.test(cond) || cond.includes("task") || BACKOFF_UUID_RE.test(cond)) return false;
+  if (/\b(?:background task|task-\d+|subagent|subagents)\b/i.test(prompt)) return false;
+  if (/\b(?:swarm_wait|swarm_monitor|swarm\s+board|board\s+message|swarm\s+worker|worker\s+status|squad\s+board|squad\s+worker)\b/i.test(prompt) || /\/swarm\b/i.test(prompt)) {
+    return false;
+  }
+  const hasRemoteCiMarker =
+    /\b(?:ci|github actions|workflow|codeql|pr checks|gh pr checks|gh run|remote checks|check runs?|pipeline|pull request|build status|status checks?|merge checks?|deploy(?:ment)?|release\s+(?:build|check|workflow|pipeline)|actions?\s+run)\b/i.test(prompt) ||
+    /\bpr\s*#\d+\b/i.test(prompt);
+  return (
+    hasRemoteCiMarker &&
+    /\b(?:check|status|poll|monitor|wait|watch|complete|finish|result|pass|scan|green|ready|job|build|workflow|run)\b/i.test(prompt)
+  );
+}
+
+function extractRemoteCiBackoffKey(args = {}) {
+  const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
+  const prMatch = prompt.match(/\bpr\s*#?(\d+)\b/i) || prompt.match(/\bpull\s+request\s*#?(\d+)\b/i);
+  if (prMatch) return `remote-ci:pr-${prMatch[1]}`;
+  const runMatch = prompt.match(/\brun\s*#?(\d{5,})\b/i);
+  if (runMatch) return `remote-ci:run-${runMatch[1]}`;
+  return "remote-ci";
+}
+
+/**
  * Detects one-shot `schedule` timers used to poll a `/swarm`, squad, or board instead of
  * relying on `swarm_wait` + `swarm_monitor`.
  * Exempts the dedicated `swarm_monitor` daemon cron (`CronExpression` + `IsDaemon: true`).
@@ -5519,32 +5926,12 @@ function isSwarmPollSchedule(args = {}) {
   const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
   // Conditioned local background-task watchdogs (`TimerCondition="<conv>/task-X"`) are never `/swarm` board polls (PR13-RUN-001)
   if (/(?:^|\/)task-[a-z0-9_-]+$/i.test(cond)) return false;
+  if (isRemoteCiPollSchedule(args)) return false;
   return (
     /\b(?:swarm|squad|board)\b/i.test(prompt) ||
     (cond === "any" &&
       !/\b(?:subagent|subagents)\b/i.test(prompt) &&
       /\b(?:check|status|poll|monitor|wait|worker|lead|auditor)\b/i.test(prompt))
-  );
-}
-
-/**
- * Detects backoff-compliant remote CI `schedule` timers (e.g., waiting on GitHub Actions / CodeQL / `gh pr checks`)
- * where no local `task-X` `TimerCondition` exists (FRIC-RUN-004).
- * Keep identical to lib/transcript-core.mjs `isRemoteCiPollSchedule`.
- */
-function isRemoteCiPollSchedule(args = {}) {
-  const isDaemon = args.IsDaemon === true || args.isDaemon === true;
-  const cron = String(args.CronExpression || args.cronExpression || "").trim();
-  if (isDaemon && cron) return false;
-  if (isSwarmPollSchedule(args)) return false;
-
-  const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
-  const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
-  if (/(?:^|\/)task-[a-z0-9_-]+$/i.test(cond) || cond.includes("task") || BACKOFF_UUID_RE.test(cond)) return false;
-  if (/\b(?:background task|task-\d+|subagent|subagents)\b/i.test(prompt)) return false;
-  return (
-    /\b(?:ci|github actions|workflow|codeql|pr checks|gh pr checks|gh run|remote checks|check runs?|pipeline)\b/i.test(prompt) &&
-    /\b(?:check|status|poll|monitor|wait|watch|complete|finish|result|pass|scan)\b/i.test(prompt)
   );
 }
 
@@ -5608,8 +5995,10 @@ function pruneTaskBackoff(session, convId, now = Date.now()) {
   for (const [key, entry] of entries) {
     if (!entry || typeof entry !== "object") continue;
     const activityTs = Math.max(entry.lastPollTime || 0, entry.lastSeenTime || 0);
-    if (activityTs > 0 && (now - activityTs) >= STATE_TTL_MS) continue;
-    if (convId && convId !== "global" && !BACKOFF_UUID_RE.test(key)) {
+    const isRemoteCiKey = key === "remote-ci" || key.startsWith("remote-ci:");
+    const keyTtl = isRemoteCiKey ? REMOTE_CI_BUCKET_TTL_MS : STATE_TTL_MS;
+    if (activityTs > 0 && (now - activityTs) >= keyTtl) continue;
+    if (convId && convId !== "global" && !isRemoteCiKey && !BACKOFF_UUID_RE.test(key)) {
       try {
         const strippedId = key.replace(/^task-/i, "");
         const taskName = /^task-/i.test(key) ? key : `task-${strippedId}`;
@@ -5663,6 +6052,8 @@ function getOrCreateTaskBucket(session, key, now = Date.now()) {
  * breaker at 5 cumulative denials, otherwise answers with the Proportional Backoff message.
  */
 function denyRunningTask(taskId, convId, taskToken = "") {
+  acquireSessionLock(convId);
+  replayMatchedHookCallIfAny(convId);
   const session = getSessionState(convId);
   const now = Date.now();
   pruneTaskBackoff(session, convId, now);
@@ -5694,9 +6085,11 @@ function denyRunningTask(taskId, convId, taskToken = "") {
   const condTarget = taskKey || `task-${taskId}`;
   const condExample = convId && convId !== "global" ? `${convId}/${condTarget}` : condTarget;
   const timingSummary =
-    elapsedMs >= requiredBackoffMs
-      ? `${elapsedSec}s elapsed — backoff window is satisfied for manage_task(Action='status'), but reading raw task logs while RUNNING remains prohibited`
-      : `Diagnostic check #${currentPollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${Math.max(1, Math.ceil((requiredBackoffMs - elapsedMs) / 1000))}s remaining)`;
+    currentPollCount === 0 && currentLastPoll === 0
+      ? `Use manage_task(Action='status', TaskId='${condExample}') for Check #1 (immediate, 0s) or arm a conditioned watchdog`
+      : elapsedMs >= requiredBackoffMs
+        ? `${elapsedSec}s elapsed — backoff window is satisfied for manage_task(Action='status'), but reading raw task logs while RUNNING remains prohibited`
+        : `Diagnostic check #${currentPollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${Math.max(1, Math.ceil((requiredBackoffMs - elapsedMs) / 1000))}s remaining)`;
 
   respond(
     {
@@ -5783,30 +6176,100 @@ function isProtectedGovernanceFileMutation(targetPath, convId = "global") {
   return false;
 }
 
+const ALWAYS_MUTATING_SHELL_VERBS = new Set([
+  "rm",
+  "del",
+  "remove-item",
+  "mv",
+  "cp",
+  "tee",
+  "truncate",
+  "shred",
+  "chmod",
+  "chown",
+  "ln",
+  "dd",
+  "patch",
+  "install"
+]);
+const DIR_MUTATING_SHELL_VERBS = new Set(["ln", "cp", "mv", "rm", "del", "remove-item", "chmod", "chown"]);
+
+function inspectShellMutationVerbs(text, depth = 0) {
+  let hasShellMutationVerb = false;
+  let hasDirMutationVerb = false;
+  if (!text || typeof text !== "string" || depth > 4) {
+    return { hasShellMutationVerb, hasDirMutationVerb };
+  }
+  const segs = splitShellSegments(text);
+  for (const seg of segs) {
+    const trimmed = String(seg.text || "").trim();
+    if (!trimmed) continue;
+    for (const sub of seg.subshells || []) {
+      const subRes = inspectShellMutationVerbs(sub, depth + 1);
+      if (subRes.hasShellMutationVerb) hasShellMutationVerb = true;
+      if (subRes.hasDirMutationVerb) hasDirMutationVerb = true;
+    }
+    const wrap = unwrapShellWrapper(trimmed);
+    if (wrap && wrap.inner) {
+      const wrapRes = inspectShellMutationVerbs(wrap.inner, depth + 1);
+      if (wrapRes.hasShellMutationVerb) hasShellMutationVerb = true;
+      if (wrapRes.hasDirMutationVerb) hasDirMutationVerb = true;
+    }
+    const { body } = splitEnvPrefix(trimmed);
+    const tokens = tokenizeShellWordsDetailed(body || trimmed);
+    let idx = 0;
+    while (idx < tokens.length) {
+      const cmd = normalizeCmdName(tokens[idx].value);
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx].raw)) {
+        idx++;
+        continue;
+      }
+      if (cmd === "env" || cmd === "sudo" || cmd === "command" || cmd === "exec" || cmd === "nohup") {
+        idx++;
+        while (idx < tokens.length && tokens[idx].value.startsWith("-")) idx++;
+        continue;
+      }
+      if (cmd === "xargs") {
+        idx++;
+        while (idx < tokens.length && tokens[idx].value.startsWith("-")) {
+          const fl = tokens[idx].value;
+          idx++;
+          if ((fl === "-I" || fl === "-n" || fl === "-L" || fl === "-P" || fl === "-d") && idx < tokens.length) idx++;
+        }
+        continue;
+      }
+      break;
+    }
+    if (idx >= tokens.length) continue;
+    const verb = normalizeCmdName(tokens[idx].value);
+    if (ALWAYS_MUTATING_SHELL_VERBS.has(verb)) {
+      hasShellMutationVerb = true;
+      if (DIR_MUTATING_SHELL_VERBS.has(verb)) hasDirMutationVerb = true;
+    } else if (verb === "sed") {
+      const rest = trimmed.slice(tokens[idx].end);
+      if (/(?:\s-[a-zA-Z]*i|\s--in-place(?:=|\s|$))/.test(rest) || /(?:['"\s;]|^)(?:w\s+[^\s'"]+)/.test(rest)) {
+        hasShellMutationVerb = true;
+      }
+    } else if (verb === "perl") {
+      const rest = trimmed.slice(tokens[idx].end);
+      if (
+        /(?:\s-[a-zA-Z]*i|\s--in-place)/.test(rest) ||
+        /\b(?:unlink|rename|truncate|sysopen|spew|write_file|write_text|write_bytes|copy|move)\b|\bopen(?:\s*\(|\s+)[^;\n]*(?:['"]\s*(?:\+?<|>>?|>)|\bO_(?:WRONLY|RDWR|CREAT)\b)/i.test(
+          rest
+        )
+      ) {
+        hasShellMutationVerb = true;
+      }
+    }
+  }
+  return { hasShellMutationVerb, hasDirMutationVerb };
+}
+
 function hasGovernanceMutationInText(text, convId = "global") {
   if (!text || typeof text !== "string") return false;
   const norm = text.replace(/\\/g, "/");
-  // Unconditional shell mutation verbs (excluding `install`, `sed`, `perl`, which are checked with precision below: FRIC-RUN-005)
-  const hasAlwaysMutatingShellVerb =
-    /(?:^|[\s;|&(`'"])(?:rm|del|remove-item|mv|cp|tee|truncate|shred|chmod|chown|ln|dd|patch)(?=$|[\s;|&)`'"])/i.test(
-      norm
-    );
-  // Require `install` strictly in command-verb position (never `npm install`, `pip install`, etc.)
-  const hasCommandVerbInstall =
-    /(?:^|[;|&(`]\s*|&&\s*|\|\|\s*)(?:sudo\s+)?(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*)(?:\/[^\s;|&]*\/)?install(?=$|[\s;|&)`'"])/i.test(
-      norm
-    );
-  // Require `-i` / `--in-place` (or `w ` write command) on `sed`, and `-i` / write APIs on `perl` so read-only `sed -n` passes
-  const hasMutatingSed =
-    /(?:^|[\s;|&(`'"])sed(?=$|[\s;|&)`'"])/i.test(norm) &&
-    (/(?:\s-[a-zA-Z]*i|\s--in-place(?:=|\s|$))/.test(norm) || /(?:['"\s;]|^)(?:w\s+[^\s'"]+)/.test(norm));
-  const hasMutatingPerl =
-    /(?:^|[\s;|&(`'"])perl(?=$|[\s;|&)`'"])/i.test(norm) &&
-    (/(?:\s-[a-zA-Z]*i|\s--in-place)/.test(norm) ||
-      /\b(?:unlink|rename|truncate|sysopen|spew|write_file|write_text|write_bytes|copy|move)\b|\bopen(?:\s*\(|\s+)[^;\n]*(?:['"]\s*(?:\+?<|>>?|>)|\bO_(?:WRONLY|RDWR|CREAT)\b)/i.test(
-        norm
-      ));
-  const hasShellMutationVerb = hasAlwaysMutatingShellVerb || hasCommandVerbInstall || hasMutatingSed || hasMutatingPerl;
+  // Check command-position shell mutation verbs across parsed segments & wrappers (avoids false positives on e.g. `git log --grep="rm"`)
+  const { hasShellMutationVerb, hasDirMutationVerb } = inspectShellMutationVerbs(text);
   const hasCodeMutationVerb =
     /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rmSync|rmdir|rmdirSync|rename|renameSync|truncateSync|chmodSync|copyFile|copyFileSync|WriteAllText)\s*\(|\bos\.(?:remove|unlink)\s*\(|\bshutil\.(?:copy|move|rmtree)\s*\(|\bPath\([^\n)]*\)\.(?:write_text|write_bytes|unlink)\s*\(/i.test(
       norm
@@ -5834,10 +6297,11 @@ function hasGovernanceMutationInText(text, convId = "global") {
     return true;
   }
 
-  // Block directory-level symlinks, moves, copies, or removals of ~/.gemini/config or ~/.gemini/antigravity/bin as a whole (IND-SEC-002)
+  // Block directory-level symlinks, moves, copies, or removals of ~/.gemini/config, $HOME/.gemini/config,
+  // /abs/.gemini/config[/...], or .gemini/antigravity/bin as a whole (IND-SEC-002; linear regex)
   if (
-    /(?:^|[\s;|&(`'"])(?:ln|cp|mv|rm|del|remove-item|chmod|chown)(?=$|[\s;|&)`'"])/i.test(norm) &&
-    /(?:^|[\s'":=~])\/?\.gemini\/(?:config|antigravity\/bin)\/?(?=$|[\s;|&)'"])/i.test(norm)
+    hasDirMutationVerb &&
+    /(?:^|[\s'":=~/$}\w.-])\/?\.gemini\/(?:config|antigravity\/bin)(?=$|[\/\s;|&)'"])/i.test(norm)
   ) {
     return true;
   }
@@ -5866,22 +6330,42 @@ function escapeDoubleQuotedArg(str) {
 function getFileMetrics(filePath) {
   if (!filePath || typeof filePath !== "string") return null;
   try {
-    const resolvedPath = resolveHookPath(filePath);
-    if (!resolvedPath || !fs.existsSync(resolvedPath)) return null;
+    const expanded = expandLeadingTilde(cleanFileToken(filePath));
+    const resolvedPath = resolveHookPath(expanded);
+    if (!resolvedPath) return null;
+    if (!fs.existsSync(resolvedPath)) {
+      // Only classify as confirmed ENOENT when the parent directory exists on disk AND target is not a dangling symlink
+      let isDanglingSymlink = false;
+      try {
+        fs.lstatSync(resolvedPath);
+        isDanglingSymlink = true;
+      } catch {}
+      if (!isDanglingSymlink && fs.existsSync(path.dirname(resolvedPath))) {
+        return { exists: false, bytes: 0, lineCount: 0, rawSplitCount: 0, oversized: false };
+      }
+      return null;
+    }
     const stat = fs.statSync(resolvedPath);
     if (!stat.isFile()) return null;
     const bytes = stat.size;
-    // Guard against reading multi-megabyte files synchronously into memory (FRIC-RUN-002)
-    if (bytes > MAX_FULL_FILE_BYTES) {
-      return { bytes, lineCount: null, rawSplitCount: null, oversized: true };
+    if (bytes === 0) {
+      return { exists: true, bytes: 0, lineCount: 0, rawSplitCount: 1, oversized: false };
     }
-    const content = fs.readFileSync(resolvedPath, "utf-8");
-    if (content.length === 0) {
-      return { bytes: 0, lineCount: 0, rawSplitCount: 1, oversized: false };
+    const oversized = bytes > MAX_FULL_FILE_BYTES;
+    // Scan newlines up to 1 MiB so EOF-clamping and exact TotalLines work on large source files
+    // without allocating UTF-8 line arrays or reading multi-megabyte files into memory
+    if (bytes > MAX_LINE_COUNT_SCAN_BYTES) {
+      return { exists: true, bytes, lineCount: null, rawSplitCount: null, oversized: true };
     }
-    const rawSplitCount = content.split(/\r?\n/).length;
-    const lineCount = /\r?\n$/.test(content) ? Math.max(1, rawSplitCount - 1) : rawSplitCount;
-    return { bytes, lineCount, rawSplitCount, oversized: false };
+    const buf = fs.readFileSync(resolvedPath);
+    let nlCount = 0;
+    for (let i = 0; i < buf.length; i++) {
+      if (buf[i] === 0x0a) nlCount++;
+    }
+    const endsWithNl = buf[buf.length - 1] === 0x0a;
+    const rawSplitCount = nlCount + 1;
+    const lineCount = endsWithNl ? Math.max(1, nlCount) : nlCount + 1;
+    return { exists: true, bytes, lineCount, rawSplitCount, oversized };
   } catch {
     return null;
   }
@@ -5943,20 +6427,16 @@ try {
       const rawScriptPath = fileURLToPath(import.meta.url);
       currentScriptPath = HOOK_SURFACE ? `${rawScriptPath}::${HOOK_SURFACE}` : rawScriptPath;
     } catch {}
-    const now = Date.now();
     const prevState = getSessionState(convId);
-    const recent = Array.isArray(prevState.recentHookCalls) ? prevState.recentHookCalls : [];
-    const matchedCall = recent.find((e) => {
-      if (!e || typeof e.ts !== "number" || (now - e.ts) >= HOOK_DEDUP_TTL_MS) return false;
-      if (callId && e.callId && e.callId === callId) return true;
-      const argMatch = inSig === e.rawSig || inSig === e.outSig;
-      if (!argMatch || e.toolName !== toolName) return false;
-      if (stepIdx !== undefined && stepIdx !== null && e.stepIdx === stepIdx) return true;
-      if (currentScriptPath && e.scriptPath && e.scriptPath !== currentScriptPath && (now - e.ts) < HOOK_SAME_ARG_CROSS_SCRIPT_MS) {
-        return true;
-      }
-      return false;
-    });
+    const dedupCandidate = {
+      convId,
+      callId,
+      stepIdx: stepIdx !== undefined ? stepIdx : null,
+      toolName,
+      scriptPath: currentScriptPath,
+      rawSig: inSig
+    };
+    const matchedCall = findMatchingRecentHookCall(prevState, dedupCandidate, Date.now());
     if (matchedCall && matchedCall.response) {
       const replay =
         inSig === matchedCall.outSig &&
@@ -5966,14 +6446,7 @@ try {
           : matchedCall.response;
       respond(replay, { skipDedupRecord: true });
     }
-    dedupRecordCtx = {
-      convId,
-      callId,
-      stepIdx: stepIdx !== undefined ? stepIdx : null,
-      toolName,
-      scriptPath: currentScriptPath,
-      rawSig: inSig
-    };
+    dedupRecordCtx = dedupCandidate;
   }
 
   // =========================================================================
@@ -6294,6 +6767,8 @@ try {
     const agyTranscriptCheck = checkAgyContextTranscriptCommand(segments, convId);
     if (agyTranscriptCheck.matched && !agyTranscriptCheck.allowed) {
       if (agyTranscriptCheck.isAccessDenial) {
+        acquireSessionLock(convId);
+        replayMatchedHookCallIfAny(convId);
         const session = getSessionState(convId);
         session.transcriptDenials = (session.transcriptDenials || 0) + 1;
         if (session.transcriptDenials >= 5) {
@@ -6412,9 +6887,14 @@ try {
           }
         }
       }
-      const protectedReason = getProtectedShellOperationReason(inspectRemainder, {
-        isRestrictedChild: callerAccess.isRestrictedChild
-      });
+      // Check non-canonical CLI invocations on parsed raw segments (never on quote-stripped prose text)
+      const nonCanonicalCli = hasNonCanonicalAgyTranscriptInvocation(rawCmd);
+      const protectedReason = nonCanonicalCli
+        ? "non-canonical-cli"
+        : getProtectedShellOperationReason(inspectRemainder, {
+            isRestrictedChild: callerAccess.isRestrictedChild,
+            checkNonCanonical: false
+          });
       if (protectedReason) {
         respond({
           decision: "deny",
@@ -6443,7 +6923,8 @@ try {
 
     if (rtk) {
       let rewrittenCandidate = rawCmd;
-      if (rtkMode === "pregate") {
+      if (rtkMode === "pregate" || (rtkMode === "off" && allowInternalReadRewrite)) {
+        // Under AGY_RTK_MODE=off, auto-delegation is off EXCEPT single scoped internal spillover/task-log reads
         const gated = rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite });
         if (gated.decision !== "allow") {
           respond({ decision: gated.decision, reason: gated.reason });
@@ -6631,16 +7112,20 @@ try {
       overwrite.WaitMsBeforeAsync = targetMaxWait;
     }
 
-    if (pendingWrittenSet.size > 0) {
-      for (const writtenPath of pendingWrittenSet) {
-        recordSessionWrittenFile(convId, writtenPath);
-      }
-    }
+    const writtenSession =
+      pendingWrittenSet.size > 0 ? prepareSessionWithWrittenFiles(convId, Array.from(pendingWrittenSet)) : null;
 
-    if (Object.keys(overwrite).length > 0) {
-      respond({ decision: "allow", overwrite });
+    const hasOverwrite = Object.keys(overwrite).length > 0;
+    const responseObj = hasOverwrite ? { decision: "allow", overwrite } : { decision: "allow" };
+    if (writtenSession) {
+      respond(responseObj, { convId, sessionToSave: writtenSession, updatePollTime: false });
     }
-    respond({ decision: "allow" });
+    const isTrulyStatelessRunAllow =
+      !hasOverwrite &&
+      !agyTranscriptCheck.needsReadGrant &&
+      !agyTranscriptCheck.isAccessMutation &&
+      pendingWrittenSet.size === 0;
+    respond(responseObj, isTrulyStatelessRunAllow ? { skipDedupRecord: true } : null);
   }
 
   // =========================================================================
@@ -6664,13 +7149,60 @@ try {
       args.TargetFile ||
       args.targetFile ||
       args.target_file ||
+      args.DirectoryPath ||
+      args.directoryPath ||
       args.dirPath ||
       args.dir_path ||
       args.directory ||
+      args.SearchDirectory ||
+      args.searchDirectory ||
       args.SearchPath ||
       args.searchPath ||
+      args.SearchRoot ||
+      args.searchRoot ||
       "";
     const target = String(rawTarget).trim();
+
+    const isDiscoveryTool = toolName === "grep_search" || toolName === "find_by_name" || toolName === "list_dir";
+    const isRecursiveDiscoveryTool = toolName === "grep_search" || toolName === "find_by_name";
+    const isProtectedDiscoveryAncestorPath = (candidateTarget) => {
+      if (!isDiscoveryTool) return false;
+      const effectiveCandidate = candidateTarget || activeHookCwd;
+      if (!effectiveCandidate) return false;
+      const normDir = (p) => {
+        if (!p) return "";
+        const norm = tryRealpath(path.resolve(p)).replace(/\\/g, "/").replace(/\/+$/, "");
+        return os.platform() === "win32" || os.platform() === "darwin" ? norm.toLowerCase() : norm;
+      };
+      const stateDirNorm = normDir(getStateDir());
+      const stateDirParentNorm = normDir(path.dirname(getStateDir()));
+      const brainDirNorms = getBrainDirs().map(normDir).filter(Boolean);
+      const agyRootNorms = brainDirNorms.map((b) => normDir(path.dirname(b))).filter(Boolean);
+      const geminiRootNorms = agyRootNorms.map((a) => normDir(path.dirname(a))).filter(Boolean);
+
+      for (const variant of expandAndResolvePathVariants(effectiveCandidate)) {
+        const nv = normDir(variant);
+        if (!nv) continue;
+        if (
+          nv === stateDirNorm ||
+          brainDirNorms.includes(nv) ||
+          agyRootNorms.includes(nv) ||
+          geminiRootNorms.includes(nv)
+        ) {
+          return true;
+        }
+        if (isRecursiveDiscoveryTool) {
+          if (nv === stateDirParentNorm) return true;
+          if (brainDirNorms.some((b) => nv.startsWith(b + "/") && !nv.slice(b.length + 1).includes("/"))) {
+            return true;
+          }
+          try {
+            if (fs.existsSync(path.join(variant, ".system_generated"))) return true;
+          } catch {}
+        }
+      }
+      return false;
+    };
 
     const rawStart = args.StartLine !== undefined ? args.StartLine : (args.startLine !== undefined ? args.startLine : args.start_line);
     const rawEnd = args.EndLine !== undefined ? args.EndLine : (args.endLine !== undefined ? args.endLine : args.end_line);
@@ -6686,7 +7218,13 @@ try {
             "Antigravity Execution Governance: Cross-conversation inspection of another session's step spillover is prohibited under Parent Transcript Isolation."
         });
       }
-      if (toolName === "read_file" && rawStart !== undefined && rawEnd !== undefined) {
+      const absSpillTarget = resolveHookPath(expandLeadingTilde(cleanFileToken(target)));
+      const isSymlinkMaskedSpill = Boolean(
+        absSpillTarget &&
+        fs.existsSync(absSpillTarget) &&
+        !/(?:^|\/)\.system_generated\//i.test(absSpillTarget.replace(/\\/g, "/"))
+      );
+      if (!isSymlinkMaskedSpill && toolName === "read_file" && rawStart !== undefined && rawEnd !== undefined) {
         const startLine = Number(rawStart);
         const endLine = Number(rawEnd);
         if (
@@ -6711,7 +7249,7 @@ try {
       });
     }
 
-    // 2b. Task Log Inspection (Lifecycle-Gated)
+    // 2b. Task Log Inspection (Lifecycle-Gated; symmetrical bounded read_file <= 150L on COMPLETED logs)
     const taskMatch = matchTaskLogToken(target, convId);
     if (taskMatch) {
       if (isCrossConversationTargetDenied(taskMatch.realPath || target, convId)) {
@@ -6726,8 +7264,13 @@ try {
         denyRunningTask(taskMatch.id, convId, taskMatch.token);
       }
       if (state === "COMPLETED") {
-        const hasRtkForTask = Boolean(resolveCachedHostEnv().rtk);
-        if (!hasRtkForTask && toolName === "read_file" && rawStart !== undefined && rawEnd !== undefined) {
+        const absTaskTarget = resolveHookPath(expandLeadingTilde(cleanFileToken(target)));
+        const isSymlinkMaskedTask = Boolean(
+          absTaskTarget &&
+          fs.existsSync(absTaskTarget) &&
+          !/(?:^|\/)\.system_generated\//i.test(absTaskTarget.replace(/\\/g, "/"))
+        );
+        if (!isSymlinkMaskedTask && toolName === "read_file" && rawStart !== undefined && rawEnd !== undefined) {
           const startLine = Number(rawStart);
           const endLine = Number(rawEnd);
           if (
@@ -6740,6 +7283,7 @@ try {
             respond({ decision: "allow" });
           }
         }
+        const hasRtkForTask = Boolean(resolveCachedHostEnv().rtk);
         const taskCmd = hasRtkForTask
           ? (isOversizedInternalTarget(target, convId, taskMatch, false)
               ? `'rtk read --tail-lines 150 ${target}' (or '--head-lines 150')`
@@ -6747,9 +7291,7 @@ try {
           : `'tail -n 150 ${target}' (or 'head -n 150 ${target}')`;
         respond({
           decision: "deny",
-          reason: hasRtkForTask
-            ? `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run ${taskCmd} via run_command instead.`
-            : `Antigravity Governance: Unbounded inspection of completed task logs via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SPILLOVER_SLICE_LINES} lines) to 'read_file' or run ${taskCmd} via run_command instead.`
+          reason: `Antigravity Governance: Unbounded inspection of completed task logs via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SPILLOVER_SLICE_LINES} lines) to 'read_file' or run ${taskCmd} via run_command instead.`
         });
       }
       respond({
@@ -6759,10 +7301,11 @@ try {
       });
     }
 
-    // 2c. Other Internal State Protection by Root (LH-02, canonicalized against symlinks & relative paths: IND-SEC-002)
+    // 2c. Other Internal State Protection by Root (LH-02, canonicalized against symlinks, relative paths & discovery ancestor roots: IND-SEC-002)
     const multiPaths = Array.isArray(args.paths) ? args.paths : (Array.isArray(args.Paths) ? args.Paths : []);
     if (
       isProtectedInternalStatePath(target) ||
+      isProtectedDiscoveryAncestorPath(target) ||
       multiPaths.some((p) => typeof p === "string" && isProtectedInternalStatePath(p)) ||
       isProtectedInternalState(JSON.stringify(args))
     ) {
@@ -6773,8 +7316,11 @@ try {
     }
 
     // 2d. Allow Antigravity Special Files (SKILL.md, brain artifacts, configs) symmetrically for read_file & view_file,
-    // while blocking cross-conversation brain artifacts for restricted children (IND-SEC-005).
-    if (isCrossConversationTargetDenied(target, convId)) {
+    // while blocking cross-conversation brain artifacts/directories for restricted children (IND-SEC-005).
+    if (
+      isCrossConversationTargetDenied(target, convId) ||
+      multiPaths.some((p) => typeof p === "string" && isCrossConversationTargetDenied(p, convId))
+    ) {
       respond({
         decision: "deny",
         reason:
@@ -6787,7 +7333,8 @@ try {
 
     // 2e. Symmetrical Hybrid Slice & Guarded Full-File Policy for `read_file` and `view_file`
     //     Unified v2.1.2 preset: <= 300 lines & <= 24 KiB omitted-bound auto-allow, <= 300-line slices
-    //     (EOF-clamped), <= 800 lines & <= 45 KiB explicit full-file audit, safe multimodal media exempt.
+    //     (EOF-clamped via 1 MiB newline scan + single-bound support), <= 800 lines & <= 45 KiB explicit
+    //     full-file audit, ENOENT pass-through after Checks 2c/2d, safe multimodal media exempt.
     if (toolName === "read_file" || toolName === "view_file") {
       // Safe workspace multimodal media files cannot be line-sliced (FRIC-RUN-001; checked AFTER internal-state/symlink guards)
       if (SAFE_MULTIMODAL_MEDIA_RE.test(target)) {
@@ -6801,10 +7348,13 @@ try {
       };
 
       const formatMetricsTag = (metrics) => {
-        if (!metrics) return "";
+        if (!metrics || metrics.exists === false) return "";
         const kib = (metrics.bytes / 1024).toFixed(1);
-        if (metrics.oversized || metrics.lineCount === null) {
+        if (metrics.lineCount === null) {
           return ` (actual file: ${kib} KiB > 45 KiB)`;
+        }
+        if (metrics.oversized) {
+          return ` (actual file: ${metrics.lineCount} lines, ${kib} KiB > 45 KiB)`;
         }
         return ` (actual file: ${metrics.lineCount} lines, ${kib} KiB)`;
       };
@@ -6818,12 +7368,42 @@ try {
       }
 
       if (hasSliceParams) {
-        const startLine = Number(rawStart);
-        const endLine = Number(rawEnd);
+        // Single-bound EndLine-only defaults StartLine to 1; single-bound StartLine-only evaluates remaining lines to EOF
+        const startLine = rawStart !== undefined ? Number(rawStart) : 1;
+        const hasExplicitEnd = rawEnd !== undefined;
+        const endLine = hasExplicitEnd ? Number(rawEnd) : null;
+
+        if (rawStart !== undefined && !hasExplicitEnd) {
+          if (Number.isInteger(startLine) && startLine > 0) {
+            const metrics = getFileMetrics(target);
+            if (metrics && metrics.exists === false) {
+              respond({ decision: "allow" });
+            }
+            if (metrics && metrics.lineCount !== null) {
+              if (startLine > metrics.lineCount) {
+                respond({ decision: "allow" });
+              }
+              const remaining = metrics.lineCount - startLine + 1;
+              if (remaining <= MAX_SAFE_SLICE_LINES) {
+                respond({ decision: "allow" });
+              }
+              respond({
+                decision: "deny",
+                reason: `Antigravity Governance: Unbounded tail read from StartLine=${startLine} via '${toolName}' (${remaining} remaining lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window)${formatMetricsTag(metrics)}. Pass an explicit EndLine (max ${MAX_SAFE_SLICE_LINES} lines) or StartLine=1, EndLine=${metrics.lineCount} if <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${getDiscoveryGuidance()}.`
+              });
+            }
+            respond({
+              decision: "deny",
+              reason: `Antigravity Governance: Unbounded tail read from StartLine=${startLine} via '${toolName}'${formatMetricsTag(metrics)} requires an explicit EndLine (max ${MAX_SAFE_SLICE_LINES} lines). ${getDiscoveryGuidance()}.`
+            });
+          }
+          respond({
+            decision: "deny",
+            reason: `Antigravity Governance: Invalid slice range via '${toolName}'. Ensure StartLine and EndLine are positive integers with EndLine >= StartLine. ${getDiscoveryGuidance()}.`
+          });
+        }
 
         if (
-          rawStart !== undefined &&
-          rawEnd !== undefined &&
           Number.isInteger(startLine) &&
           Number.isInteger(endLine) &&
           startLine > 0 &&
@@ -6835,16 +7415,19 @@ try {
           }
 
           const metrics = getFileMetrics(target);
+          if (metrics && metrics.exists === false) {
+            respond({ decision: "allow" });
+          }
+
           // Explicit full-file audit: StartLine=1 covering >= actual end of a file <= 800 lines & <= 45 KiB (FRIC-RUN-002)
           if (
             startLine === 1 &&
             !hasByteOffset &&
             metrics &&
-            !metrics.oversized &&
             metrics.lineCount !== null &&
             endLine >= metrics.lineCount
           ) {
-            if (metrics.lineCount <= MAX_FULL_FILE_LINES && metrics.bytes <= MAX_FULL_FILE_BYTES) {
+            if (!metrics.oversized && metrics.lineCount <= MAX_FULL_FILE_LINES && metrics.bytes <= MAX_FULL_FILE_BYTES) {
               respond({ decision: "allow" });
             }
             const kib = (metrics.bytes / 1024).toFixed(1);
@@ -6854,8 +7437,11 @@ try {
             });
           }
 
-          // EOF-clamped partial slice: if actual lines returned (min(EndLine, TotalLines) - StartLine + 1) <= 300, allow (FRIC-RUN-002)
-          if (metrics && !metrics.oversized && metrics.lineCount !== null && startLine <= metrics.lineCount) {
+          // EOF-clamped partial slice (works on files up to 1 MiB): if actual lines returned <= 300, allow (FRIC-RUN-002)
+          if (metrics && metrics.lineCount !== null) {
+            if (startLine > metrics.lineCount) {
+              respond({ decision: "allow" });
+            }
             const effectiveSpan = Math.min(endLine, metrics.lineCount) - startLine + 1;
             if (effectiveSpan >= 1 && effectiveSpan <= MAX_SAFE_SLICE_LINES) {
               respond({ decision: "allow" });
@@ -6874,8 +7460,11 @@ try {
         });
       }
 
-      // Omitted-bound auto-allow for small workspace files (<= 300 lines AND <= 24 KiB; FRIC-RUN-002)
+      // Omitted-bound auto-allow for small workspace files (<= 300 lines AND <= 24 KiB) or ENOENT pass-through (FRIC-RUN-002)
       const omittedMetrics = getFileMetrics(target);
+      if (omittedMetrics && omittedMetrics.exists === false) {
+        respond({ decision: "allow" });
+      }
       if (
         omittedMetrics &&
         !omittedMetrics.oversized &&
@@ -6893,10 +7482,9 @@ try {
     }
 
     // 2f. Block unbounded multi-file dumps (`read_many_files`), while allowing native workspace discovery tools
-    //     (`grep_search`, `find_by_name`, `list_dir`) now that Check 2c protects internal state & RTK uses the narrow pre-gate.
-    const { rtk: hostRtk } = resolveCachedHostEnv();
-
+    //     (`grep_search`, `find_by_name`, `list_dir`) now that Checks 2c/2d protect internal state & ancestor roots.
     if (toolName === "read_many_files") {
+      const { rtk: hostRtk } = resolveCachedHostEnv();
       respond({
         decision: "deny",
         reason: hostRtk
@@ -6996,6 +7584,52 @@ try {
     const duration = Number(args.DurationSeconds || args.durationSeconds || args.duration || 0);
     const rawCond = cleanGovernanceArg(args.TimerCondition || args.timerCondition);
 
+    if (isRemoteCiPollSchedule(args)) {
+      const session = getSessionState(convId);
+      const now = Date.now();
+      pruneTaskBackoff(session, convId, now);
+
+      const ciBucketKey = extractRemoteCiBackoffKey(args);
+      const bucket = getOrCreateTaskBucket(session, ciBucketKey, now);
+      const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(bucket.pollCount));
+
+      if (!Number.isFinite(duration) || duration < 15) {
+        bucket.denials++;
+        bucket.lastSeenTime = now;
+        session.denials++;
+        const effectiveDenials = Math.max(bucket.denials, session.denials);
+        if (effectiveDenials >= 5) {
+          respond(
+            {
+              decision: "force_ask",
+              reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: remote CI polling timer denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec}, or confirm with the user to proceed.`
+            },
+            { convId, sessionToSave: session, updatePollTime: false }
+          );
+        }
+        respond(
+          {
+            decision: "deny",
+            reason: `Antigravity Execution Governance: Remote CI schedule timer duration too short (${duration}s < 15s minimum; ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} (no local task-X TimerCondition is required for remote CI checks).`
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
+      }
+
+      bucket.pollCount = Math.max(1, bucket.pollCount) + 1;
+      bucket.lastPollTime = now;
+      bucket.lastSeenTime = now;
+      bucket.denials = 0;
+      session.denials = 0;
+      if (duration < requiredBackoffSec) {
+        respond(
+          { decision: "allow", overwrite: { DurationSeconds: requiredBackoffSec } },
+          { convId, sessionToSave: session, updatePollTime: true }
+        );
+      }
+      respond({ decision: "allow" }, { convId, sessionToSave: session, updatePollTime: true });
+    }
+
     if (isSwarmPollSchedule(args)) {
       const session = getSessionState(convId);
       session.denials++;
@@ -7073,51 +7707,6 @@ try {
       if (clamped) {
         respond(
           { decision: "allow", overwrite: { DurationSeconds: requiredSubagentSec } },
-          { convId, sessionToSave: session, updatePollTime: true }
-        );
-      }
-      respond({ decision: "allow" }, { convId, sessionToSave: session, updatePollTime: true });
-    }
-
-    if (isRemoteCiPollSchedule(args)) {
-      const session = getSessionState(convId);
-      const now = Date.now();
-      pruneTaskBackoff(session, convId, now);
-
-      const bucket = getOrCreateTaskBucket(session, "remote-ci", now);
-      const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(bucket.pollCount));
-
-      if (!Number.isFinite(duration) || duration < 15) {
-        bucket.denials++;
-        bucket.lastSeenTime = now;
-        session.denials++;
-        const effectiveDenials = Math.max(bucket.denials, session.denials);
-        if (effectiveDenials >= 5) {
-          respond(
-            {
-              decision: "force_ask",
-              reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: remote CI polling timer denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec}, or confirm with the user to proceed.`
-            },
-            { convId, sessionToSave: session, updatePollTime: false }
-          );
-        }
-        respond(
-          {
-            decision: "deny",
-            reason: `Antigravity Execution Governance: Remote CI schedule timer duration too short (${duration}s < 15s minimum; ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} (no local task-X TimerCondition is required for remote CI checks).`
-          },
-          { convId, sessionToSave: session, updatePollTime: false }
-        );
-      }
-
-      bucket.pollCount = Math.max(1, bucket.pollCount) + 1;
-      bucket.lastPollTime = now;
-      bucket.lastSeenTime = now;
-      bucket.denials = 0;
-      session.denials = 0;
-      if (duration < requiredBackoffSec) {
-        respond(
-          { decision: "allow", overwrite: { DurationSeconds: requiredBackoffSec } },
           { convId, sessionToSave: session, updatePollTime: true }
         );
       }
@@ -7285,7 +7874,10 @@ try {
       });
     }
     if (targetFile && (callerAccess.isRestrictedChild || isExecutableScriptPath(targetFile) || isTmpOrScratch)) {
-      recordSessionWrittenFile(convId, targetFile);
+      const writtenSession = prepareSessionWithWrittenFiles(convId, [targetFile]);
+      if (writtenSession) {
+        respond({ decision: "allow" }, { convId, sessionToSave: writtenSession, updatePollTime: false });
+      }
     }
     respond({ decision: "allow" });
   }
