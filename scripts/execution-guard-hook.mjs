@@ -94,6 +94,7 @@ const GOVERNED_TOOLS = new Set([
   "find_by_name",
   "list_dir",
   "replace_file_content",
+  "multi_replace_file_content",
   "write_to_file",
   "write_file",
   "edit_file"
@@ -365,8 +366,8 @@ function isAntigravitySpecialFile(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
   const normalized = targetPath.replace(/\\/g, "/");
 
-  // If inside .system_generated, it's ALWAYS protected internal state, never a special file
-  if (isProtectedInternalState(normalized)) {
+  // If inside .system_generated (including via symlinks or relative paths), it's ALWAYS protected internal state
+  if (isProtectedInternalStatePath(targetPath)) {
     return false;
   }
 
@@ -493,6 +494,92 @@ function resolveRealOrAncestorPath(targetPath) {
       cursor = parent;
     }
   }
+}
+
+/**
+ * Produces raw, tilde-expanded, cwd-resolved, and symlink-canonicalized variants of a file path
+ * so native file tools and shell path checks cannot be bypassed via relative paths or symlinks (IND-SEC-002).
+ */
+function expandAndResolvePathVariants(rawPath) {
+  if (!rawPath || typeof rawPath !== "string") return [];
+  const cleaned = cleanFileToken(rawPath);
+  if (!cleaned) return [];
+  const out = new Set();
+  const pushNorm = (p) => {
+    if (!p || typeof p !== "string") return;
+    out.add(p);
+    const slashed = p.replace(/\\/g, "/");
+    if (slashed !== p) out.add(slashed);
+  };
+  pushNorm(cleaned);
+  const expanded = expandLeadingTilde(cleaned);
+  pushNorm(expanded);
+  try {
+    const resolved = resolveHookPath(expanded);
+    pushNorm(resolved);
+    const canonical = resolveRealOrAncestorPath(resolved);
+    pushNorm(canonical);
+  } catch {}
+  return [...out];
+}
+
+function isProtectedInternalStatePath(rawPath) {
+  return expandAndResolvePathVariants(rawPath).some((v) => isProtectedInternalState(v));
+}
+
+function isProtectedGovernanceFileMutationPath(rawPath, convId = "global") {
+  return expandAndResolvePathVariants(rawPath).some((v) => isProtectedGovernanceFileMutation(v, convId));
+}
+
+function isProtectedBenchmarkFilePath(rawPath) {
+  return expandAndResolvePathVariants(rawPath).some((v) => isProtectedBenchmarkPath(v));
+}
+
+/**
+ * Extracts the conversation UUID owning an Antigravity brain path (following symlinks & configured brain roots).
+ */
+function extractBrainOwnerConvId(rawPath) {
+  if (!rawPath || typeof rawPath !== "string") return null;
+  const cmp = os.platform() === "win32" || os.platform() === "darwin" ? (s) => s.toLowerCase() : (s) => s;
+  const variants = expandAndResolvePathVariants(rawPath);
+  for (const v of variants) {
+    const norm = v.replace(/\\/g, "/");
+    const m = norm.match(/(?:^|\/)\.gemini\/antigravity(?:-cli|-ide)?\/brain\/([^/]+)(?:\/|$)/i);
+    if (m && m[1]) return m[1];
+  }
+  const brainPrefixes = [];
+  for (const bDir of getBrainDirs()) {
+    if (!bDir) continue;
+    const rawB = cmp(path.resolve(bDir).replace(/\\/g, "/").replace(/\/+$/, ""));
+    brainPrefixes.push(rawB);
+    const realB = cmp(resolveRealOrAncestorPath(bDir).replace(/\\/g, "/").replace(/\/+$/, ""));
+    if (realB !== rawB) brainPrefixes.push(realB);
+  }
+  for (const v of variants) {
+    const norm = v.replace(/\\/g, "/");
+    const nLow = cmp(norm);
+    for (const prefix of brainPrefixes) {
+      if (nLow.startsWith(`${prefix}/`)) {
+        const rest = norm.slice(prefix.length + 1);
+        const seg = rest.split("/")[0];
+        if (seg) return seg;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Enforces Parent Transcript Isolation on cross-conversation spillovers, task logs, and brain artifacts (IND-SEC-003, IND-SEC-005).
+ */
+function isCrossConversationTargetDenied(rawPath, convId = "global", callerAccess = null) {
+  if (!rawPath || typeof rawPath !== "string") return false;
+  const access = callerAccess || evaluateCallerTranscriptAccess(convId);
+  const restricted = Boolean(access.isRestrictedChild || !access.allowed || access.mode === "self-only");
+  if (!restricted) return false;
+  const ownerConvId = extractBrainOwnerConvId(rawPath);
+  if (!ownerConvId) return false;
+  return !convId || convId === "global" || ownerConvId !== convId;
 }
 
 function isInsideAntigravityBrainPath(targetPath) {
@@ -2460,6 +2547,15 @@ function getCallerLineage(convId) {
       item = JSON.parse(lines[i]);
       if (i === 0) line0Parsed = true;
     } catch {
+      // Handle Step 0 lines truncated by the 512 KiB header ceiling (FRIC-SEC-001)
+      if (i === 0 && headStr.length >= 500000) {
+        const prefix = lines[0].slice(0, 4096);
+        if (/"type"\s*:\s*"USER_INPUT"/.test(prefix) || /"source"\s*:\s*"USER_EXPLICIT"/.test(prefix)) {
+          line0Parsed = true;
+          isTopLevelUserSession = true;
+          break;
+        }
+      }
       continue;
     }
     const content = typeof item?.content === "string" ? item.content : "";
@@ -2615,14 +2711,18 @@ function findGoverningPolicyForCaller(store, convId, lineage) {
     return policies["local-operator"] || policies["global"] || (store.activeOwnerId && policies[store.activeOwnerId]) || null;
   }
 
-  // 5. Fallback for synthetic test conversationIds (when transcript file does not exist on disk)
+  // 5. Fallback for synthetic test conversationIds (when transcript file does not exist on disk).
+  // Gated to test harnesses so unflushed production top-level tabs never inherit another session's activeOwnerId lock (FRIC-SEC-001).
   if (!lineage.transcriptFound) {
     for (const pol of policyList) {
       if (matchesAgentList(pol.deny, convId, lineage.rosterName) || matchesAgentList(pol.allow, convId, lineage.rosterName)) {
         return pol;
       }
     }
-    return (store.activeOwnerId && policies[store.activeOwnerId]) || policyList[0] || null;
+    if (process.env.AGY_TEST_PROFILE_DIR) {
+      return (store.activeOwnerId && policies[store.activeOwnerId]) || policyList[0] || null;
+    }
+    return null;
   }
 
   return null;
@@ -5149,6 +5249,14 @@ function hasGovernanceMutationInText(text, convId = "global") {
     return true;
   }
 
+  // Block directory-level symlinks, moves, copies, or removals of ~/.gemini/config or ~/.gemini/antigravity/bin as a whole (IND-SEC-002)
+  if (
+    /(?:^|[\s;|&(`'"])(?:ln|cp|mv|rm|del|remove-item|chmod|chown)(?=$|[\s;|&)`'"])/i.test(norm) &&
+    /(?:^|[\s'":=~])\/?\.gemini\/(?:config|antigravity\/bin)\/?(?=$|[\s;|&)'"])/i.test(norm)
+  ) {
+    return true;
+  }
+
   if (evaluateCallerTranscriptAccess(convId).isRestrictedChild) {
     if (
       /\b(?:execution-guard-hook\.mjs|transcript-core\.mjs|agy-context\.mjs|state-dir\.mjs|install-register\.mjs|hooks\.json)\b/i.test(
@@ -5213,7 +5321,7 @@ try {
   }
 
   // Only pre-classify as governed before JSON.parse when the tool name field itself matches a governed tool
-  isGovernedTool = /"(?:name|tool_name)"\s*:\s*"(?:run_command|read_file|view_file|read_many_files|grep_search|find_by_name|list_dir|manage_task|schedule|replace_file_content|write_to_file|write_file|edit_file)"/i.test(
+  isGovernedTool = /"(?:name|tool_name)"\s*:\s*"(?:run_command|read_file|view_file|read_many_files|grep_search|find_by_name|list_dir|manage_task|schedule|replace_file_content|multi_replace_file_content|write_to_file|write_file|edit_file)"/i.test(
     inputRaw
   );
   const payload = JSON.parse(inputRaw);
@@ -5557,14 +5665,14 @@ try {
             ? getShellMutationArgCandidates(verb, detailed, cmdIdx)
             : [];
           const candidateTokens = [...redirectTargets, ...argCandidates];
-          if (candidateTokens.some((tok) => isProtectedGovernanceFileMutation(tok, convId))) {
+          if (candidateTokens.some((tok) => isProtectedGovernanceFileMutationPath(tok, convId))) {
             respond({
               decision: "deny",
               reason:
                 "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited."
             });
           }
-          if (!isBenchmarkGuardDisabled(convId) && candidateTokens.some((tok) => isProtectedBenchmarkPath(tok))) {
+          if (!isBenchmarkGuardDisabled(convId) && candidateTokens.some((tok) => isProtectedBenchmarkFilePath(tok))) {
             respond({
               decision: "force_ask",
               reason:
@@ -5795,28 +5903,58 @@ try {
       }
     }
 
+    const callerAccessForRead = (isSpillover || taskMatch) ? evaluateCallerTranscriptAccess(convId) : null;
+    const isRestrictedForInternalRead = Boolean(
+      callerAccessForRead &&
+      (callerAccessForRead.isRestrictedChild || !callerAccessForRead.allowed || callerAccessForRead.mode === "self-only")
+    );
+
     // Check 3: Step Output Spillover Safe Harbor (strictly single unchained `rtk read`, or bounded `head -n 150`/`tail -n 150` in degraded mode)
-    if (isSpillover && (rtk ? !isRtkRead : !isDegradedBoundedRead)) {
-      respond({
-        decision: "deny",
-        reason: rtk
-          ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
-          : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
-      });
+    if (isSpillover) {
+      const spillCheckTarget = spilloverTok || (parsedEff?.operands?.[0] || "");
+      if (isCrossConversationTargetDenied(spillCheckTarget, convId, callerAccessForRead)) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Cross-conversation inspection of another session's step spillover is prohibited under Parent Transcript Isolation."
+        });
+      }
+      if (rtk ? !isRtkRead : !isDegradedBoundedRead) {
+        respond({
+          decision: "deny",
+          reason: rtk
+            ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
+            : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
+        });
+      }
     }
 
-    // Check 4: Completed task logs allow post-rewrite `rtk read` (or bounded `head -n 150`/`tail -n 150` when degraded without RTK); unknown-state logs require explicit `rtk read`
-    if (taskMatch && (rtk ? (taskState === "COMPLETED" ? !isRtkRead : !isExplicitRtkRead) : (taskState !== "COMPLETED" || !isDegradedBoundedRead))) {
-      respond({
-        decision: "deny",
-        reason: rtk
-          ? "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
-            "- Once completed, inspect output using 'rtk read <path>' via run_command.\n" +
-            "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
-          : "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
-            "- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines).\n" +
-            "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
-      });
+    // Check 4: Completed task logs allow post-rewrite `rtk read` (or bounded `head -n 150`/`tail -n 150` when degraded without RTK);
+    // unknown-state logs require explicit `rtk read` for unrestricted callers and are denied for restricted callers (IND-SEC-003).
+    if (taskMatch) {
+      const taskCheckTarget = taskMatch.realPath || taskMatch.token || (parsedEff?.operands?.[0] || "");
+      if (isCrossConversationTargetDenied(taskCheckTarget, convId, callerAccessForRead)) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Cross-conversation inspection of another session's task log is prohibited under Parent Transcript Isolation."
+        });
+      }
+      const allowedTaskRead = rtk
+        ? (taskState === "COMPLETED" ? isRtkRead : (!isRestrictedForInternalRead && isExplicitRtkRead))
+        : (taskState === "COMPLETED" && isDegradedBoundedRead);
+      if (!allowedTaskRead) {
+        respond({
+          decision: "deny",
+          reason: rtk
+            ? "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+              "- Once completed, inspect output using 'rtk read <path>' via run_command.\n" +
+              "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+            : "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+              "- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines).\n" +
+              "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+        });
+      }
     }
 
     // Fail loud with explicit guidance instead of silently injecting --tail-lines 150 on >45 KiB spillover/task logs (ACS-HOOK-GREP-CLAMP)
@@ -5907,7 +6045,14 @@ try {
     const hasSliceParams = rawStart !== undefined || rawEnd !== undefined;
 
     // 2a. Step Output Spillover Safe Harbor: bounded read_file (<= 150 lines) allowed; else route to rtk read / bounded read_file
-    if (isStepSpilloverPath(target)) {
+    if (isStepSpilloverPath(target) || expandAndResolvePathVariants(target).some((v) => isStepSpilloverPath(v))) {
+      if (isCrossConversationTargetDenied(target, convId)) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Cross-conversation inspection of another session's step spillover is prohibited under Parent Transcript Isolation."
+        });
+      }
       if (toolName === "read_file" && rawStart !== undefined && rawEnd !== undefined) {
         const startLine = Number(rawStart);
         const endLine = Number(rawEnd);
@@ -5936,6 +6081,13 @@ try {
     // 2b. Task Log Inspection (Lifecycle-Gated)
     const taskMatch = matchTaskLogToken(target, convId);
     if (taskMatch) {
+      if (isCrossConversationTargetDenied(taskMatch.realPath || target, convId)) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Cross-conversation inspection of another session's task log is prohibited under Parent Transcript Isolation."
+        });
+      }
       const state = getTaskState(taskMatch, convId);
       if (state === "RUNNING") {
         denyRunningTask(taskMatch.id, convId, taskMatch.token);
@@ -5974,15 +6126,28 @@ try {
       });
     }
 
-    // 2c. Other Internal State Protection by Root (LH-02)
-    if (isProtectedInternalState(target) || isProtectedInternalState(JSON.stringify(args))) {
+    // 2c. Other Internal State Protection by Root (LH-02, canonicalized against symlinks & relative paths: IND-SEC-002)
+    const multiPaths = Array.isArray(args.paths) ? args.paths : (Array.isArray(args.Paths) ? args.Paths : []);
+    if (
+      isProtectedInternalStatePath(target) ||
+      multiPaths.some((p) => typeof p === "string" && isProtectedInternalStatePath(p)) ||
+      isProtectedInternalState(JSON.stringify(args))
+    ) {
       respond({
         decision: "deny",
         reason: buildInternalStateToolDenial(convId)
       });
     }
 
-    // 2d. Allow Antigravity Special Files (SKILL.md, brain artifacts, configs) symmetrically for read_file & view_file
+    // 2d. Allow Antigravity Special Files (SKILL.md, brain artifacts, configs) symmetrically for read_file & view_file,
+    // while blocking cross-conversation brain artifacts for restricted children (IND-SEC-005).
+    if (isCrossConversationTargetDenied(target, convId)) {
+      respond({
+        decision: "deny",
+        reason:
+          "Antigravity Execution Governance: Cross-conversation inspection of another session's brain artifacts is prohibited under Parent Transcript Isolation."
+      });
+    }
     if (isAntigravitySpecialFile(target)) {
       respond({ decision: "allow" });
     }
@@ -6330,18 +6495,28 @@ try {
   // =========================================================================
   if (
     toolName === "replace_file_content" ||
+    toolName === "multi_replace_file_content" ||
     toolName === "write_to_file" ||
     toolName === "write_file" ||
     toolName === "edit_file"
   ) {
-    const targetFile = String(args.Path || args.path || args.TargetFile || args.targetFile || "").trim();
-    if (isProtectedInternalState(targetFile)) {
+    const targetFile = String(
+      args.Path ||
+        args.path ||
+        args.TargetFile ||
+        args.targetFile ||
+        args.target_file ||
+        args.AbsolutePath ||
+        args.absolutePath ||
+        ""
+    ).trim();
+    if (isProtectedInternalStatePath(targetFile)) {
       respond({
         decision: "deny",
         reason: buildInternalStateToolDenial(convId)
       });
     }
-    if (isProtectedGovernanceFileMutation(targetFile, convId)) {
+    if (isProtectedGovernanceFileMutationPath(targetFile, convId)) {
       respond({
         decision: "deny",
         reason:
@@ -6349,15 +6524,35 @@ try {
       });
     }
 
-    const bodyContent = String(
-      args.Content ||
-        args.content ||
-        args.file_content ||
-        args.Replacement ||
-        args.replacement ||
-        args.new_string ||
-        ""
-    );
+    const bodyParts = [];
+    for (const directVal of [
+      args.Content,
+      args.content,
+      args.file_content,
+      args.Replacement,
+      args.replacement,
+      args.ReplacementContent,
+      args.replacementContent,
+      args.new_string
+    ]) {
+      if (typeof directVal === "string" && directVal) bodyParts.push(directVal);
+    }
+    const rawChunks = Array.isArray(args.ReplacementChunks)
+      ? args.ReplacementChunks
+      : (Array.isArray(args.replacementChunks) ? args.replacementChunks : []);
+    for (const chunk of rawChunks) {
+      if (!chunk || typeof chunk !== "object") continue;
+      const chunkBody =
+        chunk.ReplacementContent ||
+        chunk.replacementContent ||
+        chunk.Replacement ||
+        chunk.replacement ||
+        chunk.Content ||
+        chunk.content ||
+        "";
+      if (typeof chunkBody === "string" && chunkBody) bodyParts.push(chunkBody);
+    }
+    const bodyContent = bodyParts.join("\n");
     const normTarget = targetFile.replace(/\\/g, "/");
     const isTmpOrScratch =
       normTarget.startsWith("/tmp/") ||
@@ -6377,7 +6572,7 @@ try {
       }
     }
 
-    if (!isBenchmarkGuardDisabled(convId) && isProtectedBenchmarkPath(targetFile)) {
+    if (!isBenchmarkGuardDisabled(convId) && isProtectedBenchmarkFilePath(targetFile)) {
       respond({
         decision: "force_ask",
         reason: `[BENCHMARK MUTATION DETECTED] Mutation of protected evaluator/benchmark artifact '${targetFile}' requires explicit user confirmation to prevent benchmark contamination. Set AGY_DISABLE_BENCHMARK_GUARD=1 to disable this guard for non-evaluation repos.`

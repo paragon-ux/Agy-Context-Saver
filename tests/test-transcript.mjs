@@ -1986,7 +1986,7 @@ try {
       );
 
       // Parent grants temporary Tier 3 allowlist then resets policy: Tier 4 restrictions remain disclosed honestly
-      manageTranscriptAccessPolicy({ callerConvId: coordA, mode: "allowlist", allow: `@w2-spec1` });
+      manageTranscriptAccessPolicy({ _testAuthorizedOwner: coordA, mode: "allowlist", allow: `@w2-spec1` });
       recordTranscriptHookGrant({ callerConvId: coordA, subcommand: "access", mode: "open", isMutation: true });
       const resetCli = runCli(["transcript", "access", "--reset", "--json"], { ...testEnv, GEMINI_CONVERSATION_ID: coordA });
       assert.equal(resetCli.status, 0, resetCli.stderr);
@@ -3072,6 +3072,60 @@ try {
     assert.equal(hugeRx.test("aaaaaaaaaa"), false, "Overlong regex patterns must fall back to literal matching");
     assert.equal(hugeRx.test("(a+)+".repeat(150)), true);
     console.log("✓ CodeQL regressions (#1, #6, #9-#15) verified in linear time");
+  }
+
+  // --- Wave 0 IND-SEC-004: Tier 4 grant enforcement without GEMINI_CONVERSATION_ID & subcommand-bound grant consumption ---
+  console.log("\n--- 14. Wave 0 Tier 4 Grant Enforcement & Error-Path Isolation (IND-SEC-004) ---");
+  {
+    const t4Parent = "conv-t4-parent-ind004";
+    const t4Child = "conv-t4-child-ind004";
+    for (const cid of [t4Parent, t4Child]) {
+      const logDir = path.join(brainDir, cid, ".system_generated", "logs");
+      fs.mkdirSync(logDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(logDir, "transcript.jsonl"),
+        JSON.stringify({ step_index: 0, type: "USER_INPUT", content: `transcript for ${cid}` }) + "\n",
+        "utf-8"
+      );
+    }
+    const t4ChildState = path.join(getStateDir(), `agy-session-${t4Child}.json`);
+    fs.writeFileSync(
+      t4ChildState,
+      JSON.stringify({
+        pollCount: 0,
+        denials: 0,
+        lineage: { isChildSession: true, parentConvId: t4Parent, launchDirective: "deny" }
+      }),
+      "utf-8"
+    );
+    const prevEnvConv = process.env.GEMINI_CONVERSATION_ID;
+    delete process.env.GEMINI_CONVERSATION_ID;
+    try {
+      // Direct read of restricted child's parent or deny-locked child without a hook grant must fail closed even without GEMINI_CONVERSATION_ID
+      const blockedParentRead = await readTranscript({ conversationId: t4Parent, lastTurns: 1 });
+      assert.equal(blockedParentRead.isError, true, "Unverified read of Tier 4 child's parent must fail closed (IND-SEC-004)");
+      const blockedChildRead = await readTranscript({ conversationId: t4Child, lastTurns: 1 });
+      assert.equal(blockedChildRead.isError, true, "Unverified read of Tier 4 deny-locked child must fail closed (IND-SEC-004)");
+
+      // Unrelated conversation remains unaffected (ACS-ARCH-001 preserved)
+      const unrelatedRead = await readTranscript({ conversationId: "conv-codeql-sec", lastTurns: 1 });
+      assert.ok(!unrelatedRead.isError, "Unrelated conversation must remain accessible under Tier 4 lock on another cohort");
+
+      // Valid PreToolUse hook grant still allows authorized parent inspection
+      recordTranscriptHookGrant({ callerConvId: t4Parent, subcommand: "read", targetConvId: t4Parent, mode: "open" });
+      const authorizedParentRead = await readTranscript({ conversationId: t4Parent, lastTurns: 1 });
+      assert.ok(!authorizedParentRead.isError, "Authorized PreToolUse hook grant must succeed under Tier 4 lock");
+
+      // Error-path consumeTranscriptAccessGrant({ subcommand: 'query' }) must NOT steal a pending 'read' grant
+      recordTranscriptHookGrant({ callerConvId: t4Parent, subcommand: "read", targetConvId: t4Parent, mode: "open" });
+      consumeTranscriptAccessGrant({ subcommand: "query", targetConvId: t4Parent });
+      const survivingRead = await readTranscript({ conversationId: t4Parent, lastTurns: 1 });
+      assert.ok(!survivingRead.isError, "Mismatched subcommand error-path consume must not steal pending read grant (IND-SEC-004)");
+    } finally {
+      if (prevEnvConv !== undefined) process.env.GEMINI_CONVERSATION_ID = prevEnvConv;
+      try { fs.unlinkSync(t4ChildState); } catch {}
+    }
+    console.log("✓ IND-SEC-004: Tier 4 grant enforcement without GEMINI_CONVERSATION_ID & subcommand-bound grant cleanup verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

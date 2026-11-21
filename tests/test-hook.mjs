@@ -3180,6 +3180,228 @@ console.log("\n--- Group K: Day-1 Launch Remediation Regressions (RUN-001, RUN-0
   }
 }
 
+// ============================================================================
+// GROUP L: v2.1.2 Wave 0 Trust-Boundary Closure (IND-SEC-001..005, FRIC-SEC-001)
+// ============================================================================
+console.log("\n--- Group L: Wave 0 Trust-Boundary Closure (IND-SEC-001..005, FRIC-SEC-001) ---");
+{
+  const w0Dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-w0-sec-"));
+  try {
+    // L.1: IND-SEC-001 - multi_replace_file_content governed across internal state, governance, ReplacementChunks & benchmarks
+    const hooksCfg = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../hooks.json"), "utf-8"));
+    assert.match(hooksCfg["agy-context-saver"].PreToolUse[0].matcher, /\bmulti_replace_file_content\b/);
+    assert.equal(
+      runHook({
+        toolCall: {
+          name: "multi_replace_file_content",
+          args: { TargetFile: "~/.gemini/config/hooks.json", ReplacementChunks: [{ ReplacementContent: "{}" }] }
+        }
+      }).decision,
+      "deny",
+      "multi_replace_file_content on ~/.gemini/config/hooks.json must be denied (IND-SEC-001)"
+    );
+    assert.equal(
+      runHook({
+        toolCall: {
+          name: "multi_replace_file_content",
+          args: { TargetFile: path.join(stateDir, "transcript-access.json"), ReplacementChunks: [{ ReplacementContent: "{}" }] }
+        }
+      }).decision,
+      "deny",
+      "multi_replace_file_content on transcript-access.json must be denied (IND-SEC-001)"
+    );
+    assert.equal(
+      runHook({
+        toolCall: {
+          name: "multi_replace_file_content",
+          args: {
+            TargetFile: "/tmp/evil-helper.mjs",
+            ReplacementChunks: [{ ReplacementContent: "import fs from 'fs'; fs.readFileSync('.system_generated/logs/transcript.jsonl');" }]
+          }
+        }
+      }).decision,
+      "deny",
+      "multi_replace_file_content script payload in ReplacementChunks must be denied (IND-SEC-001)"
+    );
+    assert.equal(
+      runHook({
+        toolCall: {
+          name: "multi_replace_file_content",
+          args: { TargetFile: "benchmarks/suite.json", ReplacementChunks: [{ ReplacementContent: '{"score": 100}' }] }
+        }
+      }).decision,
+      "force_ask",
+      "multi_replace_file_content on benchmarks/ must trigger force_ask (IND-SEC-001)"
+    );
+    console.log("✓ IND-SEC-001: multi_replace_file_content & ReplacementChunks governed cleanly");
+
+    // L.2: IND-SEC-002 - Symlink & relative-path containment across file tools + ln -s ~/.gemini/config
+    const fakeParentConv = "conv-w0-symlink-parent";
+    const fakeBrainLogs = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", fakeParentConv, ".system_generated", "logs");
+    const fakeConfigDir = path.join(hermetic.profileDir, ".gemini", "config");
+    const fakeBenchDir = path.join(w0Dir, "benchmarks");
+    fs.mkdirSync(fakeBrainLogs, { recursive: true });
+    fs.mkdirSync(fakeConfigDir, { recursive: true });
+    fs.mkdirSync(fakeBenchDir, { recursive: true });
+    const realTranscript = path.join(fakeBrainLogs, "transcript.jsonl");
+    const realHooks = path.join(fakeConfigDir, "hooks.json");
+    const realBench = path.join(fakeBenchDir, "suite.json");
+    fs.writeFileSync(realTranscript, JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "secret" }) + "\n");
+    fs.writeFileSync(realHooks, "{}");
+    fs.writeFileSync(realBench, "{}");
+
+    assert.equal(
+      runHook({
+        cwd: hermetic.profileDir,
+        toolCall: { name: "edit_file", args: { Path: ".gemini/config/hooks.json", Target: "{}", Replacement: "{ }" } }
+      }).decision,
+      "deny",
+      "Relative .gemini/config/hooks.json from profile home must be denied (IND-SEC-002)"
+    );
+    assert.equal(
+      runHook({
+        toolCall: { name: "run_command", args: { CommandLine: "ln -s ~/.gemini/config ./cfg-link", WaitMsBeforeAsync: 5000 } }
+      }).decision,
+      "deny",
+      "ln -s ~/.gemini/config directory escape must be denied (IND-SEC-002)"
+    );
+    let symlinksSupported = true;
+    const symTranscript = path.join(w0Dir, "notes.txt");
+    const symHooks = path.join(w0Dir, "local-hooks.json");
+    const symBench = path.join(w0Dir, "local-data.json");
+    try {
+      fs.symlinkSync(realTranscript, symTranscript);
+      fs.symlinkSync(realHooks, symHooks);
+      fs.symlinkSync(realBench, symBench);
+    } catch {
+      symlinksSupported = false;
+    }
+    if (symlinksSupported) {
+      assert.equal(
+        runHook({ toolCall: { name: "read_file", args: { Path: symTranscript, StartLine: 1, EndLine: 50 } } }).decision,
+        "deny",
+        "read_file through workspace symlink to transcript.jsonl must be denied (IND-SEC-002)"
+      );
+      assert.equal(
+        runHook({ toolCall: { name: "edit_file", args: { Path: symHooks, Target: "{}", Replacement: "{ }" } } }).decision,
+        "deny",
+        "edit_file through workspace symlink to hooks.json must be denied (IND-SEC-002)"
+      );
+      assert.equal(
+        runHook({ toolCall: { name: "edit_file", args: { Path: symBench, Target: "{}", Replacement: "{ }" } } }).decision,
+        "force_ask",
+        "edit_file through workspace symlink to benchmarks/suite.json must trigger force_ask (IND-SEC-002)"
+      );
+    }
+    console.log("✓ IND-SEC-002: Symlink, relative-path & ln directory-escape containment verified");
+
+    // L.3: IND-SEC-003 & IND-SEC-005 - Restricted child isolation on parent spillovers, task logs & brain artifacts
+    const isoParent = "conv-w0-iso-parent";
+    const isoChildDeny = "conv-w0-iso-child-deny";
+    const isoChildSelf = "conv-w0-iso-child-self";
+    const brainRoot = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain");
+    for (const [cid, lines] of [
+      [isoParent, [JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "Parent work" })]],
+      [isoChildDeny, [JSON.stringify({ step_index: 0, type: "SYSTEM_MESSAGE", content: `[Message] sender=${isoParent} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: deny]\nDo blind audit` }), JSON.stringify({ step_index: 1, type: "SYSTEM_MESSAGE", content: `Task id "${isoChildDeny}/task-own1" finished with result:\nOK` })]],
+      [isoChildSelf, [JSON.stringify({ step_index: 0, type: "SYSTEM_MESSAGE", content: `[Message] sender=${isoParent} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: self-only]\nSelf only` })]]
+    ]) {
+      const base = path.join(brainRoot, cid);
+      fs.mkdirSync(path.join(base, ".system_generated", "logs"), { recursive: true });
+      fs.mkdirSync(path.join(base, ".system_generated", "steps", "10"), { recursive: true });
+      fs.mkdirSync(path.join(base, ".system_generated", "tasks"), { recursive: true });
+      fs.writeFileSync(path.join(base, ".system_generated", "logs", "transcript.jsonl"), lines.join("\n") + "\n");
+      fs.writeFileSync(path.join(base, ".system_generated", "steps", "10", "output.txt"), `spill-${cid}\n`);
+      fs.writeFileSync(path.join(base, ".system_generated", "tasks", "task-own1.log"), `task-${cid}\n`);
+      fs.writeFileSync(path.join(base, "implementation_plan.md"), `# Plan for ${cid}\n`);
+    }
+    const parentSpill = path.join(brainRoot, isoParent, ".system_generated", "steps", "10", "output.txt");
+    const childOwnSpill = path.join(brainRoot, isoChildDeny, ".system_generated", "steps", "10", "output.txt");
+    const parentTaskLog = path.join(brainRoot, isoParent, ".system_generated", "tasks", "task-own1.log");
+    const childOwnTaskLog = path.join(brainRoot, isoChildDeny, ".system_generated", "tasks", "task-own1.log");
+    const parentPlan = path.join(brainRoot, isoParent, "implementation_plan.md");
+    const childOwnPlan = path.join(brainRoot, isoChildDeny, "implementation_plan.md");
+
+    for (const childId of [isoChildDeny, isoChildSelf]) {
+      assert.equal(
+        runHook({ conversationId: childId, toolCall: { name: "read_file", args: { Path: parentSpill, StartLine: 1, EndLine: 50 } } }).decision,
+        "deny",
+        `Restricted child (${childId}) must be denied parent step spillover via read_file (IND-SEC-003)`
+      );
+      assert.equal(
+        runHook({ conversationId: childId, toolCall: { name: "run_command", args: { CommandLine: `rtk read "${parentSpill}"`, WaitMsBeforeAsync: 5000 } } }).decision,
+        "deny",
+        `Restricted child (${childId}) must be denied parent step spillover via rtk read (IND-SEC-003)`
+      );
+      assert.equal(
+        runHook({ conversationId: childId, toolCall: { name: "run_command", args: { CommandLine: `rtk read "${parentTaskLog}"`, WaitMsBeforeAsync: 5000 } } }).decision,
+        "deny",
+        `Restricted child (${childId}) must be denied parent task log via rtk read (IND-SEC-003)`
+      );
+      assert.equal(
+        runHook({ conversationId: childId, toolCall: { name: "read_file", args: { Path: parentPlan } } }).decision,
+        "deny",
+        `Restricted child (${childId}) must be denied parent brain artifact via read_file (IND-SEC-005)`
+      );
+    }
+    // Own spillover, own completed task log, and own brain artifact remain allowed
+    assert.equal(
+      runHook({ conversationId: isoChildDeny, toolCall: { name: "read_file", args: { Path: childOwnSpill, StartLine: 1, EndLine: 50 } } }).decision,
+      "allow",
+      "Restricted child may still inspect its OWN step spillover via bounded read_file"
+    );
+    assert.equal(
+      runHook({ conversationId: isoChildDeny, toolCall: { name: "run_command", args: { CommandLine: `rtk read "${childOwnSpill}"`, WaitMsBeforeAsync: 5000 } } }).decision,
+      "allow",
+      "Restricted child may still inspect its OWN step spillover via rtk read"
+    );
+    assert.equal(
+      runHook({ conversationId: isoChildDeny, toolCall: { name: "run_command", args: { CommandLine: `rtk read "${childOwnTaskLog}"`, WaitMsBeforeAsync: 5000 } } }).decision,
+      "allow",
+      "Restricted child may still inspect its OWN completed task log via rtk read"
+    );
+    assert.equal(
+      runHook({ conversationId: isoChildDeny, toolCall: { name: "read_file", args: { Path: childOwnPlan } } }).decision,
+      "allow",
+      "Restricted child may still read its OWN brain artifact"
+    );
+    console.log("✓ IND-SEC-003 & IND-SEC-005: Cross-conversation spillover, task-log, and brain artifact isolation verified");
+
+    // L.4: FRIC-SEC-001 - Truncated >512 KiB Step 0 USER_INPUT top-level session stays exempt from another session's deny policy
+    const bigUserConv = "conv-w0-big-step0";
+    const bigUserLogs = path.join(brainRoot, bigUserConv, ".system_generated", "logs");
+    fs.mkdirSync(bigUserLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(bigUserLogs, "transcript.jsonl"),
+      JSON.stringify({ step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", content: "A".repeat(540 * 1024) }) + "\n"
+    );
+    const policyFile = path.join(stateDir, "transcript-access.json");
+    const prevPolicy = fs.existsSync(policyFile) ? fs.readFileSync(policyFile, "utf-8") : null;
+    try {
+      fs.writeFileSync(
+        policyFile,
+        JSON.stringify({
+          version: 2,
+          activeOwnerId: isoParent,
+          policies: {
+            [isoParent]: { ownerId: isoParent, mode: "deny", allow: [], deny: [], updatedAt: Date.now(), ttlMs: 3600000 }
+          }
+        })
+      );
+      const bigUserRes = runHook({
+        conversationId: bigUserConv,
+        toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript health --id ${bigUserConv}`, WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(bigUserRes.decision, "allow", "Top-level USER_INPUT >512 KiB must not inherit another session's deny policy (FRIC-SEC-001)");
+    } finally {
+      if (prevPolicy !== null) fs.writeFileSync(policyFile, prevPolicy);
+      else try { fs.unlinkSync(policyFile); } catch {}
+    }
+    console.log("✓ FRIC-SEC-001: Oversized >512 KiB Step 0 USER_INPUT top-level session immunity verified");
+  } finally {
+    fs.rmSync(w0Dir, { recursive: true, force: true });
+  }
+}
+
 hermetic.cleanup();
 console.log("\n=================================================");
 console.log("ALL 2.0 PRETOOLUSE HOOK GOVERNANCE TESTS PASSED!");

@@ -101,7 +101,7 @@ const HOOK_KEY = "agy-context-saver";
 const LEGACY_HOOK_KEY = "execution-guard";
 const CLI_SHIM_NAMES = ["agy-context", "agy-context-saver"];
 const DEFAULT_HOOK_MATCHER =
-  "manage_task|schedule|run_command|view_file|read_file|read_many_files|grep_search|find_by_name|list_dir|replace_file_content|write_file|write_to_file|edit_file";
+  "manage_task|schedule|run_command|view_file|read_file|read_many_files|grep_search|find_by_name|list_dir|replace_file_content|multi_replace_file_content|write_file|write_to_file|edit_file";
 
 function getExpectedHookMatcher() {
   try {
