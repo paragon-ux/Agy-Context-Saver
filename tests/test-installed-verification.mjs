@@ -111,23 +111,28 @@ const shimQuery = spawnSync(process.execPath, [cliScript, "transcript", "query",
 assert.equal(shimQuery.status, 0);
 assert.match(shimQuery.stdout, /Step 3/);
 
-// Run hook from pluginDest (matching Antigravity's plugin hooks.json cwd contract!)
+// Run the registered global hook command from pluginDest (preserving Windows quoting via /d /s /c + windowsVerbatimArguments)
 const hookPayload = JSON.stringify({
   toolCall: { name: "run_command", args: { CommandLine: "git status" } }
 });
-const shellCmd = process.platform === "win32" ? "cmd.exe" : "sh";
-const shellArgs = process.platform === "win32" ? ["/c", hookCmd] : ["-c", hookCmd];
-const hookRes = spawnSync(shellCmd, shellArgs, {
-  cwd: pluginDest,
-  input: hookPayload,
-  encoding: "utf-8"
-});
-assert.equal(hookRes.status, 0, `Plugin hooks.json command failed in ${pluginDest}: ${hookRes.stderr}`);
+const hookRes = process.platform === "win32"
+  ? spawnSync(process.env.ComSpec || process.env.COMSPEC || "cmd.exe", ["/d", "/s", "/c", `"${hookCmd}"`], {
+      cwd: pluginDest,
+      input: hookPayload,
+      encoding: "utf-8",
+      windowsVerbatimArguments: true
+    })
+  : spawnSync("sh", ["-c", hookCmd], {
+      cwd: pluginDest,
+      input: hookPayload,
+      encoding: "utf-8"
+    });
+assert.equal(hookRes.status, 0, `Global hooks.json command failed in ${pluginDest}: ${hookRes.stderr}`);
 const parsedHookOut = JSON.parse(hookRes.stdout.trim());
 assert.equal(parsedHookOut.decision, "allow");
 assert.equal(parsedHookOut.overwrite?.CommandLine, "rtk git status");
 assert.equal(parsedHookOut.overwrite?.WaitMsBeforeAsync, 10000);
-console.log("✓ Installed CLI shim and plugin hooks.json relative execution verified");
+console.log("✓ Installed CLI shim and global hooks.json execution verified");
 
 // Status on an uninstalled/incomplete profile must exit non-zero (both CLI and direct install-register.mjs --status)
 const installScript = path.resolve(__dirname, "../scripts/install-register.mjs");

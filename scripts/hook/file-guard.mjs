@@ -119,7 +119,9 @@ function isProtectedDiscoveryAncestorPath(candidateTarget, isDiscoveryTool, isRe
   const normDir = (p) => {
     if (!p) return "";
     const raw = tryRealpath(path.resolve(p)).replace(/\\/g, "/");
-    const norm = raw.replace(/\/+$/, "") || (raw.startsWith("/") ? "/" : raw);
+    let end = raw.length;
+    while (end > 0 && raw.charCodeAt(end - 1) === 47) end--;
+    const norm = raw.slice(0, end) || (raw.startsWith("/") ? "/" : raw);
     return isCI ? norm.toLowerCase() : norm;
   };
   const profileHomeNorm = normDir(getProfileHomeDir());
