@@ -1,6 +1,6 @@
 # Architecture & Internals
 
-`Agy-Context-Saver` (`v2.1.1`) pairs a `PreToolUse` hook (`scripts/execution-guard-hook.mjs`) with a streaming transcript engine (`lib/transcript-core.mjs`, `bin/agy-context.mjs`) and **RTK (`>= 1.1.0`)**, a CLI proxy that compresses noisy shell and test output.
+`Agy-Context-Saver` (`v2.1.2`) pairs a `PreToolUse` hook (`scripts/execution-guard-hook.mjs`) with a streaming transcript engine (`lib/transcript-core.mjs`, `bin/agy-context.mjs`) and **RTK (`>= 1.1.0`)**, a CLI proxy that compresses noisy shell and test output.
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
@@ -15,34 +15,33 @@
 ## Division of Responsibilities
 
 ### RTK (`>= 1.1.0`)
-- Rewrites supported shell commands via `rtk hook antigravity` (`git`, `pytest`, `cargo`, `npm`, `tsc`, `docker`, and linters).
-- Searches and lists workspace files (`rtk grep`, `rtk find`, `rtk ls`, `rtk tree`).
-- Reads step spillovers and completed task logs (`rtk read`, including `cat` and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrites) and filters command output to errors or summaries (`rtk err`, `rtk summary`).
+- Compresses noisy test, build, lint, container, and `git status`/`push`/`pull`/`fetch` stdout via the Narrow High-ROI Pre-Gate (`rtk hook antigravity`, configurable via `AGY_RTK_MODE=pregate|off|all`).
+- Reads step spillovers and completed task logs (`rtk read`, including `cat` and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrites) and filters command output on demand (`rtk err`, `rtk summary`).
 
-### Agy-Context-Saver (`v2.1.1`)
-- Enforces per-task Reactive Wakeup backoff and conditioned stall-watchdog auto-clamping on `manage_task` and `schedule` (`30s -> 75s -> 188s -> 469s -> 600s` per task; `180s -> 450s -> 600s` per direct subagent), backed by a 5-strike `force_ask` circuit breaker.
-- Bounds workspace `read_file` slices (`<= 150` lines, or explicit `1..TotalLines` reads on files `<= 800` lines and `<= 45 KiB`).
-- Protects `.system_generated/` and the state directory (`getStateDir()`, `~/.local/state/agy-context-saver` on POSIX or `%LOCALAPPDATA%\agy-context-saver` on Windows).
+### Agy-Context-Saver (`v2.1.2`)
+- Enforces per-task Reactive Wakeup backoff, remote CI timers, and conditioned stall-watchdog auto-clamping on `manage_task` and `schedule` (`30s -> 75s -> 188s -> 469s -> 600s` per task/remote CI; `180s -> 450s -> 600s` per direct subagent), backed by atomic `wx`-locked dual-hook deduplication and a 5-strike `force_ask` circuit breaker.
+- Bounds large workspace `read_file` calls (auto-allowing `<= 300` lines & `<= 24 KiB`, safe multimodal media, and special files; allowing bounded slices up to `300` lines and explicit `1..TotalLines` audits up to `800` lines & `45 KiB`) while leaving native `grep_search`, `find_by_name`, and `list_dir` unblocked on workspace paths.
+- Protects `.system_generated/` and the state directory (`getStateDir()`, `~/.local/state/agy-context-saver` on POSIX or `%LOCALAPPDATA%\agy-context-saver` on Windows) across all native file tools (including `multi_replace_file_content`) and symlinks.
 - Streams Markdown transcript turns, regex queries, lineage lists, sanitized exports, and step ranges via `agy-context transcript` (`read`, `query`, `step`, `health`, `list`, `export`, `access`).
-- Governs child subagent and `/swarm` worker transcript access via CLI policies, first-line launch directives, and 10-second single-use capability grants.
-- Guards benchmark and evaluation files against unapproved edits (`edit_file`, `write_file`, and shell writes).
+- Governs child subagent and `/swarm` worker transcript access (including cross-conversation spillovers, task logs, and brain artifacts) via CLI policies, first-line launch directives, and 10-second single-use capability grants.
+- Guards benchmark and evaluation files against unapproved edits (`edit_file`, `write_file`, `replace_file_content`, `multi_replace_file_content`, and shell writes), with `AGY_DISABLE_BENCHMARK_GUARD=1` opt-out for top-level non-evaluation repos.
 
 ---
 
 ## Technical Subsystems
 
-### 1. RTK `>= 1.1.0` Hook Delegation
-The `PreToolUse` hook intercepts `run_command`. After running internal state, transcript access, and task backoff checks, it passes the command payload to `rtk hook antigravity` over stdin JSON:
-- Supported commands (`git status`, `pytest`, `cargo test`) receive an updated `CommandLine` rewrite (`rtk git`, `rtk pytest`, or `bash -c 'rtk ...'`).
-- Authorized `agy-context transcript` calls under `self-only` governance have `--id <callerConvId>` injected before execution so the child session can only read its own transcript.
-- Implicit `wc`, `ls`, `diff`, and `grep` rewrites that would alter output format are reverted unless explicitly invoked as `rtk ...`. When host `rg` is absent, `rg` commands fall back to `rtk grep`.
+### 1. Narrow High-ROI RTK Pre-Gate (`>= 1.1.0`)
+The `PreToolUse` hook intercepts `run_command`. After running internal state, transcript access, and task backoff checks, it evaluates each shell segment before spawning `rtk hook antigravity`:
+- High-ROI noisy runners (`pytest`, `cargo test`/`build`, `vitest`, `jest`, `tsc`, `eslint`, `npm`/`pnpm`/`yarn` test/build/install, `docker`, `kubectl`, `git status`/`push`/`pull`/`fetch`) and scoped internal spillover/completed task-log reads receive compact `rtk` rewrites (including inside `bash -c` / `sh -c` / `cmd /c` wrappers).
+- Precision inspection tools (`find`, `grep`, `rg`, `ls`, `wc`, `diff`, `ps`, `git diff`/`show`/`log`, workspace `cat`/`head`/`tail`), pipes, stdout redirects, and `--json`/`--porcelain` commands bypass `rtk` completely (zero subprocess spawn, lossless output). Explicit `rtk ...` invocations stay intact, and when host `rg` is absent, bare `rg` maps to lossless `grep` while explicit `rtk rg` maps to `rtk grep`.
+- Authorized `agy-context transcript` calls in both `open` and `self-only` modes have `--id <callerConvId>` injected when `--id` is omitted or `current`.
 - Unset `WaitMsBeforeAsync` on non-daemon commands is upgraded to `10,000ms` so short commands finish in-turn.
 
-### 2. 3-Tier Workspace File Inspection
-To prevent multi-thousand-line file dumps while keeping exact 1-indexed line numbers for `edit_file` and `write_file`:
-1. **Tier 1 (Search and discovery):** `rtk grep`, `rtk find`, and `rtk ls` locate target files and `[StartLine, EndLine]` ranges.
-2. **Tier 2 (Bounded `read_file` slices):** `read_file` calls pass `StartLine` and `EndLine` (`1-150` lines, or `1..TotalLines` when a file is `<= 800` lines and `<= 45 KiB`). Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) pass through Safe Harbor without slice bounds.
-3. **Tier 3 (Spillovers and completed task logs only):** Step output spillovers (`.system_generated/steps/<step>/output.txt`) allow bounded `read_file` (`<= 150` lines) or single unchained `rtk read <path>` calls. Completed background task logs (`tasks/<taskId>.log`) allow single unchained `rtk read` calls once finished (`cat`, and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; use explicit `rtk read <path>` for bare `tail`, quoted/spaced paths, Windows backslash `head`/`tail`, or env-prefixed calls, with `--head-lines 150` / `--tail-lines 150` required above `45 KiB`; unknown-state logs require explicit `rtk read`). Editable workspace files remain on Tier 2 bounded `read_file` slices so 1-indexed line numbers stay exact, and `read_many_files` routes editable files to bounded `read_file` while allowing `rtk read` for read-only logs/spillovers.
+### 2. Workspace File Bounds & Output Inspection
+To prevent multi-thousand-line file dumps without obstructing normal exploration:
+1. **Native workspace discovery:** `grep_search`, `find_by_name`, and `list_dir` run directly on workspace paths while remaining blocked on `.system_generated/` and `getStateDir()`.
+2. **Unified `read_file` / `view_file` bounds:** Small files (`<= 300` lines and `<= 24 KiB`), safe workspace multimodal media (`.png`, `.jpg`, `.webp`, `.pdf`, audio/video), and Antigravity special files (`SKILL.md`, `AGENTS.md`, own brain artifacts, `swarm_view/`, `.gemini/config/`) pass without slice bounds. Larger files accept bounded slices up to `300` lines (EOF-clamped) or explicit full-file audits (`StartLine: 1, EndLine >= TotalLines`) when `<= 800` lines and `<= 45 KiB`. `read_many_files` remains denied.
+3. **Spillovers and completed task logs:** Step output spillovers (`.system_generated/steps/<step>/output.txt`) allow bounded `read_file` (`<= 150` lines) or single unchained `rtk read <path>` calls. Completed background task logs (`tasks/<taskId>.log`) allow single unchained `rtk read` calls once finished (`cat`, and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; `--head-lines 150` / `--tail-lines 150` required above `45 KiB`; `RUNNING` task logs are always denied).
 
 ### 3. Internal State, State Directory & Script Scanning
 Segment-, quote-, and heredoc-aware shell parsing protects `.system_generated/` and `getStateDir()`:

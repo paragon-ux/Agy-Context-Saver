@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.1.1)
+ * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.1.2)
  *
  * Closed Execution Topology & Governance Invariants:
  * 1. RTK Transparent Command Optimization:
@@ -304,13 +304,18 @@ function matchesRawProtectedInternalState(targetPath) {
   return false;
 }
 
-function isProtectedShellOrScriptOperation(text, options = {}) {
-  if (!text || typeof text !== "string") return false;
-  if (isProtectedInternalState(text)) return true;
+function getProtectedShellOperationReason(text, options = {}) {
+  if (!text || typeof text !== "string") return null;
+  if (isProtectedInternalState(text)) return "internal-state";
 
-  // Non-canonical or wrapped agy-context transcript invocations that did not pass checkAgyContextTranscriptCommand
-  if (/(?:^|[\s;|&('"\/\\])agy-context(?:-saver)?(?:\.m?js)?['"]?\s+(?:-[^\s;|&'"]+\s+)*transcript(?:\s|$|['";|&)])/i.test(text)) {
-    return true;
+  // Non-canonical or wrapped agy-context transcript invocations that did not pass checkAgyContextTranscriptCommand.
+  // Check invocation boundaries (not arbitrary quoted prose payloads) and return a specific diagnostic reason (IND-RUN-003, FRIC-RUN-007).
+  if (
+    /(?:^|[\s;|&(])(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*)(?:(?:node(?:\.exe)?\s+)?(?:[^\s;|&'"()]*[\/\\])?)agy-context(?:-saver)?(?:\.(?:m?js|cmd|exe|bat))?\s+(?:-[^\s;|&'"]+\s+)*transcript(?:\s|$|[;|&)])/i.test(
+      text
+    )
+  ) {
+    return "non-canonical-cli";
   }
 
   // Inline interpreter or script execution importing/spawning transcript-core.mjs, bin/agy-context.mjs, or retired Agy-Context-Saver mcp/index.js
@@ -319,19 +324,19 @@ function isProtectedShellOrScriptOperation(text, options = {}) {
       text
     )
   ) {
-    return true;
+    return "inline-transcript-core";
   }
 
   // Unconditionally block Antigravity-specific governance or brain env redirection inside shell commands/scripts
   if (/(?:^|[\s;|&(])(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)=/i.test(text)) {
-    return true;
+    return "governance-env";
   }
   if (
     /(?:process\.env|os\.environ)\s*(?:\.\s*(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)\b|\[\s*['"](?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)['"]\s*\])/i.test(
       text
     )
   ) {
-    return true;
+    return "governance-env";
   }
 
   // Scope standard OS env vars (XDG_STATE_HOME, LOCALAPPDATA) so ordinary user tests run cleanly in non-restricted
@@ -346,7 +351,7 @@ function isProtectedShellOrScriptOperation(text, options = {}) {
     const targetsGovernanceState =
       /\bagy-context(?:-saver)?\b|\bexecution-guard\b|\btranscript(?:-access|-core)?\b|\.gemini\b/i.test(text);
     if (isRestrictedChild || targetsGovernanceState) {
-      return true;
+      return "governance-env";
     }
   }
 
@@ -361,10 +366,36 @@ function isProtectedShellOrScriptOperation(text, options = {}) {
       text
     )
   ) {
-    return true;
+    return "internal-state";
   }
 
-  return false;
+  return null;
+}
+
+function isProtectedShellOrScriptOperation(text, options = {}) {
+  return Boolean(getProtectedShellOperationReason(text, options));
+}
+
+function buildProtectedShellReasonMessage(reasonCode, convId = "global") {
+  if (reasonCode === "non-canonical-cli") {
+    return (
+      "Antigravity Execution Governance: 'agy-context transcript' must be invoked as a single unchained command " +
+      "(no shell chaining, pipes, redirects, subshells, or '..' traversal). Run e.g. 'agy-context transcript read --mode compact' directly via run_command."
+    );
+  }
+  if (reasonCode === "inline-transcript-core") {
+    return (
+      "Antigravity Execution Governance: Direct inline script or interpreter imports of 'transcript-core.mjs' or 'bin/agy-context.mjs' are prohibited. " +
+      "Invoke the single unchained 'agy-context transcript ...' CLI directly via run_command instead."
+    );
+  }
+  if (reasonCode === "governance-env") {
+    return (
+      "Antigravity Execution Governance: Overriding Antigravity governance/state environment variables " +
+      "(AGY_TEST_PROFILE_DIR, AGY_BRAIN_DIR, GEMINI_CONVERSATION_ID, or governance-scoped XDG_STATE_HOME/LOCALAPPDATA) inside shell commands is prohibited."
+    );
+  }
+  return buildInternalStateShellDenial(convId);
 }
 
 /**
@@ -3679,6 +3710,94 @@ function getInspectableTextForSegment(seg, opts = {}) {
     }
   }
 
+  // GitHub CLI (`gh` / `rtk gh`) prose-flag handler: skip literal string payloads in `pr`/`issue`/`release`
+  // (`-b`/`--body`, `-t`/`--title`, `-n`/`--notes`) and `api` (`-f`/`--raw-field` always literal; `-F`/`--field`
+  // literal only when value after `=` does NOT start with `@`), while strictly keeping `--body-file`, `--notes-file`,
+  // `--input`, `-F k=@file`, redirects, and subshells inspected (FRIC-RUN-006, IND-RUN-003).
+  let ghBaseIdx = -1;
+  if (cmd0 === "gh") {
+    ghBaseIdx = 0;
+  } else if (cmd0 === "rtk" && cmd1 === "gh") {
+    ghBaseIdx = 1;
+  } else if (cmd0 === "node" && detailed[1] && isTrustedLocalRtkLauncherPath(detailed[1].value) && cmd2 === "gh") {
+    ghBaseIdx = 2;
+  }
+  if (ghBaseIdx !== -1 && ghBaseIdx + 1 < detailed.length) {
+    const ghSub = normalizeCmdName(detailed[ghBaseIdx + 1].value);
+    if (ghSub === "pr" || ghSub === "issue" || ghSub === "release" || ghSub === "api") {
+      const isUnquotedRedirect = (t) =>
+        Boolean(t && !t.quoted && (REDIRECT_OP_REGEX.test(t.raw) || REDIRECT_ATTACHED_REGEX.test(t.raw)));
+      const isFileFieldPayload = (val) => {
+        const eq = String(val || "").indexOf("=");
+        return eq !== -1 && String(val).slice(eq + 1).startsWith("@");
+      };
+      const kept = [];
+      if (envPrefix && envPrefix.trim()) {
+        kept.push(envPrefix.trim());
+      }
+      let afterDoubleDash = false;
+      for (let i = 0; i < detailed.length; i++) {
+        const tok = detailed[i];
+        if (i <= ghBaseIdx + 1) {
+          kept.push(tok.value);
+          continue;
+        }
+        if (isUnquotedRedirect(tok)) {
+          kept.push(tok.raw);
+          if (!tok.quoted && REDIRECT_OP_REGEX.test(tok.raw) && i + 1 < detailed.length) {
+            kept.push(detailed[++i].value);
+          }
+          continue;
+        }
+        if (!afterDoubleDash && tok.value === "--") {
+          afterDoubleDash = true;
+          kept.push(tok.value);
+          continue;
+        }
+        if (!afterDoubleDash) {
+          const v = tok.value;
+          if (ghSub === "api") {
+            if (v === "-f" || v === "--raw-field") {
+              if (i + 1 < detailed.length && !isUnquotedRedirect(detailed[i + 1])) i++;
+              continue;
+            }
+            if (v.startsWith("--raw-field=") || (v.startsWith("-f") && v.length > 2 && !v.startsWith("--"))) {
+              continue;
+            }
+            if (v === "-F" || v === "--field") {
+              if (i + 1 < detailed.length && !isUnquotedRedirect(detailed[i + 1])) {
+                const nextVal = detailed[i + 1].value;
+                if (!isFileFieldPayload(nextVal)) {
+                  i++;
+                  continue;
+                }
+              }
+            }
+            if (v.startsWith("--field=") && !isFileFieldPayload(v.slice("--field=".length))) {
+              continue;
+            }
+            if (v.startsWith("-F") && v.length > 2 && !v.startsWith("--") && !isFileFieldPayload(v.slice(2))) {
+              continue;
+            }
+          } else {
+            // pr / issue / release
+            if (v === "-b" || v === "--body" || v === "-t" || v === "--title" || v === "-n" || v === "--notes") {
+              if (i + 1 < detailed.length && !isUnquotedRedirect(detailed[i + 1])) i++;
+              continue;
+            }
+            if (v.startsWith("--body=") || v.startsWith("--title=") || v.startsWith("--notes=")) {
+              continue;
+            }
+          }
+        }
+        kept.push(tok.value);
+      }
+      const redirs = extractRedirectTargets(allTokens);
+      for (const r of redirs) kept.push(r);
+      return kept.join(" ");
+    }
+  }
+
   // Search commands: skip pattern argument and inspect only target paths / -f files / redirects
   let argStart = -1;
   if (SEARCH_COMMANDS.has(cmd0)) {
@@ -4223,11 +4342,15 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
         const redirectTargets = extractRedirectTargets(tokenizeShellWordsDetailed(seg.text || ""));
         writesExecutableOrTmpScript = redirectTargets.some((t) => {
           const normT = String(t || "").replace(/\\/g, "/");
+          // Plain documentation/data heredocs in /tmp/ (e.g. /tmp/pr-body.md, /tmp/notes.txt, /tmp/payload.json)
+          // are exempt unless carrying a `#!` shebang (checked below) or executable extension (FRIC-RUN-006).
+          const isDocOrDataExt = /\.(?:md|markdown|txt|json|yml|yaml|csv|log)$/i.test(normT);
           return (
             isExecutableScriptPath(normT) ||
-            normT.startsWith("/tmp/") ||
-            normT.startsWith("/var/tmp/") ||
-            normT.startsWith(osTmpNorm + "/")
+            (!isDocOrDataExt &&
+              (normT.startsWith("/tmp/") ||
+                normT.startsWith("/var/tmp/") ||
+                normT.startsWith(osTmpNorm + "/")))
           );
         });
       }
@@ -5324,7 +5447,7 @@ function extractTaskBackoffKey(toolName, args = {}) {
       if (tail) return tail.toLowerCase();
     }
     const prompt = cleanGovernanceArg(args.Prompt || args.prompt);
-    const promptTask = prompt.match(/\b(task-\d+)\b/i);
+    const promptTask = prompt.match(/\b(task-[a-z0-9_-]+)\b/i);
     if (promptTask) return promptTask[1].toLowerCase();
     const promptUuid = prompt.match(/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i);
     if (promptUuid) return promptUuid[1].toLowerCase();
@@ -5362,6 +5485,10 @@ function hasValidSubagentTimerCondition(args = {}) {
  * Keep identical to lib/transcript-core.mjs `isTaskPollSchedule`.
  */
 function isTaskPollSchedule(args = {}) {
+  const isDaemon = args.IsDaemon === true || args.isDaemon === true;
+  const cron = String(args.CronExpression || args.cronExpression || "").trim();
+  if (isDaemon && cron) return false;
+
   const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
   const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
   return (
@@ -5564,14 +5691,17 @@ function denyRunningTask(taskId, convId, taskToken = "") {
   const requiredBackoffMs = requiredBackoffSec * 1000;
   const elapsedMs = currentLastPoll ? Math.max(0, now - currentLastPoll) : 0;
   const elapsedSec = Math.floor(elapsedMs / 1000);
-  const remainingSec = Math.max(1, Math.ceil((requiredBackoffMs - elapsedMs) / 1000));
   const condTarget = taskKey || `task-${taskId}`;
   const condExample = convId && convId !== "global" ? `${convId}/${condTarget}` : condTarget;
+  const timingSummary =
+    elapsedMs >= requiredBackoffMs
+      ? `${elapsedSec}s elapsed — backoff window is satisfied for manage_task(Action='status'), but reading raw task logs while RUNNING remains prohibited`
+      : `Diagnostic check #${currentPollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${Math.max(1, Math.ceil((requiredBackoffMs - elapsedMs) / 1000))}s remaining)`;
 
   respond(
     {
       decision: "deny",
-      reason: `Antigravity Execution Governance: Task '${taskId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. Diagnostic check #${currentPollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${remainingSec}s remaining). Keep a conditioned watchdog armed via schedule(DurationSeconds=${requiredBackoffSec}, TimerCondition="${condExample}") so Reactive Wakeup (<SYSTEM_MESSAGE>) notifies you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
+      reason: `Antigravity Execution Governance: Task '${taskId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. ${timingSummary}. Keep a conditioned watchdog armed via schedule(DurationSeconds=${requiredBackoffSec}, TimerCondition="${condExample}") so Reactive Wakeup (<SYSTEM_MESSAGE>) notifies you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
     },
     { convId, sessionToSave: session, updatePollTime: false }
   );
@@ -5656,10 +5786,27 @@ function isProtectedGovernanceFileMutation(targetPath, convId = "global") {
 function hasGovernanceMutationInText(text, convId = "global") {
   if (!text || typeof text !== "string") return false;
   const norm = text.replace(/\\/g, "/");
-  const hasShellMutationVerb =
-    /(?:^|[\s;|&(`'"])(?:rm|del|remove-item|mv|cp|tee|truncate|shred|install|sed|perl|chmod|chown|ln|dd|patch)(?=$|[\s;|&)`'"])/i.test(
+  // Unconditional shell mutation verbs (excluding `install`, `sed`, `perl`, which are checked with precision below: FRIC-RUN-005)
+  const hasAlwaysMutatingShellVerb =
+    /(?:^|[\s;|&(`'"])(?:rm|del|remove-item|mv|cp|tee|truncate|shred|chmod|chown|ln|dd|patch)(?=$|[\s;|&)`'"])/i.test(
       norm
     );
+  // Require `install` strictly in command-verb position (never `npm install`, `pip install`, etc.)
+  const hasCommandVerbInstall =
+    /(?:^|[;|&(`]\s*|&&\s*|\|\|\s*)(?:sudo\s+)?(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*)(?:\/[^\s;|&]*\/)?install(?=$|[\s;|&)`'"])/i.test(
+      norm
+    );
+  // Require `-i` / `--in-place` (or `w ` write command) on `sed`, and `-i` / write APIs on `perl` so read-only `sed -n` passes
+  const hasMutatingSed =
+    /(?:^|[\s;|&(`'"])sed(?=$|[\s;|&)`'"])/i.test(norm) &&
+    (/(?:\s-[a-zA-Z]*i|\s--in-place(?:=|\s|$))/.test(norm) || /(?:['"\s;]|^)(?:w\s+[^\s'"]+)/.test(norm));
+  const hasMutatingPerl =
+    /(?:^|[\s;|&(`'"])perl(?=$|[\s;|&)`'"])/i.test(norm) &&
+    (/(?:\s-[a-zA-Z]*i|\s--in-place)/.test(norm) ||
+      /\b(?:unlink|rename|truncate|sysopen|spew|write_file|write_text|write_bytes|copy|move)\b|\bopen(?:\s*\(|\s+)[^;\n]*(?:['"]\s*(?:\+?<|>>?|>)|\bO_(?:WRONLY|RDWR|CREAT)\b)/i.test(
+        norm
+      ));
+  const hasShellMutationVerb = hasAlwaysMutatingShellVerb || hasCommandVerbInstall || hasMutatingSed || hasMutatingPerl;
   const hasCodeMutationVerb =
     /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rmSync|rmdir|rmdirSync|rename|renameSync|truncateSync|chmodSync|copyFile|copyFileSync|WriteAllText)\s*\(|\bos\.(?:remove|unlink)\s*\(|\bshutil\.(?:copy|move|rmtree)\s*\(|\bPath\([^\n)]*\)\.(?:write_text|write_bytes|unlink)\s*\(/i.test(
       norm
@@ -6044,8 +6191,9 @@ try {
         return [];
       }
 
-      if (verb === "cp") {
+      if (verb === "cp" || verb === "ln") {
         // Only flags that genuinely consume a separate next-token value (never GNU optional `=VALUE` flags like `--backup`/`--preserve`/`--reflink`/`--update`/`--context`)
+        // Narrowing `ln` to destination operand matches `cp` so read-only `ln -s benchmarks/suite.json /tmp/link` passes (FRIC-RUN-009).
         const cpValueFlags = new Set(["-S", "--suffix", "--no-preserve", "--sparse"]);
         const targetDirs = [];
         const positionals = [];
@@ -6192,8 +6340,8 @@ try {
       const taskMatches = extractTaskLogMatches(inspectableCombined, convId);
       taskMatch = taskMatches[0] || null;
 
-      // Block unwrapped shell/interpreter mutations of governance/hook files
-      if (hasGovernanceMutationInText(inspectableCombined, convId)) {
+      // Block unwrapped shell/interpreter mutations of governance/hook files (evaluated per-segment: FRIC-RUN-005)
+      if (inspectableTexts.some((segText) => hasGovernanceMutationInText(segText, convId))) {
         respond({
           decision: "deny",
           reason:
@@ -6213,13 +6361,22 @@ try {
       // If spillover or task log is chained, redirected, uses heredocs, subshells, or `..` traversal -> DENY
       if ((isSpillover || taskMatch) && !isSingleUnchainedShellCmd(segments)) {
         const hasRtkForSpillover = Boolean(resolveCachedHostEnv().rtk);
+        let chainedReason;
+        if (isSpillover) {
+          chainedReason = hasRtkForSpillover
+            ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'rtk read <path>' command (no chaining, redirects, subshells, or '..' traversal)."
+            : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' command (or bounded 'read_file' <= 150 lines; no chaining, redirects, subshells, or '..' traversal).";
+        } else if (taskMatches.length > 0 && taskMatches.every((m) => getTaskState(m, convId) === "COMPLETED")) {
+          // Explicit unchained guidance for COMPLETED task logs rather than generic prohibition (PR13-RUN-005)
+          chainedReason = hasRtkForSpillover
+            ? "Antigravity Execution Governance: Completed task logs must be inspected using a single unchained 'rtk read <path>' command (no chaining, pipes, redirects, subshells, or '..' traversal)."
+            : "Antigravity Execution Governance: Completed task logs must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' command (or bounded 'read_file' <= 150 lines; no chaining, pipes, redirects, subshells, or '..' traversal).";
+        } else {
+          chainedReason = buildInternalStateShellDenial(convId);
+        }
         respond({
           decision: "deny",
-          reason: isSpillover
-            ? hasRtkForSpillover
-              ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'rtk read <path>' command (no chaining, redirects, subshells, or '..' traversal)."
-              : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' command (or bounded 'read_file' <= 150 lines; no chaining, redirects, subshells, or '..' traversal)."
-            : buildInternalStateShellDenial(convId)
+          reason: chainedReason
         });
       }
 
@@ -6255,10 +6412,13 @@ try {
           }
         }
       }
-      if (isProtectedShellOrScriptOperation(inspectRemainder, { isRestrictedChild: callerAccess.isRestrictedChild })) {
+      const protectedReason = getProtectedShellOperationReason(inspectRemainder, {
+        isRestrictedChild: callerAccess.isRestrictedChild
+      });
+      if (protectedReason) {
         respond({
           decision: "deny",
-          reason: buildInternalStateShellDenial(convId)
+          reason: buildProtectedShellReasonMessage(protectedReason, convId)
         });
       }
     }
@@ -7107,10 +7267,13 @@ try {
     const callerAccess = evaluateCallerTranscriptAccess(convId);
 
     if (isScript && bodyContent && (callerAccess.isRestrictedChild || isTmpOrScratch)) {
-      if (isProtectedShellOrScriptOperation(bodyContent, { isRestrictedChild: callerAccess.isRestrictedChild })) {
+      const scriptBlockReason = getProtectedShellOperationReason(bodyContent, {
+        isRestrictedChild: callerAccess.isRestrictedChild
+      });
+      if (scriptBlockReason) {
         respond({
           decision: "deny",
-          reason: buildInternalStateShellDenial(convId)
+          reason: buildProtectedShellReasonMessage(scriptBlockReason, convId)
         });
       }
     }
