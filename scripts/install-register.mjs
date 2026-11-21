@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver Registration & Installation Engine (v2.1.1)
+ * Agy-Context-Saver Registration & Installation Engine (v2.1.2)
  * Zero-delay cross-platform installer with CLI-first shim provisioning,
  * unified hook registration, and legacy MCP retirement/sweep.
  *
@@ -51,9 +51,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const PACKAGE_VERSION = (() => {
   try {
-    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.1.1";
+    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.1.2";
   } catch {
-    return "2.1.1";
+    return "2.1.2";
   }
 })();
 
@@ -101,7 +101,7 @@ const HOOK_KEY = "agy-context-saver";
 const LEGACY_HOOK_KEY = "execution-guard";
 const CLI_SHIM_NAMES = ["agy-context", "agy-context-saver"];
 const DEFAULT_HOOK_MATCHER =
-  "manage_task|schedule|run_command|view_file|read_file|read_many_files|grep_search|find_by_name|list_dir|replace_file_content|write_file|write_to_file|edit_file";
+  "manage_task|schedule|run_command|view_file|read_file|read_many_files|grep_search|find_by_name|list_dir|replace_file_content|multi_replace_file_content|write_file|write_to_file|edit_file";
 
 function getExpectedHookMatcher() {
   try {
@@ -466,6 +466,10 @@ export function detectExistingInstallation(options = {}) {
   const pluginHookScript = path.join(pluginDest, "scripts", "execution-guard-hook.mjs");
   const scriptExists = fs.existsSync(pluginHookScript);
   const mirroredHookExists = fs.existsSync(destHook);
+  let mirroredHookIsSymlink = false;
+  try {
+    mirroredHookIsSymlink = fs.lstatSync(destHook).isSymbolicLink();
+  } catch {}
   let mirroredHookStale = false;
   if (mirroredHookExists && fs.existsSync(sourceHook)) {
     try {
@@ -550,6 +554,7 @@ export function detectExistingInstallation(options = {}) {
         pluginHookRegistered,
         globalHookRegistered,
         mirroredHookExists,
+        mirroredHookIsSymlink,
         mirroredHookStale,
         legacyHookPresent,
         corrupt: hookCorrupt,
@@ -1136,12 +1141,50 @@ export async function runInstall(options = {}) {
   }
 
   // 2. Dual-surface hook governance (plugin hooks.json + global hooks.json for /swarm workers):
-  //    Mirror execution-guard-hook.mjs to ~/.gemini/config/scripts/execution-guard-hook.mjs and register
-  //    "agy-context-saver" in ~/.gemini/config/hooks.json so native /swarm workers (which load global hooks.json
-  //    rather than plugin hooks.json) execute PreToolUse reliably alongside coordinator idempotency deduplication.
+  //    Link (when plugin is symlinked) or copy execution-guard-hook.mjs to ~/.gemini/config/scripts/execution-guard-hook.mjs
+  //    and register "agy-context-saver" in ~/.gemini/config/hooks.json with explicit --surface=global identity (IND-SCRIPT-001).
   await fsPromises.mkdir(scriptsDir, { recursive: true });
-  const hookUpdated = await safeCopyFileIfChanged(sourceHook, destHook);
-  log(`[OK] Mirrored hook script ${hookUpdated ? "updated" : "verified"}: ${destHook}`);
+  let pluginIsSymlinkNow = false;
+  try {
+    pluginIsSymlinkNow = fs.lstatSync(pluginDest).isSymbolicLink();
+  } catch {}
+  let hookUpdated = false;
+  let hookLinkMode = "copy";
+  if (pluginIsSymlinkNow && !mustCopyPlugin) {
+    let destHookLst = null;
+    try {
+      destHookLst = fs.lstatSync(destHook);
+    } catch {}
+    let alreadyLinked = false;
+    if (destHookLst && destHookLst.isSymbolicLink()) {
+      try {
+        alreadyLinked = fs.realpathSync(destHook) === fs.realpathSync(sourceHook);
+      } catch {}
+    }
+    if (alreadyLinked) {
+      hookLinkMode = "symlink";
+    } else {
+      try {
+        if (destHookLst) await fsPromises.unlink(destHook);
+        fs.symlinkSync(sourceHook, destHook, "file");
+        hookUpdated = true;
+        hookLinkMode = "symlink";
+      } catch {
+        // Fall back to mirrored copy when file symlinks are unavailable (e.g. unprivileged Windows)
+        hookUpdated = await safeCopyFileIfChanged(sourceHook, destHook);
+        hookLinkMode = "copy";
+      }
+    }
+  } else {
+    try {
+      if (fs.lstatSync(destHook).isSymbolicLink()) {
+        await fsPromises.unlink(destHook);
+      }
+    } catch {}
+    hookUpdated = await safeCopyFileIfChanged(sourceHook, destHook);
+    hookLinkMode = "copy";
+  }
+  log(`[OK] Mirrored hook script (${hookLinkMode}) ${hookUpdated ? "updated" : "verified"}: ${destHook}`);
 
   const hookMatcher = getExpectedHookMatcher();
   const nextHooks = validatedHooks ? { ...validatedHooks } : {};
@@ -1154,7 +1197,7 @@ export async function runInstall(options = {}) {
         hooks: [
           {
             type: "command",
-            command: `node "${destHookNormalized}"`,
+            command: `node "${destHookNormalized}" --surface=global`,
             timeout: 10
           }
         ]

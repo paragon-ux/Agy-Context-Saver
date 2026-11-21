@@ -1,6 +1,6 @@
 {
   "name": "agy-context-saver",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "Save tokens and prevent context bloat in Google Antigravity with RTK shell compression, bounded file reads, and fast CLI transcript search.",
   "main": "lib/transcript-core.mjs",
   "bin": {

@@ -11,27 +11,18 @@ description: >-
 
 ## Architectural Boundary
 
-- **RTK (`>= 1.1.0`)**: Rewrites shell commands (`rtk hook antigravity`), compresses command output, provides workspace search and file listing (`rtk grep`, `rtk find`, `rtk ls`), reads spillovers and completed task logs (`rtk read`), and filters errors or summaries (`rtk err`, `rtk summary`).
-- **Agy-Context-Saver (`v2.1.1`)**: Enforces per-task Reactive Wakeup stall-watchdog backoff, bounds `read_file` slices, protects `.system_generated/` and the state directory, and exposes two-tier `agy-context transcript` (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode).
+- **RTK (`>= 1.1.0`)**: Compresses noisy test, build, lint, container, and `git status`/`push`/`pull`/`fetch` stdout via the Narrow High-ROI Pre-Gate (`AGY_RTK_MODE=pregate|off|all`, default `pregate`), reads step spillovers and completed task logs (`rtk read`), and remains available explicitly (`rtk <cmd>`, `rtk err`, `rtk summary`). Precision inspection commands (`find`, `grep`, `rg`, `ls`, `wc`, `diff`, workspace `cat`/`head`/`tail`, `ps`, `git diff`/`show`/`log`), pipelines, redirects, and `--json`/`--porcelain` commands stay untouched.
+- **Agy-Context-Saver (`v2.1.2`)**: Enforces per-task Reactive Wakeup stall-watchdog backoff, bounds `read_file` on large files, protects `.system_generated/` and the state directory, and exposes two-tier `agy-context transcript` (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode).
 
 ---
 
-## Workspace File & Codebase Inspection
+## Enforced File & Output Guardrails
 
-Unbounded full-file `read_file` calls on workspace files are blocked by the `PreToolUse` hook:
+Native `grep_search`, `find_by_name`, and `list_dir` work directly on workspace paths (still blocked on `.system_generated/` and `getStateDir()`):
 
-1. **Tier 1 (Search and discovery: `rtk grep`, `rtk find`, `rtk ls`)**:
-   - **Pattern and symbol search**: Run `rtk grep -rnE "<pattern>" <path>` via `run_command` to locate `[StartLine, EndLine]` coordinates (always pass an explicit target path such as `.` or `src/` so `rtk grep` does not wait on stdin). Because `rtk grep` clips lines at `~80` chars and `25` matches/file (emitting ephemeral `rtk recall` hashes unreadable from transcripts), implicit `grep` commands stay unrewritten; use raw `grep -rnE` whenever untruncated lines or `>25` matches per file are required.
-   - **Directory and file listing**: Run `rtk find <path>`, `rtk ls <path>`, or `rtk tree` (or PowerShell `dir` / `Get-ChildItem` on Windows).
-2. **Tier 2 (Workspace file reading: `read_file` slice policy)**:
-   - Pass `StartLine` and `EndLine` into `read_file` in bounded slices of `1-150` lines to preserve 1-indexed line numbers for `edit_file` and `write_file`.
-   - Partial slices of `151-800` lines and `ByteOffset`-only unbounded reads are denied. An explicit full-file read (`StartLine: 1, EndLine: <TotalLines>`) is allowed when the file on disk is `<= 800` lines and `<= 45 KiB` (`46,080` bytes).
-3. **Tier 3 (Spillovers, completed task logs, and diagnostics: `rtk read`, `rtk err`, `rtk summary`)**:
-   - **Spillovers and completed task logs only**: Read `.system_generated/steps/<step>/output.txt` spillovers (via bounded `read_file` `<= 150` lines or `rtk read <path>`) and completed `tasks/<taskId>.log` files via `rtk read <path>` (`cat`, and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; use explicit `rtk read <path>` for bare `tail`, quoted/spaced paths, Windows backslash `head`/`tail`, or env prefixes, and `--head-lines 150` / `--tail-lines 150` required on `>45 KiB` files). Never use `rtk read` for editable workspace code; use bounded `read_file` slices so 1-indexed line numbers stay exact for `edit_file` (when denied on `read_many_files`, use bounded `read_file` for editable code or `rtk read` for read-only logs/spillovers).
-   - `rtk err <cmd>`: Runs a command and prints only errors and warnings.
-   - `rtk summary <cmd>`: Runs a command and prints a 2-line summary.
-
-*Safe harbor*: Antigravity special files (`SKILL.md`, `AGENTS.md`, brain artifacts, `swarm_view/` narrator state, `.gemini/config/`) may be read via `read_file` without slice bounds, and `.system_generated/steps/<n>/output.txt` supports bounded `read_file` (`<= 150` lines).
+- **Small files, media & special files**: Workspace files `<= 300` lines and `<= 24 KiB`, safe media files (`.png`, `.jpg`, `.webp`, `.pdf`, audio/video), and Antigravity special files (`SKILL.md`, `AGENTS.md`, own brain artifacts, `swarm_view/`, `.gemini/config/`) need no line bounds on `read_file`.
+- **Large workspace files**: Bounded `read_file` slices up to `300` lines (`StartLine`, `EndLine`, EOF-clamped), or explicit full-file audits (`StartLine: 1, EndLine >= TotalLines`) when `<= 800` lines and `<= 45 KiB`. `read_many_files` and `ByteOffset`-only reads are denied.
+- **Spillovers & completed task logs**: Both `.system_generated/steps/<step>/output.txt` spillovers and `COMPLETED` `tasks/<taskId>.log` files allow bounded `read_file` (`<= 150` lines) or a single unchained `rtk read <path>` (`cat`/`head -n 150`/`tail -n 150` auto-rewrite to `rtk read`; `--head-lines 150` / `--tail-lines 150` required above `45 KiB`). Reading `RUNNING` task logs directly is always denied.
 
 ---
 
@@ -102,14 +93,13 @@ agy-context restore-backups
 ## Governance Summary
 
 1. **Layer 1 (Reactive lifecycle and per-task stall-watchdog backoff)**:
-   - Do not busy-wait on `manage_task(Action='status')` or schedule short/unconditioned polling timers; end the turn and wait for Reactive Wakeup (`<SYSTEM_MESSAGE>`).
-   - Do not run blocking CI watch loops (`gh pr checks --watch`, `gh run watch`) inside `run_command`; use one-shot snapshots (`gh pr checks`, `gh run list`) instead.
-   - Status checks follow per-task exponential backoff (`min(600, round(30 * 2.5^(pollCount - 1)))`, pruned on task completion so fresh tasks start at `0s`/`30s`). 5 cumulative denials trigger the `force_ask` circuit breaker.
-   - Whenever any `run_command` moves to the background, arm `schedule(DurationSeconds=45, TimerCondition="<convId>/task-X")` and output a Pre-Yield Status Card. On wakeup, inspect via `manage_task(Action='status')` for stalls, runaway loops, or unsafe output (`manage_task(Action='kill')` is always allowed at `0s`) and re-arm the next backoff-level watchdog (`75s`, `188s`, `469s`, `600s`) if still progressing. Conditioned task watchdogs `>= 15s` auto-clamp to the required floor instead of dropping monitoring; `< 15s` or unconditioned polls are denied.
-   - Never pair `/swarm` (`swarm_wait`) with a one-shot `schedule` timer (`swarm_monitor` handles stalls). Direct `invoke_subagent` launches may optionally arm a conditioned `180s-300s` stall watchdog (`TimerCondition="<subagentConvId>"`, scaling `180s -> 450s -> 600s`; `30s..179s` auto-clamp, `< 30s` or unconditioned subagent timers are denied).
-2. **Layer 2 (Shell rewriting, file slices, and transcript access)**:
-   - Shell commands rewrite via `rtk hook antigravity`.
-   - Workspace inspection uses `rtk grep` / `rtk find` -> bounded `read_file(StartLine, EndLine)` -> `edit_file` / `write_file`, while `rtk read` reads step spillovers and completed task logs.
-   - Direct access to `.system_generated/` or `getStateDir()` is denied; use `agy-context transcript` when permitted by the parent's access policy.
-3. **Layer 3 (Synchronous window)**:
-   - Non-daemon `run_command` calls without an explicit `WaitMsBeforeAsync` default to 10,000ms.
+   - Do not busy-wait on `manage_task(Action='status')` or schedule short/unconditioned task polling timers; end the turn and wait for Reactive Wakeup (`<SYSTEM_MESSAGE>`).
+   - Do not run blocking CI watch loops (`gh pr checks --watch`, `gh run watch`) inside `run_command`; use one-shot snapshots (`gh pr checks`, `gh run list`) and, if waiting on remote CI, a backoff-compliant `schedule` timer (`DurationSeconds >= 30`, scaling `30s -> 75s -> 188s -> 469s -> 600s`; no local `task-X` `TimerCondition` required).
+   - Status checks follow per-task exponential backoff (`min(600, round(30 * 2.5^(pollCount - 1)))`, pruned on task completion so fresh tasks start at `0s`/`30s`). Perform immediate Check #1 (`0s`) *before* arming a `schedule` watchdog (calling Check #1 after `schedule` waits for the watchdog cooldown). Reading raw `RUNNING` task logs is always denied even past cooldown. 5 cumulative denials trigger the `force_ask` circuit breaker.
+   - Whenever any `run_command` moves to the background, arm `schedule(DurationSeconds=45, TimerCondition="<convId>/task-X")` and output a Pre-Yield Status Card. On wakeup, inspect via `manage_task(Action='status')` (`manage_task(Action='kill')` is always allowed at `0s`) and re-arm the next backoff-level watchdog (`75s`, `188s`, `469s`, `600s`) if still progressing. Conditioned task watchdogs `>= 15s` auto-clamp to the required floor; `< 15s` or unconditioned task polls are denied.
+   - Never pair `/swarm` (`swarm_wait`) with a one-shot `schedule` timer (`swarm_monitor` handles stalls; conditioned `task-*` watchdogs are exempt from `/swarm` keyword collisions). Direct `invoke_subagent` launches may optionally arm a conditioned `180s-300s` stall watchdog (`TimerCondition="<subagentConvId>"`, scaling `180s -> 450s -> 600s`; `30s..179s` auto-clamp, `< 30s` or unconditioned subagent timers are denied).
+2. **Layer 2 (Narrow High-ROI RTK Pre-Gate, file bounds, and transcript access)**:
+   - High-ROI noisy runners (`pytest`, `python -m pytest`/`mypy`, `uv run pytest`/`ruff`/`mypy`/`ty`, `cargo test`/`build`/`clippy`, `go test`/`build`/`vet`, `vitest`, `jest`, `tsc`, `eslint`, `ruff`, `npm`/`pnpm`/`bun` noisy `run` scripts & `lint`, `docker build`/`ps`/`logs`/`compose ps|logs|build`, `kubectl get`/`logs`/`describe`/`apply`, `git status`/`push`/`pull`/`fetch`) and scoped internal spillover/completed task-log reads delegate to `rtk hook antigravity` (`AGY_RTK_MODE=pregate|off|all`). Precision tools (`find`, `grep`, `rg`, `ls`, `wc`, `diff`, `ps`, `git diff`/`show`/`log`, workspace `cat`/`head`/`tail`), pipes, stdout/file redirects, and machine-readable outputs (`--json`, `--porcelain`, `git status -sb`, `-o json`, etc.) stay untouched (`2>&1` / `2>/dev/null` stderr redirects pass through).
+   - Direct access to `.system_generated/` or `getStateDir()` is denied; use unchained `agy-context transcript` when permitted by the parent's access policy (`open` mode auto-injects `--id <convId>` when omitted or `current`).
+3. **Layer 3 (Synchronous window & benchmark opt-out)**:
+   - Non-daemon `run_command` calls without an explicit `WaitMsBeforeAsync` default to 10,000ms. Set `AGY_DISABLE_BENCHMARK_GUARD=1` in non-evaluation repos to disable `force_ask` prompts on `benchmarks/`/`evaluation/`/`scoring/` directories for top-level non-restricted sessions.

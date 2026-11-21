@@ -1,30 +1,40 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.1.1)
+ * Agy-Context-Saver: Intelligent Execution Governor Hook for Antigravity (v2.1.2)
  *
  * Closed Execution Topology & Governance Invariants:
- * 1. RTK Transparent Command Optimization:
- *    - Delegates command rewriting to `rtk hook antigravity` (>= 1.1.0) via stdin JSON.
- *    - Reverts lossy `rtk wc` / `rtk ls` / `rtk diff` rewrites unless explicitly requested.
- *    - Never emits `rtk rg` when `rg` is absent on PATH (maps safe invocations to `rtk grep`
- *      with explicit path, or strips `rtk ` when rg-only flags are used).
+ * 1. Narrow High-ROI RTK Pre-Gate (`AGY_RTK_MODE=pregate|off|all`, default `pregate`):
+ *    - Delegates only high-ROI noisy test/build/lint/container/git-sync commands to
+ *      `rtk hook antigravity` (>= 1.1.0), leaving precision inspection tools (`find`, `grep`,
+ *      `rg`, `ls`, `wc`, `diff`, `ps`, `git diff`/`show`/`log`, workspace `cat`/`head`/`tail`),
+ *      pipelines, stdout/file redirects, and machine-readable outputs untouched and lossless.
+ *    - Defensively reverts lossy implicit rewrites under `AGY_RTK_MODE=all` and preserves
+ *      explicit `rtk ...` + scoped spillover/completed task-log `rtk read` parity.
+ *    - Never emits `rtk rg` when `rg` is absent on PATH and rewrites off-PATH local `rtk`
+ *      (including `uv run rtk ...`) to the local binary / `rtk-run.mjs` launcher.
  *    - Sets WaitMsBeforeAsync=10000 only when `!isDaemon && waitMs === undefined`.
- * 2. Hard-Routed Native File/Search Inspection (LH-07):
- *    - read_file & view_file -> Symmetrical Safe Harbor + Hybrid Slice (<= 150 lines, or
- *      explicit full-file StartLine=1..EndLine=TotalLines when <= 800 lines & <= 45 KiB);
- *      bounded read_file (<= 150 lines) allowed on `.system_generated/steps/<n>/output.txt`.
- *    - read_many_files, grep_search, find_by_name, list_dir -> Hard-routed to RTK CLI.
+ * 2. Native File & Discovery Governance (LH-07):
+ *    - `read_file` & `view_file` -> Unified `300L / 24 KiB` omitted-bound auto-allow,
+ *      `<= 300`-line slices (EOF-clamped via `1 MiB` newline scan + single-bound support),
+ *      `<= 800L / 45 KiB` explicit full-file audits, safe workspace multimodal media exempt,
+ *      and symmetrical `<= 150`-line slices on step spillovers & `COMPLETED` task logs.
+ *    - `grep_search`, `find_by_name`, `list_dir` -> Unblocked on workspace paths after
+ *      canonicalized internal-state, ancestor-root, and cross-conversation checks (`2c`/`2d`).
+ *    - `read_many_files` -> Denied to prevent unbounded multi-file context dumps.
  * 3. Root-Based Antigravity Internal State Protection (LH-02):
  *    - Quote/heredoc-aware shell parser (`splitShellSegments`) protects `.system_generated/`
- *      without false-blocking heredoc prose, `echo`/`printf`, or literal search patterns.
+ *      and `getStateDir()` without false-blocking heredoc prose, `echo`/`printf`, `git commit`/`tag`/`log --grep`,
+ *      `gh` body/title/notes/field prose, or literal search patterns.
  *    - Allows strictly single unchained `rtk read <spillover|completed task log>` and
  *      `agy-context transcript (read|query|step|health|list|export|access) ...` within `<brainDir>`.
  * 4. Closed Lifecycle Governance (LH-03, LH-04, LH-05, LH-06):
- *    - Session-wide ledger with proportional backoff and 5-denial `force_ask` circuit breaker.
- * 5. Benchmark & Evaluator Mutation Protection (LH-09):
- *    - Requires user approval (`force_ask`) for `edit_file`, `write_file`,
- *      `replace_file_content`, `write_to_file`, and destructive shell commands.
+ *    - Session-wide ledger with per-task exponential backoff (`0s -> 30s -> 75s -> 188s -> 469s -> 600s`),
+ *      remote CI backoff (`PR`/`workflow`-scoped), `wx`-locked dual-hook deduplication, and 5-denial `force_ask` circuit breaker.
+ * 5. Benchmark & Governance Mutation Protection (LH-09):
+ *    - Blocks direct mutations of installed hooks/shims and requires user approval (`force_ask`)
+ *      for `edit_file`, `write_file`, `replace_file_content`, `multi_replace_file_content`,
+ *      `write_to_file`, and destructive shell commands targeting protected benchmark artifacts.
  * 6. Fail-Closed on Governed Operations (LH-10).
  */
 
@@ -45,40 +55,155 @@ function resolveHookPath(p) {
 }
 
 const HOOK_DEDUP_TTL_MS = 5000;
-const HOOK_SAME_ARG_CROSS_SCRIPT_MS = 500;
-const MAX_SAFE_SLICE_LINES = 150;
+const HOOK_SAME_ARG_CROSS_SCRIPT_MS = 2500;
+const SESSION_LOCK_STALE_MS = 3000;
+const SESSION_LOCK_WAIT_MS = 800;
+const MAX_SAFE_SLICE_LINES = 300;
+const MAX_SMALL_AUTO_ALLOW_LINES = 300;
+const MAX_SMALL_AUTO_ALLOW_BYTES = 24 * 1024; // 24 KiB omitted-bound auto-allow cap
+const MAX_SPILLOVER_SLICE_LINES = 150;
 const MAX_FULL_FILE_LINES = 800;
-const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes)
+const MAX_FULL_FILE_BYTES = 45 * 1024; // 45 KiB (46,080 bytes) full-file audit ceiling
+const MAX_LINE_COUNT_SCAN_BYTES = 1024 * 1024; // 1 MiB fast newline scan for EOF-clamping & exact TotalLines
+const REMOTE_CI_BUCKET_TTL_MS = 15 * 60 * 1000; // 15-minute idle decay for remote CI backoff buckets
+const SAFE_MULTIMODAL_MEDIA_RE = /\.(?:png|jpe?g|gif|webp|bmp|ico|pdf|mp3|wav|ogg|flac|m4a|mp4|webm|mov)$/i;
+const STATELESS_READ_TOOLS = new Set(["read_file", "view_file", "grep_search", "find_by_name", "list_dir"]);
+const HOOK_SURFACE = (() => {
+  for (const arg of process.argv.slice(2)) {
+    if (arg.startsWith("--surface=")) return arg.slice("--surface=".length).trim().toLowerCase();
+  }
+  return "";
+})();
+const SLEEP_WAIT_ARR = new Int32Array(new SharedArrayBuffer(4));
+let activeSessionLockPath = null;
 let dedupRecordCtx = null;
 
-function respond(obj) {
-  if (dedupRecordCtx && dedupRecordCtx.convId) {
+function releaseSessionLock() {
+  if (!activeSessionLockPath) return;
+  const toRemove = activeSessionLockPath;
+  activeSessionLockPath = null;
+  try { fs.unlinkSync(toRemove); } catch {}
+}
+
+process.on("exit", releaseSessionLock);
+
+function acquireSessionLock(convId) {
+  if (!convId || convId === "global") return false;
+  ensureStateDir();
+  const safeId = String(convId).replace(/[^a-zA-Z0-9_-]/g, "_");
+  const lockPath = path.join(getStateDir(), `agy-session-${safeId}.lock`);
+  if (activeSessionLockPath === lockPath) return true;
+  const deadline = Date.now() + SESSION_LOCK_WAIT_MS;
+  while (true) {
     try {
-      const latest = getSessionState(dedupRecordCtx.convId);
-      const now = Date.now();
-      let outSig = dedupRecordCtx.rawSig;
-      if (obj && obj.overwrite && typeof obj.overwrite === "object") {
-        try {
-          const parsedRaw = JSON.parse(dedupRecordCtx.rawSig);
-          outSig = JSON.stringify({ ...parsedRaw, ...obj.overwrite });
-        } catch {}
+      const fd = fs.openSync(lockPath, "wx");
+      try { fs.writeFileSync(fd, `${process.pid}:${Date.now()}\n`, "utf-8"); } catch {}
+      try { fs.closeSync(fd); } catch {}
+      activeSessionLockPath = lockPath;
+      return true;
+    } catch (err) {
+      if (!err || err.code !== "EEXIST") return false;
+      try {
+        const st = fs.statSync(lockPath);
+        if ((Date.now() - st.mtimeMs) > SESSION_LOCK_STALE_MS) {
+          try { fs.unlinkSync(lockPath); } catch {}
+          continue;
+        }
+      } catch {
+        continue;
       }
-      const prevList = Array.isArray(latest.recentHookCalls) ? latest.recentHookCalls : [];
-      const freshList = prevList.filter((e) => e && typeof e.ts === "number" && (now - e.ts) < HOOK_DEDUP_TTL_MS);
-      freshList.push({
-        ts: now,
-        callId: dedupRecordCtx.callId || "",
-        stepIdx: dedupRecordCtx.stepIdx !== undefined ? dedupRecordCtx.stepIdx : null,
-        toolName: dedupRecordCtx.toolName,
-        scriptPath: dedupRecordCtx.scriptPath,
-        rawSig: dedupRecordCtx.rawSig,
-        outSig,
-        response: obj
-      });
-      latest.recentHookCalls = freshList.slice(-8);
-      saveSessionState(dedupRecordCtx.convId, latest, { updatePollTime: false });
+      if (Date.now() >= deadline) return false;
+      try { Atomics.wait(SLEEP_WAIT_ARR, 0, 0, 15); } catch { return false; }
+    }
+  }
+}
+
+function findMatchingRecentHookCall(session, ctx, now = Date.now()) {
+  if (!session || !ctx) return null;
+  const recent = Array.isArray(session.recentHookCalls) ? session.recentHookCalls : [];
+  return (
+    recent.find((e) => {
+      if (!e || typeof e.ts !== "number" || (now - e.ts) >= HOOK_DEDUP_TTL_MS) return false;
+      if (ctx.callId && e.callId && e.callId === ctx.callId) return true;
+      const argMatch = ctx.rawSig === e.rawSig || ctx.rawSig === e.outSig;
+      if (!argMatch || e.toolName !== ctx.toolName) return false;
+      if (ctx.stepIdx !== undefined && ctx.stepIdx !== null && e.stepIdx === ctx.stepIdx) return true;
+      if (ctx.scriptPath && e.scriptPath && e.scriptPath !== ctx.scriptPath && (now - e.ts) < HOOK_SAME_ARG_CROSS_SCRIPT_MS) {
+        return true;
+      }
+      return false;
+    }) || null
+  );
+}
+
+function replayMatchedHookCallIfAny(convId) {
+  if (!dedupRecordCtx || !convId || convId === "global" || dedupRecordCtx.convId !== convId) return;
+  const prevState = getSessionState(convId);
+  const matchedCall = findMatchingRecentHookCall(prevState, dedupRecordCtx, Date.now());
+  if (matchedCall && matchedCall.response) {
+    const replay =
+      dedupRecordCtx.rawSig === matchedCall.outSig &&
+      matchedCall.rawSig !== matchedCall.outSig &&
+      matchedCall.response.decision === "allow"
+        ? { decision: "allow" }
+        : matchedCall.response;
+    respond(replay, { skipDedupRecord: true });
+  }
+}
+
+function buildDedupEntry(obj, now) {
+  let outSig = dedupRecordCtx.rawSig;
+  if (obj && obj.overwrite && typeof obj.overwrite === "object") {
+    try {
+      const parsedRaw = JSON.parse(dedupRecordCtx.rawSig);
+      outSig = JSON.stringify({ ...parsedRaw, ...obj.overwrite });
     } catch {}
   }
+  return {
+    ts: now,
+    callId: dedupRecordCtx.callId || "",
+    stepIdx: dedupRecordCtx.stepIdx !== undefined ? dedupRecordCtx.stepIdx : null,
+    toolName: dedupRecordCtx.toolName,
+    scriptPath: dedupRecordCtx.scriptPath,
+    rawSig: dedupRecordCtx.rawSig,
+    outSig,
+    response: obj
+  };
+}
+
+function respond(obj, persistOpts = null) {
+  const skipDedupRecord = Boolean(persistOpts && persistOpts.skipDedupRecord);
+  const hasSessionToSave = Boolean(persistOpts && persistOpts.sessionToSave);
+  try {
+    if (hasSessionToSave) {
+      const targetConvId = persistOpts.convId || (dedupRecordCtx && dedupRecordCtx.convId) || "global";
+      const entry = persistOpts.sessionToSave;
+      if (dedupRecordCtx && dedupRecordCtx.convId && !skipDedupRecord) {
+        const now = Date.now();
+        const prevList = Array.isArray(entry.recentHookCalls) ? entry.recentHookCalls : [];
+        const freshList = prevList.filter((e) => e && typeof e.ts === "number" && (now - e.ts) < HOOK_DEDUP_TTL_MS);
+        freshList.push(buildDedupEntry(obj, now));
+        entry.recentHookCalls = freshList.slice(-8);
+      }
+      saveSessionState(targetConvId, entry, { updatePollTime: Boolean(persistOpts.updatePollTime) });
+    } else if (dedupRecordCtx && dedupRecordCtx.convId && !skipDedupRecord) {
+      const isStatelessAllow =
+        STATELESS_READ_TOOLS.has(dedupRecordCtx.toolName) &&
+        obj &&
+        obj.decision === "allow" &&
+        !obj.overwrite;
+      if (!isStatelessAllow) {
+        const latest = getSessionState(dedupRecordCtx.convId);
+        const now = Date.now();
+        const prevList = Array.isArray(latest.recentHookCalls) ? latest.recentHookCalls : [];
+        const freshList = prevList.filter((e) => e && typeof e.ts === "number" && (now - e.ts) < HOOK_DEDUP_TTL_MS);
+        freshList.push(buildDedupEntry(obj, now));
+        latest.recentHookCalls = freshList.slice(-8);
+        saveSessionState(dedupRecordCtx.convId, latest, { updatePollTime: false });
+      }
+    }
+  } catch {}
+  releaseSessionLock();
   process.stdout.write(JSON.stringify(obj) + "\n");
   process.exit(0);
 }
@@ -94,6 +219,7 @@ const GOVERNED_TOOLS = new Set([
   "find_by_name",
   "list_dir",
   "replace_file_content",
+  "multi_replace_file_content",
   "write_to_file",
   "write_file",
   "edit_file"
@@ -224,13 +350,256 @@ function matchesRawProtectedInternalState(targetPath) {
   return false;
 }
 
-function isProtectedShellOrScriptOperation(text, options = {}) {
-  if (!text || typeof text !== "string") return false;
-  if (isProtectedInternalState(text)) return true;
+const SHELL_CONTROL_KEYWORDS = new Set([
+  "{",
+  "!",
+  "if",
+  "then",
+  "elif",
+  "else",
+  "do",
+  "while",
+  "until",
+  "time",
+  "&"
+]);
+const SUDO_VALUE_FLAGS = new Set([
+  "-u",
+  "-g",
+  "-C",
+  "-h",
+  "-p",
+  "-r",
+  "-t",
+  "-U",
+  "-T",
+  "--user",
+  "--group",
+  "--host",
+  "--prompt",
+  "--role",
+  "--type",
+  "--other-user",
+  "--command-timeout"
+]);
+const XARGS_VALUE_FLAGS = new Set([
+  "-I",
+  "-i",
+  "-n",
+  "-L",
+  "-l",
+  "-P",
+  "-d",
+  "-a",
+  "-E",
+  "-e",
+  "-s",
+  "--max-args",
+  "--max-lines",
+  "--max-procs",
+  "--delimiter",
+  "--arg-file",
+  "--replace",
+  "--eof",
+  "--max-chars"
+]);
 
-  // Non-canonical or wrapped agy-context transcript invocations that did not pass checkAgyContextTranscriptCommand
-  if (/(?:^|[\s;|&('"\/\\])agy-context(?:-saver)?(?:\.m?js)?['"]?\s+(?:-[^\s;|&'"]+\s+)*transcript(?:\s|$|['";|&)])/i.test(text)) {
+function stripLeadingShellPrefixesAndWrappers(tokens, startIdx = 0) {
+  let idx = startIdx;
+  let guard = 0;
+  while (idx < tokens.length && guard++ < 32) {
+    const raw = tokens[idx].raw;
+    const val = tokens[idx].value;
+    const low = val.toLowerCase();
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(raw) || (!tokens[idx].quoted && SHELL_CONTROL_KEYWORDS.has(low))) {
+      idx++;
+      continue;
+    }
+    const cmd = normalizeCmdName(val);
+    if (cmd === "env") {
+      idx++;
+      while (idx < tokens.length) {
+        const sub = tokens[idx];
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(sub.raw)) {
+          idx++;
+          continue;
+        }
+        if (sub.value.startsWith("-") && sub.value !== "-") {
+          idx++;
+          if (ENV_VALUE_FLAGS.has(sub.value) && idx < tokens.length) idx++;
+          continue;
+        }
+        break;
+      }
+      continue;
+    }
+    if (cmd === "sudo" || cmd === "doas") {
+      idx++;
+      while (idx < tokens.length) {
+        const fl = tokens[idx].value;
+        if (fl === "--") {
+          idx++;
+          break;
+        }
+        if (!fl.startsWith("-") || fl === "-") break;
+        idx++;
+        if (SUDO_VALUE_FLAGS.has(fl) && idx < tokens.length) idx++;
+      }
+      continue;
+    }
+    if (cmd === "timeout") {
+      idx++;
+      while (idx < tokens.length && tokens[idx].value.startsWith("-")) {
+        const fl = tokens[idx].value;
+        idx++;
+        if ((fl === "-k" || fl === "-s" || fl === "--kill-after" || fl === "--signal") && idx < tokens.length) idx++;
+      }
+      if (idx < tokens.length) idx++;
+      continue;
+    }
+    if (cmd === "nice") {
+      idx++;
+      while (idx < tokens.length && tokens[idx].value.startsWith("-")) {
+        const fl = tokens[idx].value;
+        idx++;
+        if ((fl === "-n" || fl === "--adjustment") && idx < tokens.length) idx++;
+      }
+      continue;
+    }
+    if (cmd === "stdbuf") {
+      idx++;
+      while (idx < tokens.length && tokens[idx].value.startsWith("-")) {
+        const fl = tokens[idx].value;
+        idx++;
+        if ((fl === "-i" || fl === "-o" || fl === "-e" || fl === "--input" || fl === "--output" || fl === "--error") && idx < tokens.length) idx++;
+      }
+      continue;
+    }
+    if (cmd === "xargs") {
+      idx++;
+      while (idx < tokens.length) {
+        const fl = tokens[idx].value;
+        if (fl === "--") {
+          idx++;
+          break;
+        }
+        if (!fl.startsWith("-") || fl === "-") break;
+        idx++;
+        if (XARGS_VALUE_FLAGS.has(fl) && idx < tokens.length) idx++;
+      }
+      continue;
+    }
+    if (COMMAND_WRAPPERS.has(cmd)) {
+      idx++;
+      while (idx < tokens.length && tokens[idx].value.startsWith("-")) {
+        const fl = tokens[idx].value;
+        idx++;
+        if (fl === "--") break;
+      }
+      continue;
+    }
+    break;
+  }
+  return idx;
+}
+
+/**
+ * Yields all command-start indices inside a tokenized segment: index 0 plus immediately after
+ * any unquoted compound block delimiter (`{`, `then`, `do`, `else`, `elif`) or `find -exec`/`-execdir`/`-ok`.
+ */
+function collectSegmentCommandStartIndices(tokens) {
+  const starts = [0];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.quoted) continue;
+    const low = t.value.toLowerCase();
+    if (low === "{" || low === "then" || low === "do" || low === "else" || low === "elif") {
+      if (i + 1 < tokens.length) starts.push(i + 1);
+    } else if (low === "-exec" || low === "-execdir" || low === "-ok" || low === "-okdir") {
+      if (i + 1 < tokens.length) starts.push(i + 1);
+    }
+  }
+  return starts;
+}
+
+function hasNonCanonicalAgyTranscriptInvocation(text, depth = 0) {
+  if (!text || typeof text !== "string" || depth > 4) return false;
+  if (!/agy-context(?:-saver)?/i.test(text) || !/\btranscript\b/i.test(text)) return false;
+
+  // Catch interpreter spawn/exec calls invoking `agy-context transcript` from single-line or multiline inline code/scripts
+  const hasExecApi = /\b(?:exec|execSync|execFile|execFileSync|spawn|spawnSync|popen|system|subprocess|child_process)\b/i.test(text);
+  if (hasExecApi && /\bagy-context(?:-saver)?(?:\.(?:m?js|cmd|exe|bat))?[\s'",\[\]()]{1,24}transcript\b/i.test(text)) {
     return true;
+  }
+
+  const segs = splitShellSegments(text);
+  for (const seg of segs) {
+    const trimmed = String(seg.text || "").trim();
+    if (Array.isArray(seg.heredocBodies)) {
+      for (const hd of seg.heredocBodies) {
+        if (hd && hasNonCanonicalAgyTranscriptInvocation(hd, depth + 1)) return true;
+      }
+    }
+    if (!trimmed) continue;
+
+    // Inspect embedded subshells `$(...)` / backticks recursively
+    for (const sub of seg.subshells || []) {
+      if (hasNonCanonicalAgyTranscriptInvocation(sub, depth + 1)) return true;
+    }
+
+    // Unwrap shell wrappers (`bash -c`/`-lc`, `/bin/sh -c`, `zsh -c`, `cmd /c`, `eval`, `env -S`)
+    const wrap = unwrapShellWrapper(trimmed);
+    if (wrap && wrap.inner && hasNonCanonicalAgyTranscriptInvocation(wrap.inner, depth + 1)) {
+      return true;
+    }
+    const extWrap = extractWrappedScriptInfo(trimmed);
+    if (extWrap && extWrap.inner && hasNonCanonicalAgyTranscriptInvocation(extWrap.inner, depth + 1)) {
+      return true;
+    }
+
+    const tokens = tokenizeShellWordsDetailed(trimmed);
+    if (tokens.length < 2) continue;
+
+    for (const startPos of collectSegmentCommandStartIndices(tokens)) {
+      const idx = stripLeadingShellPrefixesAndWrappers(tokens, startPos);
+      if (idx >= tokens.length) continue;
+
+      let cmdTok = tokens[idx].value;
+      let cmdName = normalizeCmdName(cmdTok);
+      let afterCmdIdx = idx + 1;
+      if (cmdName === "node" && afterCmdIdx < tokens.length) {
+        while (afterCmdIdx < tokens.length && tokens[afterCmdIdx].value.startsWith("-")) afterCmdIdx++;
+        if (afterCmdIdx < tokens.length) {
+          cmdTok = tokens[afterCmdIdx].value;
+          cmdName = normalizeCmdName(cmdTok);
+          afterCmdIdx++;
+        }
+      }
+
+      const isAgyCli =
+        cmdName === "agy-context" ||
+        cmdName === "agy-context-saver" ||
+        /(?:^|[\/\\])agy-context(?:-saver)?(?:\.(?:m?js|cmd|exe|bat))?$/i.test(cmdTok);
+      if (!isAgyCli) continue;
+
+      let subIdx = afterCmdIdx;
+      while (subIdx < tokens.length && tokens[subIdx].value.startsWith("-")) subIdx++;
+      if (subIdx < tokens.length && tokens[subIdx].value.toLowerCase() === "transcript") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function getProtectedShellOperationReason(text, options = {}) {
+  if (!text || typeof text !== "string") return null;
+  if (isProtectedInternalState(text)) return "internal-state";
+
+  // Non-canonical or wrapped agy-context transcript invocations that did not pass checkAgyContextTranscriptCommand.
+  // Check parsed command-position invocations (not quoted prose payloads) and return a specific diagnostic reason (IND-RUN-003, FRIC-RUN-007).
+  if (options.checkNonCanonical !== false && hasNonCanonicalAgyTranscriptInvocation(text)) {
+    return "non-canonical-cli";
   }
 
   // Inline interpreter or script execution importing/spawning transcript-core.mjs, bin/agy-context.mjs, or retired Agy-Context-Saver mcp/index.js
@@ -239,19 +608,19 @@ function isProtectedShellOrScriptOperation(text, options = {}) {
       text
     )
   ) {
-    return true;
+    return "inline-transcript-core";
   }
 
   // Unconditionally block Antigravity-specific governance or brain env redirection inside shell commands/scripts
   if (/(?:^|[\s;|&(])(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)=/i.test(text)) {
-    return true;
+    return "governance-env";
   }
   if (
     /(?:process\.env|os\.environ)\s*(?:\.\s*(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)\b|\[\s*['"](?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)['"]\s*\])/i.test(
       text
     )
   ) {
-    return true;
+    return "governance-env";
   }
 
   // Scope standard OS env vars (XDG_STATE_HOME, LOCALAPPDATA) so ordinary user tests run cleanly in non-restricted
@@ -266,7 +635,7 @@ function isProtectedShellOrScriptOperation(text, options = {}) {
     const targetsGovernanceState =
       /\bagy-context(?:-saver)?\b|\bexecution-guard\b|\btranscript(?:-access|-core)?\b|\.gemini\b/i.test(text);
     if (isRestrictedChild || targetsGovernanceState) {
-      return true;
+      return "governance-env";
     }
   }
 
@@ -281,10 +650,36 @@ function isProtectedShellOrScriptOperation(text, options = {}) {
       text
     )
   ) {
-    return true;
+    return "internal-state";
   }
 
-  return false;
+  return null;
+}
+
+function isProtectedShellOrScriptOperation(text, options = {}) {
+  return Boolean(getProtectedShellOperationReason(text, options));
+}
+
+function buildProtectedShellReasonMessage(reasonCode, convId = "global") {
+  if (reasonCode === "non-canonical-cli") {
+    return (
+      "Antigravity Execution Governance: 'agy-context transcript' must be invoked as a single unchained command " +
+      "(no shell chaining, pipes, redirects, subshells, or '..' traversal). Run e.g. 'agy-context transcript read --mode compact' directly via run_command."
+    );
+  }
+  if (reasonCode === "inline-transcript-core") {
+    return (
+      "Antigravity Execution Governance: Direct inline script or interpreter imports of 'transcript-core.mjs' or 'bin/agy-context.mjs' are prohibited. " +
+      "Invoke the single unchained 'agy-context transcript ...' CLI directly via run_command instead."
+    );
+  }
+  if (reasonCode === "governance-env") {
+    return (
+      "Antigravity Execution Governance: Overriding Antigravity governance/state environment variables " +
+      "(AGY_TEST_PROFILE_DIR, AGY_BRAIN_DIR, GEMINI_CONVERSATION_ID, or governance-scoped XDG_STATE_HOME/LOCALAPPDATA) inside shell commands is prohibited."
+    );
+  }
+  return buildInternalStateShellDenial(convId);
 }
 
 /**
@@ -365,8 +760,8 @@ function isAntigravitySpecialFile(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
   const normalized = targetPath.replace(/\\/g, "/");
 
-  // If inside .system_generated, it's ALWAYS protected internal state, never a special file
-  if (isProtectedInternalState(normalized)) {
+  // If inside .system_generated (including via symlinks or relative paths), it's ALWAYS protected internal state
+  if (isProtectedInternalStatePath(targetPath)) {
     return false;
   }
 
@@ -493,6 +888,92 @@ function resolveRealOrAncestorPath(targetPath) {
       cursor = parent;
     }
   }
+}
+
+/**
+ * Produces raw, tilde-expanded, cwd-resolved, and symlink-canonicalized variants of a file path
+ * so native file tools and shell path checks cannot be bypassed via relative paths or symlinks (IND-SEC-002).
+ */
+function expandAndResolvePathVariants(rawPath) {
+  if (!rawPath || typeof rawPath !== "string") return [];
+  const cleaned = cleanFileToken(rawPath);
+  if (!cleaned) return [];
+  const out = new Set();
+  const pushNorm = (p) => {
+    if (!p || typeof p !== "string") return;
+    out.add(p);
+    const slashed = p.replace(/\\/g, "/");
+    if (slashed !== p) out.add(slashed);
+  };
+  pushNorm(cleaned);
+  const expanded = expandLeadingTilde(cleaned);
+  pushNorm(expanded);
+  try {
+    const resolved = resolveHookPath(expanded);
+    pushNorm(resolved);
+    const canonical = resolveRealOrAncestorPath(resolved);
+    pushNorm(canonical);
+  } catch {}
+  return [...out];
+}
+
+function isProtectedInternalStatePath(rawPath) {
+  return expandAndResolvePathVariants(rawPath).some((v) => isProtectedInternalState(v));
+}
+
+function isProtectedGovernanceFileMutationPath(rawPath, convId = "global") {
+  return expandAndResolvePathVariants(rawPath).some((v) => isProtectedGovernanceFileMutation(v, convId));
+}
+
+function isProtectedBenchmarkFilePath(rawPath) {
+  return expandAndResolvePathVariants(rawPath).some((v) => isProtectedBenchmarkPath(v));
+}
+
+/**
+ * Extracts the conversation UUID owning an Antigravity brain path (following symlinks & configured brain roots).
+ */
+function extractBrainOwnerConvId(rawPath) {
+  if (!rawPath || typeof rawPath !== "string") return null;
+  const cmp = os.platform() === "win32" || os.platform() === "darwin" ? (s) => s.toLowerCase() : (s) => s;
+  const variants = expandAndResolvePathVariants(rawPath);
+  for (const v of variants) {
+    const norm = v.replace(/\\/g, "/");
+    const m = norm.match(/(?:^|\/)\.gemini\/antigravity(?:-cli|-ide)?\/brain\/([^/]+)(?:\/|$)/i);
+    if (m && m[1]) return m[1];
+  }
+  const brainPrefixes = [];
+  for (const bDir of getBrainDirs()) {
+    if (!bDir) continue;
+    const rawB = cmp(path.resolve(bDir).replace(/\\/g, "/").replace(/\/+$/, ""));
+    brainPrefixes.push(rawB);
+    const realB = cmp(resolveRealOrAncestorPath(bDir).replace(/\\/g, "/").replace(/\/+$/, ""));
+    if (realB !== rawB) brainPrefixes.push(realB);
+  }
+  for (const v of variants) {
+    const norm = v.replace(/\\/g, "/");
+    const nLow = cmp(norm);
+    for (const prefix of brainPrefixes) {
+      if (nLow.startsWith(`${prefix}/`)) {
+        const rest = norm.slice(prefix.length + 1);
+        const seg = rest.split("/")[0];
+        if (seg) return seg;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Enforces Parent Transcript Isolation on cross-conversation spillovers, task logs, and brain artifacts (IND-SEC-003, IND-SEC-005).
+ */
+function isCrossConversationTargetDenied(rawPath, convId = "global", callerAccess = null) {
+  if (!rawPath || typeof rawPath !== "string") return false;
+  const access = callerAccess || evaluateCallerTranscriptAccess(convId);
+  const restricted = Boolean(access.isRestrictedChild || !access.allowed || access.mode === "self-only");
+  if (!restricted) return false;
+  const ownerConvId = extractBrainOwnerConvId(rawPath);
+  if (!ownerConvId) return false;
+  return !convId || convId === "global" || ownerConvId !== convId;
 }
 
 function isInsideAntigravityBrainPath(targetPath) {
@@ -718,16 +1199,52 @@ function scanTaskMarkers(text, taskName) {
     text.includes(`/${taskName}" finished`) ||
     text.includes(`/${taskName}\\" was canceled`) ||
     text.includes(`/${taskName}" was canceled`) ||
+    text.includes(`/${taskName}\\" was cancelled`) ||
+    text.includes(`/${taskName}" was cancelled`) ||
     text.includes(`/${taskName}\\" cancelled.`) ||
-    text.includes(`/${taskName}" cancelled.`)
+    text.includes(`/${taskName}" cancelled.`) ||
+    text.includes(`/${taskName}\\" canceled.`) ||
+    text.includes(`/${taskName}" canceled.`) ||
+    text.includes(`/${taskName} has already finished`)
   ) {
     return "COMPLETED";
   }
   const hasOneShotTimerLaunch =
     text.includes(`/${taskName}\\nTask Description: Timer:`) ||
     text.includes(`/${taskName}\nTask Description: Timer:`);
-  if (hasOneShotTimerLaunch && text.includes(`/${taskName} priority=`)) {
-    return "COMPLETED";
+  if (hasOneShotTimerLaunch) {
+    if (text.includes(`/${taskName} priority=`)) {
+      return "COMPLETED";
+    }
+    // Detect auto-canceled conditioned timers when their watched TimerCondition target task has finished (PR13-RUN-008)
+    const launchMarker = text.includes(`/${taskName}\\nTask Description: Timer:`)
+      ? `/${taskName}\\nTask Description: Timer:`
+      : `/${taskName}\nTask Description: Timer:`;
+    const launchIdx = text.lastIndexOf(launchMarker);
+    if (launchIdx !== -1) {
+      // Search backward across preceding PLANNER_RESPONSE tool_calls (up to 2500 chars) + forward 600 chars
+      const windowSlice = text.slice(Math.max(0, launchIdx - 2500), Math.min(text.length, launchIdx + 600));
+      const allCondMatches = [...windowSlice.matchAll(/TimerCondition[^/\n]{0,80}\/(task-[a-z0-9_-]+)/gi)];
+      const condMatch = allCondMatches.length > 0 ? allCondMatches[allCondMatches.length - 1] : null;
+      if (condMatch && condMatch[1] && condMatch[1].toLowerCase() !== taskName.toLowerCase()) {
+        const condTask = condMatch[1];
+        if (
+          text.includes(`/${condTask}\\" finished`) ||
+          text.includes(`/${condTask}" finished`) ||
+          text.includes(`/${condTask}\\" was canceled`) ||
+          text.includes(`/${condTask}" was canceled`) ||
+          text.includes(`/${condTask}\\" was cancelled`) ||
+          text.includes(`/${condTask}" was cancelled`) ||
+          text.includes(`/${condTask}\\" cancelled.`) ||
+          text.includes(`/${condTask}" cancelled.`) ||
+          text.includes(`/${condTask}\\" canceled.`) ||
+          text.includes(`/${condTask}" canceled.`) ||
+          text.includes(`/${condTask} has already finished`)
+        ) {
+          return "COMPLETED";
+        }
+      }
+    }
   }
   if (text.includes(`/${taskName}\\nTask `) || text.includes(`/${taskName}\nTask `)) return "RUNNING";
   return null;
@@ -1784,14 +2301,20 @@ function normalizeSessionTrackedPath(targetPath) {
   }
 }
 
-function recordSessionWrittenFile(convId = "global", targetPath) {
-  const norm = normalizeSessionTrackedPath(targetPath);
-  if (!norm) return;
+function prepareSessionWithWrittenFiles(convId = "global", targetPaths = []) {
+  const norms = [];
+  for (const tp of targetPaths) {
+    const norm = normalizeSessionTrackedPath(tp);
+    if (norm && !norms.includes(norm)) norms.push(norm);
+  }
+  if (norms.length === 0) return null;
+  acquireSessionLock(convId);
   const session = getSessionState(convId);
   const existing = Array.isArray(session.writtenFiles) ? session.writtenFiles : [];
-  if (existing.includes(norm)) return;
-  session.writtenFiles = existing.slice(-199).concat([norm]);
-  saveSessionState(convId, session, { updatePollTime: false });
+  const toAdd = norms.filter((n) => !existing.includes(n));
+  if (toAdd.length === 0) return null;
+  session.writtenFiles = existing.concat(toAdd).slice(-200);
+  return session;
 }
 
 function wasFileWrittenInSession(convId = "global", targetPath) {
@@ -2389,6 +2912,7 @@ function getCallerLineage(convId) {
     if (
       session.lineage.isSwarmChild ||
       session.lineage.isTopLevelUserSession ||
+      session.lineage.lineageFinalized ||
       (targetStat &&
         targetStat.size === session.lineage.fileSize &&
         targetStat.mtimeMs === session.lineage.fileMtimeMs)
@@ -2452,6 +2976,7 @@ function getCallerLineage(convId) {
   let rosterName = null;
   let launchDirective = null;
   let line0Parsed = false;
+  let lineageFinalized = false;
 
   const lines = headStr.split(/\r?\n/).filter((l) => l.trim()).slice(0, MAX_HEADER_LINES);
   for (let i = 0; i < lines.length; i++) {
@@ -2460,6 +2985,15 @@ function getCallerLineage(convId) {
       item = JSON.parse(lines[i]);
       if (i === 0) line0Parsed = true;
     } catch {
+      // Handle Step 0 lines truncated by the 512 KiB header ceiling (FRIC-SEC-001)
+      if (i === 0 && headStr.length >= 500000) {
+        const prefix = lines[0].slice(0, 4096);
+        if (/"type"\s*:\s*"USER_INPUT"/.test(prefix) || /"source"\s*:\s*"USER_EXPLICIT"/.test(prefix)) {
+          line0Parsed = true;
+          isTopLevelUserSession = true;
+          break;
+        }
+      }
       continue;
     }
     const content = typeof item?.content === "string" ? item.content : "";
@@ -2508,6 +3042,8 @@ function getCallerLineage(convId) {
         }
       }
     } else if (i > 0) {
+      // Once a non-SYSTEM step (e.g., PLANNER_RESPONSE) appears after startup messages, Step 0/1 lineage is immutable (IND-RUN-004)
+      lineageFinalized = true;
       break;
     }
   }
@@ -2520,6 +3056,7 @@ function getCallerLineage(convId) {
     fileSize: targetStat ? targetStat.size : 0,
     fileMtimeMs: targetStat ? targetStat.mtimeMs : 0,
     transcriptFound: lines.length > 0 && line0Parsed,
+    lineageFinalized: Boolean(lineageFinalized || isTopLevelUserSession || isSwarmChild),
     isTopLevelUserSession,
     isChildSession,
     isSwarmChild,
@@ -2615,14 +3152,18 @@ function findGoverningPolicyForCaller(store, convId, lineage) {
     return policies["local-operator"] || policies["global"] || (store.activeOwnerId && policies[store.activeOwnerId]) || null;
   }
 
-  // 5. Fallback for synthetic test conversationIds (when transcript file does not exist on disk)
+  // 5. Fallback for synthetic test conversationIds (when transcript file does not exist on disk).
+  // Gated to test harnesses so unflushed production top-level tabs never inherit another session's activeOwnerId lock (FRIC-SEC-001).
   if (!lineage.transcriptFound) {
     for (const pol of policyList) {
       if (matchesAgentList(pol.deny, convId, lineage.rosterName) || matchesAgentList(pol.allow, convId, lineage.rosterName)) {
         return pol;
       }
     }
-    return (store.activeOwnerId && policies[store.activeOwnerId]) || policyList[0] || null;
+    if (process.env.AGY_TEST_PROFILE_DIR) {
+      return (store.activeOwnerId && policies[store.activeOwnerId]) || policyList[0] || null;
+    }
+    return null;
   }
 
   return null;
@@ -2989,10 +3530,11 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
     tokens
   } = match;
 
-  // Must be strictly single segment at index 0, unchained, unwrapped, no redirects/heredocs/subshells/node-flags
+  // Must be strictly single segment at index 0, unchained, unwrapped, no leading operator, redirects/heredocs/subshells/node-flags
   if (
     totalSegs !== 1 ||
     segIndex !== 0 ||
+    (seg.leadingSep && seg.leadingSep !== "\n") ||
     hadWrapper ||
     hasNodeFlags ||
     invalidBinaryPath ||
@@ -3343,6 +3885,19 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       }
     }
 
+    const openTargetWasCurrent = Boolean(
+      targetInfo.targetId && targetInfo.targetId.toLowerCase() === "current"
+    );
+    const needsOpenSelfIdInjection =
+      !isListSub &&
+      !(isExportSub && targetInfo.targetParent) &&
+      !targetInfo.explicitFile &&
+      (!targetInfo.targetId || openTargetWasCurrent) &&
+      Boolean(convId && convId !== "global");
+    if (needsOpenSelfIdInjection) {
+      resolvedTargetConvId = convId;
+    }
+
     return {
       matched: true,
       allowed: true,
@@ -3350,6 +3905,8 @@ function checkAgyContextTranscriptCommand(segments, convId = "global") {
       mode: "open",
       needsReadGrant: true,
       targetConvId: resolvedTargetConvId,
+      injectSelfId: needsOpenSelfIdInjection ? convId : null,
+      targetWasCurrentPlaceholder: openTargetWasCurrent,
       injectParentId
     };
   }
@@ -3478,6 +4035,188 @@ function getInspectableTextForSegment(seg, opts = {}) {
       for (const r of redirs) kept.push(r);
       return kept.join(" ");
     }
+    if (gitSub === "log" || gitSub === "rev-list" || gitSub === "shortlog") {
+      const isUnquotedRedirect = (t) =>
+        Boolean(t && !t.quoted && (REDIRECT_OP_REGEX.test(t.raw) || REDIRECT_ATTACHED_REGEX.test(t.raw)));
+      const kept = [];
+      if (envPrefix && envPrefix.trim()) {
+        kept.push(envPrefix.trim());
+      }
+      let afterDoubleDash = false;
+      for (let i = 0; i < detailed.length; i++) {
+        const tok = detailed[i];
+        if (i <= subIdx) {
+          kept.push(tok.value);
+          continue;
+        }
+        if (isUnquotedRedirect(tok)) {
+          kept.push(tok.raw);
+          if (!tok.quoted && REDIRECT_OP_REGEX.test(tok.raw) && i + 1 < detailed.length) {
+            kept.push(detailed[++i].value);
+          }
+          continue;
+        }
+        if (!afterDoubleDash && tok.value === "--") {
+          afterDoubleDash = true;
+          kept.push(tok.value);
+          continue;
+        }
+        if (!afterDoubleDash) {
+          const v = tok.value;
+          if (v === "--grep" || v === "-S" || v === "-G") {
+            if (i + 1 < detailed.length && !isUnquotedRedirect(detailed[i + 1])) i++;
+            continue;
+          }
+          if (v.startsWith("--grep=") || (v.startsWith("-S") && v.length > 2) || (v.startsWith("-G") && v.length > 2)) {
+            continue;
+          }
+        }
+        kept.push(tok.value);
+      }
+      const redirs = extractRedirectTargets(allTokens);
+      for (const r of redirs) kept.push(r);
+      return kept.join(" ");
+    }
+  }
+
+  // GitHub CLI (`gh` / `rtk gh`) prose-flag handler: skip global flags before subcommand (`-R`/`--repo`/`--hostname`),
+  // skip literal string payloads in `pr`/`issue`/`release` (`-b`/`--body`, `-t`/`--title`, `-n`/`--notes`,
+  // `-c`/`--comment`, `--subject`, attached short forms) and `api` (`-f`/`--raw-field` always literal; `-F`/`--field`
+  // literal only when value after `=` does NOT start with `@`), while strictly keeping `--body-file`, `--notes-file`,
+  // `--input`, `-F k=@file`, redirects, and subshells inspected (FRIC-RUN-006, IND-RUN-003).
+  let ghBaseIdx = -1;
+  if (cmd0 === "gh") {
+    ghBaseIdx = 0;
+  } else if (cmd0 === "rtk" && cmd1 === "gh") {
+    ghBaseIdx = 1;
+  } else if (cmd0 === "node" && detailed[1] && isTrustedLocalRtkLauncherPath(detailed[1].value) && cmd2 === "gh") {
+    ghBaseIdx = 2;
+  }
+  if (ghBaseIdx !== -1 && ghBaseIdx + 1 < detailed.length) {
+    const ghGlobalValueFlags = new Set(["-R", "--repo", "--hostname"]);
+    let ghSubIdx = ghBaseIdx + 1;
+    while (ghSubIdx < detailed.length) {
+      const gv = detailed[ghSubIdx].value;
+      if (ghGlobalValueFlags.has(gv)) {
+        ghSubIdx += 2;
+        continue;
+      }
+      if (gv.startsWith("-")) {
+        ghSubIdx++;
+        continue;
+      }
+      break;
+    }
+    const ghSub = ghSubIdx < detailed.length ? normalizeCmdName(detailed[ghSubIdx].value) : "";
+    if (ghSub === "pr" || ghSub === "issue" || ghSub === "release" || ghSub === "api") {
+      // Resolve action subcommand (e.g. `close`, `reopen`, `review`, `create`) past persistent `-R`/`--repo`/`--hostname` flags
+      let ghAction = "";
+      if (ghSub !== "api") {
+        let actIdx = ghSubIdx + 1;
+        while (actIdx < detailed.length) {
+          const av = detailed[actIdx].value;
+          if (ghGlobalValueFlags.has(av)) {
+            actIdx += 2;
+            continue;
+          }
+          if (av.startsWith("-")) {
+            actIdx++;
+            continue;
+          }
+          ghAction = normalizeCmdName(av);
+          break;
+        }
+      }
+      // In GitHub CLI, `-c`/`--comment` is a STRING value ONLY on `pr|issue close|reopen` (on `gh pr review` it is boolean!)
+      const ghAllowsCommentStringFlag =
+        (ghSub === "pr" || ghSub === "issue") && (ghAction === "close" || ghAction === "reopen");
+      const isUnquotedRedirect = (t) =>
+        Boolean(t && !t.quoted && (REDIRECT_OP_REGEX.test(t.raw) || REDIRECT_ATTACHED_REGEX.test(t.raw)));
+      const isFileFieldPayload = (val) => {
+        const eq = String(val || "").indexOf("=");
+        return eq !== -1 && String(val).slice(eq + 1).startsWith("@");
+      };
+      const kept = [];
+      if (envPrefix && envPrefix.trim()) {
+        kept.push(envPrefix.trim());
+      }
+      let afterDoubleDash = false;
+      for (let i = 0; i < detailed.length; i++) {
+        const tok = detailed[i];
+        if (i <= ghSubIdx) {
+          kept.push(tok.value);
+          continue;
+        }
+        if (isUnquotedRedirect(tok)) {
+          kept.push(tok.raw);
+          if (!tok.quoted && REDIRECT_OP_REGEX.test(tok.raw) && i + 1 < detailed.length) {
+            kept.push(detailed[++i].value);
+          }
+          continue;
+        }
+        if (!afterDoubleDash && tok.value === "--") {
+          afterDoubleDash = true;
+          kept.push(tok.value);
+          continue;
+        }
+        if (!afterDoubleDash) {
+          const v = tok.value;
+          if (ghSub === "api") {
+            if (v === "-f" || v === "--raw-field") {
+              if (i + 1 < detailed.length && !isUnquotedRedirect(detailed[i + 1])) i++;
+              continue;
+            }
+            if (v.startsWith("--raw-field=") || (v.startsWith("-f") && v.length > 2 && !v.startsWith("--"))) {
+              continue;
+            }
+            if (v === "-F" || v === "--field") {
+              if (i + 1 < detailed.length && !isUnquotedRedirect(detailed[i + 1])) {
+                const nextVal = detailed[i + 1].value;
+                if (!isFileFieldPayload(nextVal)) {
+                  i++;
+                  continue;
+                }
+              }
+            }
+            if (v.startsWith("--field=") && !isFileFieldPayload(v.slice("--field=".length))) {
+              continue;
+            }
+            if (v.startsWith("-F") && v.length > 2 && !v.startsWith("--") && !isFileFieldPayload(v.slice(2))) {
+              continue;
+            }
+          } else {
+            // pr / issue / release
+            if (
+              v === "-b" ||
+              v === "--body" ||
+              v === "-t" ||
+              v === "--title" ||
+              v === "-n" ||
+              v === "--notes" ||
+              v === "--subject" ||
+              (ghAllowsCommentStringFlag && (v === "-c" || v === "--comment"))
+            ) {
+              if (i + 1 < detailed.length && !isUnquotedRedirect(detailed[i + 1])) i++;
+              continue;
+            }
+            if (
+              v.startsWith("--body=") ||
+              v.startsWith("--title=") ||
+              v.startsWith("--notes=") ||
+              v.startsWith("--subject=") ||
+              (ghAllowsCommentStringFlag && v.startsWith("--comment=")) ||
+              (!v.startsWith("--") && (ghAllowsCommentStringFlag ? /^-[btnc].+/ : /^-[btn].+/).test(v))
+            ) {
+              continue;
+            }
+          }
+        }
+        kept.push(tok.value);
+      }
+      const redirs = extractRedirectTargets(allTokens);
+      for (const r of redirs) kept.push(r);
+      return kept.join(" ");
+    }
   }
 
   // Search commands: skip pattern argument and inspect only target paths / -f files / redirects
@@ -3555,7 +4294,7 @@ function getInspectableTextForSegment(seg, opts = {}) {
     return targets.join(" ");
   }
 
-  const unquotedJoined = allTokens.map((t) => t.value).join(" ");
+  const unquotedJoined = allTokens.map((t) => t.value.replace(/[\r\n]+/g, " ")).join(" ");
   return unquotedJoined && unquotedJoined !== seg.text ? `${seg.text}\n${unquotedJoined}` : seg.text;
 }
 
@@ -4024,11 +4763,15 @@ function collectInspectableTexts(segments, depth = 0, options = {}) {
         const redirectTargets = extractRedirectTargets(tokenizeShellWordsDetailed(seg.text || ""));
         writesExecutableOrTmpScript = redirectTargets.some((t) => {
           const normT = String(t || "").replace(/\\/g, "/");
+          // Plain documentation/data heredocs in /tmp/ (e.g. /tmp/pr-body.md, /tmp/notes.txt, /tmp/payload.json)
+          // are exempt unless carrying a `#!` shebang (checked below) or executable extension (FRIC-RUN-006).
+          const isDocOrDataExt = /\.(?:md|markdown|txt|json|yml|yaml|csv|log)$/i.test(normT);
           return (
             isExecutableScriptPath(normT) ||
-            normT.startsWith("/tmp/") ||
-            normT.startsWith("/var/tmp/") ||
-            normT.startsWith(osTmpNorm + "/")
+            (!isDocOrDataExt &&
+              (normT.startsWith("/tmp/") ||
+                normT.startsWith("/var/tmp/") ||
+                normT.startsWith(osTmpNorm + "/")))
           );
         });
       }
@@ -4056,7 +4799,7 @@ const RTK_READ_ALLOWED_LEVELS = new Set(["none", "minimal", "aggressive"]);
 
 /**
  * Parses an `rtk read ...` invocation (fail-closed on env prefixes: PR9-RUN-007 Closed (By Design)).
- * Tracks positional operands after `--`, validates line bounds (`1 <= n <= MAX_SAFE_SLICE_LINES`),
+ * Tracks positional operands after `--`, validates line bounds (`1 <= n <= MAX_SPILLOVER_SLICE_LINES`),
  * and rejects disallowed flags or `-l`/`--level` values.
  */
 function parseRtkReadCommand(cmd) {
@@ -4088,7 +4831,7 @@ function parseRtkReadCommand(cmd) {
       return;
     }
     const n = Number(rawVal);
-    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SAFE_SLICE_LINES) {
+    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SPILLOVER_SLICE_LINES) {
       hasInvalidOrOversizedLineBound = true;
       return;
     }
@@ -4162,7 +4905,7 @@ function isRtkReadCommand(cmd) {
 
 /**
  * Parses a single unchained bounded `head -n <N>` / `tail -n <N>` command for degraded mode (when RTK is unavailable).
- * Enforces explicit positive line limits `1 <= N <= MAX_SAFE_SLICE_LINES`, rejects `+N` offsets and unknown flags,
+ * Enforces explicit positive line limits `1 <= N <= MAX_SPILLOVER_SLICE_LINES`, rejects `+N` offsets and unknown flags,
  * and returns parsed positional operands for single-operand isolation checks.
  */
 function parseDegradedBoundedHeadTailCommand(cmd) {
@@ -4184,7 +4927,7 @@ function parseDegradedBoundedHeadTailCommand(cmd) {
       return;
     }
     const n = Number(rawVal);
-    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SAFE_SLICE_LINES) {
+    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_SPILLOVER_SLICE_LINES) {
       hasInvalidOrOversizedLineBound = true;
       return;
     }
@@ -4232,6 +4975,7 @@ function parseDegradedBoundedHeadTailCommand(cmd) {
 function isSingleUnchainedShellCmd(segments) {
   if (segments.length !== 1) return false;
   const seg = segments[0];
+  if (seg.leadingSep && seg.leadingSep !== "\n") return false;
   return !seg.hasRedirect && !seg.hasHeredoc && !seg.hasSubshell && !hasDotDotTraversal(seg.text);
 }
 
@@ -4657,7 +5401,394 @@ function matchRtkInvocation(text) {
   return null;
 }
 
-function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipeline, rtkPrefix }) {
+const RTK_HIGH_ROI_DIRECT_CMDS = new Set([
+  "pytest",
+  "vitest",
+  "jest",
+  "playwright",
+  "ctest",
+  "phpunit",
+  "pest",
+  "paratest",
+  "rspec",
+  "mvn",
+  "mvnd",
+  "gradlew",
+  "sbt",
+  "tsc",
+  "eslint",
+  "ruff",
+  "mypy",
+  "ty",
+  "prettier",
+  "phpstan",
+  "rubocop",
+  "golangci-lint",
+  "sqlfluff",
+  "ecs",
+  "pint"
+]);
+
+// Empirically calibrated against live `rtk >= 1.1.0`: only commands/subcommands RTK actually rewrites
+const RTK_HIGH_ROI_SUBCMDS = {
+  cargo: new Set(["test", "build", "check", "clippy", "install"]),
+  go: new Set(["test", "build", "vet"]),
+  dotnet: new Set(["build", "restore"]),
+  npm: new Set(["run", "lint"]),
+  pnpm: new Set(["run", "install", "i", "outdated", "lint", "tsc", "list"]),
+  bun: new Set(["test", "run", "build", "install", "add"]),
+  deno: new Set(["test", "compile", "install", "lint", "check"]),
+  npx: new Set(["tsc", "eslint", "vitest", "jest", "playwright", "prettier", "prisma", "next", "ng"]),
+  bunx: new Set(["tsc", "eslint", "vitest", "jest", "playwright", "prettier", "prisma", "next", "ng"]),
+  uv: new Set(["run", "sync", "pip"]),
+  pip: new Set(["install", "list", "outdated"]),
+  pip3: new Set(["install", "list", "outdated"]),
+  next: new Set(["build"]),
+  ng: new Set(["build"]),
+  prisma: new Set(["generate", "migrate", "db"]),
+  docker: new Set(["build", "compose", "ps", "images", "logs"]),
+  kubectl: new Set(["get", "logs", "describe", "apply"]),
+  oc: new Set(["get", "logs", "describe", "apply"]),
+  git: new Set(["status", "push", "pull", "fetch"])
+};
+
+const RTK_HIGH_ROI_PKG_RUN_SCRIPT_RE =
+  /^(?:test|tests|build|compile|lint|check|typecheck|type-check|tsc|e2e|ci|format|fmt|vitest|jest|playwright|pytest|coverage|cov|verify-types)(?:$|[:_-])/i;
+const RTK_HIGH_ROI_UV_RUN_CMDS = new Set(["pytest", "ruff", "mypy", "ty"]);
+const RTK_HIGH_ROI_UV_PIP_SUBS = new Set(["install", "list", "show"]);
+const RTK_HIGH_ROI_PYTHON_MODULES = new Set(["pytest", "mypy"]);
+const RTK_HIGH_ROI_DOCKER_COMPOSE_SUBS = new Set(["ps", "logs", "build"]);
+
+const RTK_RUNNER_VALUE_FLAGS = {
+  git: new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"]),
+  npm: new Set(["--prefix", "-C", "--cwd", "--workspace", "-w"]),
+  pnpm: new Set(["--dir", "-C", "--filter", "-F", "--prefix"]),
+  bun: new Set(["--cwd"]),
+  npx: new Set(["-p", "--package", "-c", "--call"]),
+  bunx: new Set(["-p", "--package"]),
+  uv: new Set(["--directory", "--project", "--python", "-p", "--with", "--group", "--extra"]),
+  docker: new Set(["-H", "--host", "--context", "--config", "-l", "--log-level"]),
+  kubectl: new Set(["-n", "--namespace", "--context", "--kubeconfig", "--cluster", "--user"]),
+  oc: new Set(["-n", "--namespace", "--context", "--kubeconfig", "--cluster", "--user"])
+};
+
+function getAgyRtkMode() {
+  const raw = String(process.env.AGY_RTK_MODE || "pregate").trim().toLowerCase();
+  if (raw === "off" || raw === "none" || raw === "disabled") return "off";
+  if (raw === "all" || raw === "full" || raw === "legacy") return "all";
+  return "pregate";
+}
+
+const MACHINE_FORMAT_VALUE_RE =
+  /^(?:json|jsonl|ndjson|yaml|yml|sarif|checkstyle|junit|tap|xml|csv|tsv|jsonpath|custom-columns|go-template|name|compact|unix|concise|rdjson|gitlab|github|blob|dot|short)(?:[=:]|$)/i;
+
+function hasMachineReadableOutputFlag(cmd0, subcmd, tokens) {
+  for (let i = 1; i < tokens.length; i++) {
+    const v = tokens[i].value;
+    const low = v.toLowerCase();
+    if (
+      low === "--json" ||
+      low === "-json" ||
+      low === "--porcelain" ||
+      low.startsWith("--porcelain=") ||
+      low === "--raw" ||
+      low === "-ojson" ||
+      low === "-oyaml" ||
+      low === "-oname" ||
+      low.startsWith("-ojsonpath") ||
+      low.startsWith("-ocustom-columns") ||
+      low.startsWith("-ogo-template") ||
+      (low.startsWith("-o=") && MACHINE_FORMAT_VALUE_RE.test(low.slice(3))) ||
+      (low.startsWith("--format=") && MACHINE_FORMAT_VALUE_RE.test(low.slice("--format=".length))) ||
+      (low.startsWith("--output=") && MACHINE_FORMAT_VALUE_RE.test(low.slice("--output=".length))) ||
+      (low.startsWith("--output-format=") && MACHINE_FORMAT_VALUE_RE.test(low.slice("--output-format=".length))) ||
+      (low.startsWith("--out-format=") && MACHINE_FORMAT_VALUE_RE.test(low.slice("--out-format=".length))) ||
+      (low.startsWith("--message-format=") && MACHINE_FORMAT_VALUE_RE.test(low.slice("--message-format=".length))) ||
+      (low.startsWith("--reporter=") && MACHINE_FORMAT_VALUE_RE.test(low.slice("--reporter=".length)))
+    ) {
+      return true;
+    }
+    if (
+      (low === "-o" ||
+        low === "--output" ||
+        low === "--format" ||
+        low === "-f" ||
+        low === "--output-format" ||
+        low === "--out-format" ||
+        low === "--message-format" ||
+        low === "--reporter") &&
+      i + 1 < tokens.length
+    ) {
+      const nextLow = tokens[i + 1].value.toLowerCase();
+      if (MACHINE_FORMAT_VALUE_RE.test(nextLow)) {
+        return true;
+      }
+    }
+    if (cmd0 === "docker") {
+      if (
+        low === "--format" ||
+        low.startsWith("--format=") ||
+        low === "--quiet" ||
+        (!v.startsWith("--") && /^-[a-zA-Z]*q[a-zA-Z]*$/.test(v))
+      ) {
+        return true;
+      }
+    }
+    if (
+      cmd0 === "git" &&
+      subcmd === "status" &&
+      (v === "--short" || low.startsWith("--porcelain") || (!v.startsWith("--") && /^-[a-zA-Z]*[sz][a-zA-Z]*$/.test(v)))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Strips harmless stderr-only redirects (`2>&1`, `2>/dev/null`, `2>NUL`) while returning `null`
+ * if any stdout, file, or stdin redirect is present (so redirected output stays untouched & lossless).
+ */
+function filterAllowedStderrRedirects(tokens) {
+  const clean = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (!t.quoted && (REDIRECT_OP_REGEX.test(t.raw) || REDIRECT_ATTACHED_REGEX.test(t.raw))) {
+      if (t.raw === "2>&" && i + 1 < tokens.length && tokens[i + 1].value === "1") {
+        i++;
+        continue;
+      }
+      if (t.raw === "2>" && i + 1 < tokens.length && /^(?:\/dev\/null|nul)$/i.test(tokens[i + 1].value)) {
+        i++;
+        continue;
+      }
+      if (/^2>&1$/i.test(t.raw) || /^2>(?:\/dev\/null|nul)$/i.test(t.raw)) {
+        continue;
+      }
+      return null;
+    }
+    clean.push(t);
+  }
+  return clean;
+}
+
+/**
+ * Narrow High-ROI RTK Pre-Gate (v2.1.2):
+ * Decides before spawning `rtk hook antigravity` whether a standalone shell segment should be
+ * compressed via RTK. Precision/inspection commands (`find`, `grep`, `rg`, `ls`, `wc`, `diff`,
+ * workspace `cat`/`head`/`tail`, `ps`, `git diff`/`show`/`log`, `gh`, `curl`, `node`, `python`),
+ * pipelines, stdout/file redirects, and machine-readable outputs return `false` (0 RTK subprocess spawns).
+ * Harmless stderr redirects (`2>&1`, `2>/dev/null`) are allowed through.
+ */
+function shouldDelegateSegmentToRtk(segText, { inPipeline = false, allowInternalReadRewrite = false } = {}) {
+  const trimmed = String(segText || "").trim();
+  if (!trimmed || inPipeline) return false;
+  const { body } = splitEnvPrefix(trimmed);
+  const target = (body || trimmed).trim();
+  if (!target) return false;
+  if (matchRtkInvocation(target)) return false;
+
+  const rawTokens = tokenizeShellWordsDetailed(target);
+  if (rawTokens.length === 0) return false;
+  const tokens = filterAllowedStderrRedirects(rawTokens);
+  if (!tokens || tokens.length === 0) return false;
+
+  const cmd0 = normalizeCmdName(tokens[0].value);
+  if (!cmd0) return false;
+
+  // Scoped internal spillover / completed task-log reads retain cat/head/tail -> `rtk read` parity
+  if (allowInternalReadRewrite && (cmd0 === "cat" || cmd0 === "head" || cmd0 === "tail")) {
+    return true;
+  }
+
+  if (RTK_HIGH_ROI_DIRECT_CMDS.has(cmd0)) {
+    return !hasMachineReadableOutputFlag(cmd0, "", tokens);
+  }
+
+  if (cmd0 === "rake") {
+    const sub = tokens[1] ? normalizeCmdName(tokens[1].value) : "";
+    if (sub === "test" || sub.startsWith("test:")) {
+      return !hasMachineReadableOutputFlag(cmd0, sub, tokens);
+    }
+    return false;
+  }
+
+  // `python -m pytest` / `python3 -m mypy` -> `rtk pytest` / `rtk mypy`
+  if (cmd0 === "python" || cmd0 === "python3") {
+    let idx = 1;
+    while (idx < tokens.length && tokens[idx].value.startsWith("-") && tokens[idx].value !== "-m") {
+      idx++;
+    }
+    if (tokens[idx]?.value === "-m" && idx + 1 < tokens.length) {
+      const mod = normalizeCmdName(tokens[idx + 1].value);
+      if (RTK_HIGH_ROI_PYTHON_MODULES.has(mod)) {
+        return !hasMachineReadableOutputFlag(mod, "", tokens.slice(idx + 1));
+      }
+    }
+    return false;
+  }
+
+  const allowedSubs = RTK_HIGH_ROI_SUBCMDS[cmd0];
+  if (!allowedSubs) return false;
+
+  const valueFlags = RTK_RUNNER_VALUE_FLAGS[cmd0] || new Set();
+  let subIdx = 1;
+  while (subIdx < tokens.length) {
+    const v = tokens[subIdx].value;
+    if (valueFlags.has(v)) {
+      subIdx += 2;
+      continue;
+    }
+    if (v.startsWith("-")) {
+      subIdx++;
+      continue;
+    }
+    break;
+  }
+  const sub = subIdx < tokens.length ? normalizeCmdName(tokens[subIdx].value) : "";
+  if (!sub || !allowedSubs.has(sub)) return false;
+
+  // Narrow `<pkg> run <script>` to noisy test/build/lint/typecheck/ci scripts so diagnostic scripts stay lossless
+  if ((cmd0 === "npm" || cmd0 === "pnpm" || cmd0 === "bun") && sub === "run") {
+    let scriptIdx = subIdx + 1;
+    while (scriptIdx < tokens.length && tokens[scriptIdx].value.startsWith("-") && tokens[scriptIdx].value !== "--") {
+      scriptIdx++;
+    }
+    const scriptName = scriptIdx < tokens.length ? tokens[scriptIdx].value : "";
+    if (!scriptName || !RTK_HIGH_ROI_PKG_RUN_SCRIPT_RE.test(scriptName)) {
+      return false;
+    }
+  }
+
+  // Narrow `uv run <runner>` to noisy runners (`pytest`, `ruff`, `mypy`, `ty`, `python[3] -m pytest|mypy`)
+  if (cmd0 === "uv" && sub === "run") {
+    let runIdx = subIdx + 1;
+    while (runIdx < tokens.length && tokens[runIdx].value.startsWith("-")) {
+      const fl = tokens[runIdx].value;
+      runIdx += valueFlags.has(fl) ? 2 : 1;
+    }
+    if (runIdx >= tokens.length) return false;
+    const runCmd = normalizeCmdName(tokens[runIdx].value);
+    if (RTK_HIGH_ROI_UV_RUN_CMDS.has(runCmd)) {
+      return !hasMachineReadableOutputFlag(runCmd, "", tokens.slice(runIdx));
+    }
+    if ((runCmd === "python" || runCmd === "python3") && tokens[runIdx + 1]?.value === "-m" && runIdx + 2 < tokens.length) {
+      const mod = normalizeCmdName(tokens[runIdx + 2].value);
+      if (RTK_HIGH_ROI_PYTHON_MODULES.has(mod)) {
+        return !hasMachineReadableOutputFlag(mod, "", tokens.slice(runIdx + 2));
+      }
+    }
+    return false;
+  }
+
+  // Narrow `uv pip <subcmd>` to subcommands `rtk 1.1.0` actually rewrites (`install`, `list`, `show`)
+  if (cmd0 === "uv" && sub === "pip") {
+    let pipIdx = subIdx + 1;
+    while (pipIdx < tokens.length && tokens[pipIdx].value.startsWith("-")) {
+      const fl = tokens[pipIdx].value;
+      pipIdx += valueFlags.has(fl) ? 2 : 1;
+    }
+    const pipSub = pipIdx < tokens.length ? normalizeCmdName(tokens[pipIdx].value) : "";
+    if (!pipSub || !RTK_HIGH_ROI_UV_PIP_SUBS.has(pipSub)) {
+      return false;
+    }
+  }
+
+  // Narrow `docker compose` to high-ROI read/build subcommands (`ps`, `logs`, `build`; skip `up`/`down`/`exec`)
+  if (cmd0 === "docker" && sub === "compose") {
+    let compIdx = subIdx + 1;
+    while (compIdx < tokens.length && tokens[compIdx].value.startsWith("-")) {
+      const fl = tokens[compIdx].value;
+      compIdx += (fl === "-f" || fl === "--file" || fl === "-p" || fl === "--project-name" || fl === "--env-file") ? 2 : 1;
+    }
+    const compSub = compIdx < tokens.length ? normalizeCmdName(tokens[compIdx].value) : "";
+    if (!compSub || !RTK_HIGH_ROI_DOCKER_COMPOSE_SUBS.has(compSub)) {
+      return false;
+    }
+  }
+
+  return !hasMachineReadableOutputFlag(cmd0, sub, tokens);
+}
+
+function isLossyLegacyGitRewrite(rest) {
+  const tokens = tokenizeShellWordsDetailed(rest);
+  if (tokens.length < 2 || normalizeCmdName(tokens[0].value) !== "git") return false;
+  const valueFlags = RTK_RUNNER_VALUE_FLAGS.git;
+  let subIdx = 1;
+  while (subIdx < tokens.length) {
+    const v = tokens[subIdx].value;
+    if (valueFlags.has(v)) {
+      subIdx += 2;
+      continue;
+    }
+    if (v.startsWith("-")) {
+      subIdx++;
+      continue;
+    }
+    break;
+  }
+  const sub = subIdx < tokens.length ? normalizeCmdName(tokens[subIdx].value) : "";
+  if (sub === "diff" || sub === "show") return true;
+  if (sub === "log") {
+    const restArgs = tokens.slice(subIdx + 1).map((t) => t.value);
+    if (restArgs.some((a) => a === "-p" || a === "--patch" || a === "-u")) return true;
+  }
+  return false;
+}
+
+function rewriteCommandViaRtkPreGate(rawCmd, rtk, ctx = {}) {
+  const segs = splitShellSegments(rawCmd);
+  if (segs.length === 0) return { decision: "allow", commandLine: rawCmd };
+
+  let result = rawCmd;
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const seg = segs[i];
+    const leadWs = (seg.text.match(/^\s*/) || [""])[0];
+    const trailWs = (seg.text.match(/\s*$/) || [""])[0];
+    const trimmed = seg.text.trim();
+    if (!trimmed) continue;
+
+    const wrap = unwrapShellWrapper(trimmed);
+    if (wrap) {
+      const innerRes = rewriteCommandViaRtkPreGate(wrap.inner, rtk, {
+        ...ctx,
+        allowInternalReadRewrite: false
+      });
+      if (innerRes.decision !== "allow") return innerRes;
+      if (innerRes.commandLine !== wrap.inner) {
+        const rebuilt = `${leadWs}${wrap.prefix}${wrap.quote}${innerRes.commandLine}${wrap.quote}${trailWs}`;
+        result = result.slice(0, seg.start) + rebuilt + result.slice(seg.end);
+      }
+      continue;
+    }
+
+    const inPipeline =
+      seg.leadingSep === "|" ||
+      seg.leadingSep === "|&" ||
+      (i + 1 < segs.length && (segs[i + 1].leadingSep === "|" || segs[i + 1].leadingSep === "|&"));
+
+    if (
+      !shouldDelegateSegmentToRtk(trimmed, {
+        inPipeline,
+        allowInternalReadRewrite: Boolean(ctx.allowInternalReadRewrite && segs.length === 1)
+      })
+    ) {
+      continue;
+    }
+
+    const delegated = delegateRewriteToRtk(trimmed, rtk);
+    if (delegated.decision !== "allow") {
+      return delegated;
+    }
+    if (delegated.commandLine && delegated.commandLine !== trimmed) {
+      result = result.slice(0, seg.start) + `${leadWs}${delegated.commandLine}${trailWs}` + result.slice(seg.end);
+    }
+  }
+
+  return { decision: "allow", commandLine: result };
+}
+
+function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipeline, rtkPrefix, allowInternalReadRewrite = false }) {
   const trimmedEff = effSegText.trim();
   const trimmedRaw = (rawSegText || "").trim();
 
@@ -4673,7 +5804,7 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
     const processedInner = postProcessCommand(
       rawWrap ? rawWrap.inner : effWrap.inner,
       effWrap.inner,
-      { rgAvailable, rtkPrefix: wrappedRtkPrefix }
+      { rgAvailable, rtkPrefix: wrappedRtkPrefix, allowInternalReadRewrite: false }
     );
     return `${effWrap.prefix}${effWrap.quote}${processedInner}${effWrap.quote}`;
   }
@@ -4685,7 +5816,11 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
 
   const rtkMatch = matchRtkInvocation(effMatchTarget);
   if (!rtkMatch) {
-    // When host `rg` is absent, also rewrite bare `rg` in pipelines or `bash -c` subshells to `grep`/`find`
+    // Handle `uv run rtk ...` emitted by `rtk >= 1.1.0` for plugin-local off-PATH RTK installs
+    if (rtkPrefix && rtkPrefix !== "rtk" && /^uv(?:\.exe)?\s+run\s+rtk(?:\.exe|\.cmd|\.bat)?(?=\s)/i.test(effMatchTarget)) {
+      return `${effEnvPrefix}${effMatchTarget.replace(/^(uv(?:\.exe)?\s+run\s+)rtk(?:\.exe|\.cmd|\.bat)?(?=\s)/i, (_, pfx) => `${pfx}${rtkPrefix}`)}`;
+    }
+    // When host `rg` is absent, rewrite bare `rg` to lossless `grep`/`find`
     if (!rgAvailable && /^rg(?:\.exe)?(?=\s|$)/i.test(effMatchTarget)) {
       const mapped = rewriteRtkRgSegment("", effMatchTarget, { inPipeline });
       if (mapped !== effMatchTarget) {
@@ -4699,12 +5834,23 @@ function postProcessSegmentText(rawSegText, effSegText, { rgAvailable, inPipelin
   const rest = rtkMatch.rest;
   const subcmd = (rest.match(/^([^\s"']+)/)?.[1] || "").toLowerCase();
 
-  // Revert lossy `rtk wc` / `rtk ls` / `rtk diff` / `rtk grep` back to raw unless caller explicitly typed it (ACS-HOOK-09, ACS-HOOK-GREP-CLAMP)
-  if (subcmd === "wc" || subcmd === "ls" || subcmd === "diff" || subcmd === "grep") {
-    const rawRtkMatch = matchRtkInvocation(rawMatchTarget);
-    const rawSubcmd = rawRtkMatch ? (rawRtkMatch.rest.match(/^([^\s"']+)/)?.[1] || "").toLowerCase() : "";
-    if (rawSubcmd !== subcmd) {
+  // Defensive safety net (esp. under AGY_RTK_MODE=all): revert lossy implicit rewrites unless caller explicitly typed `rtk ...`
+  const rawRtkMatch = matchRtkInvocation(rawMatchTarget);
+  const rawSubcmd = rawRtkMatch ? (rawRtkMatch.rest.match(/^([^\s"']+)/)?.[1] || "").toLowerCase() : "";
+  if (rawSubcmd !== subcmd) {
+    if (
+      subcmd === "wc" ||
+      subcmd === "ls" ||
+      subcmd === "diff" ||
+      subcmd === "grep" ||
+      subcmd === "find" ||
+      subcmd === "ps" ||
+      (subcmd === "git" && isLossyLegacyGitRewrite(rest))
+    ) {
       return `${effEnvPrefix}${rest}`;
+    }
+    if (subcmd === "read" && !allowInternalReadRewrite) {
+      return trimmedRaw || trimmedEff;
     }
   }
 
@@ -4852,7 +5998,8 @@ function extractTaskBackoffKey(toolName, args = {}) {
     const taskMatch = raw.match(/(?:^|\/)(task-[a-z0-9_-]+)$/i);
     if (taskMatch) return taskMatch[1].toLowerCase();
     const tail = raw.includes("/") ? raw.slice(raw.lastIndexOf("/") + 1).trim() : raw;
-    return tail ? tail.toLowerCase() : null;
+    if (!tail) return null;
+    return /^\d+$/.test(tail) ? `task-${tail}` : tail.toLowerCase();
   }
 
   if (toolName === "schedule") {
@@ -4863,10 +6010,10 @@ function extractTaskBackoffKey(toolName, args = {}) {
       if (taskMatch) return taskMatch[1].toLowerCase();
       if (BACKOFF_UUID_RE.test(cond)) return condLower;
       const tail = cond.includes("/") ? cond.slice(cond.lastIndexOf("/") + 1).trim() : cond;
-      if (tail) return tail.toLowerCase();
+      if (tail) return /^\d+$/.test(tail) ? `task-${tail}` : tail.toLowerCase();
     }
     const prompt = cleanGovernanceArg(args.Prompt || args.prompt);
-    const promptTask = prompt.match(/\b(task-\d+)\b/i);
+    const promptTask = prompt.match(/\b(task-[a-z0-9_-]+)\b/i);
     if (promptTask) return promptTask[1].toLowerCase();
     const promptUuid = prompt.match(/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i);
     if (promptUuid) return promptUuid[1].toLowerCase();
@@ -4904,6 +6051,10 @@ function hasValidSubagentTimerCondition(args = {}) {
  * Keep identical to lib/transcript-core.mjs `isTaskPollSchedule`.
  */
 function isTaskPollSchedule(args = {}) {
+  const isDaemon = args.IsDaemon === true || args.isDaemon === true;
+  const cron = String(args.CronExpression || args.cronExpression || "").trim();
+  if (isDaemon && cron) return false;
+
   const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
   const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
   return (
@@ -4920,6 +6071,42 @@ function isTaskPollSchedule(args = {}) {
 }
 
 /**
+ * Detects backoff-compliant remote CI `schedule` timers (e.g., waiting on GitHub Actions / CodeQL / `gh pr checks` / PR builds / deployments)
+ * where no local `task-X` `TimerCondition` exists (FRIC-RUN-004).
+ * Evaluated ahead of `isSwarmPollSchedule` so repo names containing `squad` (e.g. `Agy-Squad`) are not misclassified as `/swarm` board polls.
+ * Keep identical to lib/transcript-core.mjs `isRemoteCiPollSchedule`.
+ */
+function isRemoteCiPollSchedule(args = {}) {
+  const isDaemon = args.IsDaemon === true || args.isDaemon === true;
+  const cron = String(args.CronExpression || args.cronExpression || "").trim();
+  if (isDaemon && cron) return false;
+
+  const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
+  const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
+  if (/(?:^|\/)task-[a-z0-9_-]+$/i.test(cond) || cond.includes("task") || BACKOFF_UUID_RE.test(cond)) return false;
+  if (/\b(?:background task|task-\d+|subagent|subagents)\b/i.test(prompt)) return false;
+  if (/\b(?:swarm_wait|swarm_monitor|swarm\s+board|board\s+message|swarm\s+worker|worker\s+status|squad\s+board|squad\s+worker)\b/i.test(prompt) || /\/swarm\b/i.test(prompt)) {
+    return false;
+  }
+  const hasRemoteCiMarker =
+    /\b(?:ci|github actions|workflow|codeql|pr checks|gh pr checks|gh run|remote checks|check runs?|pipeline|pull request|build status|status checks?|merge checks?|deploy(?:ment)?|release\s+(?:build|check|workflow|pipeline)|actions?\s+run)\b/i.test(prompt) ||
+    /\bpr\s*#\d+\b/i.test(prompt);
+  return (
+    hasRemoteCiMarker &&
+    /\b(?:check|status|poll|monitor|wait|watch|complete|finish|result|pass|scan|green|ready|job|build|workflow|run)\b/i.test(prompt)
+  );
+}
+
+function extractRemoteCiBackoffKey(args = {}) {
+  const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
+  const prMatch = prompt.match(/\bpr\s*#?(\d+)\b/i) || prompt.match(/\bpull\s+request\s*#?(\d+)\b/i);
+  if (prMatch) return `remote-ci:pr-${prMatch[1]}`;
+  const runMatch = prompt.match(/\brun\s*#?(\d{5,})\b/i);
+  if (runMatch) return `remote-ci:run-${runMatch[1]}`;
+  return "remote-ci";
+}
+
+/**
  * Detects one-shot `schedule` timers used to poll a `/swarm`, squad, or board instead of
  * relying on `swarm_wait` + `swarm_monitor`.
  * Exempts the dedicated `swarm_monitor` daemon cron (`CronExpression` + `IsDaemon: true`).
@@ -4932,6 +6119,9 @@ function isSwarmPollSchedule(args = {}) {
 
   const prompt = cleanGovernanceArg(args.Prompt || args.prompt).toLowerCase();
   const cond = cleanGovernanceArg(args.TimerCondition || args.timerCondition).toLowerCase();
+  // Conditioned local background-task watchdogs (`TimerCondition="<conv>/task-X"`) are never `/swarm` board polls (PR13-RUN-001)
+  if (/(?:^|\/)task-[a-z0-9_-]+$/i.test(cond)) return false;
+  if (isRemoteCiPollSchedule(args)) return false;
   return (
     /\b(?:swarm|squad|board)\b/i.test(prompt) ||
     (cond === "any" &&
@@ -4960,21 +6150,75 @@ function isSubagentPollSchedule(args = {}) {
 
 /**
  * Prunes expired, completed (`getTaskState() === "COMPLETED"`), and excess per-task backoff buckets.
+ * Loads the conversation transcript tail ONCE per invocation (at most one full-file fallback) instead of
+ * looping per-key `getTaskState()` disk reads (PR13-RUN-006).
  */
 function pruneTaskBackoff(session, convId, now = Date.now()) {
   if (!session.taskBackoff || typeof session.taskBackoff !== "object" || Array.isArray(session.taskBackoff)) {
     session.taskBackoff = {};
     return;
   }
+  const entries = Object.entries(session.taskBackoff);
+  let convTranscript = null;
+  let convTasksDir = null;
+  if (convId && convId !== "global" && entries.length > 0) {
+    for (const bDir of getBrainDirs()) {
+      const sysDir = path.join(bDir, convId, ".system_generated");
+      const candTranscript = path.join(sysDir, "logs", "transcript.jsonl");
+      const candTasksDir = path.join(sysDir, "tasks");
+      if (fs.existsSync(candTranscript) || fs.existsSync(candTasksDir)) {
+        if (fs.existsSync(candTranscript)) convTranscript = candTranscript;
+        convTasksDir = candTasksDir;
+        break;
+      }
+    }
+  }
+  const tail = convTranscript ? readTail(convTranscript, TASK_TAIL_BYTES) : null;
+  let fullTextLoaded = false;
+  let fullText = null;
+  const getFullTextOnce = () => {
+    if (!fullTextLoaded) {
+      fullTextLoaded = true;
+      if (convTranscript && tail && !tail.whole) {
+        try { fullText = fs.readFileSync(convTranscript, "utf-8"); } catch {}
+      }
+    }
+    return fullText;
+  };
+
   const kept = [];
-  for (const [key, entry] of Object.entries(session.taskBackoff)) {
+  for (const [key, entry] of entries) {
     if (!entry || typeof entry !== "object") continue;
     const activityTs = Math.max(entry.lastPollTime || 0, entry.lastSeenTime || 0);
-    if (activityTs > 0 && (now - activityTs) >= STATE_TTL_MS) continue;
-    if (convId && convId !== "global" && !BACKOFF_UUID_RE.test(key)) {
+    const isRemoteCiKey = key === "remote-ci" || key.startsWith("remote-ci:");
+    const keyTtl = isRemoteCiKey ? REMOTE_CI_BUCKET_TTL_MS : STATE_TTL_MS;
+    if (activityTs > 0 && (now - activityTs) >= keyTtl) continue;
+    if (convId && convId !== "global" && !isRemoteCiKey && !BACKOFF_UUID_RE.test(key)) {
       try {
         const strippedId = key.replace(/^task-/i, "");
-        const state = getTaskState({ id: strippedId, token: `tasks/${key}.log` }, convId);
+        const taskName = /^task-/i.test(key) ? key : `task-${strippedId}`;
+        let state = null;
+        if (tail) {
+          state = scanTaskMarkers(tail.text, taskName);
+          if (!state && !tail.whole) {
+            const full = getFullTextOnce();
+            if (full) state = scanTaskMarkers(full, taskName);
+          }
+        }
+        if (!state && convTasksDir) {
+          const candidates = [
+            path.join(convTasksDir, `${taskName}.log`),
+            path.join(convTasksDir, `${key}.log`),
+            path.join(convTasksDir, `${strippedId}.log`)
+          ];
+          for (const logPath of candidates) {
+            try {
+              const st = fs.statSync(logPath);
+              state = (now - st.mtimeMs) > TASK_QUIET_MS ? "COMPLETED" : "RUNNING";
+              break;
+            } catch {}
+          }
+        }
         if (state === "COMPLETED") continue;
       } catch {}
     }
@@ -5003,6 +6247,8 @@ function getOrCreateTaskBucket(session, key, now = Date.now()) {
  * breaker at 5 cumulative denials, otherwise answers with the Proportional Backoff message.
  */
 function denyRunningTask(taskId, convId, taskToken = "") {
+  acquireSessionLock(convId);
+  replayMatchedHookCallIfAny(convId);
   const session = getSessionState(convId);
   const now = Date.now();
   pruneTaskBackoff(session, convId, now);
@@ -5013,14 +6259,16 @@ function denyRunningTask(taskId, convId, taskToken = "") {
     bucket.lastSeenTime = now;
   }
   session.denials++;
-  saveSessionState(convId, session, { updatePollTime: false });
 
   const effectiveDenials = bucket ? Math.max(bucket.denials, session.denials) : session.denials;
   if (effectiveDenials >= 5) {
-    respond({
-      decision: "force_ask",
-      reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: reading task log '${taskId}' attempted prematurely ${effectiveDenials} times during active backoff window. User confirmation required to proceed.`
-    });
+    respond(
+      {
+        decision: "force_ask",
+        reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: reading task log '${taskId}' attempted prematurely ${effectiveDenials} times during active backoff window. User confirmation required to proceed.`
+      },
+      { convId, sessionToSave: session, updatePollTime: false }
+    );
   }
 
   const currentPollCount = bucket ? bucket.pollCount : session.pollCount;
@@ -5029,14 +6277,22 @@ function denyRunningTask(taskId, convId, taskToken = "") {
   const requiredBackoffMs = requiredBackoffSec * 1000;
   const elapsedMs = currentLastPoll ? Math.max(0, now - currentLastPoll) : 0;
   const elapsedSec = Math.floor(elapsedMs / 1000);
-  const remainingSec = Math.max(1, Math.ceil((requiredBackoffMs - elapsedMs) / 1000));
   const condTarget = taskKey || `task-${taskId}`;
   const condExample = convId && convId !== "global" ? `${convId}/${condTarget}` : condTarget;
+  const timingSummary =
+    currentPollCount === 0 && currentLastPoll === 0
+      ? `Use manage_task(Action='status', TaskId='${condExample}') for Check #1 (immediate, 0s) or arm a conditioned watchdog`
+      : elapsedMs >= requiredBackoffMs
+        ? `${elapsedSec}s elapsed — backoff window is satisfied for manage_task(Action='status'), but reading raw task logs while RUNNING remains prohibited`
+        : `Diagnostic check #${currentPollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${Math.max(1, Math.ceil((requiredBackoffMs - elapsedMs) / 1000))}s remaining)`;
 
-  respond({
-    decision: "deny",
-    reason: `Antigravity Execution Governance: Task '${taskId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. Diagnostic check #${currentPollCount + 1} requires at least ${requiredBackoffSec}s elapsed (${elapsedSec}s elapsed, ${remainingSec}s remaining). Keep a conditioned watchdog armed via schedule(DurationSeconds=${requiredBackoffSec}, TimerCondition="${condExample}") so Reactive Wakeup (<SYSTEM_MESSAGE>) notifies you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
-  });
+  respond(
+    {
+      decision: "deny",
+      reason: `Antigravity Execution Governance: Task '${taskId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. ${timingSummary}. Keep a conditioned watchdog armed via schedule(DurationSeconds=${requiredBackoffSec}, TimerCondition="${condExample}") so Reactive Wakeup (<SYSTEM_MESSAGE>) notifies you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
+    },
+    { convId, sessionToSave: session, updatePollTime: false }
+  );
 }
 
 // ============================================================================
@@ -5115,13 +6371,94 @@ function isProtectedGovernanceFileMutation(targetPath, convId = "global") {
   return false;
 }
 
+const ALWAYS_MUTATING_SHELL_VERBS = new Set([
+  "rm",
+  "del",
+  "remove-item",
+  "mv",
+  "cp",
+  "tee",
+  "truncate",
+  "shred",
+  "chmod",
+  "chown",
+  "ln",
+  "dd",
+  "patch",
+  "install"
+]);
+const DIR_MUTATING_SHELL_VERBS = new Set(["ln", "cp", "mv", "rm", "del", "remove-item", "chmod", "chown"]);
+
+function inspectShellMutationVerbs(text, depth = 0) {
+  let hasShellMutationVerb = false;
+  let hasDirMutationVerb = false;
+  if (!text || typeof text !== "string" || depth > 4) {
+    return { hasShellMutationVerb, hasDirMutationVerb };
+  }
+  const segs = splitShellSegments(text);
+  for (const seg of segs) {
+    const trimmed = String(seg.text || "").trim();
+    if (!trimmed) continue;
+    for (const sub of seg.subshells || []) {
+      const subRes = inspectShellMutationVerbs(sub, depth + 1);
+      if (subRes.hasShellMutationVerb) hasShellMutationVerb = true;
+      if (subRes.hasDirMutationVerb) hasDirMutationVerb = true;
+    }
+    const wrap = unwrapShellWrapper(trimmed);
+    if (wrap && wrap.inner) {
+      const wrapRes = inspectShellMutationVerbs(wrap.inner, depth + 1);
+      if (wrapRes.hasShellMutationVerb) hasShellMutationVerb = true;
+      if (wrapRes.hasDirMutationVerb) hasDirMutationVerb = true;
+    }
+    const extWrap = extractWrappedScriptInfo(trimmed);
+    if (extWrap && extWrap.inner) {
+      const extRes = inspectShellMutationVerbs(extWrap.inner, depth + 1);
+      if (extRes.hasShellMutationVerb) hasShellMutationVerb = true;
+      if (extRes.hasDirMutationVerb) hasDirMutationVerb = true;
+    }
+    const tokens = tokenizeShellWordsDetailed(trimmed);
+    for (const startPos of collectSegmentCommandStartIndices(tokens)) {
+      const idx = stripLeadingShellPrefixesAndWrappers(tokens, startPos);
+      if (idx >= tokens.length) continue;
+      const verb = normalizeCmdName(tokens[idx].value);
+      if (ALWAYS_MUTATING_SHELL_VERBS.has(verb)) {
+        hasShellMutationVerb = true;
+        if (DIR_MUTATING_SHELL_VERBS.has(verb)) hasDirMutationVerb = true;
+      } else if (verb === "find") {
+        // Catch `find ... -delete` (while `-exec` / `-execdir` / `-ok` are already iterated by collectSegmentCommandStartIndices)
+        for (let k = idx + 1; k < tokens.length; k++) {
+          if (!tokens[k].quoted && tokens[k].value === "-delete") {
+            hasShellMutationVerb = true;
+            hasDirMutationVerb = true;
+            break;
+          }
+        }
+      } else if (verb === "sed") {
+        const rest = trimmed.slice(tokens[idx].end);
+        if (/(?:\s-[a-zA-Z]*i|\s--in-place(?:=|\s|$))/.test(rest) || /(?:['"\s;]|^)(?:w\s+[^\s'"]+)/.test(rest)) {
+          hasShellMutationVerb = true;
+        }
+      } else if (verb === "perl") {
+        const rest = trimmed.slice(tokens[idx].end);
+        if (
+          /(?:\s-[a-zA-Z]*i|\s--in-place)/.test(rest) ||
+          /\b(?:unlink|rename|truncate|sysopen|spew|write_file|write_text|write_bytes|copy|move)\b|\bopen(?:\s*\(|\s+)[^;\n]*(?:['"]\s*(?:\+?<|>>?|>)|\bO_(?:WRONLY|RDWR|CREAT)\b)/i.test(
+            rest
+          )
+        ) {
+          hasShellMutationVerb = true;
+        }
+      }
+    }
+  }
+  return { hasShellMutationVerb, hasDirMutationVerb };
+}
+
 function hasGovernanceMutationInText(text, convId = "global") {
   if (!text || typeof text !== "string") return false;
   const norm = text.replace(/\\/g, "/");
-  const hasShellMutationVerb =
-    /(?:^|[\s;|&(`'"])(?:rm|del|remove-item|mv|cp|tee|truncate|shred|install|sed|perl|chmod|chown|ln|dd|patch)(?=$|[\s;|&)`'"])/i.test(
-      norm
-    );
+  // Check command-position shell mutation verbs across parsed segments & wrappers (avoids false positives on e.g. `git log --grep="rm"`)
+  const { hasShellMutationVerb, hasDirMutationVerb } = inspectShellMutationVerbs(text);
   const hasCodeMutationVerb =
     /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|unlink|unlinkSync|rmSync|rmdir|rmdirSync|rename|renameSync|truncateSync|chmodSync|copyFile|copyFileSync|WriteAllText)\s*\(|\bos\.(?:remove|unlink)\s*\(|\bshutil\.(?:copy|move|rmtree)\s*\(|\bPath\([^\n)]*\)\.(?:write_text|write_bytes|unlink)\s*\(/i.test(
       norm
@@ -5145,6 +6482,15 @@ function hasGovernanceMutationInText(text, convId = "global") {
     /\/\.gemini\/config\/scripts\/execution-guard-hook\.mjs\b/i.test(norm) ||
     /\/\.gemini\/config\/plugins\/agy-context-saver(?:$|[\/\\\s'"])/i.test(norm) ||
     /\/\.gemini\/antigravity\/bin\/agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?\b/i.test(norm)
+  ) {
+    return true;
+  }
+
+  // Block directory-level symlinks, moves, copies, or removals of ~/.gemini/config, $HOME/.gemini/config,
+  // /abs/.gemini/config[/...], or .gemini/antigravity/bin as a whole (IND-SEC-002; linear regex)
+  if (
+    hasDirMutationVerb &&
+    /(?:^|[\s'":=~/$}\w.-])\/?\.gemini\/(?:config|antigravity\/bin)(?=$|[\/\s;|&)'"])/i.test(norm)
   ) {
     return true;
   }
@@ -5173,18 +6519,42 @@ function escapeDoubleQuotedArg(str) {
 function getFileMetrics(filePath) {
   if (!filePath || typeof filePath !== "string") return null;
   try {
-    const resolvedPath = resolveHookPath(filePath);
-    if (!resolvedPath || !fs.existsSync(resolvedPath)) return null;
+    const expanded = expandLeadingTilde(cleanFileToken(filePath));
+    const resolvedPath = resolveHookPath(expanded);
+    if (!resolvedPath) return null;
+    if (!fs.existsSync(resolvedPath)) {
+      // Only classify as confirmed ENOENT when the parent directory exists on disk AND target is not a dangling symlink
+      let isDanglingSymlink = false;
+      try {
+        fs.lstatSync(resolvedPath);
+        isDanglingSymlink = true;
+      } catch {}
+      if (!isDanglingSymlink && fs.existsSync(path.dirname(resolvedPath))) {
+        return { exists: false, bytes: 0, lineCount: 0, rawSplitCount: 0, oversized: false };
+      }
+      return null;
+    }
     const stat = fs.statSync(resolvedPath);
     if (!stat.isFile()) return null;
     const bytes = stat.size;
-    const content = fs.readFileSync(resolvedPath, "utf-8");
-    if (content.length === 0) {
-      return { bytes: 0, lineCount: 0, rawSplitCount: 1 };
+    if (bytes === 0) {
+      return { exists: true, bytes: 0, lineCount: 0, rawSplitCount: 1, oversized: false };
     }
-    const rawSplitCount = content.split(/\r?\n/).length;
-    const lineCount = /\r?\n$/.test(content) ? Math.max(1, rawSplitCount - 1) : rawSplitCount;
-    return { bytes, lineCount, rawSplitCount };
+    const oversized = bytes > MAX_FULL_FILE_BYTES;
+    // Scan newlines up to 1 MiB so EOF-clamping and exact TotalLines work on large source files
+    // without allocating UTF-8 line arrays or reading multi-megabyte files into memory
+    if (bytes > MAX_LINE_COUNT_SCAN_BYTES) {
+      return { exists: true, bytes, lineCount: null, rawSplitCount: null, oversized: true };
+    }
+    const buf = fs.readFileSync(resolvedPath);
+    let nlCount = 0;
+    for (let i = 0; i < buf.length; i++) {
+      if (buf[i] === 0x0a) nlCount++;
+    }
+    const endsWithNl = buf[buf.length - 1] === 0x0a;
+    const rawSplitCount = nlCount + 1;
+    const lineCount = endsWithNl ? Math.max(1, nlCount) : nlCount + 1;
+    return { exists: true, bytes, lineCount, rawSplitCount, oversized };
   } catch {
     return null;
   }
@@ -5213,7 +6583,7 @@ try {
   }
 
   // Only pre-classify as governed before JSON.parse when the tool name field itself matches a governed tool
-  isGovernedTool = /"(?:name|tool_name)"\s*:\s*"(?:run_command|read_file|view_file|read_many_files|grep_search|find_by_name|list_dir|manage_task|schedule|replace_file_content|write_to_file|write_file|edit_file)"/i.test(
+  isGovernedTool = /"(?:name|tool_name)"\s*:\s*"(?:run_command|read_file|view_file|read_many_files|grep_search|find_by_name|list_dir|manage_task|schedule|replace_file_content|multi_replace_file_content|write_to_file|write_file|edit_file)"/i.test(
     inputRaw
   );
   const payload = JSON.parse(inputRaw);
@@ -5231,39 +6601,23 @@ try {
 
   isGovernedTool = true;
 
-  // Dual-hook idempotency deduplication when payload.conversationId is present (coordinator plugin + global hooks.json)
+  // Dual-hook idempotency deduplication when payload.conversationId is present (coordinator plugin + global hooks.json).
+  // Stateful tools (`manage_task`, `schedule`) hold a brief `wx` session lock across dedup + atomic state persistence (IND-RUN-001).
   if (payload.conversationId) {
+    if (toolName === "manage_task" || toolName === "schedule") {
+      acquireSessionLock(convId);
+    }
     const callId = String(toolCall.id || payload.toolUseId || payload.tool_use_id || "").trim();
     const stepIdx = payload.stepIdx !== undefined ? payload.stepIdx : payload.step_index;
     const inSig = JSON.stringify(args || {});
     let currentScriptPath = "";
     try {
-      currentScriptPath = tryRealpath(fileURLToPath(import.meta.url));
+      // Key cross-surface dedup on non-realpath script path + explicit `--surface=` flag so symlinked dual surfaces stay distinct (IND-SCRIPT-001)
+      const rawScriptPath = fileURLToPath(import.meta.url);
+      currentScriptPath = HOOK_SURFACE ? `${rawScriptPath}::${HOOK_SURFACE}` : rawScriptPath;
     } catch {}
-    const now = Date.now();
     const prevState = getSessionState(convId);
-    const recent = Array.isArray(prevState.recentHookCalls) ? prevState.recentHookCalls : [];
-    const matchedCall = recent.find((e) => {
-      if (!e || typeof e.ts !== "number" || (now - e.ts) >= HOOK_DEDUP_TTL_MS) return false;
-      if (callId && e.callId && e.callId === callId) return true;
-      const argMatch = inSig === e.rawSig || inSig === e.outSig;
-      if (!argMatch || e.toolName !== toolName) return false;
-      if (stepIdx !== undefined && stepIdx !== null && e.stepIdx === stepIdx) return true;
-      if (currentScriptPath && e.scriptPath && e.scriptPath !== currentScriptPath && (now - e.ts) < HOOK_SAME_ARG_CROSS_SCRIPT_MS) {
-        return true;
-      }
-      return false;
-    });
-    if (matchedCall && matchedCall.response) {
-      const replay =
-        inSig === matchedCall.outSig &&
-        matchedCall.rawSig !== matchedCall.outSig &&
-        matchedCall.response.decision === "allow"
-          ? { decision: "allow" }
-          : matchedCall.response;
-      respond(replay);
-    }
-    dedupRecordCtx = {
+    const dedupCandidate = {
       convId,
       callId,
       stepIdx: stepIdx !== undefined ? stepIdx : null,
@@ -5271,6 +6625,17 @@ try {
       scriptPath: currentScriptPath,
       rawSig: inSig
     };
+    const matchedCall = findMatchingRecentHookCall(prevState, dedupCandidate, Date.now());
+    if (matchedCall && matchedCall.response) {
+      const replay =
+        inSig === matchedCall.outSig &&
+        matchedCall.rawSig !== matchedCall.outSig &&
+        matchedCall.response.decision === "allow"
+          ? { decision: "allow" }
+          : matchedCall.response;
+      respond(replay, { skipDedupRecord: true });
+    }
+    dedupRecordCtx = dedupCandidate;
   }
 
   // =========================================================================
@@ -5488,8 +6853,9 @@ try {
         return [];
       }
 
-      if (verb === "cp") {
+      if (verb === "cp" || verb === "ln") {
         // Only flags that genuinely consume a separate next-token value (never GNU optional `=VALUE` flags like `--backup`/`--preserve`/`--reflink`/`--update`/`--context`)
+        // Narrowing `ln` to destination operand matches `cp` so read-only `ln -s benchmarks/suite.json /tmp/link` passes (FRIC-RUN-009).
         const cpValueFlags = new Set(["-S", "--suffix", "--no-preserve", "--sparse"]);
         const targetDirs = [];
         const positionals = [];
@@ -5540,31 +6906,25 @@ try {
       for (const st of segTexts) {
         const detailed = tokenizeShellWordsDetailed(st);
         if (detailed.length === 0) continue;
-        let cmdIdx = 0;
-        while (
-          cmdIdx < detailed.length &&
-          (/^[A-Za-z_][A-Za-z0-9_]*=/.test(detailed[cmdIdx].value) ||
-            detailed[cmdIdx].value === "env" ||
-            detailed[cmdIdx].value === "sudo")
-        ) {
-          cmdIdx++;
+        const redirectTargets = seg.hasWriteRedirect ? extractRedirectTargets(detailed) : [];
+        const argCandidates = [];
+        for (const startPos of collectSegmentCommandStartIndices(detailed)) {
+          const cmdIdx = stripLeadingShellPrefixesAndWrappers(detailed, startPos);
+          const verb = cmdIdx < detailed.length ? normalizeCmdName(detailed[cmdIdx].value) : "";
+          if (SHELL_MUTATION_VERBS.has(verb)) {
+            argCandidates.push(...getShellMutationArgCandidates(verb, detailed, cmdIdx));
+          }
         }
-        const verb = cmdIdx < detailed.length ? normalizeCmdName(detailed[cmdIdx].value) : "";
-        const isMutatingVerb = SHELL_MUTATION_VERBS.has(verb);
-        if (seg.hasWriteRedirect || isMutatingVerb) {
-          const redirectTargets = extractRedirectTargets(detailed);
-          const argCandidates = isMutatingVerb
-            ? getShellMutationArgCandidates(verb, detailed, cmdIdx)
-            : [];
+        if (redirectTargets.length > 0 || argCandidates.length > 0) {
           const candidateTokens = [...redirectTargets, ...argCandidates];
-          if (candidateTokens.some((tok) => isProtectedGovernanceFileMutation(tok, convId))) {
+          if (candidateTokens.some((tok) => isProtectedGovernanceFileMutationPath(tok, convId))) {
             respond({
               decision: "deny",
               reason:
                 "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited."
             });
           }
-          if (!isBenchmarkGuardDisabled(convId) && candidateTokens.some((tok) => isProtectedBenchmarkPath(tok))) {
+          if (!isBenchmarkGuardDisabled(convId) && candidateTokens.some((tok) => isProtectedBenchmarkFilePath(tok))) {
             respond({
               decision: "force_ask",
               reason:
@@ -5590,15 +6950,26 @@ try {
     const agyTranscriptCheck = checkAgyContextTranscriptCommand(segments, convId);
     if (agyTranscriptCheck.matched && !agyTranscriptCheck.allowed) {
       if (agyTranscriptCheck.isAccessDenial) {
+        acquireSessionLock(convId);
+        replayMatchedHookCallIfAny(convId);
         const session = getSessionState(convId);
         session.transcriptDenials = (session.transcriptDenials || 0) + 1;
-        saveSessionState(convId, session, { updatePollTime: false });
         if (session.transcriptDenials >= 5) {
-          respond({
-            decision: "force_ask",
-            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: restricted session '${convId}' attempted forbidden 'agy-context transcript' access ${session.transcriptDenials} times. ${agyTranscriptCheck.reason}`
-          });
+          respond(
+            {
+              decision: "force_ask",
+              reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: restricted session '${convId}' attempted forbidden 'agy-context transcript' access ${session.transcriptDenials} times. ${agyTranscriptCheck.reason}`
+            },
+            { convId, sessionToSave: session, updatePollTime: false }
+          );
         }
+        respond(
+          {
+            decision: "deny",
+            reason: agyTranscriptCheck.reason
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
       }
       respond({
         decision: "deny",
@@ -5627,8 +6998,8 @@ try {
       const taskMatches = extractTaskLogMatches(inspectableCombined, convId);
       taskMatch = taskMatches[0] || null;
 
-      // Block unwrapped shell/interpreter mutations of governance/hook files
-      if (hasGovernanceMutationInText(inspectableCombined, convId)) {
+      // Block unwrapped shell/interpreter mutations of governance/hook files (evaluated per-segment: FRIC-RUN-005)
+      if (inspectableTexts.some((segText) => hasGovernanceMutationInText(segText, convId))) {
         respond({
           decision: "deny",
           reason:
@@ -5648,13 +7019,22 @@ try {
       // If spillover or task log is chained, redirected, uses heredocs, subshells, or `..` traversal -> DENY
       if ((isSpillover || taskMatch) && !isSingleUnchainedShellCmd(segments)) {
         const hasRtkForSpillover = Boolean(resolveCachedHostEnv().rtk);
+        let chainedReason;
+        if (isSpillover) {
+          chainedReason = hasRtkForSpillover
+            ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'rtk read <path>' command (no chaining, redirects, subshells, or '..' traversal)."
+            : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' command (or bounded 'read_file' <= 150 lines; no chaining, redirects, subshells, or '..' traversal).";
+        } else if (taskMatches.length > 0 && taskMatches.every((m) => getTaskState(m, convId) === "COMPLETED")) {
+          // Explicit unchained guidance for COMPLETED task logs rather than generic prohibition (PR13-RUN-005)
+          chainedReason = hasRtkForSpillover
+            ? "Antigravity Execution Governance: Completed task logs must be inspected using a single unchained 'rtk read <path>' command (no chaining, pipes, redirects, subshells, or '..' traversal)."
+            : "Antigravity Execution Governance: Completed task logs must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' command (or bounded 'read_file' <= 150 lines; no chaining, pipes, redirects, subshells, or '..' traversal).";
+        } else {
+          chainedReason = buildInternalStateShellDenial(convId);
+        }
         respond({
           decision: "deny",
-          reason: isSpillover
-            ? hasRtkForSpillover
-              ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'rtk read <path>' command (no chaining, redirects, subshells, or '..' traversal)."
-              : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' command (or bounded 'read_file' <= 150 lines; no chaining, redirects, subshells, or '..' traversal)."
-            : buildInternalStateShellDenial(convId)
+          reason: chainedReason
         });
       }
 
@@ -5690,10 +7070,14 @@ try {
           }
         }
       }
-      if (isProtectedShellOrScriptOperation(inspectRemainder, { isRestrictedChild: callerAccess.isRestrictedChild })) {
+      // Inspect prose-stripped segments, heredoc bodies, and on-disk scripts uniformly (including non-canonical CLI checks)
+      const protectedReason = getProtectedShellOperationReason(inspectRemainder, {
+        isRestrictedChild: callerAccess.isRestrictedChild
+      });
+      if (protectedReason) {
         respond({
           decision: "deny",
-          reason: buildInternalStateShellDenial(convId)
+          reason: buildProtectedShellReasonMessage(protectedReason, convId)
         });
       }
     }
@@ -5708,23 +7092,40 @@ try {
       });
     }
 
-    // Delegate command rewriting to `rtk hook antigravity` (>= 1.1.0)
+    // Delegate high-ROI command rewriting to `rtk hook antigravity` (>= 1.1.0) via Narrow Pre-Gate (AGY_RTK_MODE=pregate|off|all)
     const { rtk, rgAvailable } = resolveCachedHostEnv();
+    const rtkMode = getAgyRtkMode();
+    const allowInternalReadRewrite = Boolean(
+      isSingleUnchainedShellCmd(segments) && (isSpillover || (taskMatch && taskState === "COMPLETED"))
+    );
     let effectiveCmd = rawCmd;
 
     if (rtk) {
-      const delegated = delegateRewriteToRtk(rawCmd, rtk);
-      if (delegated.decision !== "allow") {
-        respond({ decision: delegated.decision, reason: delegated.reason });
+      let rewrittenCandidate = rawCmd;
+      if (rtkMode === "pregate" || (rtkMode === "off" && allowInternalReadRewrite)) {
+        // Under AGY_RTK_MODE=off, auto-delegation is off EXCEPT single scoped internal spillover/task-log reads
+        const gated = rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite });
+        if (gated.decision !== "allow") {
+          respond({ decision: gated.decision, reason: gated.reason });
+        }
+        rewrittenCandidate = gated.commandLine;
+      } else if (rtkMode === "all") {
+        const delegated = delegateRewriteToRtk(rawCmd, rtk);
+        if (delegated.decision !== "allow") {
+          respond({ decision: delegated.decision, reason: delegated.reason });
+        }
+        rewrittenCandidate = delegated.commandLine;
       }
-      effectiveCmd = postProcessCommand(rawCmd, delegated.commandLine, {
+      effectiveCmd = postProcessCommand(rawCmd, rewrittenCandidate, {
         rgAvailable,
-        rtkPrefix: rtk.prefix
+        rtkPrefix: rtk.prefix,
+        allowInternalReadRewrite
       });
     } else if (!rgAvailable) {
       effectiveCmd = postProcessCommand(rawCmd, rawCmd, {
         rgAvailable: false,
-        rtkPrefix: "rtk"
+        rtkPrefix: "rtk",
+        allowInternalReadRewrite
       });
     }
 
@@ -5795,28 +7196,58 @@ try {
       }
     }
 
+    const callerAccessForRead = (isSpillover || taskMatch) ? evaluateCallerTranscriptAccess(convId) : null;
+    const isRestrictedForInternalRead = Boolean(
+      callerAccessForRead &&
+      (callerAccessForRead.isRestrictedChild || !callerAccessForRead.allowed || callerAccessForRead.mode === "self-only")
+    );
+
     // Check 3: Step Output Spillover Safe Harbor (strictly single unchained `rtk read`, or bounded `head -n 150`/`tail -n 150` in degraded mode)
-    if (isSpillover && (rtk ? !isRtkRead : !isDegradedBoundedRead)) {
-      respond({
-        decision: "deny",
-        reason: rtk
-          ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
-          : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
-      });
+    if (isSpillover) {
+      const spillCheckTarget = spilloverTok || (parsedEff?.operands?.[0] || "");
+      if (isCrossConversationTargetDenied(spillCheckTarget, convId, callerAccessForRead)) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Cross-conversation inspection of another session's step spillover is prohibited under Parent Transcript Isolation."
+        });
+      }
+      if (rtk ? !isRtkRead : !isDegradedBoundedRead) {
+        respond({
+          decision: "deny",
+          reason: rtk
+            ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
+            : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
+        });
+      }
     }
 
-    // Check 4: Completed task logs allow post-rewrite `rtk read` (or bounded `head -n 150`/`tail -n 150` when degraded without RTK); unknown-state logs require explicit `rtk read`
-    if (taskMatch && (rtk ? (taskState === "COMPLETED" ? !isRtkRead : !isExplicitRtkRead) : (taskState !== "COMPLETED" || !isDegradedBoundedRead))) {
-      respond({
-        decision: "deny",
-        reason: rtk
-          ? "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
-            "- Once completed, inspect output using 'rtk read <path>' via run_command.\n" +
-            "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
-          : "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
-            "- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines).\n" +
-            "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
-      });
+    // Check 4: Completed task logs allow post-rewrite `rtk read` (or bounded `head -n 150`/`tail -n 150` when degraded without RTK);
+    // unknown-state logs require explicit `rtk read` for unrestricted callers and are denied for restricted callers (IND-SEC-003).
+    if (taskMatch) {
+      const taskCheckTarget = taskMatch.realPath || taskMatch.token || (parsedEff?.operands?.[0] || "");
+      if (isCrossConversationTargetDenied(taskCheckTarget, convId, callerAccessForRead)) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Cross-conversation inspection of another session's task log is prohibited under Parent Transcript Isolation."
+        });
+      }
+      const allowedTaskRead = rtk
+        ? (taskState === "COMPLETED" ? isRtkRead : (!isRestrictedForInternalRead && isExplicitRtkRead))
+        : (taskState === "COMPLETED" && isDegradedBoundedRead);
+      if (!allowedTaskRead) {
+        respond({
+          decision: "deny",
+          reason: rtk
+            ? "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+              "- Once completed, inspect output using 'rtk read <path>' via run_command.\n" +
+              "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+            : "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+              "- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines).\n" +
+              "- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+        });
+      }
     }
 
     // Fail loud with explicit guidance instead of silently injecting --tail-lines 150 on >45 KiB spillover/task logs (ACS-HOOK-GREP-CLAMP)
@@ -5860,16 +7291,20 @@ try {
       overwrite.WaitMsBeforeAsync = targetMaxWait;
     }
 
-    if (pendingWrittenSet.size > 0) {
-      for (const writtenPath of pendingWrittenSet) {
-        recordSessionWrittenFile(convId, writtenPath);
-      }
-    }
+    const writtenSession =
+      pendingWrittenSet.size > 0 ? prepareSessionWithWrittenFiles(convId, Array.from(pendingWrittenSet)) : null;
 
-    if (Object.keys(overwrite).length > 0) {
-      respond({ decision: "allow", overwrite });
+    const hasOverwrite = Object.keys(overwrite).length > 0;
+    const responseObj = hasOverwrite ? { decision: "allow", overwrite } : { decision: "allow" };
+    if (writtenSession) {
+      respond(responseObj, { convId, sessionToSave: writtenSession, updatePollTime: false });
     }
-    respond({ decision: "allow" });
+    const isTrulyStatelessRunAllow =
+      !hasOverwrite &&
+      !agyTranscriptCheck.needsReadGrant &&
+      !agyTranscriptCheck.isAccessMutation &&
+      pendingWrittenSet.size === 0;
+    respond(responseObj, isTrulyStatelessRunAllow ? { skipDedupRecord: true } : null);
   }
 
   // =========================================================================
@@ -5893,13 +7328,72 @@ try {
       args.TargetFile ||
       args.targetFile ||
       args.target_file ||
+      args.DirectoryPath ||
+      args.directoryPath ||
       args.dirPath ||
       args.dir_path ||
       args.directory ||
+      args.SearchDirectory ||
+      args.searchDirectory ||
       args.SearchPath ||
       args.searchPath ||
+      args.SearchRoot ||
+      args.searchRoot ||
       "";
     const target = String(rawTarget).trim();
+
+    const isDiscoveryTool = toolName === "grep_search" || toolName === "find_by_name" || toolName === "list_dir";
+    const isRecursiveDiscoveryTool = toolName === "grep_search" || toolName === "find_by_name";
+    const effectiveTarget = target || (isDiscoveryTool ? activeHookCwd : "");
+    const isProtectedDiscoveryAncestorPath = (candidateTarget) => {
+      if (!isDiscoveryTool) return false;
+      const effectiveCandidate = candidateTarget || activeHookCwd;
+      if (!effectiveCandidate) return false;
+      const normDir = (p) => {
+        if (!p) return "";
+        const raw = tryRealpath(path.resolve(p)).replace(/\\/g, "/");
+        const stripped = raw.replace(/\/+$/, "");
+        const norm = stripped || (raw.startsWith("/") ? "/" : raw);
+        return os.platform() === "win32" || os.platform() === "darwin" ? norm.toLowerCase() : norm;
+      };
+      const profileHomeNorm = normDir(getProfileHomeDir());
+      const stateDirNorm = normDir(getStateDir());
+      const stateDirParentNorm = normDir(path.dirname(getStateDir()));
+      const stateDirGrandParentRaw = normDir(path.dirname(path.dirname(getStateDir())));
+      const stateDirGrandParentBase = path.basename(stateDirGrandParentRaw).toLowerCase();
+      const stateDirGrandParentNorm =
+        stateDirGrandParentBase === ".local" || stateDirGrandParentBase === "appdata" || stateDirGrandParentBase === "library"
+          ? stateDirGrandParentRaw
+          : "";
+      const brainDirNorms = getBrainDirs().map(normDir).filter(Boolean);
+      const agyRootNorms = brainDirNorms.map((b) => normDir(path.dirname(b))).filter(Boolean);
+      const geminiRootNorms = agyRootNorms.map((a) => normDir(path.dirname(a))).filter(Boolean);
+
+      for (const variant of expandAndResolvePathVariants(effectiveCandidate)) {
+        const nv = normDir(variant);
+        if (!nv) continue;
+        if (
+          nv === stateDirNorm ||
+          brainDirNorms.includes(nv) ||
+          agyRootNorms.includes(nv) ||
+          geminiRootNorms.includes(nv)
+        ) {
+          return true;
+        }
+        if (isRecursiveDiscoveryTool) {
+          if (nv === "/" || /^[a-z]:$/i.test(nv)) return true;
+          if (stateDirParentNorm && stateDirParentNorm !== profileHomeNorm && nv === stateDirParentNorm) return true;
+          if (stateDirGrandParentNorm && stateDirGrandParentNorm !== profileHomeNorm && nv === stateDirGrandParentNorm) return true;
+          if (brainDirNorms.some((b) => nv.startsWith(b + "/") && !nv.slice(b.length + 1).includes("/"))) {
+            return true;
+          }
+          try {
+            if (fs.existsSync(path.join(variant, ".system_generated"))) return true;
+          } catch {}
+        }
+      }
+      return false;
+    };
 
     const rawStart = args.StartLine !== undefined ? args.StartLine : (args.startLine !== undefined ? args.startLine : args.start_line);
     const rawEnd = args.EndLine !== undefined ? args.EndLine : (args.endLine !== undefined ? args.endLine : args.end_line);
@@ -5907,8 +7401,21 @@ try {
     const hasSliceParams = rawStart !== undefined || rawEnd !== undefined;
 
     // 2a. Step Output Spillover Safe Harbor: bounded read_file (<= 150 lines) allowed; else route to rtk read / bounded read_file
-    if (isStepSpilloverPath(target)) {
-      if (toolName === "read_file" && rawStart !== undefined && rawEnd !== undefined) {
+    if (isStepSpilloverPath(target) || expandAndResolvePathVariants(target).some((v) => isStepSpilloverPath(v))) {
+      if (isCrossConversationTargetDenied(target, convId)) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Cross-conversation inspection of another session's step spillover is prohibited under Parent Transcript Isolation."
+        });
+      }
+      const absSpillTarget = resolveHookPath(expandLeadingTilde(cleanFileToken(target)));
+      const isSymlinkMaskedSpill = Boolean(
+        absSpillTarget &&
+        fs.existsSync(absSpillTarget) &&
+        !/(?:^|\/)\.system_generated\//i.test(absSpillTarget.replace(/\\/g, "/"))
+      );
+      if (!isSymlinkMaskedSpill && toolName === "read_file" && rawStart !== undefined && rawEnd !== undefined) {
         const startLine = Number(rawStart);
         const endLine = Number(rawEnd);
         if (
@@ -5916,7 +7423,7 @@ try {
           Number.isInteger(endLine) &&
           startLine > 0 &&
           endLine >= startLine &&
-          (endLine - startLine + 1) <= MAX_SAFE_SLICE_LINES
+          (endLine - startLine + 1) <= MAX_SPILLOVER_SLICE_LINES
         ) {
           respond({ decision: "allow" });
         }
@@ -5929,20 +7436,32 @@ try {
         : `'tail -n 150 ${target}' (or 'head -n 150 ${target}')`;
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Unbounded inspection of step spillover via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'read_file' or run ${spillCmd} via run_command instead.`
+        reason: `Antigravity Governance: Unbounded inspection of step spillover via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SPILLOVER_SLICE_LINES} lines) to 'read_file' or run ${spillCmd} via run_command instead.`
       });
     }
 
-    // 2b. Task Log Inspection (Lifecycle-Gated)
+    // 2b. Task Log Inspection (Lifecycle-Gated; symmetrical bounded read_file <= 150L on COMPLETED logs)
     const taskMatch = matchTaskLogToken(target, convId);
     if (taskMatch) {
+      if (isCrossConversationTargetDenied(taskMatch.realPath || target, convId)) {
+        respond({
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Cross-conversation inspection of another session's task log is prohibited under Parent Transcript Isolation."
+        });
+      }
       const state = getTaskState(taskMatch, convId);
       if (state === "RUNNING") {
         denyRunningTask(taskMatch.id, convId, taskMatch.token);
       }
       if (state === "COMPLETED") {
-        const hasRtkForTask = Boolean(resolveCachedHostEnv().rtk);
-        if (!hasRtkForTask && toolName === "read_file" && rawStart !== undefined && rawEnd !== undefined) {
+        const absTaskTarget = resolveHookPath(expandLeadingTilde(cleanFileToken(target)));
+        const isSymlinkMaskedTask = Boolean(
+          absTaskTarget &&
+          fs.existsSync(absTaskTarget) &&
+          !/(?:^|\/)\.system_generated\//i.test(absTaskTarget.replace(/\\/g, "/"))
+        );
+        if (!isSymlinkMaskedTask && toolName === "read_file" && rawStart !== undefined && rawEnd !== undefined) {
           const startLine = Number(rawStart);
           const endLine = Number(rawEnd);
           if (
@@ -5950,11 +7469,12 @@ try {
             Number.isInteger(endLine) &&
             startLine > 0 &&
             endLine >= startLine &&
-            (endLine - startLine + 1) <= MAX_SAFE_SLICE_LINES
+            (endLine - startLine + 1) <= MAX_SPILLOVER_SLICE_LINES
           ) {
             respond({ decision: "allow" });
           }
         }
+        const hasRtkForTask = Boolean(resolveCachedHostEnv().rtk);
         const taskCmd = hasRtkForTask
           ? (isOversizedInternalTarget(target, convId, taskMatch, false)
               ? `'rtk read --tail-lines 150 ${target}' (or '--head-lines 150')`
@@ -5962,9 +7482,7 @@ try {
           : `'tail -n 150 ${target}' (or 'head -n 150 ${target}')`;
         respond({
           decision: "deny",
-          reason: hasRtkForTask
-            ? `Antigravity Governance: Native file inspection via '${toolName}' bypasses token optimization. Run ${taskCmd} via run_command instead.`
-            : `Antigravity Governance: Unbounded inspection of completed task logs via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to 'read_file' or run ${taskCmd} via run_command instead.`
+          reason: `Antigravity Governance: Unbounded inspection of completed task logs via '${toolName}' is denied. Pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SPILLOVER_SLICE_LINES} lines) to 'read_file' or run ${taskCmd} via run_command instead.`
         });
       }
       respond({
@@ -5974,45 +7492,109 @@ try {
       });
     }
 
-    // 2c. Other Internal State Protection by Root (LH-02)
-    if (isProtectedInternalState(target) || isProtectedInternalState(JSON.stringify(args))) {
+    // 2c. Other Internal State Protection by Root (LH-02, canonicalized against symlinks, relative paths & discovery ancestor roots: IND-SEC-002)
+    const multiPaths = Array.isArray(args.paths) ? args.paths : (Array.isArray(args.Paths) ? args.Paths : []);
+    if (
+      isProtectedInternalStatePath(effectiveTarget) ||
+      isProtectedDiscoveryAncestorPath(effectiveTarget) ||
+      multiPaths.some((p) => typeof p === "string" && isProtectedInternalStatePath(p)) ||
+      isProtectedInternalState(JSON.stringify(args))
+    ) {
       respond({
         decision: "deny",
         reason: buildInternalStateToolDenial(convId)
       });
     }
 
-    // 2d. Allow Antigravity Special Files (SKILL.md, brain artifacts, configs) symmetrically for read_file & view_file
+    // 2d. Allow Antigravity Special Files (SKILL.md, brain artifacts, configs) symmetrically for read_file & view_file,
+    // while blocking cross-conversation brain artifacts/directories for restricted children (IND-SEC-005).
+    if (
+      isCrossConversationTargetDenied(effectiveTarget, convId) ||
+      multiPaths.some((p) => typeof p === "string" && isCrossConversationTargetDenied(p, convId))
+    ) {
+      respond({
+        decision: "deny",
+        reason:
+          "Antigravity Execution Governance: Cross-conversation inspection of another session's brain artifacts is prohibited under Parent Transcript Isolation."
+      });
+    }
     if (isAntigravitySpecialFile(target)) {
       respond({ decision: "allow" });
     }
 
     // 2e. Symmetrical Hybrid Slice & Guarded Full-File Policy for `read_file` and `view_file`
+    //     Unified v2.1.2 preset: <= 300 lines & <= 24 KiB omitted-bound auto-allow, <= 300-line slices
+    //     (EOF-clamped via 1 MiB newline scan + single-bound support), <= 800 lines & <= 45 KiB explicit
+    //     full-file audit, ENOENT pass-through after Checks 2c/2d, safe multimodal media exempt.
     if (toolName === "read_file" || toolName === "view_file") {
+      // Safe workspace multimodal media files cannot be line-sliced (FRIC-RUN-001; checked AFTER internal-state/symlink guards)
+      if (SAFE_MULTIMODAL_MEDIA_RE.test(target)) {
+        respond({ decision: "allow" });
+      }
+
       const getDiscoveryGuidance = () => {
-        const { rtk, rgAvailable } = resolveCachedHostEnv();
-        if (rtk) {
-          const searchHint = rgAvailable ? "rtk rg" : "rtk grep -rnE";
-          return `Locate the target symbol, heading, or config key first with '${searchHint}' via run_command and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
-        }
+        const { rgAvailable } = resolveCachedHostEnv();
         const shellSearchHint = rgAvailable ? "rg" : "grep -rnE";
-        return `Locate the target symbol, heading, or config key first with 'grep_search' (or '${shellSearchHint}' via run_command) and pass a precise bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
+        return `Locate the target symbol, heading, or section first with 'grep_search' (or '${shellSearchHint}' via run_command) and pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
+      };
+
+      const formatMetricsTag = (metrics) => {
+        if (!metrics || metrics.exists === false) return "";
+        const kib = (metrics.bytes / 1024).toFixed(1);
+        if (metrics.lineCount === null) {
+          return ` (actual file: ${kib} KiB > 45 KiB)`;
+        }
+        if (metrics.oversized) {
+          return ` (actual file: ${metrics.lineCount} lines, ${kib} KiB > 45 KiB)`;
+        }
+        return ` (actual file: ${metrics.lineCount} lines, ${kib} KiB)`;
       };
 
       if (hasByteOffset && !hasSliceParams) {
+        const metrics = getFileMetrics(target);
         respond({
           decision: "deny",
-          reason: `Antigravity Governance: Unbounded 'ByteOffset'-only read via '${toolName}' is denied. ${getDiscoveryGuidance()}.`
+          reason: `Antigravity Governance: Unbounded 'ByteOffset'-only read via '${toolName}'${formatMetricsTag(metrics)} is denied. ${getDiscoveryGuidance()}.`
         });
       }
 
       if (hasSliceParams) {
-        const startLine = Number(rawStart);
-        const endLine = Number(rawEnd);
+        // Single-bound EndLine-only defaults StartLine to 1; single-bound StartLine-only evaluates remaining lines to EOF
+        const startLine = rawStart !== undefined ? Number(rawStart) : 1;
+        const hasExplicitEnd = rawEnd !== undefined;
+        const endLine = hasExplicitEnd ? Number(rawEnd) : null;
+
+        if (rawStart !== undefined && !hasExplicitEnd) {
+          if (Number.isInteger(startLine) && startLine > 0) {
+            const metrics = getFileMetrics(target);
+            if (metrics && metrics.exists === false) {
+              respond({ decision: "allow" });
+            }
+            if (metrics && metrics.lineCount !== null) {
+              if (startLine > metrics.lineCount) {
+                respond({ decision: "allow" });
+              }
+              const remaining = metrics.lineCount - startLine + 1;
+              if (remaining <= MAX_SAFE_SLICE_LINES) {
+                respond({ decision: "allow" });
+              }
+              respond({
+                decision: "deny",
+                reason: `Antigravity Governance: Unbounded tail read from StartLine=${startLine} via '${toolName}' (${remaining} remaining lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window)${formatMetricsTag(metrics)}. Pass an explicit EndLine (max ${MAX_SAFE_SLICE_LINES} lines) or StartLine=1, EndLine=${metrics.lineCount} if <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${getDiscoveryGuidance()}.`
+              });
+            }
+            respond({
+              decision: "deny",
+              reason: `Antigravity Governance: Unbounded tail read from StartLine=${startLine} via '${toolName}'${formatMetricsTag(metrics)} requires an explicit EndLine (max ${MAX_SAFE_SLICE_LINES} lines). ${getDiscoveryGuidance()}.`
+            });
+          }
+          respond({
+            decision: "deny",
+            reason: `Antigravity Governance: Invalid slice range via '${toolName}'. Ensure StartLine and EndLine are positive integers with EndLine >= StartLine. ${getDiscoveryGuidance()}.`
+          });
+        }
 
         if (
-          rawStart !== undefined &&
-          rawEnd !== undefined &&
           Number.isInteger(startLine) &&
           Number.isInteger(endLine) &&
           startLine > 0 &&
@@ -6023,15 +7605,32 @@ try {
             respond({ decision: "allow" });
           }
 
-          const metrics = startLine === 1 && !hasByteOffset ? getFileMetrics(target) : null;
-          const isExplicitFullFile = Boolean(
-            metrics &&
-              startLine === 1 &&
-              (endLine === metrics.lineCount || endLine === metrics.rawSplitCount)
-          );
+          const metrics = getFileMetrics(target);
+          if (metrics && metrics.exists === false) {
+            respond({ decision: "allow" });
+          }
 
-          if (isExplicitFullFile) {
-            if (metrics.lineCount <= MAX_FULL_FILE_LINES && metrics.bytes <= MAX_FULL_FILE_BYTES) {
+          // EOF-clamped partial slice (works on files up to 1 MiB): if actual lines returned <= 300, allow consistently
+          // before checking the 45 KiB explicit full-file audit ceiling (FRIC-RUN-002)
+          if (metrics && metrics.lineCount !== null) {
+            if (startLine > metrics.lineCount) {
+              respond({ decision: "allow" });
+            }
+            const effectiveSpan = Math.min(endLine, metrics.lineCount) - startLine + 1;
+            if (effectiveSpan >= 1 && effectiveSpan <= MAX_SAFE_SLICE_LINES) {
+              respond({ decision: "allow" });
+            }
+          }
+
+          // Explicit full-file audit: StartLine=1 covering >= actual end of a file <= 800 lines & <= 45 KiB (FRIC-RUN-002)
+          if (
+            startLine === 1 &&
+            !hasByteOffset &&
+            metrics &&
+            metrics.lineCount !== null &&
+            endLine >= metrics.lineCount
+          ) {
+            if (!metrics.oversized && metrics.lineCount <= MAX_FULL_FILE_LINES && metrics.bytes <= MAX_FULL_FILE_BYTES) {
               respond({ decision: "allow" });
             }
             const kib = (metrics.bytes / 1024).toFixed(1);
@@ -6043,7 +7642,7 @@ try {
 
           respond({
             decision: "deny",
-            reason: `Antigravity Governance: Oversized partial file slice via '${toolName}' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window). Partial slices above ${MAX_SAFE_SLICE_LINES} lines are denied; full-file reads are only permitted when explicitly covering line 1 through the actual end of a file <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${getDiscoveryGuidance()}.`
+            reason: `Antigravity Governance: Oversized partial file slice via '${toolName}' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window)${formatMetricsTag(metrics)}. Partial slices above ${MAX_SAFE_SLICE_LINES} lines are denied; full-file reads are permitted via StartLine=1, EndLine >= TotalLines when <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${getDiscoveryGuidance()}.`
           });
         }
 
@@ -6053,55 +7652,36 @@ try {
         });
       }
 
+      // Omitted-bound auto-allow for small workspace files (<= 300 lines AND <= 24 KiB) or ENOENT pass-through (FRIC-RUN-002)
+      const omittedMetrics = getFileMetrics(target);
+      if (omittedMetrics && omittedMetrics.exists === false) {
+        respond({ decision: "allow" });
+      }
+      if (
+        omittedMetrics &&
+        !omittedMetrics.oversized &&
+        omittedMetrics.lineCount !== null &&
+        omittedMetrics.lineCount <= MAX_SMALL_AUTO_ALLOW_LINES &&
+        omittedMetrics.bytes <= MAX_SMALL_AUTO_ALLOW_BYTES
+      ) {
+        respond({ decision: "allow" });
+      }
+
       respond({
         decision: "deny",
-        reason: `Antigravity Governance: Full-file inspection via '${toolName}' without explicit bounds is denied. ${getDiscoveryGuidance()} (or pass explicit StartLine=1, EndLine=<TotalLines> for a one-pass audit when the file is <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB).`
+        reason: `Antigravity Governance: Full-file inspection via '${toolName}' without explicit bounds is denied${formatMetricsTag(omittedMetrics)} (omitted bounds auto-allow files <= ${MAX_SMALL_AUTO_ALLOW_LINES} lines and <= 24 KiB). ${getDiscoveryGuidance()} (or pass explicit StartLine=1, EndLine=<TotalLines> for a one-pass audit when the file is <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB).`
       });
     }
 
-    // 2f. Hard-Route Other Native File/Search Tools (LH-07); degrade gracefully when RTK is absent (--allow-degraded)
-    const { rtk: hostRtk, rgAvailable: hostRgAvailable } = resolveCachedHostEnv();
-
+    // 2f. Block unbounded multi-file dumps (`read_many_files`), while allowing native workspace discovery tools
+    //     (`grep_search`, `find_by_name`, `list_dir`) now that Checks 2c/2d protect internal state & ancestor roots.
     if (toolName === "read_many_files") {
+      const { rtk: hostRtk } = resolveCachedHostEnv();
       respond({
         decision: "deny",
         reason: hostRtk
-          ? "Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses token optimization. Use bounded 'read_file' slices ('<= 150' lines) for editable workspace code, or run 'rtk read <file>' via run_command for read-only logs and spillovers instead."
-          : "Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses context bounds. Use bounded 'read_file' slices ('<= 150' lines) for editable workspace code, or run bounded 'head -n 150 <file>' / 'tail -n 150 <file>' via run_command for read-only logs and spillovers instead."
-      });
-    }
-
-    if (!hostRtk && (toolName === "grep_search" || toolName === "find_by_name" || toolName === "list_dir")) {
-      respond({ decision: "allow" });
-    }
-
-    if (toolName === "grep_search") {
-      const pattern = String(args.Query || args.query || args.Pattern || args.pattern || "").trim();
-      const searchTarget = String(args.SearchPath || args.searchPath || args.path || ".").trim() || ".";
-      const safePattern = pattern ? escapeDoubleQuotedArg(pattern) : "<pattern>";
-      const cmdHint = hostRgAvailable
-        ? `rtk rg -- "${safePattern}" ${searchTarget}`
-        : `rtk grep -rnE "${safePattern}" ${searchTarget}`;
-      respond({
-        decision: "deny",
-        reason: `Antigravity Governance: Native grep inspection via 'grep_search' bypasses token optimization. Run '${cmdHint}' via run_command instead (or raw 'grep -rnE' when untruncated lines or >25 matches per file are needed).`
-      });
-    }
-
-    if (toolName === "find_by_name") {
-      const searchTarget = args.Pattern || args.pattern || args.query || target || ".";
-      respond({
-        decision: "deny",
-        reason: `Antigravity Governance: Native file search via 'find_by_name' bypasses token optimization. Run 'rtk find ${searchTarget}' via run_command instead.`
-      });
-    }
-
-    if (toolName === "list_dir") {
-      const isWin = os.platform() === "win32";
-      const cmdHint = isWin ? `rtk find ${target || "."}` : `rtk ls ${target || "."}`;
-      respond({
-        decision: "deny",
-        reason: `Antigravity Governance: Native directory listing via 'list_dir' bypasses token optimization. Run '${cmdHint}' via run_command instead.`
+          ? `Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses context bounds. Use bounded 'read_file' slices ('<= ${MAX_SAFE_SLICE_LINES}' lines) for editable workspace code, or run 'rtk read <file>' via run_command for read-only logs and spillovers instead.`
+          : `Antigravity Governance: Native multi-file reading via 'read_many_files' bypasses context bounds. Use bounded 'read_file' slices ('<= ${MAX_SAFE_SLICE_LINES}' lines) for editable workspace code, or run bounded 'head -n 150 <file>' / 'tail -n 150 <file>' via run_command for read-only logs and spillovers instead.`
       });
     }
 
@@ -6152,23 +7732,28 @@ try {
         bucket.lastSeenTime = now;
       }
       session.denials++;
-      saveSessionState(convId, session, { updatePollTime: false });
 
       const effectiveDenials = bucket ? Math.max(bucket.denials, session.denials) : session.denials;
       if (effectiveDenials >= 5) {
-        respond({
-          decision: "force_ask",
-          reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: manage_task('${action}') called prematurely ${effectiveDenials} times during active backoff window across tasks [${session.taskIds.join(", ")}]. User confirmation required to proceed.`
-        });
+        respond(
+          {
+            decision: "force_ask",
+            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: manage_task('${action}') called prematurely ${effectiveDenials} times during active backoff window across tasks [${session.taskIds.join(", ")}]. User confirmation required to proceed.`
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
       }
 
       const remainingSec = Math.max(1, Math.ceil((Math.max(requiredBackoffMs, displayRequiredSec * 1000) - elapsedMs) / 1000));
       const condTarget = taskKey || "task-X";
       const condExample = convId && convId !== "global" ? `${convId}/${condTarget}` : condTarget;
-      respond({
-        decision: "deny",
-        reason: `Antigravity Execution Governance: Proportional Backoff Active (Level ${stateRef.pollCount}${taskKey ? ` for '${taskKey}'` : ""}, ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Diagnostic check #${stateRef.pollCount + 1} requires at least ${displayRequiredSec}s elapsed since previous check (${elapsedSec}s elapsed, ${remainingSec}s remaining). Keep a conditioned watchdog armed via schedule(DurationSeconds=${Math.max(30, displayRequiredSec)}, TimerCondition="${condExample}") so Reactive Wakeup (<SYSTEM_MESSAGE>) wakes you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
-      });
+      respond(
+        {
+          decision: "deny",
+          reason: `Antigravity Execution Governance: Proportional Backoff Active (Level ${stateRef.pollCount}${taskKey ? ` for '${taskKey}'` : ""}, ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Diagnostic check #${stateRef.pollCount + 1} requires at least ${displayRequiredSec}s elapsed since previous check (${elapsedSec}s elapsed, ${remainingSec}s remaining). Keep a conditioned watchdog armed via schedule(DurationSeconds=${Math.max(30, displayRequiredSec)}, TimerCondition="${condExample}") so Reactive Wakeup (<SYSTEM_MESSAGE>) wakes you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
+        },
+        { convId, sessionToSave: session, updatePollTime: false }
+      );
     }
 
     // Backoff window satisfied! Allow diagnostic check and advance level:
@@ -6184,30 +7769,80 @@ try {
       bucket.denials = 0;
     }
     session.denials = 0;
-    saveSessionState(convId, session);
-    respond({ decision: "allow" });
+    respond({ decision: "allow" }, { convId, sessionToSave: session, updatePollTime: true });
   }
 
   if (toolName === "schedule") {
     const duration = Number(args.DurationSeconds || args.durationSeconds || args.duration || 0);
     const rawCond = cleanGovernanceArg(args.TimerCondition || args.timerCondition);
 
+    if (isRemoteCiPollSchedule(args)) {
+      const session = getSessionState(convId);
+      const now = Date.now();
+      pruneTaskBackoff(session, convId, now);
+
+      const ciBucketKey = extractRemoteCiBackoffKey(args);
+      const bucket = getOrCreateTaskBucket(session, ciBucketKey, now);
+      const requiredBackoffSec = Math.max(30, getRequiredBackoffSeconds(bucket.pollCount));
+
+      if (!Number.isFinite(duration) || duration < 15) {
+        bucket.denials++;
+        bucket.lastSeenTime = now;
+        session.denials++;
+        const effectiveDenials = Math.max(bucket.denials, session.denials);
+        if (effectiveDenials >= 5) {
+          respond(
+            {
+              decision: "force_ask",
+              reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: remote CI polling timer denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec}, or confirm with the user to proceed.`
+            },
+            { convId, sessionToSave: session, updatePollTime: false }
+          );
+        }
+        respond(
+          {
+            decision: "deny",
+            reason: `Antigravity Execution Governance: Remote CI schedule timer duration too short (${duration}s < 15s minimum; ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} (no local task-X TimerCondition is required for remote CI checks).`
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
+      }
+
+      bucket.pollCount = Math.max(1, bucket.pollCount) + 1;
+      bucket.lastPollTime = now;
+      bucket.lastSeenTime = now;
+      bucket.denials = 0;
+      session.denials = 0;
+      if (duration < requiredBackoffSec) {
+        respond(
+          { decision: "allow", overwrite: { DurationSeconds: requiredBackoffSec } },
+          { convId, sessionToSave: session, updatePollTime: true }
+        );
+      }
+      respond({ decision: "allow" }, { convId, sessionToSave: session, updatePollTime: true });
+    }
+
     if (isSwarmPollSchedule(args)) {
       const session = getSessionState(convId);
       session.denials++;
-      saveSessionState(convId, session, { updatePollTime: false });
       if (session.denials >= 5) {
-        respond({
-          decision: "force_ask",
-          reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: /swarm schedule polling attempted ${session.denials} times. Use 'swarm_wait' for '/swarm' (the dedicated 'swarm_monitor' daemon cron checks for stalls). User confirmation required to proceed.`
-        });
+        respond(
+          {
+            decision: "force_ask",
+            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: /swarm schedule polling attempted ${session.denials} times. Use 'swarm_wait' for '/swarm' (the dedicated 'swarm_monitor' daemon cron checks for stalls). User confirmation required to proceed.`
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
       }
-      respond({
-        decision: "deny",
-        reason:
-          "Antigravity Execution Governance: Using one-shot 'schedule' timers to poll a '/swarm' board or squad is strictly prohibited. " +
-          "Call 'swarm_wait' directly without a 'schedule' timer (it sleeps at zero token cost and wakes immediately when any board message arrives, while the dedicated 'swarm_monitor' daemon cron handles stall detection)."
-      });
+      respond(
+        {
+          decision: "deny",
+          reason:
+            "Antigravity Execution Governance: Using one-shot 'schedule' timers to poll a '/swarm' board or squad is strictly prohibited. " +
+            "Call 'swarm_wait' directly without a 'schedule' timer (it sleeps at zero token cost and wakes immediately when any board message arrives, while the dedicated 'swarm_monitor' daemon cron handles stall detection)."
+        },
+        { convId, sessionToSave: session, updatePollTime: false }
+      );
     }
 
     if (isSubagentPollSchedule(args)) {
@@ -6227,24 +7862,29 @@ try {
           bucket.lastSeenTime = now;
         }
         session.denials++;
-        saveSessionState(convId, session, { updatePollTime: false });
 
         const effectiveDenials = bucket ? Math.max(bucket.denials, session.denials) : session.denials;
         if (effectiveDenials >= 5) {
-          respond({
-            decision: "force_ask",
-            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: direct subagent schedule polling denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredSubagentSec} and TimerCondition="<subagentConvId>", or confirm with the user to proceed.`
-          });
+          respond(
+            {
+              decision: "force_ask",
+              reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: direct subagent schedule polling denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredSubagentSec} and TimerCondition="<subagentConvId>", or confirm with the user to proceed.`
+            },
+            { convId, sessionToSave: session, updatePollTime: false }
+          );
         }
 
         const condHint = rawCond && hasValidCond ? rawCond : (subKey || "<subagentConvId>");
         const cause = !hasValidCond
           ? "Unconditioned subagent polling timers are prohibited."
           : `Direct subagent stall watchdog duration too short (${duration}s < 30s minimum).`;
-        respond({
-          decision: "deny",
-          reason: `Antigravity Execution Governance: ${cause} (${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). For direct invoke_subagent stall safety, retry 'schedule' with DurationSeconds >= ${requiredSubagentSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost if the subagent finishes normally.`
-        });
+        respond(
+          {
+            decision: "deny",
+            reason: `Antigravity Execution Governance: ${cause} (${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). For direct invoke_subagent stall safety, retry 'schedule' with DurationSeconds >= ${requiredSubagentSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost if the subagent finishes normally.`
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
       }
 
       // Valid conditioned direct-subagent stall watchdog (>= 30s): auto-clamp 30..required-1 up to requiredSubagentSec
@@ -6256,11 +7896,13 @@ try {
         bucket.denials = 0;
       }
       session.denials = 0;
-      saveSessionState(convId, session);
       if (clamped) {
-        respond({ decision: "allow", overwrite: { DurationSeconds: requiredSubagentSec } });
+        respond(
+          { decision: "allow", overwrite: { DurationSeconds: requiredSubagentSec } },
+          { convId, sessionToSave: session, updatePollTime: true }
+        );
       }
-      respond({ decision: "allow" });
+      respond({ decision: "allow" }, { convId, sessionToSave: session, updatePollTime: true });
     }
 
     if (isTaskPollSchedule(args)) {
@@ -6285,23 +7927,28 @@ try {
           bucket.lastSeenTime = now;
         }
         session.denials++;
-        saveSessionState(convId, session, { updatePollTime: false });
 
         const effectiveDenials = bucket ? Math.max(bucket.denials, session.denials) : session.denials;
         if (effectiveDenials >= 5) {
-          respond({
-            decision: "force_ask",
-            reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: schedule polling timer denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} and TimerCondition="${condHint}", or confirm with the user to proceed.`
-          });
+          respond(
+            {
+              decision: "force_ask",
+              reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: schedule polling timer denied ${effectiveDenials} times. Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} and TimerCondition="${condHint}", or confirm with the user to proceed.`
+            },
+            { convId, sessionToSave: session, updatePollTime: false }
+          );
         }
 
         const cause = !hasValidCond
           ? "Unconditioned task polling timers are prohibited because they do not auto-cancel when the task finishes."
           : `Task watchdog timer duration too short (${duration}s < 15s minimum).`;
-        respond({
-          decision: "deny",
-          reason: `Antigravity Execution Governance: ${cause} (Level ${stateRef.pollCount}${taskKey ? ` for '${taskKey}'` : ""}, ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost on normal completion while protecting against stalls.`
-        });
+        respond(
+          {
+            decision: "deny",
+            reason: `Antigravity Execution Governance: ${cause} (Level ${stateRef.pollCount}${taskKey ? ` for '${taskKey}'` : ""}, ${effectiveDenials} denial${effectiveDenials > 1 ? "s" : ""}). Retry 'schedule' with DurationSeconds >= ${requiredBackoffSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost on normal completion while protecting against stalls.`
+          },
+          { convId, sessionToSave: session, updatePollTime: false }
+        );
       }
 
       // Conditioned task watchdog with DurationSeconds >= 15: auto-clamp up to requiredBackoffSec instead of dropping monitoring
@@ -6314,11 +7961,13 @@ try {
         bucket.denials = 0;
       }
       session.denials = 0;
-      saveSessionState(convId, session);
       if (duration < requiredBackoffSec) {
-        respond({ decision: "allow", overwrite: { DurationSeconds: requiredBackoffSec } });
+        respond(
+          { decision: "allow", overwrite: { DurationSeconds: requiredBackoffSec } },
+          { convId, sessionToSave: session, updatePollTime: true }
+        );
       }
-      respond({ decision: "allow" });
+      respond({ decision: "allow" }, { convId, sessionToSave: session, updatePollTime: true });
     }
 
     // Non-polling timers (e.g. user-requested reminders) are allowed
@@ -6330,18 +7979,28 @@ try {
   // =========================================================================
   if (
     toolName === "replace_file_content" ||
+    toolName === "multi_replace_file_content" ||
     toolName === "write_to_file" ||
     toolName === "write_file" ||
     toolName === "edit_file"
   ) {
-    const targetFile = String(args.Path || args.path || args.TargetFile || args.targetFile || "").trim();
-    if (isProtectedInternalState(targetFile)) {
+    const targetFile = String(
+      args.Path ||
+        args.path ||
+        args.TargetFile ||
+        args.targetFile ||
+        args.target_file ||
+        args.AbsolutePath ||
+        args.absolutePath ||
+        ""
+    ).trim();
+    if (isProtectedInternalStatePath(targetFile)) {
       respond({
         decision: "deny",
         reason: buildInternalStateToolDenial(convId)
       });
     }
-    if (isProtectedGovernanceFileMutation(targetFile, convId)) {
+    if (isProtectedGovernanceFileMutationPath(targetFile, convId)) {
       respond({
         decision: "deny",
         reason:
@@ -6349,15 +8008,35 @@ try {
       });
     }
 
-    const bodyContent = String(
-      args.Content ||
-        args.content ||
-        args.file_content ||
-        args.Replacement ||
-        args.replacement ||
-        args.new_string ||
-        ""
-    );
+    const bodyParts = [];
+    for (const directVal of [
+      args.Content,
+      args.content,
+      args.file_content,
+      args.Replacement,
+      args.replacement,
+      args.ReplacementContent,
+      args.replacementContent,
+      args.new_string
+    ]) {
+      if (typeof directVal === "string" && directVal) bodyParts.push(directVal);
+    }
+    const rawChunks = Array.isArray(args.ReplacementChunks)
+      ? args.ReplacementChunks
+      : (Array.isArray(args.replacementChunks) ? args.replacementChunks : []);
+    for (const chunk of rawChunks) {
+      if (!chunk || typeof chunk !== "object") continue;
+      const chunkBody =
+        chunk.ReplacementContent ||
+        chunk.replacementContent ||
+        chunk.Replacement ||
+        chunk.replacement ||
+        chunk.Content ||
+        chunk.content ||
+        "";
+      if (typeof chunkBody === "string" && chunkBody) bodyParts.push(chunkBody);
+    }
+    const bodyContent = bodyParts.join("\n");
     const normTarget = targetFile.replace(/\\/g, "/");
     const isTmpOrScratch =
       normTarget.startsWith("/tmp/") ||
@@ -6369,22 +8048,28 @@ try {
     const callerAccess = evaluateCallerTranscriptAccess(convId);
 
     if (isScript && bodyContent && (callerAccess.isRestrictedChild || isTmpOrScratch)) {
-      if (isProtectedShellOrScriptOperation(bodyContent, { isRestrictedChild: callerAccess.isRestrictedChild })) {
+      const scriptBlockReason = getProtectedShellOperationReason(bodyContent, {
+        isRestrictedChild: callerAccess.isRestrictedChild
+      });
+      if (scriptBlockReason) {
         respond({
           decision: "deny",
-          reason: buildInternalStateShellDenial(convId)
+          reason: buildProtectedShellReasonMessage(scriptBlockReason, convId)
         });
       }
     }
 
-    if (!isBenchmarkGuardDisabled(convId) && isProtectedBenchmarkPath(targetFile)) {
+    if (!isBenchmarkGuardDisabled(convId) && isProtectedBenchmarkFilePath(targetFile)) {
       respond({
         decision: "force_ask",
         reason: `[BENCHMARK MUTATION DETECTED] Mutation of protected evaluator/benchmark artifact '${targetFile}' requires explicit user confirmation to prevent benchmark contamination. Set AGY_DISABLE_BENCHMARK_GUARD=1 to disable this guard for non-evaluation repos.`
       });
     }
     if (targetFile && (callerAccess.isRestrictedChild || isExecutableScriptPath(targetFile) || isTmpOrScratch)) {
-      recordSessionWrittenFile(convId, targetFile);
+      const writtenSession = prepareSessionWithWrittenFiles(convId, [targetFile]);
+      if (writtenSession) {
+        respond({ decision: "allow" }, { convId, sessionToSave: writtenSession, updatePollTime: false });
+      }
     }
     respond({ decision: "allow" });
   }

@@ -49,6 +49,10 @@ assert.ok(fs.existsSync(mirroredHook), `Mirrored global hook script missing at $
 const globalHooks = JSON.parse(fs.readFileSync(globalHooksJsonPath, "utf-8"));
 assert.equal(globalHooks["execution-guard"], undefined, "Legacy execution-guard must not be in global hooks.json");
 assert.ok(globalHooks["agy-context-saver"]?.PreToolUse?.[0]?.hooks?.[0]?.command?.includes("execution-guard-hook.mjs"), "agy-context-saver must register in global hooks.json for /swarm workers");
+assert.ok(globalHooks["agy-context-saver"]?.PreToolUse?.[0]?.hooks?.[0]?.command?.includes("--surface=global"), "Global hooks.json must pass --surface=global for dual-surface dedup (IND-SCRIPT-001)");
+if (os.platform() !== "win32" && fs.lstatSync(pluginDest).isSymbolicLink()) {
+  assert.equal(fs.lstatSync(mirroredHook).isSymbolicLink(), true, "Symlinked plugin installs must symlink mirrored hook to prevent drift (IND-SCRIPT-001)");
+}
 assert.equal(globalHooks["agy-context-saver"]?.PreToolUse?.[0]?.matcher, hookMatcher, "Global hooks.json matcher must match plugin hooks.json");
 assert.ok(globalHooks["waymark-continuity"], "Foreign hook waymark-continuity must remain preserved");
 
@@ -166,7 +170,9 @@ try {
   const repoPkgVersion = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../package.json"), "utf8")).version;
   fs.writeFileSync(stalePkgPath, JSON.stringify({ ...stalePkg, version: repoPkgVersion }, null, 2));
   const staleMirroredHookPath = path.join(staleCopyProfile, ".gemini", "config", "scripts", "execution-guard-hook.mjs");
-  fs.appendFileSync(staleMirroredHookPath, "\n// stale-hook-marker\n");
+  const staleHookBody = fs.readFileSync(staleMirroredHookPath, "utf-8");
+  fs.unlinkSync(staleMirroredHookPath);
+  fs.writeFileSync(staleMirroredHookPath, `${staleHookBody}\n// stale-hook-marker\n`, "utf-8");
   const staleHookStatus = spawnSync(process.execPath, [cliScript, "status", "--json"], {
     encoding: "utf-8",
     env: staleEnv

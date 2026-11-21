@@ -20,6 +20,8 @@ import {
   hasValidSubagentTimerCondition,
   isSwarmPollSchedule,
   isSubagentPollSchedule,
+  isRemoteCiPollSchedule,
+  extractRemoteCiBackoffKey,
   listTranscriptConversations,
   exportSanitizedTranscript,
   stripSummaryStepBoilerplate,
@@ -1986,7 +1988,7 @@ try {
       );
 
       // Parent grants temporary Tier 3 allowlist then resets policy: Tier 4 restrictions remain disclosed honestly
-      manageTranscriptAccessPolicy({ callerConvId: coordA, mode: "allowlist", allow: `@w2-spec1` });
+      manageTranscriptAccessPolicy({ _testAuthorizedOwner: coordA, mode: "allowlist", allow: `@w2-spec1` });
       recordTranscriptHookGrant({ callerConvId: coordA, subcommand: "access", mode: "open", isMutation: true });
       const resetCli = runCli(["transcript", "access", "--reset", "--json"], { ...testEnv, GEMINI_CONVERSATION_ID: coordA });
       assert.equal(resetCli.status, 0, resetCli.stderr);
@@ -3072,6 +3074,166 @@ try {
     assert.equal(hugeRx.test("aaaaaaaaaa"), false, "Overlong regex patterns must fall back to literal matching");
     assert.equal(hugeRx.test("(a+)+".repeat(150)), true);
     console.log("✓ CodeQL regressions (#1, #6, #9-#15) verified in linear time");
+  }
+
+  // --- Wave 0 IND-SEC-004: Tier 4 grant enforcement without GEMINI_CONVERSATION_ID & subcommand-bound grant consumption ---
+  console.log("\n--- 14. Wave 0 Tier 4 Grant Enforcement & Error-Path Isolation (IND-SEC-004) ---");
+  {
+    const t4Parent = "conv-t4-parent-ind004";
+    const t4Child = "conv-t4-child-ind004";
+    for (const cid of [t4Parent, t4Child]) {
+      const logDir = path.join(brainDir, cid, ".system_generated", "logs");
+      fs.mkdirSync(logDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(logDir, "transcript.jsonl"),
+        JSON.stringify({ step_index: 0, type: "USER_INPUT", content: `transcript for ${cid}` }) + "\n",
+        "utf-8"
+      );
+    }
+    const t4ChildState = path.join(getStateDir(), `agy-session-${t4Child}.json`);
+    fs.writeFileSync(
+      t4ChildState,
+      JSON.stringify({
+        pollCount: 0,
+        denials: 0,
+        lineage: { isChildSession: true, parentConvId: t4Parent, launchDirective: "deny" }
+      }),
+      "utf-8"
+    );
+    const prevEnvConv = process.env.GEMINI_CONVERSATION_ID;
+    delete process.env.GEMINI_CONVERSATION_ID;
+    try {
+      // Direct read of restricted child's parent or deny-locked child without a hook grant must fail closed even without GEMINI_CONVERSATION_ID
+      const blockedParentRead = await readTranscript({ conversationId: t4Parent, lastTurns: 1 });
+      assert.equal(blockedParentRead.isError, true, "Unverified read of Tier 4 child's parent must fail closed (IND-SEC-004)");
+      const blockedChildRead = await readTranscript({ conversationId: t4Child, lastTurns: 1 });
+      assert.equal(blockedChildRead.isError, true, "Unverified read of Tier 4 deny-locked child must fail closed (IND-SEC-004)");
+
+      // Unrelated conversation remains unaffected (ACS-ARCH-001 preserved)
+      const unrelatedRead = await readTranscript({ conversationId: "conv-codeql-sec", lastTurns: 1 });
+      assert.ok(!unrelatedRead.isError, "Unrelated conversation must remain accessible under Tier 4 lock on another cohort");
+
+      // Valid PreToolUse hook grant still allows authorized parent inspection
+      recordTranscriptHookGrant({ callerConvId: t4Parent, subcommand: "read", targetConvId: t4Parent, mode: "open" });
+      const authorizedParentRead = await readTranscript({ conversationId: t4Parent, lastTurns: 1 });
+      assert.ok(!authorizedParentRead.isError, "Authorized PreToolUse hook grant must succeed under Tier 4 lock");
+
+      // Error-path consumeTranscriptAccessGrant({ subcommand: 'query' }) must NOT steal a pending 'read' grant
+      recordTranscriptHookGrant({ callerConvId: t4Parent, subcommand: "read", targetConvId: t4Parent, mode: "open" });
+      consumeTranscriptAccessGrant({ subcommand: "query", targetConvId: t4Parent });
+      const survivingRead = await readTranscript({ conversationId: t4Parent, lastTurns: 1 });
+      assert.ok(!survivingRead.isError, "Mismatched subcommand error-path consume must not steal pending read grant (IND-SEC-004)");
+
+      // Boost Pass IND-SEC-004: internal lib/transcript-core.mjs error paths (export/step) must NOT steal a pending 'read' grant
+      recordTranscriptHookGrant({ callerConvId: t4Parent, subcommand: "read", targetConvId: t4Parent, mode: "open" });
+      const badExport = await exportSanitizedTranscript({ conversationIds: [t4Parent], sanitized: false });
+      assert.equal(badExport.isError, true);
+      const badStep = await getStepDetail({ conversationId: t4Parent, stepIndex: "not-a-step" });
+      assert.equal(badStep.isError, true);
+      const survivingRead2 = await readTranscript({ conversationId: t4Parent, lastTurns: 1 });
+      assert.ok(!survivingRead2.isError, "Internal export/step error paths must pass { subcommand } and never steal a pending read grant");
+    } finally {
+      if (prevEnvConv !== undefined) process.env.GEMINI_CONVERSATION_ID = prevEnvConv;
+      try { fs.unlinkSync(t4ChildState); } catch {}
+    }
+    console.log("✓ IND-SEC-004: Tier 4 grant enforcement without GEMINI_CONVERSATION_ID & subcommand-bound grant cleanup verified");
+  }
+
+  // --- Boost Pass FRIC-SEC-001 SYNC-MIRROR: >512 KiB Step 0 USER_INPUT lineage classification ---
+  {
+    const hugeConv = "conv-boost-huge-step0";
+    const hugeLogs = path.join(tempHome, ".gemini", "antigravity", "brain", hugeConv, ".system_generated", "logs");
+    fs.mkdirSync(hugeLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(hugeLogs, "transcript.jsonl"),
+      JSON.stringify({ step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", content: "A".repeat(600000) }) + "\n",
+      "utf-8"
+    );
+    const listed = listTranscriptConversations({ limit: 50, includeLineage: true });
+    const found = listed.conversations.find((c) => c.conversationId === hugeConv);
+    assert.ok(found, "Huge Step 0 conversation must appear in listTranscriptConversations");
+    assert.equal(found.sessionKind, "top-level", ">512 KiB Step 0 USER_INPUT must classify as top-level (FRIC-SEC-001 SYNC-MIRROR)");
+    console.log("✓ Boost Pass FRIC-SEC-001 SYNC-MIRROR (>512 KiB Step 0 lineage) verified");
+  }
+
+  // --- Wave 2 + Boost Pass PR13-RUN-001, PR13-RUN-007 & FRIC-RUN-004: Schedule & Backoff Classifier Parity ---
+  {
+    assert.equal(
+      isSwarmPollSchedule({ Prompt: "Check Agy-Squad tests on task-9", TimerCondition: "conv-1/task-9" }),
+      false,
+      "Conditioned task-* watchdog mentioning Squad must not classify as swarm poll (PR13-RUN-001)"
+    );
+    assert.equal(
+      isRemoteCiPollSchedule({ DurationSeconds: 45, Prompt: "Check GitHub Actions CI & CodeQL status" }),
+      true,
+      "Remote CI schedule must classify cleanly (FRIC-RUN-004)"
+    );
+    assert.equal(
+      isRemoteCiPollSchedule({ DurationSeconds: 60, Prompt: "Check status of Agy-Squad GitHub Actions CI workflow" }),
+      true,
+      "Agy-Squad GitHub Actions CI prompt must classify as remote CI (FRIC-RUN-004 Boost)"
+    );
+    assert.equal(
+      isSwarmPollSchedule({ DurationSeconds: 60, Prompt: "Check status of Agy-Squad GitHub Actions CI workflow" }),
+      false,
+      "Agy-Squad GitHub Actions CI prompt must not classify as swarm poll (FRIC-RUN-004 Boost)"
+    );
+    assert.equal(
+      isRemoteCiPollSchedule({ DurationSeconds: 60, Prompt: "Check on PR #14 build status" }),
+      true,
+      "PR #14 build status prompt must classify as remote CI"
+    );
+    assert.equal(
+      isRemoteCiPollSchedule({ DurationSeconds: 60, Prompt: "Check status of deployment job" }),
+      true,
+      "Deployment job status prompt must classify as remote CI"
+    );
+    assert.equal(
+      isRemoteCiPollSchedule({ DurationSeconds: 45, Prompt: "Check background task-4 status", TimerCondition: "conv-1/task-4" }),
+      false,
+      "Local task watchdog must not classify as remote CI"
+    );
+    assert.equal(
+      extractTaskBackoffKey("manage_task", { TaskId: "2239" }),
+      "task-2239",
+      "Bare numeric TaskId '2239' must normalize to 'task-2239' (PR13-RUN-007)"
+    );
+    assert.equal(extractRemoteCiBackoffKey({ Prompt: "Check PR #14 build status" }), "remote-ci:pr-14");
+    assert.equal(extractRemoteCiBackoffKey({ Prompt: "Check PR #15 build status" }), "remote-ci:pr-15");
+
+    // §3.2: checkContextHealth() must scope remote CI backoff per PR key with 15-min decay (no cross-PR false pollingViolations)
+    const ciHealthConv = "conv-boost-ci-health";
+    const ciHealthLogs = path.join(tempHome, ".gemini", "antigravity", "brain", ciHealthConv, ".system_generated", "logs");
+    fs.mkdirSync(ciHealthLogs, { recursive: true });
+    fs.writeFileSync(
+      path.join(ciHealthLogs, "transcript.jsonl"),
+      [
+        JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "Check CI on PR #14 and PR #15", created_at: "2026-11-21T10:00:00Z" }),
+        JSON.stringify({
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          created_at: "2026-11-21T10:00:05Z",
+          tool_calls: [{ name: "schedule", args: { DurationSeconds: 30, Prompt: "Check PR #14 build status" } }]
+        }),
+        JSON.stringify({
+          step_index: 2,
+          type: "PLANNER_RESPONSE",
+          created_at: "2026-11-21T10:00:10Z",
+          tool_calls: [{ name: "schedule", args: { DurationSeconds: 30, Prompt: "Check PR #15 build status" } }]
+        }),
+        JSON.stringify({
+          step_index: 3,
+          type: "PLANNER_RESPONSE",
+          created_at: "2026-11-21T10:20:00Z",
+          tool_calls: [{ name: "schedule", args: { DurationSeconds: 30, Prompt: "Check PR #14 build status" } }]
+        })
+      ].join("\n") + "\n"
+    );
+    const ciHealthRes = await checkContextHealth({ conversationId: ciHealthConv });
+    assert.ok(!ciHealthRes.isError, ciHealthRes.error);
+    assert.equal(ciHealthRes.metrics.pollingViolations, 0, "Per-PR remote CI buckets + 15-min decay must report 0 pollingViolations (§3.2)");
+    assert.equal(ciHealthRes.metrics.legalChecks, 3, "All 3 remote CI checks across PR #14, PR #15, and decayed PR #14 must be legal");
+    console.log("✓ Wave 2 + Boost Pass PR13-RUN-001, PR13-RUN-007 & FRIC-RUN-004 classifier & health parity verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

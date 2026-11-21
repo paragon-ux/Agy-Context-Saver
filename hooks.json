@@ -2,11 +2,11 @@
   "agy-context-saver": {
     "PreToolUse": [
       {
-        "matcher": "manage_task|schedule|run_command|view_file|read_file|read_many_files|grep_search|find_by_name|list_dir|replace_file_content|write_file|write_to_file|edit_file",
+        "matcher": "manage_task|schedule|run_command|view_file|read_file|read_many_files|grep_search|find_by_name|list_dir|replace_file_content|multi_replace_file_content|write_file|write_to_file|edit_file",
         "hooks": [
           {
             "type": "command",
-            "command": "node ./scripts/execution-guard-hook.mjs",
+            "command": "node ./scripts/execution-guard-hook.mjs --surface=plugin",
             "timeout": 10
           }
         ]

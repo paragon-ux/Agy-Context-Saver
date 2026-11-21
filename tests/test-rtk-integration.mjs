@@ -55,14 +55,48 @@ try {
   assert.equal(/\brtk\s+ls\b/.test(compoundOut.overwrite.CommandLine), false, "Lossy rtk ls rewrite must be reverted");
   console.log(`✓ Compound 'git status && ls -la' -> '${compoundOut.overwrite.CommandLine}'`);
 
-  // 2. Shell wrapper `bash -c 'git status && cat package.json'`
+  // 2. Shell wrapper `bash -c 'git status && cat package.json'` (Narrow Pre-Gate rewrites git status, keeps workspace cat lossless)
   const wrapperOut = runHook(
     { toolCall: { name: "run_command", args: { CommandLine: "bash -c 'git status && cat package.json'", WaitMsBeforeAsync: 5000 } } },
     testEnv
   );
   assert.equal(wrapperOut.decision, "allow");
-  assert.match(wrapperOut.overwrite?.CommandLine || "", /rtk git status && rtk read package\.json/);
-  console.log(`✓ Shell wrapper rewritten cleanly -> '${wrapperOut.overwrite?.CommandLine}'`);
+  assert.match(wrapperOut.overwrite?.CommandLine || "", /rtk git status && cat package\.json/);
+  console.log(`✓ Shell wrapper pre-gated cleanly -> '${wrapperOut.overwrite?.CommandLine}'`);
+
+  // 2b. Narrow High-ROI Pre-Gate: noisy runners delegated; precision inspection commands stay untouched
+  for (const [rawCmd, expectPrefix] of [
+    ["pytest tests/", /^rtk pytest\b/],
+    ["cargo test --lib", /^rtk cargo test\b/],
+    ["npm run test", /^rtk npm run test\b/],
+    ["vitest run", /^rtk vitest\b/]
+  ]) {
+    const out = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: rawCmd, WaitMsBeforeAsync: 5000 } } },
+      testEnv
+    );
+    assert.equal(out.decision, "allow");
+    assert.match(out.overwrite?.CommandLine || "", expectPrefix, `High-ROI runner '${rawCmd}' must delegate to RTK`);
+  }
+  for (const losslessCmd of [
+    "find . -maxdepth 2 -name '*.mjs'",
+    "git diff HEAD~1",
+    "git -C scripts diff",
+    "git show HEAD",
+    "git log -p -1",
+    "git status --porcelain",
+    "ps aux",
+    "cat package.json",
+    "pytest tests/ | tail -n 20"
+  ]) {
+    const out = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: losslessCmd, WaitMsBeforeAsync: 5000 } } },
+      testEnv
+    );
+    assert.equal(out.decision, "allow");
+    assert.equal(out.overwrite?.CommandLine, undefined, `Precision/piped command '${losslessCmd}' must stay unrewritten under Narrow Pre-Gate`);
+  }
+  console.log("✓ Narrow High-ROI Pre-Gate verified across high-ROI runners vs lossless inspection/piped commands");
 
   // 3. Real `rtk hook antigravity` never mutates `agy-context transcript` invocations (including list --parent/--lineage and export --sanitized)
   for (const cmd of [
@@ -95,7 +129,7 @@ try {
       noRgEnv
     );
     assert.equal(rgFallback.decision, "allow");
-    assert.match(rgFallback.overwrite?.CommandLine || "", /^rtk grep\b/, "Simple rg must map to rtk grep when rg is absent");
+    assert.match(rgFallback.overwrite?.CommandLine || "", /^grep\b/, "Bare rg must map to lossless grep when rg is absent");
     assert.equal((rgFallback.overwrite?.CommandLine || "").includes("rtk rg"), false, "Must never emit rtk rg when rg is absent");
     console.log(`✓ Absent 'rg' binary guarded -> '${rgFallback.overwrite?.CommandLine}'`);
 
@@ -104,9 +138,18 @@ try {
       noRgEnv
     );
     assert.equal(envRgFallback.decision, "allow");
-    assert.match(envRgFallback.overwrite?.CommandLine || "", /^FOO=1 rtk grep\b/);
+    assert.match(envRgFallback.overwrite?.CommandLine || "", /^FOO=1 grep\b/);
     assert.equal((envRgFallback.overwrite?.CommandLine || "").includes("rtk rg"), false);
     console.log(`✓ Env-prefixed absent 'rg' guarded -> '${envRgFallback.overwrite?.CommandLine}'`);
+
+    const explicitRtkRgFallback = runHook(
+      { toolCall: { name: "run_command", args: { CommandLine: 'rtk rg -n "GOVERNED_TOOLS" scripts/', WaitMsBeforeAsync: 5000 } } },
+      noRgEnv
+    );
+    assert.equal(explicitRtkRgFallback.decision, "allow");
+    assert.match(explicitRtkRgFallback.overwrite?.CommandLine || "", /^rtk grep\b/, "Explicit rtk rg must map to rtk grep when rg is absent");
+    assert.equal((explicitRtkRgFallback.overwrite?.CommandLine || "").includes("rtk rg"), false);
+    console.log(`✓ Explicit 'rtk rg' guarded when rg absent -> '${explicitRtkRgFallback.overwrite?.CommandLine}'`);
   }
 
   // 5. Real `rtk 1.1.0` / shim `cat`/`head`/`tail` rewrite parity + Check 3/4 operand enforcement
