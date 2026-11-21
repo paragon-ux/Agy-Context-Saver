@@ -823,12 +823,17 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
   const idValues = [];
   const outPaths = [];
   const positionals = [];
+  let sanitized = false;
   for (let i = 0; i < restTokens.length; i++) {
     const tok = restTokens[i];
     if (!tok.startsWith("-") || tok === "-") { positionals.push(tok); continue; }
     if (!tok.startsWith("--")) continue;
     const eq = tok.indexOf("=");
     const key = eq === -1 ? tok.slice(2) : tok.slice(2, eq);
+    if (key === "sanitized") {
+      sanitized = eq === -1 ? true : tok.slice(eq + 1) === "true";
+      continue;
+    }
     if (!valueFlags.has(key)) continue;
     const val = eq === -1 ? (i + 1 < restTokens.length ? restTokens[++i] : null) : tok.slice(eq + 1);
     if (val === null) continue;
@@ -860,7 +865,8 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
     targetIds: uniqueIds,
     targetParent: opts.parent !== undefined ? String(opts.parent).trim() : null,
     outPaths,
-    explicitFile: opts.file ? String(opts.file).trim() : null
+    explicitFile: opts.file ? String(opts.file).trim() : null,
+    sanitized
   };
 }
 
@@ -917,6 +923,9 @@ function checkAgyContextTranscriptCommand(segments, convId, ctx) {
     if (targetInfo.error) return fail(targetInfo.error);
     const isExport = subcommand === "export" || subcommand === "dump";
     const isList = subcommand === "list" || subcommand === "ls";
+    if (isExport && !targetInfo.sanitized) {
+      return fail("Antigravity Execution Governance: Flag '--sanitized' is required for 'agy-context transcript export' to enforce transcript isolation (raw transcript export is prohibited).");
+    }
 
     for (const outPath of targetInfo.outPaths || []) {
       const resolvedOut = resolveHookPath(outPath, cwd);
@@ -1571,7 +1580,7 @@ export async function handleRunCommand(ctx) {
       reason:
         `Antigravity Execution Governance: Blocking CI watch loop ('${blockingWatch.command}') stalls agents indefinitely when remote runners queue.\n` +
         "- Run a single non-blocking snapshot ('gh pr checks' or 'gh run list') instead.\n" +
-        "- If waiting on remote CI, end your turn or use a backoff-compliant 'schedule' timer (DurationSeconds >= Math.max(30, requiredBackoffSec): >= 30s initially, then 75s/188s/469s/600s) rather than blocking inside run_command."
+        "- If waiting on remote CI, end your turn or use a backoff-compliant 'schedule' timer (DurationSeconds >= 30s initially, scaling 30s -> 75s -> 188s -> 469s -> 600s) rather than blocking inside run_command."
     });
   }
 

@@ -1423,6 +1423,30 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
     );
     assert.equal(badOutExportHook.decision, "deny", "export --out writing executable/governance script must be denied");
 
+    // PreToolUse fail-fast --sanitized enforcement for export/dump
+    for (const [label, conv, tp, cmd] of [
+      ["parent export missing --sanitized", pA, path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"), `agy-context transcript export --id ${pA}`],
+      ["parent dump missing --sanitized", pA, path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"), `agy-context transcript dump --id ${pA}`],
+      ["export --sanitized=false", pA, path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"), `agy-context transcript export --id ${pA} --sanitized=false`],
+      ["export --sanitized --sanitized=false (last flag wins)", pA, path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"), `agy-context transcript export --id ${pA} --sanitized --sanitized=false`],
+      ["export --out --sanitized (flag value spoof)", pA, path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"), `agy-context transcript export --id ${pA} --out --sanitized`],
+      ["self-only export missing --sanitized", cliRestricted, path.join(cliRestrictedLogs, "transcript.jsonl"), "agy-context transcript export"]
+    ]) {
+      const unsanitizedHook = runHook({ conversationId: conv, transcriptPath: tp, toolCall: { name: "run_command", args: { CommandLine: cmd } } }, cliEnv);
+      assert.equal(unsanitizedHook.decision, "deny", `${label} must be denied at PreToolUse`);
+      assert.match(unsanitizedHook.reason || "", /--sanitized/);
+    }
+    assert.equal(
+      runHook({ conversationId: pA, transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"), toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript export --id ${pA} --sanitized=true` } } }, cliEnv).decision,
+      "allow",
+      "export --sanitized=true must be allowed"
+    );
+    assert.equal(
+      runHook({ conversationId: pA, transcriptPath: path.join(cliBrainRoot, pA, ".system_generated", "logs", "transcript.jsonl"), toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript export --help" } } }, cliEnv).decision,
+      "allow",
+      "export --help must remain allowed without --sanitized"
+    );
+
     const selfExportOwn = runHook(
       {
         conversationId: cliRestricted,
@@ -1947,7 +1971,8 @@ console.log("\n--- Group H: Multi-Root, Lineage Chunking, Cross-Swarm Isolation 
       assert.equal(watchDeny.decision, "deny", `Blocking CI watch loop must be denied: ${blockedWatchCmd}`);
       assert.match(watchDeny.reason, /Blocking CI watch loop/i);
       assert.doesNotMatch(watchDeny.reason, />= 60s/);
-      assert.match(watchDeny.reason, /Math\.max\(30,\s*requiredBackoffSec\)[\s\S]*30s[\s\S]*75s/);
+      assert.match(watchDeny.reason, /DurationSeconds >= 30s[\s\S]*75s[\s\S]*188s/);
+      assert.doesNotMatch(watchDeny.reason, /Math\.max/);
     }
 
     for (const allowedGhCmd of [

@@ -6,9 +6,6 @@
  *   POSIX:   $XDG_STATE_HOME/agy-context-saver (default ~/.local/state/agy-context-saver)
  *   Legacy versions (<= 1.7.0) left session JSON files in os.tmpdir(); cleaned on setup/uninstall.
  * Under AGY_TEST_PROFILE_DIR the same layout is rooted in the test profile.
- *
- * The hook is mirrored into ~/.gemini/config/scripts as a standalone file, so it keeps an
- * identical inline copy of getStateDir(). tests/test-hook.mjs checks that the two agree.
  * No side effects on import.
  */
 import fs from "node:fs";
