@@ -12,7 +12,7 @@ Native `grep_search`, `find_by_name`, and `list_dir` run directly on workspace p
 
 | Target | Enforced Guardrail |
 | :--- | :--- |
-| **Small workspace files & media** | Files $\le 300$ lines and $\le 24\text{ KiB}$, safe multimodal media (`.png`, `.jpg`, `.webp`, `.pdf`, audio/video), and Antigravity special files (`SKILL.md`, `AGENTS.md`, own brain artifacts, `swarm_view/`, `.gemini/config/`) need no line bounds. |
+| **Small workspace files & media** | Files $\le 300$ lines and $\le 24\text{ KiB}$, safe multimodal media (`.png`, `.jpg`, `.webp`, `.pdf`, audio/video), and Antigravity special files (`SKILL.md`, `AGENTS.md`, own brain artifacts, own non-symlink `.system_generated/swarm/plan.json`, `swarm_view/`, `.gemini/config/`) need no line bounds. |
 | **Large workspace files (bounded slice)** | Pass `StartLine` and/or `EndLine` ($\le 300$ lines, EOF-clamped via $1\text{ MiB}$ newline scan, single-bound supported) to `read_file` / `view_file`. `read_many_files` and `ByteOffset`-only reads are denied. |
 | **Medium workspace files (full-file audit)** | Files $\le 800$ lines and $\le 45\text{ KiB}$ allow explicit `StartLine: 1, EndLine >= TotalLines`. |
 | **Spillovers & completed task logs** | Both `.system_generated/steps/<step>/output.txt` spillovers and `COMPLETED` `tasks/<taskId>.log` files allow bounded `read_file` ($\le 150\text{L}$) or single unchained `rtk read <path>` (`cat` and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; `--head-lines 150` / `--tail-lines 150` required above `45 KiB`; `RUNNING` task logs are always denied). |

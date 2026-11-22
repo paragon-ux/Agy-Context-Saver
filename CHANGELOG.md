@@ -5,6 +5,14 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Antigravity Ergonomics & Guardrail Refinements (`scripts/hook/common.mjs`, `scripts/hook/file-guard.mjs`, `scripts/hook/shell-guard.mjs`, `rules/AGENTS.md`, `skills/context-governance/SKILL.md`, `SECURITY.md`, `docs/*`, `tests/test-hook.mjs`)**:
+  - **Own-session Swarm UI Overview allowlist (`UX-03`):** Allowed single-file `read_file`, `view_file`, `write_file`, and `edit_file` strictly on the active session's own non-symlink `<ownBrainDir>/.system_generated/swarm/plan.json` (for `swarm_pane`), while keeping symlinks, sibling sessions, other `.system_generated/` files, `ByteOffset`-only reads, `read_many_files`, and discovery tools (`list_dir`, `find_by_name`, `grep_search`) denied.
+  - **Top-level user config `force_ask`:** Downgraded top-level unrestricted (`isTopLevelUnrestrictedSession`), non-symlink, non-destructive edits to `~/.gemini/{config,antigravity*}/{mcp_config.json,config.json}` to `force_ask` (unblocking `/plugin`, `/migrate-agent-settings`, and MCP setup), while keeping global `hooks.json`, `*.bak` backups, ACS plugin/hook files, symlinks, destructive shell verbs (`rm`, `mv`, `ln`, `truncate`, `shred`, `dd`, `chmod`, `chown`, `find`), compound deny+ask commands, transcript `--out` targets, and all child subagents/`/swarm` workers hard-`deny`.
+  - **Brain `scratch/`/`browser_sandbox/`/`swarm_view/` carve-out & safe artifact extensions:** Replaced the backtracking brain-subpath regex in `common.mjs` with linear `O(N)` `isProtectedBrainSubpath()` exempting `scratch/`, `browser_sandbox/`, and `swarm_view/` from `logs/`/`tasks/`/`steps/` denials while keeping `..` traversal, `$`, dotfiles, `.system_generated/`, and `transcript*.jsonl` denied everywhere; expanded direct safe shell artifact extensions in `shell-guard.mjs` (`.csv`, `.tsv`, `.yaml`, `.yml`, `.xml`, `.zip`, `.gif`, `.bmp`, `.ico`, `.mp3`, `.wav`, `.mp4`, `.webm`, `.mov`) while keeping `.jsonl`, `.log`, dotfiles, and bare brain directories denied.
+
 ## [2.1.2] - 2026-11-21
 
 ### Changed
