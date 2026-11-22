@@ -4525,6 +4525,129 @@ console.log("\n--- Group Q: Wave 3 Hardening & Bug-Fix Regressions ---");
   }
 }
 
+// =========================================================================
+// Group R: UX-03 Own-session Swarm UI Overview (.system_generated/swarm/plan.json) allowlist
+// =========================================================================
+{
+  const rConvOwn = "conv-swarm-plan-own-001";
+  const rConvOther = "conv-swarm-plan-other-002";
+  const rBrainDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain");
+  const rOwnPlan = path.join(rBrainDir, rConvOwn, ".system_generated", "swarm", "plan.json");
+  const rOwnOtherFile = path.join(rBrainDir, rConvOwn, ".system_generated", "swarm", "notes.json");
+  const rOwnTranscript = path.join(rBrainDir, rConvOwn, ".system_generated", "logs", "transcript.jsonl");
+  const rSiblingPlan = path.join(rBrainDir, rConvOther, ".system_generated", "swarm", "plan.json");
+  const rTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-swarm-plan-test-"));
+
+  try {
+    // R.1: Writing own plan.json BEFORE .system_generated/swarm/ exists is allowed
+    assert.equal(
+      runHook({
+        conversationId: rConvOwn,
+        toolCall: { name: "write_file", args: { Path: rOwnPlan, Content: '{"goal":{"title":"Test","line":"Run"}}', Overwrite: true } }
+      }).decision,
+      "allow",
+      "UX-03: write_file to own .system_generated/swarm/plan.json before dir exists must allow"
+    );
+
+    // Create actual files on disk for read/edit and symlink tests
+    fs.mkdirSync(path.dirname(rOwnPlan), { recursive: true });
+    fs.mkdirSync(path.dirname(rOwnTranscript), { recursive: true });
+    fs.mkdirSync(path.dirname(rSiblingPlan), { recursive: true });
+    fs.writeFileSync(rOwnPlan, '{"goal":{"title":"Test","line":"Run"}}\n', "utf-8");
+    fs.writeFileSync(rOwnTranscript, '{"step_index":1}\n', "utf-8");
+    fs.writeFileSync(rSiblingPlan, '{"goal":{"title":"Other","line":"Other"}}\n', "utf-8");
+
+    // R.2: read_file, edit_file, write_file on existing own plan.json are allowed
+    assert.equal(
+      runHook({
+        conversationId: rConvOwn,
+        toolCall: { name: "read_file", args: { Path: rOwnPlan } }
+      }).decision,
+      "allow",
+      "UX-03: read_file on own .system_generated/swarm/plan.json must allow"
+    );
+    assert.equal(
+      runHook({
+        conversationId: rConvOwn,
+        toolCall: { name: "edit_file", args: { Path: rOwnPlan, Target: "Test", Replacement: "Updated" } }
+      }).decision,
+      "allow",
+      "UX-03: edit_file on own .system_generated/swarm/plan.json must allow"
+    );
+
+    // R.3: Sibling session plan.json, wrong filename in swarm/, and logs/transcript.jsonl stay denied
+    for (const [label, tc] of [
+      ["sibling write_file", { name: "write_file", args: { Path: rSiblingPlan, Content: "{}" } }],
+      ["sibling read_file", { name: "read_file", args: { Path: rSiblingPlan } }],
+      ["own other swarm file write", { name: "write_file", args: { Path: rOwnOtherFile, Content: "{}" } }],
+      ["own other swarm file read", { name: "read_file", args: { Path: rOwnOtherFile } }],
+      ["own transcript write", { name: "write_file", args: { Path: rOwnTranscript, Content: "{}" } }],
+      ["own transcript read", { name: "read_file", args: { Path: rOwnTranscript } }],
+      ["ByteOffset-only read on own plan.json", { name: "read_file", args: { Path: rOwnPlan, ByteOffset: 0 } }],
+      ["read_many_files on own plan.json", { name: "read_many_files", args: { Paths: [rOwnPlan] } }],
+      ["list_dir on own swarm dir", { name: "list_dir", args: { DirectoryPath: path.dirname(rOwnPlan) } }],
+      ["find_by_name on own swarm dir", { name: "find_by_name", args: { SearchDirectory: path.dirname(rOwnPlan), Pattern: "*" } }],
+      ["grep_search on own plan.json", { name: "grep_search", args: { SearchPath: rOwnPlan, Query: "goal" } }]
+    ]) {
+      assert.equal(
+        runHook({ conversationId: rConvOwn, toolCall: tc }).decision,
+        "deny",
+        `UX-03: ${label} must stay denied`
+      );
+    }
+
+    // R.4: Symlink attacks (skip on platforms that cannot create symlinks)
+    let symlinksSupported = true;
+    const extLink = path.join(rTmpDir, "alias-plan.json");
+    try {
+      fs.symlinkSync(rOwnPlan, extLink);
+    } catch {
+      symlinksSupported = false;
+    }
+    if (symlinksSupported) {
+      assert.equal(
+        runHook({ conversationId: rConvOwn, toolCall: { name: "read_file", args: { Path: extLink } } }).decision,
+        "deny",
+        "UX-03: external symlink pointing to own swarm/plan.json must deny on read_file"
+      );
+      assert.equal(
+        runHook({ conversationId: rConvOwn, toolCall: { name: "write_file", args: { Path: extLink, Content: "{}" } } }).decision,
+        "deny",
+        "UX-03: external symlink pointing to own swarm/plan.json must deny on write_file"
+      );
+
+      // Replace plan.json with symlink to ../logs/transcript.jsonl
+      fs.unlinkSync(rOwnPlan);
+      fs.symlinkSync(rOwnTranscript, rOwnPlan);
+      assert.equal(
+        runHook({ conversationId: rConvOwn, toolCall: { name: "read_file", args: { Path: rOwnPlan } } }).decision,
+        "deny",
+        "UX-03: symlinked plan.json pointing to transcript.jsonl must deny on read_file"
+      );
+      assert.equal(
+        runHook({ conversationId: rConvOwn, toolCall: { name: "write_file", args: { Path: rOwnPlan, Content: "{}" } } }).decision,
+        "deny",
+        "UX-03: symlinked plan.json pointing to transcript.jsonl must deny on write_file"
+      );
+
+      // Replace swarm/ directory with symlink to external dir
+      fs.rmSync(path.dirname(rOwnPlan), { recursive: true, force: true });
+      fs.symlinkSync(rTmpDir, path.dirname(rOwnPlan));
+      assert.equal(
+        runHook({ conversationId: rConvOwn, toolCall: { name: "write_file", args: { Path: rOwnPlan, Content: "{}" } } }).decision,
+        "deny",
+        "UX-03: symlinked .system_generated/swarm dir pointing outside must deny on write_file"
+      );
+    }
+
+    console.log("✓ Group R: UX-03 own-session Swarm UI Overview plan.json allowlist verified");
+  } finally {
+    fs.rmSync(rTmpDir, { recursive: true, force: true });
+    fs.rmSync(path.join(rBrainDir, rConvOwn), { recursive: true, force: true });
+    fs.rmSync(path.join(rBrainDir, rConvOther), { recursive: true, force: true });
+  }
+}
+
 hermetic.cleanup();
 console.log("\n=================================================");
 console.log("ALL 2.0 PRETOOLUSE HOOK GOVERNANCE TESTS PASSED!");

@@ -111,6 +111,51 @@ function isSymlinkMaskedInternalPath(rawPath, cwd = "") {
   return isLink || (canonical !== absNorm && /(?:^|\/)\.system_generated\//i.test(canonical));
 }
 
+function isOwnSwarmPlanPath(rawPath, convId, ctx = {}) {
+  if (!rawPath || typeof rawPath !== "string" || !convId || convId === "global") return false;
+  if (/[/\\]/.test(convId) || convId === "." || convId === "..") return false;
+  const cleaned = cleanFileToken(rawPath);
+  if (!cleaned) return false;
+  const cwd = ctx?.cwd || "";
+  const resolved = resolveHookPath(expandLeadingTilde(cleaned), cwd);
+  if (!resolved) return false;
+  const canonical = resolveRealOrAncestorPath(resolved, { cwd });
+
+  const isCI = os.platform() === "win32" || os.platform() === "darwin";
+  const norm = (p) => {
+    const s = String(p || "").replace(/\\/g, "/");
+    return isCI ? s.toLowerCase() : s;
+  };
+  const resolvedNorm = norm(resolved);
+  const canonicalNorm = norm(canonical);
+
+  const brainDirs = getBrainDirs({ activeTranscriptPath: ctx?.transcriptPath || "" });
+  let matchedBrainDir = null;
+  for (const bDir of brainDirs) {
+    if (!bDir) continue;
+    const expectedRaw = path.join(bDir, convId, ".system_generated", "swarm", "plan.json");
+    const expectedCanonical = resolveRealOrAncestorPath(expectedRaw, { cwd });
+    const expRawNorm = norm(expectedRaw);
+    const expCanonNorm = norm(expectedCanonical);
+    if ((resolvedNorm === expRawNorm || resolvedNorm === expCanonNorm) && canonicalNorm === expCanonNorm) {
+      matchedBrainDir = bDir;
+      break;
+    }
+  }
+  if (!matchedBrainDir) return false;
+
+  // Reject any symlink at plan.json or within <convId>/.system_generated/swarm
+  const convDir = path.join(matchedBrainDir, convId);
+  const sysDir = path.join(convDir, ".system_generated");
+  const swarmDir = path.join(sysDir, "swarm");
+  for (const seg of [convDir, sysDir, swarmDir, resolved]) {
+    try {
+      if (fs.lstatSync(seg).isSymbolicLink()) return false;
+    } catch {}
+  }
+  return true;
+}
+
 function isProtectedDiscoveryAncestorPath(candidateTarget, isDiscoveryTool, isRecursiveDiscoveryTool, ctx = {}) {
   if (!isDiscoveryTool) return false;
   const effectiveCandidate = candidateTarget || ctx?.cwd || "";
@@ -295,8 +340,13 @@ export async function handleInspectionTool(ctx) {
   }
 
   // Check 2c: Internal state & discovery ancestor roots (never scanning Query/Pattern/Includes/Excludes/Extensions)
+  const isSingleFileReadTool = toolName === "read_file" || toolName === "view_file";
   for (const cand of allCandidates) {
     if (safeHarborCandidates.has(cand)) continue;
+    if (isSingleFileReadTool && !hasByteOffset && isOwnSwarmPlanPath(cand, convId, ctx)) {
+      safeHarborCandidates.add(cand);
+      continue;
+    }
     if (isProtectedInternalStatePath(cand, cwd) || isProtectedDiscoveryAncestorPath(cand, isDiscoveryTool, isRecursiveDiscoveryTool, ctx)) {
       respond({ decision: "deny", reason: buildInternalStateToolDenial(convId, ctx) });
     }
@@ -357,7 +407,7 @@ export function handleMutationTool(ctx) {
   const callerAccess = evaluateCallerTranscriptAccess(convId, ctx);
 
   for (const targetFile of targetFiles) {
-    if (isProtectedInternalStatePath(targetFile, cwd)) {
+    if (isProtectedInternalStatePath(targetFile, cwd) && !isOwnSwarmPlanPath(targetFile, convId, ctx)) {
       respond({ decision: "deny", reason: buildInternalStateToolDenial(convId, ctx) });
     }
     if (isProtectedGovernanceFileMutationPath(targetFile, convId, ctx)) {
