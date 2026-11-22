@@ -4773,6 +4773,9 @@ console.log("\n--- Group Q: Wave 3 Hardening & Bug-Fix Regressions ---");
     for (const [label, tc] of [
       ["scratch/../logs/transcript.jsonl", { name: "run_command", args: { CommandLine: `cat "${sTopDir}/scratch/../logs/transcript.jsonl"`, WaitMsBeforeAsync: 5000 } }],
       ["scratch/../tasks/task-1.log", { name: "run_command", args: { CommandLine: `cat "${sTopDir}/scratch/../tasks/task-1.log"`, WaitMsBeforeAsync: 5000 } }],
+      ["quote-split $SUB/logs bypass", { name: "run_command", args: { CommandLine: `cat "${sTopDir}/"$SUB/logs/a`, WaitMsBeforeAsync: 5000 } }],
+      ["quote-split logs/a bypass", { name: "run_command", args: { CommandLine: `cat "${sTopDir}/logs"/a`, WaitMsBeforeAsync: 5000 } }],
+      ["quote-split scratch/../logs bypass", { name: "run_command", args: { CommandLine: `cat "${sTopDir}/scratch/".."/logs/a"`, WaitMsBeforeAsync: 5000 } }],
       ["scratch/$X/logs/foo", { name: "run_command", args: { CommandLine: `cat "${sTopDir}/scratch/$X/logs/foo"`, WaitMsBeforeAsync: 5000 } }],
       ["brain/<id>/$SUB/logs/foo", { name: "run_command", args: { CommandLine: `cat "${sTopDir}/$SUB/logs/foo"`, WaitMsBeforeAsync: 5000 } }],
       ["scratch/.system_generated/logs/foo", { name: "read_file", args: { Path: path.join(sTopDir, "scratch", ".system_generated", "logs", "foo") } }],

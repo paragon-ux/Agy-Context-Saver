@@ -294,14 +294,33 @@ const BRAIN_PREFIX_RE = /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/
 const USER_BRAIN_SUBDIRS = new Set(["scratch", "browser_sandbox", "swarm_view"]);
 const INTERNAL_BRAIN_SUBDIRS = new Set(["logs", "tasks", "steps"]);
 
-// Linear O(N) scan: blocks `$`, `..`, and `logs/`|`tasks/`|`steps/` under brain/<id>/ except inside user subdirs
+// Linear O(N) scan: reads full quote-concatenated shell word and blocks `$`, `..`, and `logs/`|`tasks/`|`steps/` under brain/<id>/ except inside user subdirs
 function isProtectedBrainSubpath(targetPath) {
   BRAIN_PREFIX_RE.lastIndex = 0;
   let m;
+  let scanPos = 0;
+  let activeQuote = "";
   while ((m = BRAIN_PREFIX_RE.exec(targetPath)) !== null) {
-    let end = m.index + m[0].length;
-    while (end < targetPath.length && !/[\s'"`]/.test(targetPath[end])) end++;
-    const tail = targetPath.slice(m.index + m[0].length, end);
+    const startIdx = m.index + m[0].length;
+    for (let i = scanPos; i < startIdx; i++) {
+      const ch = targetPath[i];
+      if (activeQuote) { if (ch === activeQuote) activeQuote = ""; }
+      else if (ch === "'" || ch === '"') activeQuote = ch;
+    }
+    scanPos = startIdx;
+    let quote = activeQuote;
+    let tail = "";
+    for (let i = startIdx; i < targetPath.length; i++) {
+      const ch = targetPath[i];
+      if (quote) {
+        if (ch === quote) { quote = ""; continue; }
+        tail += ch;
+        continue;
+      }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (/[\s;|&()<>`,]/.test(ch)) break;
+      tail += ch;
+    }
     if (!tail) continue;
     if (tail.includes("$")) return true;
     const parts = tail.split(/[/\\]+/);
@@ -415,7 +434,8 @@ export function isUserEditableGeminiConfigPath(rawPath, convId = "global", ctx =
     !USER_EDITABLE_GEMINI_CONFIG_RE.test(resolved.replace(/\\/g, "/")) ||
     !USER_EDITABLE_GEMINI_CONFIG_RE.test(canonical.replace(/\\/g, "/"))
   ) return false;
-  for (const seg of [path.dirname(resolved), resolved]) {
+  const cfgDir = path.dirname(resolved);
+  for (const seg of [path.dirname(cfgDir), cfgDir, resolved]) {
     try { if (fs.lstatSync(seg).isSymbolicLink()) return false; } catch {}
   }
   return true;
