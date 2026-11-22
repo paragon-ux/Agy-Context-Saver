@@ -27,6 +27,7 @@ import {
   isProtectedInternalState,
   isProtectedInternalStatePath,
   isProtectedGovernanceFileMutationPath,
+  isUserEditableGeminiConfigPath,
   isProtectedBenchmarkFilePath,
   isBenchmarkGuardDisabled,
   isCrossConversationTargetDenied,
@@ -406,12 +407,17 @@ export function handleMutationTool(ctx) {
   const targetFiles = collectPathAliases(args, MUTATION_PATH_KEYS, false);
   const callerAccess = evaluateCallerTranscriptAccess(convId, ctx);
 
+  let userConfigConfirmTarget = null;
   for (const targetFile of targetFiles) {
     if (isProtectedInternalStatePath(targetFile, cwd) && !isOwnSwarmPlanPath(targetFile, convId, ctx)) {
       respond({ decision: "deny", reason: buildInternalStateToolDenial(convId, ctx) });
     }
     if (isProtectedGovernanceFileMutationPath(targetFile, convId, ctx)) {
-      respond({ decision: "deny", reason: "Antigravity Execution Governance: Direct mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited." });
+      if (isUserEditableGeminiConfigPath(targetFile, convId, ctx)) {
+        if (!userConfigConfirmTarget) userConfigConfirmTarget = targetFile;
+      } else {
+        respond({ decision: "deny", reason: "Antigravity Execution Governance: Direct mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited." });
+      }
     }
     if (isCrossConversationTargetDenied(targetFile, convId, ctx, callerAccess)) {
       respond({ decision: "deny", reason: "Antigravity Execution Governance: Cross-conversation mutation of another session's brain artifacts is prohibited under Parent Transcript Isolation." });
@@ -443,6 +449,13 @@ export function handleMutationTool(ctx) {
       }
       if (code) respond({ decision: "deny", reason: buildInternalStateToolDenial(convId, ctx) });
     }
+  }
+
+  if (userConfigConfirmTarget) {
+    respond({
+      decision: "force_ask",
+      reason: `[GEMINI CONFIG MUTATION] Editing Antigravity user configuration '${userConfigConfirmTarget}' requires explicit user confirmation.`
+    });
   }
 
   if (!isBenchmarkGuardDisabled(convId, ctx)) {

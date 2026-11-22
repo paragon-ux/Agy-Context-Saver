@@ -44,6 +44,7 @@ import {
   isProtectedInternalState,
   isInsideAgyContextSaverRepo,
   isProtectedGovernanceFileMutationPath,
+  isUserEditableGeminiConfigPath,
   isProtectedGovernanceDirPath,
   isProtectedBenchmarkFilePath,
   isBenchmarkGuardDisabled,
@@ -604,6 +605,7 @@ const OBVIOUS_MUTATION_VERBS = new Set([
   "rm", "del", "remove-item", "mv", "cp", "ln", "tee", "truncate", "shred", "dd", "patch", "chmod", "chown", "sed", "perl", "find", "install"
 ]);
 const DIR_MUTATION_VERBS = new Set(["rm", "del", "remove-item", "mv", "cp", "ln", "chmod", "chown", "find"]);
+const DESTRUCTIVE_CONFIG_VERBS = new Set(["rm", "del", "remove-item", "mv", "ln", "truncate", "shred", "dd", "chmod", "chown", "find"]);
 
 function extractVerbMutationTargets(verb, tokens, cmdIdx) {
   const args = tokens.slice(cmdIdx + 1);
@@ -675,12 +677,19 @@ function checkShellMutations(segments, convId, ctx, depth = 0) {
   if (depth > 4) return null;
   const cwd = ctx?.cwd || "";
   const benchDisabled = isBenchmarkGuardDisabled(convId, ctx);
+  let pendingForceAsk = null;
+  const record = (res) => {
+    if (!res) return null;
+    if (res.decision === "deny") return res;
+    if (!pendingForceAsk) pendingForceAsk = res;
+    return null;
+  };
 
   for (let segIdx = 0; segIdx < segments.length; segIdx++) {
     const seg = segments[segIdx];
     const tokens = getSegTokens(seg);
     const writeRedirects = seg.hasWriteRedirect ? extractRedirectTargets(tokens, true) : [];
-    const govChecks = writeRedirects.map((tok) => ({ tok, isDirVerb: false }));
+    const govChecks = writeRedirects.map((tok) => ({ tok, isDirVerb: false, isDestructive: false }));
     const benchChecks = [...writeRedirects];
 
     for (const startPos of collectSegmentCommandStartIndices(tokens)) {
@@ -689,28 +698,36 @@ function checkShellMutations(segments, convId, ctx, depth = 0) {
       const verb = normalizeCmdName(tokens[cmdIdx].value);
       if (!OBVIOUS_MUTATION_VERBS.has(verb)) continue;
       const isDirVerb = DIR_MUTATION_VERBS.has(verb);
+      const isDestructive = DESTRUCTIVE_CONFIG_VERBS.has(verb);
       const { govTargets, benchTargets } = extractVerbMutationTargets(verb, tokens, cmdIdx);
-      for (const tok of govTargets) govChecks.push({ tok, isDirVerb });
+      for (const tok of govTargets) govChecks.push({ tok, isDirVerb, isDestructive });
       benchChecks.push(...benchTargets);
     }
 
-    for (const { tok, isDirVerb } of govChecks) {
-      if (isProtectedGovernanceFileMutationPath(tok, convId, ctx) || (isDirVerb && isProtectedGovernanceDirPath(tok, cwd))) {
+    for (const { tok, isDirVerb, isDestructive } of govChecks) {
+      if (isDirVerb && isProtectedGovernanceDirPath(tok, cwd)) {
         return { decision: "deny", reason: "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited." };
+      }
+      if (isProtectedGovernanceFileMutationPath(tok, convId, ctx)) {
+        if (!isDestructive && isUserEditableGeminiConfigPath(tok, convId, ctx)) {
+          record({ decision: "force_ask", reason: `[GEMINI CONFIG MUTATION] Shell edit to Antigravity user configuration '${tok}' requires explicit user confirmation.` });
+        } else {
+          return { decision: "deny", reason: "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited." };
+        }
       }
     }
     if (!benchDisabled && benchChecks.some((tok) => isProtectedBenchmarkFilePath(tok, cwd))) {
-      return { decision: "force_ask", reason: "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination. Set AGY_DISABLE_BENCHMARK_GUARD=1 to disable this guard for non-evaluation repos." };
+      record({ decision: "force_ask", reason: "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination. Set AGY_DISABLE_BENCHMARK_GUARD=1 to disable this guard for non-evaluation repos." });
     }
 
     const wrap = extractSimpleWrappedScript(seg.text);
-    if (wrap?.innerScript) { const r = checkShellMutations(splitShellSegments(wrap.innerScript), convId, ctx, depth + 1); if (r) return r; }
-    for (const sub of seg.subshells || []) { const r = checkShellMutations(splitShellSegments(sub), convId, ctx, depth + 1); if (r) return r; }
+    if (wrap?.innerScript) { const d = record(checkShellMutations(splitShellSegments(wrap.innerScript), convId, ctx, depth + 1)); if (d) return d; }
+    for (const sub of seg.subshells || []) { const d = record(checkShellMutations(splitShellSegments(sub), convId, ctx, depth + 1)); if (d) return d; }
     if (seg.heredocBodies?.length && segmentPipesToShell(segments, segIdx)) {
-      for (const hd of seg.heredocBodies) if (hd) { const r = checkShellMutations(splitShellSegments(hd), convId, ctx, depth + 1); if (r) return r; }
+      for (const hd of seg.heredocBodies) if (hd) { const d = record(checkShellMutations(splitShellSegments(hd), convId, ctx, depth + 1)); if (d) return d; }
     }
   }
-  return null;
+  return pendingForceAsk;
 }
 
 // ============================================================================
@@ -1180,7 +1197,7 @@ function getProtectedShellOperationReason(text, { isRestrictedChild = false } = 
   }
 
   if (
-    /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?![^\s'"]*[\/\\](?:scratch|browser_sandbox|swarm_view|\.agents)(?:$|[\/\\])|[^\s'"]*\.(?:md|txt|json|png|jpg|jpeg|svg|html|css|webp|pdf)\b)/i.test(text) &&
+    /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?![^\/\\\s'"]+[\/\\](?:scratch|browser_sandbox|swarm_view|\.agents)(?:$|[\/\\])|[^\/\\\s'"]+[\/\\][^\/\\\s'"]+\.(?:md|txt|json|csv|tsv|yaml|yml|xml|zip|png|jpg|jpeg|gif|svg|html|css|webp|bmp|ico|pdf|mp3|wav|mp4|webm|mov)\b)/i.test(text) &&
     /\b(?:ln|cp|mv|rsync|tar|zip|find|readdir|readdirSync|scandir|listdir|walk|glob|iglob|readFile|readFileSync|createReadStream|open|openSync)\b/i.test(text)
   ) return "internal-state";
   return null;

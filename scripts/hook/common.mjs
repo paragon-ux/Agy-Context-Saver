@@ -22,7 +22,8 @@ import {
 import {
   STATE_TTL_MS,
   inspectTranscriptLineageFromFile,
-  evaluateCallerTranscriptAccessFromLineage
+  evaluateCallerTranscriptAccessFromLineage,
+  isTopLevelUnrestrictedSession
 } from "../../lib/access-policy.mjs";
 
 export { STATE_TTL_MS };
@@ -289,6 +290,31 @@ export function evaluateCallerTranscriptAccess(convId, ctx = {}) {
 
 // --- Direct Internal State, Governance (1B.1), Benchmark & Cross-Conversation Guards ---
 
+const BRAIN_PREFIX_RE = /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+/gi;
+const USER_BRAIN_SUBDIRS = new Set(["scratch", "browser_sandbox", "swarm_view"]);
+const INTERNAL_BRAIN_SUBDIRS = new Set(["logs", "tasks", "steps"]);
+
+// Linear O(N) scan: blocks `$`, `..`, and `logs/`|`tasks/`|`steps/` under brain/<id>/ except inside user subdirs
+function isProtectedBrainSubpath(targetPath) {
+  BRAIN_PREFIX_RE.lastIndex = 0;
+  let m;
+  while ((m = BRAIN_PREFIX_RE.exec(targetPath)) !== null) {
+    let end = m.index + m[0].length;
+    while (end < targetPath.length && !/[\s'"`]/.test(targetPath[end])) end++;
+    const tail = targetPath.slice(m.index + m[0].length, end);
+    if (!tail) continue;
+    if (tail.includes("$")) return true;
+    const parts = tail.split(/[/\\]+/);
+    if (parts.includes("..")) return true;
+    const topSub = (parts[1] || "").toLowerCase();
+    if (USER_BRAIN_SUBDIRS.has(topSub)) continue;
+    for (let i = 1; i < parts.length - 1; i++) {
+      if (INTERNAL_BRAIN_SUBDIRS.has(parts[i].toLowerCase())) return true;
+    }
+  }
+  return false;
+}
+
 export function isProtectedInternalState(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
   if (
@@ -298,7 +324,7 @@ export function isProtectedInternalState(targetPath) {
     /['"]\.['"]\s*(?:[+.]\s*)?['"]system_gen/i.test(targetPath) ||
     /\btranscript(?:_full)?\.jsonl\b/i.test(targetPath) ||
     /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]?)?$/i.test(targetPath) ||
-    /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+.*(?:logs[\/\\]|tasks[\/\\]|steps[\/\\]|\$)/i.test(targetPath) ||
+    isProtectedBrainSubpath(targetPath) ||
     /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]+)?(?:\.(?!agents(?:$|[\/\\]))|[*?\[])/i.test(targetPath) ||
     /\b(?:transcript-access|agy-session-governance-state|agy-rtk-rewrite-cache)\.json\b/i.test(targetPath) ||
     /\bagy-session-[a-zA-Z0-9_-]+\.json\b/i.test(targetPath) ||
@@ -370,6 +396,29 @@ export function isProtectedGovernanceFileMutationPath(rawPath, convId = "global"
     }
   }
   return false;
+}
+
+const USER_EDITABLE_GEMINI_CONFIG_RE =
+  /\/\.gemini\/(?:config|antigravity(?:-cli|-ide)?)\/(?:mcp_config\.json|config\.json)$/i;
+
+// Top-level unrestricted sessions may edit non-symlink mcp_config.json / config.json via force_ask; hooks.json and all child sessions stay hard-deny
+export function isUserEditableGeminiConfigPath(rawPath, convId = "global", ctx = {}) {
+  if (!rawPath || typeof rawPath !== "string") return false;
+  const lineage = getCallerLineage(convId, ctx);
+  const access = evaluateCallerTranscriptAccess(convId, ctx);
+  if (!isTopLevelUnrestrictedSession(convId, lineage, access)) return false;
+  const cwd = ctx?.cwd || "";
+  const resolved = resolveHookPath(expandLeadingTilde(cleanFileToken(rawPath)), cwd);
+  if (!resolved) return false;
+  const canonical = resolveRealOrAncestorPath(resolved, { cwd });
+  if (
+    !USER_EDITABLE_GEMINI_CONFIG_RE.test(resolved.replace(/\\/g, "/")) ||
+    !USER_EDITABLE_GEMINI_CONFIG_RE.test(canonical.replace(/\\/g, "/"))
+  ) return false;
+  for (const seg of [path.dirname(resolved), resolved]) {
+    try { if (fs.lstatSync(seg).isSymbolicLink()) return false; } catch {}
+  }
+  return true;
 }
 
 export function isProtectedGovernanceDirPath(rawPath, cwd = "") {

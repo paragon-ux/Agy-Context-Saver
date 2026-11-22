@@ -4648,6 +4648,155 @@ console.log("\n--- Group Q: Wave 3 Hardening & Bug-Fix Regressions ---");
   }
 }
 
+// =========================================================================
+// Group S: Antigravity Ergonomics (Row 1 user config force_ask + Row 3 brain subdir carve-out)
+// =========================================================================
+{
+  const sTop = "conv-ergo-top-001";
+  const sChildUnrestricted = "conv-ergo-child-unrestricted-002";
+  const sBrainDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain");
+  const sConfigDir = path.join(hermetic.profileDir, ".gemini", "config");
+  const sTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-ergo-test-"));
+
+  const sTopDir = path.join(sBrainDir, sTop);
+  const sChildDir = path.join(sBrainDir, sChildUnrestricted);
+  fs.mkdirSync(path.join(sTopDir, ".system_generated", "logs"), { recursive: true });
+  fs.mkdirSync(path.join(sChildDir, ".system_generated", "logs"), { recursive: true });
+  fs.mkdirSync(sConfigDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sTopDir, ".system_generated", "logs", "transcript.jsonl"),
+    JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "Configure plugins" }) + "\n"
+  );
+  // Unrestricted child subagent (isChildSession=true, isRestrictedChild=false)
+  fs.writeFileSync(
+    path.join(sChildDir, ".system_generated", "logs", "transcript.jsonl"),
+    JSON.stringify({
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `[Message] sender=${sTop} priority=MESSAGE_PRIORITY_HIGH content=Normal unrestricted subagent task.`
+    }) + "\n"
+  );
+
+  const sMcpCfg = path.join(sConfigDir, "mcp_config.json");
+  const sCfg = path.join(sConfigDir, "config.json");
+  const sHooks = path.join(sConfigDir, "hooks.json");
+  const sMcpBak = path.join(sConfigDir, "mcp_config.json.bak");
+  fs.writeFileSync(sMcpCfg, "{}\n", "utf-8");
+  fs.writeFileSync(sCfg, "{}\n", "utf-8");
+  fs.writeFileSync(sHooks, "{}\n", "utf-8");
+  fs.writeFileSync(sMcpBak, "{}\n", "utf-8");
+
+  try {
+    // S.1: Top-level non-symlink edits to mcp_config.json & config.json -> force_ask
+    for (const [label, tc] of [
+      ["edit_file mcp_config.json", { name: "edit_file", args: { Path: sMcpCfg, Target: "{}", Replacement: '{"mcpServers":{}}' } }],
+      ["write_file config.json", { name: "write_file", args: { Path: sCfg, Content: '{"plugins":{}}', Overwrite: true } }],
+      ["shell redirect mcp_config.json", { name: "run_command", args: { CommandLine: `echo '{}' > "${sMcpCfg}"`, WaitMsBeforeAsync: 5000 } }]
+    ]) {
+      assert.equal(
+        runHook({ conversationId: sTop, toolCall: tc }).decision,
+        "force_ask",
+        `Row 1: top-level ${label} must downgrade to force_ask`
+      );
+    }
+
+    // S.2: hooks.json, *.bak, destructive shell verbs, compound deny+force_ask, and unrestricted child -> hard deny
+    for (const [label, convId, tc] of [
+      ["top-level edit_file hooks.json", sTop, { name: "edit_file", args: { Path: sHooks, Target: "{}", Replacement: "{ }" } }],
+      ["top-level write_file mcp_config.json.bak", sTop, { name: "write_file", args: { Path: sMcpBak, Content: "{}" } }],
+      ["top-level rm mcp_config.json", sTop, { name: "run_command", args: { CommandLine: `rm -f "${sMcpCfg}"`, WaitMsBeforeAsync: 5000 } }],
+      ["top-level mv config.json", sTop, { name: "run_command", args: { CommandLine: `mv "${sCfg}" "${path.join(sTmpDir, "x.json")}"`, WaitMsBeforeAsync: 5000 } }],
+      ["top-level ln mcp_config.json", sTop, { name: "run_command", args: { CommandLine: `ln -s "${sMcpCfg}" "${path.join(sTmpDir, "l.json")}"`, WaitMsBeforeAsync: 5000 } }],
+      ["top-level compound force_ask + hooks.json deny", sTop, { name: "run_command", args: { CommandLine: `echo '{}' > "${sMcpCfg}" && rm -f "${sHooks}"`, WaitMsBeforeAsync: 5000 } }],
+      ["unrestricted child edit_file mcp_config.json", sChildUnrestricted, { name: "edit_file", args: { Path: sMcpCfg, Target: "{}", Replacement: "{ }" } }],
+      ["unrestricted child write_file config.json", sChildUnrestricted, { name: "write_file", args: { Path: sCfg, Content: "{}" } }],
+      ["unrestricted child shell redirect mcp_config.json", sChildUnrestricted, { name: "run_command", args: { CommandLine: `echo '{}' > "${sMcpCfg}"`, WaitMsBeforeAsync: 5000 } }],
+      ["transcript export --out mcp_config.json", sTop, { name: "run_command", args: { CommandLine: `agy-context transcript export --id ${sTop} --sanitized --out "${sMcpCfg}"`, WaitMsBeforeAsync: 5000 } }]
+    ]) {
+      assert.equal(
+        runHook({ conversationId: convId, toolCall: tc }).decision,
+        "deny",
+        `Row 1: ${label} must remain hard-deny`
+      );
+    }
+
+    // S.3: Symlinked mcp_config.json stays hard-deny even for top-level
+    let symOk = true;
+    const wsLinkToMcp = path.join(sTmpDir, "local-mcp.json");
+    try { fs.symlinkSync(sMcpCfg, wsLinkToMcp); } catch { symOk = false; }
+    if (symOk) {
+      assert.equal(
+        runHook({ conversationId: sTop, toolCall: { name: "edit_file", args: { Path: wsLinkToMcp, Target: "{}", Replacement: "{ }" } } }).decision,
+        "deny",
+        "Row 1: workspace symlink targeting mcp_config.json must stay hard-deny"
+      );
+      const symMcp = path.join(sConfigDir, "mcp_config.json");
+      fs.unlinkSync(symMcp);
+      fs.symlinkSync(sHooks, symMcp);
+      assert.equal(
+        runHook({ conversationId: sTop, toolCall: { name: "edit_file", args: { Path: symMcp, Target: "{}", Replacement: "{ }" } } }).decision,
+        "deny",
+        "Row 1: symlinked mcp_config.json pointing to hooks.json must stay hard-deny"
+      );
+    }
+
+    // S.4: Row 3 positive — brain/<id>/{scratch,browser_sandbox,swarm_view} with logs/tasks/steps + safe direct extensions
+    const sScratchTasks = path.join(sTopDir, "scratch", "tasks", "plan.md");
+    const sBrowserLogs = path.join(sTopDir, "browser_sandbox", "uploads", "logs", "a.txt");
+    const sSwarmSteps = path.join(sTopDir, "swarm_view", "steps", "s1.md");
+    fs.mkdirSync(path.dirname(sScratchTasks), { recursive: true });
+    fs.mkdirSync(path.dirname(sBrowserLogs), { recursive: true });
+    fs.mkdirSync(path.dirname(sSwarmSteps), { recursive: true });
+    fs.writeFileSync(sScratchTasks, "# plan\n", "utf-8");
+    fs.writeFileSync(sBrowserLogs, "ok\n", "utf-8");
+    fs.writeFileSync(sSwarmSteps, "# step\n", "utf-8");
+
+    for (const [label, tc] of [
+      ["read_file scratch/tasks/plan.md", { name: "read_file", args: { Path: sScratchTasks } }],
+      ["write_file scratch/tasks/plan.md", { name: "write_file", args: { Path: sScratchTasks, Content: "# ok", Overwrite: true } }],
+      ["read_file browser_sandbox/uploads/logs/a.txt", { name: "read_file", args: { Path: sBrowserLogs } }],
+      ["read_file swarm_view/steps/s1.md", { name: "read_file", args: { Path: sSwarmSteps } }],
+      ["shell cp to scratch/tasks/", { name: "run_command", args: { CommandLine: `cp /tmp/a.txt "${sScratchTasks}"`, WaitMsBeforeAsync: 5000 } }],
+      ["shell cp .csv to brain/<id>/", { name: "run_command", args: { CommandLine: `cp /tmp/data.csv "${path.join(sTopDir, "data.csv")}"`, WaitMsBeforeAsync: 5000 } }],
+      ["shell cp .zip to brain/<id>/", { name: "run_command", args: { CommandLine: `cp /tmp/out.zip "${path.join(sTopDir, "out.zip")}"`, WaitMsBeforeAsync: 5000 } }],
+      ["shell cp .mp4 to brain/<id>/", { name: "run_command", args: { CommandLine: `cp /tmp/demo.mp4 "${path.join(sTopDir, "demo.mp4")}"`, WaitMsBeforeAsync: 5000 } }]
+    ]) {
+      assert.equal(
+        runHook({ conversationId: sTop, toolCall: tc }).decision,
+        "allow",
+        `Row 3: ${label} must allow`
+      );
+    }
+
+    // S.5: Row 3 negative — `..` traversal, `$`, `.system_generated`, non-carveout subdirs, `.jsonl`, bare brain/<id> dir stay denied
+    for (const [label, tc] of [
+      ["scratch/../logs/transcript.jsonl", { name: "run_command", args: { CommandLine: `cat "${sTopDir}/scratch/../logs/transcript.jsonl"`, WaitMsBeforeAsync: 5000 } }],
+      ["scratch/../tasks/task-1.log", { name: "run_command", args: { CommandLine: `cat "${sTopDir}/scratch/../tasks/task-1.log"`, WaitMsBeforeAsync: 5000 } }],
+      ["scratch/$X/logs/foo", { name: "run_command", args: { CommandLine: `cat "${sTopDir}/scratch/$X/logs/foo"`, WaitMsBeforeAsync: 5000 } }],
+      ["brain/<id>/$SUB/logs/foo", { name: "run_command", args: { CommandLine: `cat "${sTopDir}/$SUB/logs/foo"`, WaitMsBeforeAsync: 5000 } }],
+      ["scratch/.system_generated/logs/foo", { name: "read_file", args: { Path: path.join(sTopDir, "scratch", ".system_generated", "logs", "foo") } }],
+      ["brain/<id>/logs/foo.txt", { name: "read_file", args: { Path: path.join(sTopDir, "logs", "foo.txt") } }],
+      ["brain/<id>/other/tasks/bar.txt", { name: "read_file", args: { Path: path.join(sTopDir, "other", "tasks", "bar.txt") } }],
+      ["shell cp .jsonl to brain/<id>/", { name: "run_command", args: { CommandLine: `cp /tmp/a.jsonl "${path.join(sTopDir, "data.jsonl")}"`, WaitMsBeforeAsync: 5000 } }],
+      ["shell cp -r bare brain/<id>/", { name: "run_command", args: { CommandLine: `cp -r "${sTopDir}" /tmp/exfil`, WaitMsBeforeAsync: 5000 } }]
+    ]) {
+      assert.equal(
+        runHook({ conversationId: sTop, toolCall: tc }).decision,
+        "deny",
+        `Row 3: ${label} must stay denied`
+      );
+    }
+
+    console.log("✓ Group S: Row 1 user-config force_ask & Row 3 brain subdir carve-out verified");
+  } finally {
+    fs.rmSync(sTmpDir, { recursive: true, force: true });
+    fs.rmSync(sTopDir, { recursive: true, force: true });
+    fs.rmSync(sChildDir, { recursive: true, force: true });
+    for (const f of [sMcpCfg, sCfg, sHooks, sMcpBak]) { try { fs.unlinkSync(f); } catch {} }
+  }
+}
+
 hermetic.cleanup();
 console.log("\n=================================================");
 console.log("ALL 2.0 PRETOOLUSE HOOK GOVERNANCE TESTS PASSED!");
