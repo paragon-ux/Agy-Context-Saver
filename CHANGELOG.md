@@ -5,7 +5,7 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.2.0] - 2026-11-23
 
 ### Changed
 - **Gemini Core Starter Prompt & Quota-Sink Remediations (`rules/AGENTS.md`, `skills/context-governance/SKILL.md`, `scripts/hook/*`, `lib/transcript-core.mjs`, `lib/access-policy.mjs`, `bin/agy-context.mjs`, `docs/*`, `tests/*`)**:

@@ -1,6 +1,6 @@
 # Architecture & Internals
 
-`Agy-Context-Saver` (`v2.1.2`) pairs a thin lazy-loaded `PreToolUse` hook router (`scripts/execution-guard-hook.mjs` dynamically importing `scripts/hook/{file,shell,task}-guard.mjs`) with a streaming transcript engine (`lib/transcript-core.mjs`, `bin/agy-context.mjs`), shared governance libraries (`lib/path-guards.mjs`, `lib/access-policy.mjs`, `lib/backoff.mjs`, `scripts/state-dir.mjs`, `scripts/rtk-run.mjs`), and **RTK (`>= 1.1.0`)**, a CLI proxy that compresses noisy shell and test output.
+`Agy-Context-Saver` (`v2.2.0`) pairs a thin lazy-loaded `PreToolUse` hook router (`scripts/execution-guard-hook.mjs` dynamically importing `scripts/hook/{file,shell,task}-guard.mjs`) with a streaming transcript engine (`lib/transcript-core.mjs`, `bin/agy-context.mjs`), shared governance libraries (`lib/path-guards.mjs`, `lib/access-policy.mjs`, `lib/backoff.mjs`, `scripts/state-dir.mjs`, `scripts/rtk-run.mjs`), and **RTK (`>= 1.1.0`)**, a CLI proxy that compresses noisy shell and test output.
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
@@ -18,7 +18,7 @@
 - Compresses noisy test, build, lint, container, and `git status`/`push`/`pull`/`fetch` stdout via the Narrow High-ROI Pre-Gate (`rtk hook antigravity`, configurable via `AGY_RTK_MODE=pregate|off`, default `pregate`).
 - Reads step spillovers and completed task logs (`rtk read`, including `cat` and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrites) and filters command output on demand (`rtk err`, `rtk summary`).
 
-### Agy-Context-Saver (`v2.1.2`)
+### Agy-Context-Saver (`v2.2.0`)
 - Enforces per-task Reactive Wakeup backoff, remote CI timers, and conditioned stall-watchdog auto-clamping on `manage_task` and `schedule` (`30s -> 75s -> 188s -> 469s -> 600s` per task/remote CI; `180s -> 450s -> 600s` per direct subagent), backed by a single global `PreToolUse` registration and a 5-strike `force_ask` circuit breaker.
 - Bounds large workspace `read_file` calls (unified `800` lines / `45 KiB` rule: auto-allowing `<= 800` lines & `<= 45 KiB`, safe multimodal media, and special files; denying omitted bounds on larger files while allowing explicit slices up to `800` lines) while leaving native `grep_search`, `find_by_name`, and `list_dir` unblocked on workspace paths.
 - Protects `.system_generated/` and the state directory (`getStateDir()`, `~/.local/state/agy-context-saver` on POSIX or `%LOCALAPPDATA%\agy-context-saver` on Windows) across all native file tools (including `multi_replace_file_content`) and symlinks, while cleanly allowing own-session `<ownBrainDir>/.system_generated/swarm/plan.json` (Swarm UI Overview), nested `logs/`/`tasks/`/`steps/` paths inside user `scratch/`/`browser_sandbox/`/`swarm_view/` brain subdirs (rejecting `..`, `$`, dotfiles, and `.system_generated/`), and top-level non-symlink `force_ask` edits to `mcp_config.json` / `config.json`.
