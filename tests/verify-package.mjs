@@ -42,11 +42,13 @@ const REQUIRED = [
   "docs/roadmap.md",
   "docs/RTK-SUPPORT-MATRIX.md",
   "docs/tools.md",
+  "docs/transcript-cli.md",
   "docs/assets/architecture-overview.svg",
   "docs/assets/default-vs-context-saver.svg",
   "docs/assets/hook-interception-flow.svg",
   "docs/assets/roadmap-phases.svg",
-  "docs/assets/transcript-access-governance.svg"
+  "docs/assets/transcript-access-governance.svg",
+  "docs/assets/transcript-cli-vs-native.svg"
 ];
 
 const RETIRED_DENYLIST = [

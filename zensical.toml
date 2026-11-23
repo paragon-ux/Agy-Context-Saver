@@ -12,6 +12,7 @@ nav = [
   { "Overview" = "index.md" },
   { "Installation & Setup" = "installation.md" },
   { "CLI & Hook Reference" = "tools.md" },
+  { "Transcript CLI" = "transcript-cli.md" },
   { "Lifecycle Governance" = "governance.md" },
   { "Architecture & Internals" = "architecture.md" },
   { "Installer Hardening" = "INSTALLER-HARDENING.md" },

@@ -29,6 +29,14 @@ Agy-Context-Saver layers a lightweight pre-tool hook on top of Google Antigravit
 
 ![Default Antigravity session vs. Antigravity with Agy-Context-Saver](docs/assets/default-vs-context-saver.svg)
 
+## Transcript CLI vs. native Antigravity
+
+Google Antigravity stores conversation history as raw log files on disk without a dedicated transcript tool. Rather than looking up session IDs, opening multi-megabyte logs directly, or matching cut-off outputs across a second file by hand, the agy-context transcript CLI finds recent sessions and child worker teams automatically, keeps inline summaries under 9.2 KB, pulls full step details on demand, checks session and team health, and lets parent sessions control child access or export redacted summaries:
+
+![Native Antigravity logs vs. agy-context Transcript CLI](docs/assets/transcript-cli-vs-native.svg)
+
+For subcommand workflows, output budgets, and operational notes, see the [Transcript CLI vs. native Antigravity guide](https://paragon-ux.github.io/Agy-Context-Saver/transcript-cli/).
+
 ## Documentation
 
 Read the full documentation at [paragon-ux.github.io/Agy-Context-Saver](https://paragon-ux.github.io/Agy-Context-Saver/):
@@ -36,6 +44,7 @@ Read the full documentation at [paragon-ux.github.io/Agy-Context-Saver](https://
 - [Overview](https://paragon-ux.github.io/Agy-Context-Saver/)
 - [Installation and setup](https://paragon-ux.github.io/Agy-Context-Saver/installation/)
 - [CLI and hook reference](https://paragon-ux.github.io/Agy-Context-Saver/tools/)
+- [Transcript CLI vs. native Antigravity](https://paragon-ux.github.io/Agy-Context-Saver/transcript-cli/)
 - [Lifecycle governance and transcript access control](https://paragon-ux.github.io/Agy-Context-Saver/governance/)
 - [Architecture and internals](https://paragon-ux.github.io/Agy-Context-Saver/architecture/)
 - [Installer hardening policy](https://paragon-ux.github.io/Agy-Context-Saver/INSTALLER-HARDENING/)

@@ -8,6 +8,7 @@
 
 - **[Installation and setup](installation.md):** Prerequisites, `npx` and local repository setup, status verification, and backup restoration.
 - **[CLI and hook reference](tools.md):** Subcommands, aliases, and flags for `agy-context transcript` (`health`, `read`, `query`, `step`, `list`, `export`, `access`) and `agy-context` (`status`, `setup`, `uninstall`, `restore-backups`).
+- **[Transcript CLI vs. native Antigravity](transcript-cli.md):** Side-by-side diagram and guide comparing `agy-context transcript` against inspecting raw Antigravity JSONL logs directly.
 - **[Lifecycle governance](governance.md):** Exponential backoff on background task checks, Reactive Wakeup coordination, 3-tier workspace inspection, and parent-controlled child transcript access.
 - **[Architecture and internals](architecture.md):** Single-surface `PreToolUse` topology, lazy-loaded `scripts/hook/` modules, `rtk hook antigravity`, shared `lib/` helpers, single-use capability grants, and single-pass streaming bounds.
 - **[Installer hardening](INSTALLER-HARDENING.md) & [RTK support matrix](RTK-SUPPORT-MATRIX.md):** Read-only preflight validation, SHA-256 binary verification, and RTK `config.toml` settings.
