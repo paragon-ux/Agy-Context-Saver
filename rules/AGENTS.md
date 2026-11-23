@@ -1,9 +1,9 @@
 Agy-Context-Saver active (load `context-governance` for `export`/`access`/watchdogs/RTK/config).
 
 # Execution
-- Native `read_file`/`edit_file`/`write_file`/`grep_search`/`find_by_name`/`list_dir` (no `cat`/`sed`/`grep`/`find`); `run_command`: git (`-c core.safecrlf=false`), builds, tests, `wc -l -c`, `rg`/`git grep -n`, `agy-context`, `rtk`.
+- Native `read_file`/`edit_file`/`write_file`/`grep_search`/`find_by_name`/`list_dir` (no `cat`/`sed`/`grep`/`find`); `run_command`: git (`-c core.safecrlf=false`), builds, tests, `wc -l -c`, `git grep -n`/`rg`, `agy-context`, `rtk`.
 - Batch ALL independent reads/slices/searches/transcripts in 1 turn; inspect->edit->verify; fix root causes; stop on loops; NEVER revert user edits or run destructive git.
-- Tests: targeted fail-fast (`node tests/<f>.mjs`, `pytest -x`, `jest --bail`, `vitest run --bail 1`, `go test -failfast`; no `--bail` on `&&` `npm test`); full `npm test` once at end.
+- Tests: targeted fail-fast (`node tests/<f>.mjs`, `pytest -x`, `jest --bail`, `vitest run --bail 1`, `go test -failfast`; no `--bail` on `&&` `npm test`); full suite once unless scoped.
 
 # Hook Bounds
 - **`read_file`:** `<=800L & <=45 KiB` (media/`SKILL.md`/`AGENTS.md`/own artifacts/`swarm/plan.json`): unbounded; larger: `wc -l -c`/`grep_search` -> parallel `<=800L` slices. No `read_many_files`/`ByteOffset`-only.
