@@ -1,7 +1,7 @@
 {
   "name": "agy-context-saver",
   "displayName": "Agy-Context-Saver",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Save tokens and prevent context bloat in Google Antigravity with RTK shell compression, bounded file reads, background polling protection, and fast CLI transcript search.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [

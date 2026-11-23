@@ -2,7 +2,7 @@
 
 Google Antigravity stores conversation history as raw JSON Lines files (`.system_generated/logs/transcript.jsonl` and `transcript_full.jsonl`) inside separate session folders for Antigravity Desktop, the `agy` CLI, and Antigravity IDE, without shipping a dedicated transcript tool. Inspecting those logs natively means locating a known session ID on disk, grepping `invoke_subagent` calls to trace child runs, and cross-referencing cut-off outputs between the compact and full log files by hand.
 
-`agy-context transcript` (`v2.2.0`) adds a structured, local-first CLI and `PreToolUse` governance layer on top of those same log files. It handles cross-session discovery, bounded Markdown and JSON summaries, single-pass full-step retrieval, session and team health checks, redacted exports, and parent-controlled child access with zero MCP tool schema overhead.
+`agy-context transcript` (`v2.2.1`) adds a structured, local-first CLI and `PreToolUse` governance layer on top of those same log files. It handles cross-session discovery, bounded Markdown and JSON summaries, single-pass full-step retrieval, session and team health checks, redacted exports, and parent-controlled child access with zero MCP tool schema overhead.
 
 ![Native Antigravity logs compared to the agy-context Transcript CLI](assets/transcript-cli-vs-native.svg)
 
