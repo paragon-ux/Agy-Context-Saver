@@ -141,7 +141,7 @@ export function denyRunningTask(taskId, convId, taskToken = "", ctx = {}) {
     const condTarget = taskKey || `task-${taskId}`;
     const condEx = convId && convId !== "global" ? `${convId}/${condTarget}` : condTarget;
     const timing = pollCount === 0 && lastPoll === 0
-      ? `Use manage_task(Action='status', TaskId='${condEx}') for Check #1 (immediate, 0s) or arm a conditioned watchdog`
+      ? `Use manage_task(Action='status', TaskId='${condEx}') for Check #1 (immediate, 0s) or Pure Yield`
       : elapsedMs >= reqSec * 1000
         ? `${elapsedSec}s elapsed — backoff window is satisfied for manage_task(Action='status'), but reading raw task logs while RUNNING remains prohibited`
         : `Diagnostic check #${pollCount + 1} requires at least ${reqSec}s elapsed (${elapsedSec}s elapsed, ${Math.max(1, Math.ceil((reqSec * 1000 - elapsedMs) / 1000))}s remaining)`;
@@ -151,7 +151,7 @@ export function denyRunningTask(taskId, convId, taskToken = "", ctx = {}) {
       result: recordDenialOrBreaker(
         session, bucket, now,
         (n) => `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: reading task log '${taskId}' attempted prematurely ${n} times during active backoff window. User confirmation required to proceed.`,
-        () => `Antigravity Execution Governance: Task '${taskId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. ${timing}. Keep a conditioned watchdog armed via schedule(DurationSeconds=${reqSec}, TimerCondition="${condEx}") so Reactive Wakeup (<SYSTEM_MESSAGE>) notifies you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
+        () => `Antigravity Execution Governance: Task '${taskId}' is actively RUNNING. Reading task logs in .system_generated during execution is strictly prohibited to prevent polling loops. ${timing}. Use Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE> on completion; manage_task(Action='kill') is always allowed at 0s if hung).`
       )
     };
   });
@@ -176,13 +176,12 @@ export function handleTaskOrSchedule(ctx) {
       if (!step.allowed) {
         const elapsedSec = Math.floor(step.elapsedMs / 1000);
         const remSec = Math.max(1, Math.ceil((Math.max(step.requiredSec, step.displayRequiredSec) * 1000 - step.elapsedMs) / 1000));
-        const condEx = convId && convId !== "global" ? `${convId}/${taskKey || "task-X"}` : (taskKey || "task-X");
         return {
           updatePollTime: false,
           result: recordDenialOrBreaker(
             session, bucket, now,
             (n) => `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: manage_task('${action}') called prematurely ${n} times during active backoff window across tasks [${session.taskIds.join(", ")}]. User confirmation required to proceed.`,
-            (n) => `Antigravity Execution Governance: Proportional Backoff Active (Level ${prevLevel}${taskKey ? ` for '${taskKey}'` : ""}, ${n} denial${n > 1 ? "s" : ""}). Diagnostic check #${prevLevel + 1} requires at least ${step.displayRequiredSec}s elapsed since previous check (${elapsedSec}s elapsed, ${remSec}s remaining). Keep a conditioned watchdog armed via schedule(DurationSeconds=${Math.max(30, step.displayRequiredSec)}, TimerCondition="${condEx}") so Reactive Wakeup (<SYSTEM_MESSAGE>) wakes you on completion or stall (manage_task(Action='kill') is always allowed immediately at 0s if hung).`
+            (n) => `Antigravity Execution Governance: Proportional Backoff Active (Level ${prevLevel}${taskKey ? ` for '${taskKey}'` : ""}, ${n} denial${n > 1 ? "s" : ""}). Diagnostic check #${prevLevel + 1} requires at least ${step.displayRequiredSec}s elapsed since previous check (${elapsedSec}s elapsed, ${remSec}s remaining). Use Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE> on completion; manage_task(Action='kill') is always allowed at 0s if hung).`
           )
         };
       }
@@ -224,7 +223,7 @@ export function handleTaskOrSchedule(ctx) {
       runScheduleBackoff(convId, ctx, {
         kind: "subagent_schedule", key: subKey, duration, hasValidCond,
         breakerReason: (n, s) => `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: direct subagent schedule polling denied ${n} times. Retry 'schedule' with DurationSeconds >= ${s.requiredSec} and TimerCondition="${condHint}", or confirm with the user to proceed.`,
-        denyReason: (n, s) => `Antigravity Execution Governance: ${!hasValidCond ? "Unconditioned subagent polling timers are prohibited." : `Direct subagent stall watchdog duration too short (${duration}s < 30s minimum).`} (${n} denial${n > 1 ? "s" : ""}). For direct invoke_subagent stall safety, retry 'schedule' with DurationSeconds >= ${s.requiredSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost if the subagent finishes normally.`
+        denyReason: (n, s) => `Antigravity Execution Governance: ${!hasValidCond ? "Unconditioned subagent polling timers are prohibited." : `Direct subagent stall watchdog duration too short (${duration}s < 30s minimum).`} (${n} denial${n > 1 ? "s" : ""}). Prefer Pure Yield (end turn; no 'schedule' timer; subagents notify automatically on completion), or if opting into a stall watchdog retry 'schedule' with DurationSeconds >= ${s.requiredSec} and TimerCondition="${condHint}".`
       });
     }
 
@@ -235,7 +234,7 @@ export function handleTaskOrSchedule(ctx) {
       runScheduleBackoff(convId, ctx, {
         kind: "task_schedule", key: taskKey, duration, hasValidCond,
         breakerReason: (n, s) => `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: schedule polling timer denied ${n} times. Retry 'schedule' with DurationSeconds >= ${s.requiredSec} and TimerCondition="${condHint}", or confirm with the user to proceed.`,
-        denyReason: (n, s, lvl) => `Antigravity Execution Governance: ${!hasValidCond ? "Unconditioned task polling timers are prohibited because they do not auto-cancel when the task finishes." : `Task watchdog timer duration too short (${duration}s < 15s minimum).`} (Level ${lvl}${taskKey ? ` for '${taskKey}'` : ""}, ${n} denial${n > 1 ? "s" : ""}). Retry 'schedule' with DurationSeconds >= ${s.requiredSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost on normal completion while protecting against stalls.`
+        denyReason: (n, s, lvl) => `Antigravity Execution Governance: ${!hasValidCond ? "Unconditioned task polling timers are prohibited because they do not auto-cancel when the task finishes." : `Task watchdog timer duration too short (${duration}s < 15s minimum).`} (Level ${lvl}${taskKey ? ` for '${taskKey}'` : ""}, ${n} denial${n > 1 ? "s" : ""}). Prefer Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE>), or if opting into a stall watchdog retry 'schedule' with DurationSeconds >= ${s.requiredSec} and TimerCondition="${condHint}".`
       });
     }
   }

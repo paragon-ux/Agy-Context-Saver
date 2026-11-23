@@ -31,6 +31,8 @@ const REQUIRED = [
   "scripts/state-dir.mjs",
   "rules/AGENTS.md",
   "skills/context-governance/SKILL.md",
+  "skills/context-governance/references/cli.md",
+  "skills/context-governance/references/guardrails.md",
   "docs/architecture.md",
   "docs/governance.md",
   "docs/index.md",

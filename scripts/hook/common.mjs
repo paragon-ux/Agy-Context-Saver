@@ -22,14 +22,15 @@ import {
 import {
   STATE_TTL_MS,
   inspectTranscriptLineageFromFile,
-  evaluateCallerTranscriptAccessFromLineage
+  evaluateCallerTranscriptAccessFromLineage,
+  isTopLevelUnrestrictedSession
 } from "../../lib/access-policy.mjs";
 
 export { STATE_TTL_MS };
 
-export const MAX_SAFE_SLICE_LINES = 300;
-export const MAX_SMALL_AUTO_ALLOW_LINES = 300;
-export const MAX_SMALL_AUTO_ALLOW_BYTES = 24 * 1024;
+export const MAX_SAFE_SLICE_LINES = 800;
+export const MAX_SMALL_AUTO_ALLOW_LINES = 800;
+export const MAX_SMALL_AUTO_ALLOW_BYTES = 45 * 1024;
 export const MAX_SPILLOVER_SLICE_LINES = 150;
 export const MAX_FULL_FILE_LINES = 800;
 export const MAX_FULL_FILE_BYTES = 45 * 1024;
@@ -289,6 +290,50 @@ export function evaluateCallerTranscriptAccess(convId, ctx = {}) {
 
 // --- Direct Internal State, Governance (1B.1), Benchmark & Cross-Conversation Guards ---
 
+const BRAIN_PREFIX_RE = /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+/gi;
+const USER_BRAIN_SUBDIRS = new Set(["scratch", "browser_sandbox", "swarm_view"]);
+const INTERNAL_BRAIN_SUBDIRS = new Set(["logs", "tasks", "steps"]);
+
+// Linear O(N) scan: reads full quote-concatenated shell word and blocks `$`, `..`, and `logs/`|`tasks/`|`steps/` under brain/<id>/ except inside user subdirs
+function isProtectedBrainSubpath(targetPath) {
+  BRAIN_PREFIX_RE.lastIndex = 0;
+  let m;
+  let scanPos = 0;
+  let activeQuote = "";
+  while ((m = BRAIN_PREFIX_RE.exec(targetPath)) !== null) {
+    const startIdx = m.index + m[0].length;
+    for (let i = scanPos; i < startIdx; i++) {
+      const ch = targetPath[i];
+      if (activeQuote) { if (ch === activeQuote) activeQuote = ""; }
+      else if (ch === "'" || ch === '"') activeQuote = ch;
+    }
+    scanPos = startIdx;
+    let quote = activeQuote;
+    let tail = "";
+    for (let i = startIdx; i < targetPath.length; i++) {
+      const ch = targetPath[i];
+      if (quote) {
+        if (ch === quote) { quote = ""; continue; }
+        tail += ch;
+        continue;
+      }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (/[\s;|&()<>`,]/.test(ch)) break;
+      tail += ch;
+    }
+    if (!tail) continue;
+    if (tail.includes("$")) return true;
+    const parts = tail.split(/[/\\]+/);
+    if (parts.includes("..")) return true;
+    const topSub = (parts[1] || "").toLowerCase();
+    if (USER_BRAIN_SUBDIRS.has(topSub)) continue;
+    for (let i = 1; i < parts.length - 1; i++) {
+      if (INTERNAL_BRAIN_SUBDIRS.has(parts[i].toLowerCase())) return true;
+    }
+  }
+  return false;
+}
+
 export function isProtectedInternalState(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
   if (
@@ -298,7 +343,7 @@ export function isProtectedInternalState(targetPath) {
     /['"]\.['"]\s*(?:[+.]\s*)?['"]system_gen/i.test(targetPath) ||
     /\btranscript(?:_full)?\.jsonl\b/i.test(targetPath) ||
     /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]?)?$/i.test(targetPath) ||
-    /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+.*(?:logs[\/\\]|tasks[\/\\]|steps[\/\\]|\$)/i.test(targetPath) ||
+    isProtectedBrainSubpath(targetPath) ||
     /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]+)?(?:\.(?!agents(?:$|[\/\\]))|[*?\[])/i.test(targetPath) ||
     /\b(?:transcript-access|agy-session-governance-state|agy-rtk-rewrite-cache)\.json\b/i.test(targetPath) ||
     /\bagy-session-[a-zA-Z0-9_-]+\.json\b/i.test(targetPath) ||
@@ -370,6 +415,30 @@ export function isProtectedGovernanceFileMutationPath(rawPath, convId = "global"
     }
   }
   return false;
+}
+
+const USER_EDITABLE_GEMINI_CONFIG_RE =
+  /\/\.gemini\/(?:config|antigravity(?:-cli|-ide)?)\/(?:mcp_config\.json|config\.json)$/i;
+
+// Top-level unrestricted sessions may edit non-symlink mcp_config.json / config.json via force_ask; hooks.json and all child sessions stay hard-deny
+export function isUserEditableGeminiConfigPath(rawPath, convId = "global", ctx = {}) {
+  if (!rawPath || typeof rawPath !== "string") return false;
+  const lineage = getCallerLineage(convId, ctx);
+  const access = evaluateCallerTranscriptAccess(convId, ctx);
+  if (!isTopLevelUnrestrictedSession(convId, lineage, access)) return false;
+  const cwd = ctx?.cwd || "";
+  const resolved = resolveHookPath(expandLeadingTilde(cleanFileToken(rawPath)), cwd);
+  if (!resolved) return false;
+  const canonical = resolveRealOrAncestorPath(resolved, { cwd });
+  if (
+    !USER_EDITABLE_GEMINI_CONFIG_RE.test(resolved.replace(/\\/g, "/")) ||
+    !USER_EDITABLE_GEMINI_CONFIG_RE.test(canonical.replace(/\\/g, "/"))
+  ) return false;
+  const cfgDir = path.dirname(resolved);
+  for (const seg of [path.dirname(cfgDir), cfgDir, resolved]) {
+    try { if (fs.lstatSync(seg).isSymbolicLink()) return false; } catch {}
+  }
+  return true;
 }
 
 export function isProtectedGovernanceDirPath(rawPath, cwd = "") {
@@ -635,7 +704,7 @@ export function getTaskState(match, convId, ctx = {}) {
 
 function buildInternalStateDenial(kindLabel, convId = "global", ctx = {}) {
   const accessEval = evaluateCallerTranscriptAccess(convId, ctx);
-  const taskLine = "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs.";
+  const taskLine = "- To inspect background tasks: Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE>). Do not read internal task logs.";
   if (!accessEval.allowed) {
     return (
       `Antigravity Execution Governance: Direct ${kindLabel} to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n` +
@@ -646,13 +715,13 @@ function buildInternalStateDenial(kindLabel, convId = "global", ctx = {}) {
   if (accessEval.mode === "self-only") {
     return (
       `Antigravity Execution Governance: Direct ${kindLabel} to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n` +
-      `- Cross-session transcript inspection is DISABLED for this session (mode: self-only). You may only inspect your own transcript via 'agy-context transcript read --id ${convId} --mode compact' via run_command.\n` +
+      `- Cross-session transcript inspection is DISABLED for this session (mode: self-only). You may only inspect your own transcript via 'agy-context transcript' (read-only '|' ok; no '&&'/';'): 'outline'/'query'/'read'/'step --id ${convId} --full' ('--out <path>' if >9 KB raw) via run_command.\n` +
       taskLine
     );
   }
   return (
     `Antigravity Execution Governance: Direct ${kindLabel} to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n` +
-    "- To inspect conversation transcripts: Run 'agy-context transcript read --id <uuid> --mode compact' or 'agy-context transcript query --id <uuid> --query \"<pattern>\" --summary' via run_command.\n" +
+    "- To inspect conversation transcripts: Run 'agy-context transcript' (read-only '|' ok; no '&&'/';') via run_command: 'list'/'health --parent|--id u1,u2 --json' -> parallel 'outline'/'query'/'read'/'step --id <uuid> --full' ('--out <path>' if >9 KB raw).\n" +
     taskLine
   );
 }

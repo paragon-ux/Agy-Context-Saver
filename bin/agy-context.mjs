@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver CLI (v2.1.2)
+ * Agy-Context-Saver CLI (v2.2.0)
  *
  * Local-first CLI for streaming transcript inspection, forensic querying,
  * context health diagnostics, and lifecycle management.
@@ -41,12 +41,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const pkgPath = path.resolve(__dirname, "../package.json");
 
+process.stdout.on("error", (err) => {
+  if (err?.code === "EPIPE") process.exit(0);
+  throw err;
+});
+
 function getVersion() {
   try {
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-    return pkg.version || "2.1.2";
+    return pkg.version || "2.2.0";
   } catch {
-    return "2.1.2";
+    return "2.2.0";
   }
 }
 
@@ -176,13 +181,18 @@ const SUBCOMMAND_HELP = {
   },
   health: {
     title: "transcript health (aliases: stats, info)",
-    usage: "agy-context transcript health [<id>] [options]",
+    usage: "agy-context transcript health [<id[,id...]>] [options]",
     body: [
-      "  --id <uuid>            Conversation UUID (or pass as first positional argument)",
+      "  --id <uuid[,uuid...]>  One or more conversation UUIDs (positional, comma-separated, or repeatable)",
+      "  --parent <uuid>        Audit health across all child sessions belonging to a parent UUID",
       "  --file <path>          Explicit transcript .jsonl path inside Antigravity brain roots",
       "  --json                 Emit structured JSON health metrics"
     ],
-    examples: ["agy-context transcript health", "agy-context transcript stats --json"]
+    examples: [
+      "agy-context transcript health",
+      "agy-context transcript stats --parent current --json",
+      "agy-context transcript info --id <uuid1>,<uuid2> --json"
+    ]
   },
   list: {
     title: "transcript list (alias: ls)",
@@ -481,7 +491,7 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryS
         else delete page.nextCursor;
       }
       if (isBatch) {
-        page.data = payload.data.slice(0, count);
+        if (Array.isArray(payload.data)) page.data = payload.data.slice(0, count);
         page.stepIndices = retained.map((entry) => entry.stepIndex);
         page.stepIndex = retained[0]?.stepIndex ?? null;
       } else if (isRead) {
@@ -516,7 +526,9 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryS
   } else if (payload.stepIndex !== undefined) {
     // A single step can carry its selected field without duplicating the entire raw step.
     const { step, data, ...header } = payload;
-    const fitted = tryFit({ ...header, data, clamped: true, ...meta(1) }) || tryFit({ ...header, clamped: true, ...meta(0) });
+    const fitted =
+      (step !== undefined && data !== undefined ? tryFit({ ...header, data, clamped: true, ...meta(1) }) : null) ||
+      tryFit({ ...header, clamped: true, ...meta(0) });
     if (fitted) return fitted;
   }
 
@@ -569,11 +581,13 @@ function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, {
   }
 
   const bytesWritten = Buffer.byteLength(content, "utf8");
+  const lineCount = content.length === 0 ? 0 : (content.split("\n").length - (content.endsWith("\n") ? 1 : 0));
   if (asJson) {
     const { text, steps, items, sessions, step, data, _serializedJson, _serializedMarkdown, _summaryDirection, ...compactMeta } = metadata ?? res;
-    console.log(JSON.stringify({ ...compactMeta, outputPath: safeOutPath, bytesWritten, charsWritten: content.length }, null, 2));
+    console.log(JSON.stringify({ ...compactMeta, outputPath: safeOutPath, lineCount, bytesWritten, charsWritten: content.length }, null, 2));
   } else {
-    console.log(customMessage || `[OK] Wrote ${label} (${bytesWritten} bytes) to: ${safeOutPath}`);
+    const msg = typeof customMessage === "function" ? customMessage({ lineCount, bytesWritten, safeOutPath }) : customMessage;
+    console.log(msg || `[OK] Wrote ${label} (${lineCount} lines, ${bytesWritten} bytes) to: ${safeOutPath}`);
   }
 }
 
@@ -744,12 +758,30 @@ const TRANSCRIPT_HANDLERS = {
   },
 
   async health(sub, rest) {
-    const { opts, positional } = parseTranscriptSubcommand(sub, rest, { booleans: ["json"], values: ["id", "file"] });
-    if (opts.id === undefined && positional.length === 1) opts.id = positional.shift();
-    pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
+    const { opts, positional } = parseTranscriptSubcommand(sub, rest, {
+      booleans: ["json"],
+      values: ["parent", "file"],
+      multiValues: ["id"]
+    });
+    if ((!opts.id || opts.id.length === 0) && !opts.parent && !opts.file && positional.length === 1) {
+      opts.id = [positional.shift()];
+    }
+    const healthIds = (opts.id || []).flatMap((id) => String(id || "").split(",")).map((id) => id.trim()).filter(Boolean);
+    pendingErrorGrantContext = {
+      subcommand: sub,
+      targetConvId: opts.parent
+        ? `parent:${String(opts.parent).trim()}`
+        : healthIds.length === 1 ? healthIds[0] : healthIds.length > 1 ? `multi:${[...new Set(healthIds)].sort().join(",")}` : null
+    };
     assertNoExtraPositionals(sub, positional);
+    if (opts.parent !== undefined && !String(opts.parent).trim()) {
+      throw new Error("Flag '--parent' must be a non-empty conversation ID or 'current'.");
+    }
     const res = await checkContextHealth({
-      conversationId: opts.id, filePath: validateExplicitFileFlag(opts.file), allowExternalPaths: false
+      conversationIds: opts.id || [],
+      parentId: opts.parent,
+      filePath: validateExplicitFileFlag(opts.file),
+      allowExternalPaths: false
     });
     if (res.isError) emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
     if (opts.json) {
@@ -817,7 +849,9 @@ const TRANSCRIPT_HANDLERS = {
     });
     emitTranscriptResult(res, asJson, rawOut, safeOutPath, {
       label: "sanitized transcript export",
-      customMessage: safeOutPath ? `[OK] Exported sanitized transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}` : undefined,
+      customMessage: safeOutPath
+        ? ({ lineCount, bytesWritten }) => `[OK] Exported sanitized transcript index (${res.exportedCount} session(s), ${lineCount} lines, ${bytesWritten} bytes) to: ${safeOutPath}`
+        : undefined,
       maxBytes: effectiveMaxChars
     });
   },
@@ -926,6 +960,7 @@ async function main() {
 }
 
 main().catch((err) => {
+  if (err?.code === "EPIPE") process.exit(0);
   const wantsJson = process.argv.includes("--json");
   emitError(err?.message || String(err), wantsJson);
 });

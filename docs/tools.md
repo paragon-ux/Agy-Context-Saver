@@ -1,6 +1,6 @@
 # CLI & Hook Reference
 
-`Agy-Context-Saver` (`v2.1.2`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the single global `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs` routing dynamically to `scripts/hook/{file,shell,task}-guard.mjs`), paired with **RTK (`>= 1.1.0`)** via the Narrow High-ROI Pre-Gate (`AGY_RTK_MODE=pregate|off`, default `pregate`).
+`Agy-Context-Saver` (`v2.2.0`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the single global `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs` routing dynamically to `scripts/hook/{file,shell,task}-guard.mjs`), paired with **RTK (`>= 1.1.0`)** via the Narrow High-ROI Pre-Gate (`AGY_RTK_MODE=pregate|off`, default `pregate`).
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
@@ -12,9 +12,8 @@ Native `grep_search`, `find_by_name`, and `list_dir` run directly on workspace p
 
 | Target | Enforced Guardrail |
 | :--- | :--- |
-| **Small workspace files & media** | Files $\le 300$ lines and $\le 24\text{ KiB}$, safe multimodal media (`.png`, `.jpg`, `.webp`, `.pdf`, audio/video), and Antigravity special files (`SKILL.md`, `AGENTS.md`, own brain artifacts, `swarm_view/`, `.gemini/config/`) need no line bounds. |
-| **Large workspace files (bounded slice)** | Pass `StartLine` and/or `EndLine` ($\le 300$ lines, EOF-clamped via $1\text{ MiB}$ newline scan, single-bound supported) to `read_file` / `view_file`. `read_many_files` and `ByteOffset`-only reads are denied. |
-| **Medium workspace files (full-file audit)** | Files $\le 800$ lines and $\le 45\text{ KiB}$ allow explicit `StartLine: 1, EndLine >= TotalLines`. |
+| **Workspace files ($\le 800\text{L}$ & $\le 45\text{ KiB}$) & media** | Files $\le 800$ lines and $\le 45\text{ KiB}$, safe multimodal media (`.png`, `.jpg`, `.webp`, `.pdf`, audio/video), and Antigravity special files (`SKILL.md`, `AGENTS.md`, own brain artifacts, own non-symlink `.system_generated/swarm/plan.json`, `swarm_view/`, `.gemini/config/`) need no line bounds. |
+| **Large workspace files ($> 800\text{L}$ or $> 45\text{ KiB}$)** | Omitted bounds are denied; pass explicit `StartLine` and/or `EndLine` ($\le 800$ lines, EOF-clamped via $1\text{ MiB}$ newline scan, single-bound supported) to `read_file` / `view_file` (batch parallel $\le 800\text{L}$ slices in one turn when full coverage is needed). `read_many_files` and `ByteOffset`-only reads are denied. |
 | **Spillovers & completed task logs** | Both `.system_generated/steps/<step>/output.txt` spillovers and `COMPLETED` `tasks/<taskId>.log` files allow bounded `read_file` ($\le 150\text{L}$) or single unchained `rtk read <path>` (`cat` and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; `--head-lines 150` / `--tail-lines 150` required above `45 KiB`; `RUNNING` task logs are always denied). |
 
 ---
@@ -22,20 +21,22 @@ Native `grep_search`, `find_by_name`, and `list_dir` run directly on workspace p
 ## 1. `agy-context transcript health`
 
 - **Aliases:** `stats`, `info`
-- **Usage:** `agy-context transcript health [<id>] [--id <uuid>] [--file <path>] [--json]`
+- **Usage:** `agy-context transcript health [<id[,id...]>] [--id <uuid[,uuid...]>] [--parent <uuid|current>] [--file <path>] [--json]`
 
-Streams `transcript.jsonl` to report step counts, user turns, tool call counts, transcript byte size, per-task and direct-subagent backoff-aware busy-polling events (`>= 30s` per task and `>= 180s` per conditioned direct subagent stall watchdog, while flagging `/swarm` one-shot polls and unconditioned loops), and local RTK status.
+Streams `transcript.jsonl` to report step counts, user turns, tool call counts, transcript byte size, per-task and direct-subagent backoff-aware busy-polling events (`>= 30s` per task and `>= 180s` per conditioned direct subagent stall watchdog, while flagging `/swarm` one-shot polls and unconditioned loops), and local RTK status. Passing multiple `--id` values (comma-separated, repeatable, or positional) or `--parent <uuid|current>` emits a combined cohort health table (or structured `sessions[]` + `totals` JSON) in a single call.
 
 | Flag / Argument | Value | Required | Description |
 | :--- | :---: | :---: | :--- |
-| `[<id>]` / `--id` | `<uuid>` | No* | Conversation UUID as positional arg or `--id`. (*Inside Antigravity sessions, `PreToolUse` auto-injects `--id <callerConvId>` in both `open` and `self-only` modes when omitted or `current`; required only in direct external CLI shells when `>= 2` sessions ran in the last 5 minutes without `GEMINI_CONVERSATION_ID`.) |
+| `[<id[,id...]>]` / `--id` | `<uuid[,uuid...]>` | No* | One or more conversation UUIDs (positional, comma-separated, or repeatable `--id`). (*Inside Antigravity sessions, `PreToolUse` auto-injects `--id <callerConvId>` in both `open` and `self-only` modes when omitted or `current`; required only in direct external CLI shells when `>= 2` sessions ran in the last 5 minutes without `GEMINI_CONVERSATION_ID`. Multi-session `--id` is disabled in `self-only` mode.) |
+| `--parent` | `<uuid \| current>` | No | Audit health across all child sessions belonging to `<uuid>` in one call (disabled in `self-only` mode). |
 | `--file` | `<path>` | No | Explicit path to `transcript.jsonl` inside Antigravity's brain roots (`antigravity`, `antigravity-cli`, `antigravity-ide`; disabled under `self-only` mode outside caller's session). |
 | `--json` | `(none)` | No | Output JSON instead of Markdown. |
 
 ```bash
 agy-context transcript health
 agy-context transcript stats 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc
-agy-context transcript info --id 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --json
+agy-context transcript info --parent 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --json
+agy-context transcript health --id <uuid1>,<uuid2> --json
 ```
 
 | Status | Condition | Action |
@@ -77,7 +78,7 @@ agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --mode full --f
 
 ### Output budgets
 
-`read`, `outline`, `query`, `tools`, and `export --sanitized` default to 9,200 UTF-8 bytes. `step` defaults to 24,000 bytes. The deep tier (`--full`, `--out`) allows up to 524,288 bytes. An explicit `--max-chars` budget includes serialization and the trailing newline. With `--out`, stdout reports the write and the limit applies to the file.
+`read`, `outline`, `query`, `tools`, and `export --sanitized` default to 9,200 UTF-8 bytes. `step` defaults to 24,000 bytes. The deep tier (`--full`, `--out`) allows up to 524,288 bytes. An explicit `--max-chars` budget includes serialization and the trailing newline. With `--out`, stdout reports the write and the limit applies to the file. To stay under Antigravity's `~10 KB` (`9,892 B`) `run_command` stdout spillover ceiling, read-only `agy-context transcript` commands may pipe stdout through stdin-only filters (`| rg`, `| grep`, `| head`, `| tail`, `| jq`, `| wc`, `| cut`, `| sort`, `| uniq`, `| tr`, plus `2>/dev/null`); for unfiltered dumps `> 9.2 KB`, pass `--out <path>`, which prints exact `lineCount` and `bytesWritten` so you can immediately slice with parallel `<= 800L` `read_file` calls (`45 KiB` each).
 
 `--out` accepts any safe workspace-relative `.md`, `.json`, or `.txt` path outside protected state, governance, and benchmark directories. If you write artifacts under a `scratch/` folder, add `scratch/` to `.gitignore` or `.git/info/exclude` so exports stay untracked. (In `self-only` child mode, `--out` is scoped to `<workspace>/scratch/` or `<brainDir>/<convId>/scratch/`.)
 
@@ -102,13 +103,13 @@ Searches conversation transcripts by regex or substring, hydrating truncated fie
 | `--mode` | `auto \| compact \| full` | `auto` | `auto` scans `transcript.jsonl` and hydrates `truncated_fields` from `transcript_full.jsonl` when matched. |
 | `--start` / `--end` | `<N>` | `(none)` | Inclusive `step_index` bounds. |
 | `--last-turns` | `<N>` | `(none)` | Restrict search to the last `N` turns (aliases: `--last`, `--tail`). |
-| `--limit` | `<N>` | `5` (`30` w/ `--summary`, up to `500` on explicit range/`tools`, `2000` w/ `--full`/`--out`) | Maximum matching steps to return. |
-| `--summary` / `--outline` | `(none)` | `false` | Print 1-line timeline bullets with `[ERROR]`, `[spill: steps/<N>]`, and `[tools: ...]` tags (or compact `{ step_index, type, role, created_at, status, summary }` items with `--json`). |
+| `--limit` | `<N>` | `5` (`100` w/ `--summary`, `500` w/ `--full` or explicit range/`tools`, `2000` on `outline`/`tools` w/ `--full`/`--out`) | Maximum matching steps to return. |
+| `--summary` / `--outline` | `(none)` | `false` | Print compact 1-line timeline bullets with `[ERROR]`, `[spill: steps/<N>]`, and `[tools: ...]` tags (or compact `{ step_index, type, role, created_at, status, summary }` items with `--json`); `--full` unlocks the `512 KB` / `500`-step budget while keeping individual bullets compact unless `--full-args` is passed. |
 | `--include-tools` | `(none)` | `false` (`true` on `grep`/`search`/`find`/`tools`) | Search and display tool call names and arguments. |
 | `--full-args` | `(none)` | `false` | Print full tool call arguments (unclamping `LARGE_BODY_ARG_KEYS` when combined with `--full`). |
 | `--field` | `<spec>` | `all` (`tool_args` on `tools`) | Project a single field: `content`, `thinking`, `tool_calls`, `tool_args`, `tool_args:<Key>`, or `all`. |
 | `--include-thinking` | `(none)` | `false` | Search and include thinking blocks. |
-| `--full` | `(none)` | `false` | Opt into deep `512 KB` ceiling with expanded previews and untruncated field rendering. |
+| `--full` | `(none)` | `false` | Opt into deep `512 KB` ceiling and `500`-step default cap (keeping `--summary` lines compact and `LARGE_BODY_ARG_KEYS` summarized unless `--full-args` is passed). |
 | `--max-chars` | `<N>` | `(tier default)` | Override the serialized UTF-8 output budget (up to `524,288` bytes). With `--out`, the budget applies to the artifact. |
 | `--out` / `--output` | `<path>` | `(none)` | Write deep results (up to `512 KB`, including bounded `--json` artifacts with `jsonTruncated` metadata) to a safe `.md`/`.json`/`.txt` artifact outside protected directories and print a compact summary to stdout. |
 | `--json` / `--file` | `(none)` / `<path>` | `(none)` | Output JSON or read an explicit `.jsonl` file path. |
@@ -127,7 +128,7 @@ agy-context transcript outline 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --full --out
 
 **Usage:** `agy-context transcript step [<N|N,M|N-M|N..M>] [<id>] [options]`
 
-Extracts untruncated fields from `transcript_full.jsonl` (falling back to normalized `transcript.jsonl` records when needed) for a single step, a comma-separated list of steps, or a step range, with optional line slicing across every `--field` mode. Rendered Markdown and JSON outputs normalize `\r\n`/`\r` line endings and collapse excess blank lines, trim `<thinking>` trailing newlines before `>` quoting, strip leading duplicate `Created At:`/`Completed At:` headers on non-dialogue steps (including immediately after hook-rewrite or spillover truncation notices while preserving those notices, exit-code lines, and spillover URLs), pretty-print bounded (`<= 64 KB`) single-line JSON outputs in Markdown content renders (including `--field content` and `--full`), and decode compact `transcript.jsonl` `tool_calls[].args` encodings (gated strictly on compact-sourced steps).
+Extracts untruncated fields from `transcript_full.jsonl` (falling back to normalized `transcript.jsonl` records when needed) for a single step, a comma-separated list of steps, or a step range, with optional line slicing across every `--field` mode. Rendered Markdown and JSON outputs normalize `\r\n`/`\r` line endings and collapse excess blank lines, trim `<thinking>` trailing newlines before `>` quoting, strip leading duplicate `Created At:`/`Completed At:` headers on non-dialogue steps (including immediately after hook-rewrite or spillover truncation notices while preserving those notices, exit-code lines, and spillover URLs), pretty-print bounded (`<= 64 KB`) single-line JSON outputs in Markdown content renders (including `--field content` and `--full`), and decode compact `transcript.jsonl` `tool_calls[].args` encodings (gated strictly on compact-sourced steps). JSON output (`--json`) is deduplicated: `--field all` emits `step` (`steps[].step` in batch mode), while projected fields emit only `data` (`steps[].data` in batch mode) without repeating raw steps or a duplicate top-level `data` array.
 
 | Flag / Argument | Value | Default | Description |
 | :--- | :---: | :---: | :--- |

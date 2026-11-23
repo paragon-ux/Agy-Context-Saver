@@ -44,6 +44,7 @@ import {
   isProtectedInternalState,
   isInsideAgyContextSaverRepo,
   isProtectedGovernanceFileMutationPath,
+  isUserEditableGeminiConfigPath,
   isProtectedGovernanceDirPath,
   isProtectedBenchmarkFilePath,
   isBenchmarkGuardDisabled,
@@ -160,6 +161,19 @@ function spawnRtk(bin, args, opts = {}) {
 
 const getFileMtimeMsSafe = (p) => { if (!p) return 0; try { return Math.trunc(fs.statSync(p).mtimeMs); } catch { return 0; } };
 
+function extractRtkSemver(versionStr) {
+  const match = String(versionStr || "").match(/(\d+\.\d+\.\d+)/);
+  return match ? match[1] : "";
+}
+
+function isRtkVersionBelow(versionStr, targetMajor, targetMinor) {
+  const match = String(versionStr || "").match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return true;
+  const major = parseInt(match[1], 10);
+  const minor = parseInt(match[2], 10);
+  return major < targetMajor || (major === targetMajor && minor < targetMinor);
+}
+
 export function resolveCachedHostEnv() {
   const pathEnv = process.env.PATH || process.env.Path || "";
   const localCandidate = getLocalRtkCandidate();
@@ -173,21 +187,24 @@ export function resolveCachedHostEnv() {
     }
   } catch {}
 
+  const hasValidCachedResolved = (v) => v === null || (Boolean(v) && typeof v.version === "string");
   if (parsed && parsed.pathEnv === pathEnv && parsed.localCandidate === localCandidate && (parsed.winLauncher || "") === winLauncher && typeof parsed.pathCandidate === "string") {
     const fastKey = `${parsed.pathCandidate}::${localCandidate}::${getFileMtimeMsSafe(parsed.pathCandidate)}::${getFileMtimeMsSafe(localCandidate)}::${winLauncher}`;
-    if (parsed.key === fastKey) { cachedRtkKey = fastKey; cachedRtkValue = parsed.resolved ?? null; return { rtk: cachedRtkValue }; }
+    if (parsed.key === fastKey && hasValidCachedResolved(parsed.resolved ?? null)) { cachedRtkKey = fastKey; cachedRtkValue = parsed.resolved ?? null; return { rtk: cachedRtkValue }; }
   }
 
   const pathCandidate = findExecutableOnPath("rtk");
   const key = `${pathCandidate}::${localCandidate}::${getFileMtimeMsSafe(pathCandidate)}::${getFileMtimeMsSafe(localCandidate)}::${winLauncher}`;
   if (cachedRtkKey === key && cachedRtkValue !== undefined) return { rtk: cachedRtkValue };
-  if (parsed && parsed.key === key && typeof parsed.pathEnv !== "string") { cachedRtkKey = key; cachedRtkValue = parsed.resolved ?? null; return { rtk: cachedRtkValue }; }
+  if (parsed && parsed.key === key && typeof parsed.pathEnv !== "string" && hasValidCachedResolved(parsed.resolved ?? null)) { cachedRtkKey = key; cachedRtkValue = parsed.resolved ?? null; return { rtk: cachedRtkValue }; }
 
   const opts = { encoding: "utf-8", timeout: 2000, windowsHide: true };
   let resolved = null;
   if (pathCandidate) {
     const r = spawnRtk(pathCandidate, ["--version"], opts);
-    if (!r.error && r.status === 0 && isCompatibleRtkVersion(r.stdout)) resolved = { exe: pathCandidate, prefix: "rtk" };
+    if (!r.error && r.status === 0 && isCompatibleRtkVersion(r.stdout)) {
+      resolved = { exe: pathCandidate, prefix: "rtk", version: extractRtkSemver(r.stdout) };
+    }
   }
   if (!resolved && localCandidate) {
     const r = spawnRtk(localCandidate, ["--version"], opts);
@@ -196,7 +213,7 @@ export function resolveCachedHostEnv() {
       const prefix = os.platform() === "win32" && winLauncher
         ? `node "${winLauncher.replace(/\\/g, "/")}"`
         : (/\s/.test(normLocal) ? `"${normLocal}"` : normLocal);
-      resolved = { exe: localCandidate, prefix };
+      resolved = { exe: localCandidate, prefix, version: extractRtkSemver(r.stdout) };
     }
   }
 
@@ -604,6 +621,7 @@ const OBVIOUS_MUTATION_VERBS = new Set([
   "rm", "del", "remove-item", "mv", "cp", "ln", "tee", "truncate", "shred", "dd", "patch", "chmod", "chown", "sed", "perl", "find", "install"
 ]);
 const DIR_MUTATION_VERBS = new Set(["rm", "del", "remove-item", "mv", "cp", "ln", "chmod", "chown", "find"]);
+const DESTRUCTIVE_CONFIG_VERBS = new Set(["rm", "del", "remove-item", "mv", "ln", "truncate", "shred", "dd", "chmod", "chown", "find"]);
 
 function extractVerbMutationTargets(verb, tokens, cmdIdx) {
   const args = tokens.slice(cmdIdx + 1);
@@ -675,12 +693,19 @@ function checkShellMutations(segments, convId, ctx, depth = 0) {
   if (depth > 4) return null;
   const cwd = ctx?.cwd || "";
   const benchDisabled = isBenchmarkGuardDisabled(convId, ctx);
+  let pendingForceAsk = null;
+  const record = (res) => {
+    if (!res) return null;
+    if (res.decision === "deny") return res;
+    if (!pendingForceAsk) pendingForceAsk = res;
+    return null;
+  };
 
   for (let segIdx = 0; segIdx < segments.length; segIdx++) {
     const seg = segments[segIdx];
     const tokens = getSegTokens(seg);
     const writeRedirects = seg.hasWriteRedirect ? extractRedirectTargets(tokens, true) : [];
-    const govChecks = writeRedirects.map((tok) => ({ tok, isDirVerb: false }));
+    const govChecks = writeRedirects.map((tok) => ({ tok, isDirVerb: false, isDestructive: false }));
     const benchChecks = [...writeRedirects];
 
     for (const startPos of collectSegmentCommandStartIndices(tokens)) {
@@ -689,28 +714,36 @@ function checkShellMutations(segments, convId, ctx, depth = 0) {
       const verb = normalizeCmdName(tokens[cmdIdx].value);
       if (!OBVIOUS_MUTATION_VERBS.has(verb)) continue;
       const isDirVerb = DIR_MUTATION_VERBS.has(verb);
+      const isDestructive = DESTRUCTIVE_CONFIG_VERBS.has(verb);
       const { govTargets, benchTargets } = extractVerbMutationTargets(verb, tokens, cmdIdx);
-      for (const tok of govTargets) govChecks.push({ tok, isDirVerb });
+      for (const tok of govTargets) govChecks.push({ tok, isDirVerb, isDestructive });
       benchChecks.push(...benchTargets);
     }
 
-    for (const { tok, isDirVerb } of govChecks) {
-      if (isProtectedGovernanceFileMutationPath(tok, convId, ctx) || (isDirVerb && isProtectedGovernanceDirPath(tok, cwd))) {
+    for (const { tok, isDirVerb, isDestructive } of govChecks) {
+      if (isDirVerb && isProtectedGovernanceDirPath(tok, cwd)) {
         return { decision: "deny", reason: "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited." };
+      }
+      if (isProtectedGovernanceFileMutationPath(tok, convId, ctx)) {
+        if (!isDestructive && isUserEditableGeminiConfigPath(tok, convId, ctx)) {
+          record({ decision: "force_ask", reason: `[GEMINI CONFIG MUTATION] Shell edit to Antigravity user configuration '${tok}' requires explicit user confirmation.` });
+        } else {
+          return { decision: "deny", reason: "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited." };
+        }
       }
     }
     if (!benchDisabled && benchChecks.some((tok) => isProtectedBenchmarkFilePath(tok, cwd))) {
-      return { decision: "force_ask", reason: "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination. Set AGY_DISABLE_BENCHMARK_GUARD=1 to disable this guard for non-evaluation repos." };
+      record({ decision: "force_ask", reason: "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination. Set AGY_DISABLE_BENCHMARK_GUARD=1 to disable this guard for non-evaluation repos." });
     }
 
     const wrap = extractSimpleWrappedScript(seg.text);
-    if (wrap?.innerScript) { const r = checkShellMutations(splitShellSegments(wrap.innerScript), convId, ctx, depth + 1); if (r) return r; }
-    for (const sub of seg.subshells || []) { const r = checkShellMutations(splitShellSegments(sub), convId, ctx, depth + 1); if (r) return r; }
+    if (wrap?.innerScript) { const d = record(checkShellMutations(splitShellSegments(wrap.innerScript), convId, ctx, depth + 1)); if (d) return d; }
+    for (const sub of seg.subshells || []) { const d = record(checkShellMutations(splitShellSegments(sub), convId, ctx, depth + 1)); if (d) return d; }
     if (seg.heredocBodies?.length && segmentPipesToShell(segments, segIdx)) {
-      for (const hd of seg.heredocBodies) if (hd) { const r = checkShellMutations(splitShellSegments(hd), convId, ctx, depth + 1); if (r) return r; }
+      for (const hd of seg.heredocBodies) if (hd) { const d = record(checkShellMutations(splitShellSegments(hd), convId, ctx, depth + 1)); if (d) return d; }
     }
   }
-  return null;
+  return pendingForceAsk;
 }
 
 // ============================================================================
@@ -812,7 +845,7 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
     : sub === "step"
       ? new Set(["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "line-start", "line-end", "max-chars", "out", "output", "file"])
       : ["health", "stats", "info"].includes(sub)
-        ? new Set(["id", "file"])
+        ? new Set(["id", "parent", "file"])
         : ["list", "ls"].includes(sub)
           ? new Set(["limit", "parent"])
           : ["export", "dump"].includes(sub)
@@ -842,6 +875,7 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
     opts[key] = val;
   }
 
+  const isMultiCapable = ["export", "dump", "health", "stats", "info"].includes(sub);
   const pos = [...positionals];
   if (["query", "grep", "search", "find", "tools"].includes(sub)) {
     if (opts.query === undefined && pos.length) opts.query = pos.shift();
@@ -850,10 +884,10 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
     if (opts.step === undefined && pos.length) opts.step = pos.shift();
     if (opts.id === undefined && pos.length) { opts.id = pos.shift(); idValues.push(opts.id); }
   } else if (["read", "outline", "summary", "health", "stats", "info", "export", "dump"].includes(sub)) {
-    const canTakeId = (sub !== "export" && sub !== "dump") || (opts.parent === undefined && opts.file === undefined);
+    const canTakeId = !isMultiCapable || (opts.parent === undefined && opts.file === undefined);
     if (opts.id === undefined && canTakeId && pos.length) {
       opts.id = pos.shift();
-      if (sub === "export" || sub === "dump") String(opts.id).split(",").map((s) => s.trim()).filter(Boolean).forEach((p) => idValues.push(p));
+      if (isMultiCapable) String(opts.id).split(",").map((s) => s.trim()).filter(Boolean).forEach((p) => idValues.push(p));
       else idValues.push(opts.id);
     }
   }
@@ -861,7 +895,7 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
 
   const uniqueIds = [...new Set(idValues.map((s) => String(s).trim()).filter(Boolean))];
   return {
-    targetId: (sub === "export" || sub === "dump") && uniqueIds.length === 1 ? uniqueIds[0] : (opts.id ? String(opts.id).trim() : null),
+    targetId: isMultiCapable && uniqueIds.length === 1 ? uniqueIds[0] : (opts.id ? String(opts.id).trim() : null),
     targetIds: uniqueIds,
     targetParent: opts.parent !== undefined ? String(opts.parent).trim() : null,
     outPaths,
@@ -870,16 +904,246 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
   };
 }
 
+const SAFE_TRANSCRIPT_FILTER_CMDS = new Set(["head", "tail", "grep", "egrep", "fgrep", "rg", "wc", "jq", "cut", "sort", "uniq", "tr"]);
+const GREP_FILTER_SHORT_BOOL = new Set(["i", "v", "n", "c", "E", "F", "P", "G", "w", "x", "o", "q", "s", "S", "h", "H", "a", "U"]);
+const GREP_FILTER_SHORT_NUM = new Set(["m", "A", "B", "C"]);
+const GREP_FILTER_LONG_BOOL = new Set([
+  "--ignore-case", "--smart-case", "--case-sensitive", "--invert-match", "--line-number", "--no-line-number",
+  "--count", "--only-matching", "--fixed-strings", "--extended-regexp", "--basic-regexp", "--perl-regexp",
+  "--word-regexp", "--line-regexp", "--quiet", "--silent", "--no-heading", "--no-filename", "--with-filename",
+  "--multiline", "--text", "--passthru", "--passthrough", "--json", "--vimgrep", "--stats"
+]);
+const GREP_FILTER_LONG_NUM = new Set(["--max-count", "--after-context", "--before-context", "--context", "--max-columns"]);
+const JQ_FILTER_SHORT_BOOL = new Set(["r", "c", "s", "R", "S", "e", "a", "M", "n", "j"]);
+const JQ_FILTER_LONG_BOOL = new Set([
+  "--raw-output", "--compact-output", "--slurp", "--raw-input", "--sort-keys",
+  "--exit-status", "--ascii-output", "--monochrome-output", "--null-input", "--join-output", "--tab"
+]);
+const WC_FILTER_SHORT_BOOL = new Set(["l", "w", "c", "m", "L"]);
+const WC_FILTER_LONG_BOOL = new Set(["--lines", "--words", "--bytes", "--chars", "--max-line-length"]);
+const CUT_FILTER_SHORT_BOOL = new Set(["s", "n", "z"]);
+const CUT_FILTER_SHORT_VAL = new Set(["d", "f", "c", "b"]);
+const CUT_FILTER_LONG_BOOL = new Set(["--only-delimited", "--complement", "--zero-terminated"]);
+const CUT_FILTER_LONG_VAL = new Set(["--delimiter", "--fields", "--characters", "--bytes", "--output-delimiter"]);
+const SORT_FILTER_SHORT_BOOL = new Set(["r", "n", "u", "f", "h", "V", "b", "d", "i", "M", "R", "s", "z", "c", "C", "g"]);
+const SORT_FILTER_SHORT_VAL = new Set(["k", "t"]);
+const SORT_FILTER_LONG_BOOL = new Set(["--reverse", "--numeric-sort", "--unique", "--ignore-case", "--human-numeric-sort", "--version-sort", "--stable", "--zero-terminated", "--general-numeric-sort"]);
+const SORT_FILTER_LONG_VAL = new Set(["--key", "--field-separator"]);
+const UNIQ_FILTER_SHORT_BOOL = new Set(["c", "d", "D", "u", "i", "z"]);
+const UNIQ_FILTER_SHORT_NUM = new Set(["f", "s", "w"]);
+const UNIQ_FILTER_LONG_BOOL = new Set(["--count", "--repeated", "--all-repeated", "--unique", "--ignore-case", "--zero-terminated"]);
+const UNIQ_FILTER_LONG_NUM = new Set(["--skip-fields", "--skip-chars", "--check-chars"]);
+const TR_FILTER_SHORT_BOOL = new Set(["d", "s", "c", "C", "t"]);
+const TR_FILTER_LONG_BOOL = new Set(["--delete", "--squeeze-repeats", "--complement", "--truncate-set1"]);
+
+function isSafeReadOnlyTranscriptFilterSegment(seg) {
+  if (!seg || (seg.leadingSep !== "|" && seg.leadingSep !== "|&")) return false;
+  if (seg.hasHeredoc || seg.hasSubshell) return false;
+  const rawTokens = getSegTokens(seg);
+  if (!rawTokens || rawTokens.length === 0) return false;
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(rawTokens[0].raw)) return false;
+  const clean = filterAllowedStderrRedirects(rawTokens);
+  if (!clean || clean.length === 0) return false;
+
+  const cmdRaw = clean[0].value;
+  if (!cmdRaw || /[/\\]/.test(cmdRaw)) return false;
+  const cmd = cmdRaw.toLowerCase();
+  if (!SAFE_TRANSCRIPT_FILTER_CMDS.has(cmd)) return false;
+
+  const args = clean.slice(1).map((t) => t.value);
+  let afterDD = false;
+  let posCount = 0;
+
+  if (cmd === "head" || cmd === "tail") {
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") return false;
+      if (/^-\d+$/.test(v)) continue;
+      if (v.startsWith("--")) {
+        if (["--quiet", "--silent", "--verbose", "--zero-terminated"].includes(v)) continue;
+        const eq = v.indexOf("=");
+        const fl = eq === -1 ? v : v.slice(0, eq);
+        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
+        if (fl === "--lines") { if (!/^[+-]?\d+$/.test(val || "")) return false; continue; }
+        if (fl === "--bytes") { if (!/^[+-]?\d+[bkmKMGTPEZY]?$/.test(val || "")) return false; continue; }
+        return false;
+      }
+      for (let j = 1; j < v.length; j++) {
+        const ch = v[j];
+        if (ch === "q" || ch === "v" || ch === "z") continue;
+        if (ch === "n" || ch === "c") {
+          const val = j + 1 < v.length ? v.slice(j + 1) : args[++i];
+          const re = ch === "n" ? /^[+-]?\d+$/ : /^[+-]?\d+[bkmKMGTPEZY]?$/;
+          if (!re.test(val || "")) return false;
+          break;
+        }
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (cmd === "grep" || cmd === "egrep" || cmd === "fgrep" || cmd === "rg") {
+    let hasExplicitPattern = false;
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") { posCount++; continue; }
+      if (v.startsWith("--")) {
+        if (GREP_FILTER_LONG_BOOL.has(v)) continue;
+        const eq = v.indexOf("=");
+        const fl = eq === -1 ? v : v.slice(0, eq);
+        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
+        if (val === undefined) return false;
+        if (fl === "--regexp") { hasExplicitPattern = true; continue; }
+        if (GREP_FILTER_LONG_NUM.has(fl)) { if (!/^\d+$/.test(val)) return false; continue; }
+        if (fl === "--color" || fl === "--colour") { if (!/^(?:always|never|auto|ansi)$/i.test(val)) return false; continue; }
+        return false;
+      }
+      for (let j = 1; j < v.length; j++) {
+        const ch = v[j];
+        if (GREP_FILTER_SHORT_BOOL.has(ch)) continue;
+        if (ch === "e") {
+          hasExplicitPattern = true;
+          if (j + 1 === v.length && ++i >= args.length) return false;
+          break;
+        }
+        if (GREP_FILTER_SHORT_NUM.has(ch)) {
+          const val = j + 1 < v.length ? v.slice(j + 1) : args[++i];
+          if (!/^\d+$/.test(val || "")) return false;
+          break;
+        }
+        return false;
+      }
+    }
+    return hasExplicitPattern ? posCount === 0 : posCount === 1;
+  }
+
+  if (cmd === "wc") {
+    for (const v of args) {
+      if (!v.startsWith("-") || v === "-") return false;
+      if (v.startsWith("--")) { if (!WC_FILTER_LONG_BOOL.has(v)) return false; continue; }
+      for (let j = 1; j < v.length; j++) if (!WC_FILTER_SHORT_BOOL.has(v[j])) return false;
+    }
+    return true;
+  }
+
+  if (cmd === "jq") {
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") { posCount++; continue; }
+      if (v.startsWith("--")) {
+        if (JQ_FILTER_LONG_BOOL.has(v)) continue;
+        if (v === "--arg" || v === "--argjson") { if (i + 2 >= args.length) return false; i += 2; continue; }
+        return false;
+      }
+      for (let j = 1; j < v.length; j++) if (!JQ_FILTER_SHORT_BOOL.has(v[j])) return false;
+    }
+    return posCount <= 1;
+  }
+
+  if (cmd === "cut") {
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") return false;
+      if (v.startsWith("--")) {
+        if (CUT_FILTER_LONG_BOOL.has(v)) continue;
+        const eq = v.indexOf("=");
+        const fl = eq === -1 ? v : v.slice(0, eq);
+        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
+        if (CUT_FILTER_LONG_VAL.has(fl) && val !== undefined) continue;
+        return false;
+      }
+      for (let j = 1; j < v.length; j++) {
+        const ch = v[j];
+        if (CUT_FILTER_SHORT_BOOL.has(ch)) continue;
+        if (CUT_FILTER_SHORT_VAL.has(ch)) { if (j + 1 === v.length && ++i >= args.length) return false; break; }
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (cmd === "sort") {
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") return false;
+      if (v.startsWith("--")) {
+        if (SORT_FILTER_LONG_BOOL.has(v)) continue;
+        const eq = v.indexOf("=");
+        const fl = eq === -1 ? v : v.slice(0, eq);
+        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
+        if (SORT_FILTER_LONG_VAL.has(fl) && val !== undefined) continue;
+        return false;
+      }
+      for (let j = 1; j < v.length; j++) {
+        const ch = v[j];
+        if (SORT_FILTER_SHORT_BOOL.has(ch)) continue;
+        if (SORT_FILTER_SHORT_VAL.has(ch)) { if (j + 1 === v.length && ++i >= args.length) return false; break; }
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (cmd === "uniq") {
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") return false;
+      if (v.startsWith("--")) {
+        if (UNIQ_FILTER_LONG_BOOL.has(v)) continue;
+        const eq = v.indexOf("=");
+        const fl = eq === -1 ? v : v.slice(0, eq);
+        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
+        if (UNIQ_FILTER_LONG_NUM.has(fl) && /^\d+$/.test(val || "")) continue;
+        return false;
+      }
+      for (let j = 1; j < v.length; j++) {
+        const ch = v[j];
+        if (UNIQ_FILTER_SHORT_BOOL.has(ch)) continue;
+        if (UNIQ_FILTER_SHORT_NUM.has(ch)) {
+          const val = j + 1 < v.length ? v.slice(j + 1) : args[++i];
+          if (!/^\d+$/.test(val || "")) return false;
+          break;
+        }
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (cmd === "tr") {
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") { posCount++; continue; }
+      if (v.startsWith("--")) { if (!TR_FILTER_LONG_BOOL.has(v)) return false; continue; }
+      for (let j = 1; j < v.length; j++) if (!TR_FILTER_SHORT_BOOL.has(v[j])) return false;
+    }
+    return posCount >= 1 && posCount <= 2;
+  }
+
+  return false;
+}
+
 function checkAgyContextTranscriptCommand(segments, convId, ctx) {
   const cwd = ctx?.cwd || "";
   const match = segments.length ? findAgyContextTranscriptUsage(segments, cwd) : null;
   if (!match) return { matched: false, allowed: false };
-  const { seg, segIndex, totalSegs, hadWrapper, subOffset, subcommand, isReadSub, isHelpSub, isAdminSub, isKnownSubcommand, hasNodeFlags, invalidBinaryPath, tokens } = match;
+  const { seg, segIndex, totalSegs, hadWrapper, subOffset, subcommand, isReadSub, isHelpSub, isAdminSub, isKnownSubcommand, hasNodeFlags, invalidBinaryPath } = match;
   const fail = (reason, isAccessDenial = false) => ({ matched: true, allowed: false, isAccessDenial, reason });
 
-  if (totalSegs !== 1 || segIndex !== 0 || (seg.leadingSep && seg.leadingSep !== "\n") || hadWrapper || hasNodeFlags || invalidBinaryPath || seg.hasRedirect || seg.hasHeredoc || seg.hasSubshell) {
-    return fail("Antigravity Execution Governance: 'agy-context transcript' access to .system_generated must be strictly single and unchained (no chaining, wrappers, env prefixes, node flags, redirects, heredocs, or subshells).");
+  const seg0CleanDetailed = !seg.hasRedirect ? getSegTokens(seg) : filterAllowedStderrRedirects(getSegTokens(seg));
+  const hasValidPipeline = totalSegs === 1 || (totalSegs <= 7 && (isReadSub || isHelpSub) && segments.slice(1).every(isSafeReadOnlyTranscriptFilterSegment));
+  if (segIndex !== 0 || !hasValidPipeline || (seg.leadingSep && seg.leadingSep !== "\n") || hadWrapper || hasNodeFlags || invalidBinaryPath || !seg0CleanDetailed || seg.hasHeredoc || seg.hasSubshell) {
+    return fail("Antigravity Execution Governance: 'agy-context transcript' access to .system_generated must be a single unchained command or piped strictly to read-only stdin filters (rg/grep/head/tail/jq/wc/cut/sort/uniq/tr; no &&, ;, write redirects, file operands, wrappers, env prefixes, node flags, heredocs, or subshells). Use: 'list'/'health --parent|--id u1,u2 --json' -> parallel 'outline'/'query'/'read'/'step --id <uuid> --full' ('--out <path>' if >9 KB raw).");
   }
+  const tokens = seg.hasRedirect ? seg0CleanDetailed.map((t) => t.value) : match.tokens;
   if (!isKnownSubcommand) {
     return fail(`Antigravity Execution Governance: Unknown 'agy-context transcript' subcommand '${subcommand}'. Expected read, query, step, health, list, export, or access.`);
   }
@@ -922,6 +1186,8 @@ function checkAgyContextTranscriptCommand(segments, convId, ctx) {
     const targetInfo = extractTargetConvIdFromTranscriptTokens(subcommand, restTokens);
     if (targetInfo.error) return fail(targetInfo.error);
     const isExport = subcommand === "export" || subcommand === "dump";
+    const isHealth = subcommand === "health" || subcommand === "stats" || subcommand === "info";
+    const isMultiTargetSub = isExport || isHealth;
     const isList = subcommand === "list" || subcommand === "ls";
     if (isExport && !targetInfo.sanitized) {
       return fail("Antigravity Execution Governance: Flag '--sanitized' is required for 'agy-context transcript export' to enforce transcript isolation (raw transcript export is prohibited).");
@@ -944,9 +1210,9 @@ function checkAgyContextTranscriptCommand(segments, convId, ctx) {
 
     if (accessEval.mode === "self-only") {
       if (isList) return denyAccess("'list'/'ls' across sessions is disabled in self-only mode.");
-      if (isExport && targetInfo.targetParent) return denyAccess("'--parent' across sessions is disabled in self-only mode.");
-      if (isExport && (targetInfo.targetIds.length > 1 || targetInfo.targetIds.some((id) => id.toLowerCase() !== "current" && id !== convId))) {
-        return denyAccess("Cross-session or multi-session transcript export is disabled in self-only mode.");
+      if (isMultiTargetSub && targetInfo.targetParent !== null) return denyAccess("'--parent' across sessions is disabled in self-only mode.");
+      if (isMultiTargetSub && (targetInfo.targetIds.length > 1 || targetInfo.targetIds.some((id) => id.toLowerCase() !== "current" && id !== convId))) {
+        return denyAccess(`Cross-session or multi-session transcript ${isExport ? "export" : "health inspection"} is disabled in self-only mode.`);
       }
       if (targetInfo.explicitFile && !isContainedInAnyBrainDir(targetInfo.explicitFile, brainDirs, convId, { cwd })) {
         return denyAccess(`Cross-session '--file' access outside '${convId}' is disabled in self-only mode.`);
@@ -956,12 +1222,12 @@ function checkAgyContextTranscriptCommand(segments, convId, ctx) {
       }
       const wasCur = Boolean(targetInfo.targetId && targetInfo.targetId.toLowerCase() === "current");
       const injectSelfId = !targetInfo.explicitFile && (!targetInfo.targetId || wasCur) && convId && convId !== "global" ? convId : null;
-      return { matched: true, allowed: true, subcommand, mode: "self-only", targetConvId: convId, needsReadGrant: true, injectSelfId, targetWasCurrentPlaceholder: wasCur };
+      return { matched: true, allowed: true, subcommand, mode: "self-only", targetConvId: convId, needsReadGrant: true, injectSelfId, targetWasCurrentPlaceholder: wasCur, seg0Start: seg.start, seg0End: seg.end };
     }
 
     let resolvedTarget = targetInfo.targetId || null;
-    const injectParentId = (isExport || isList) && targetInfo.targetParent?.toLowerCase() === "current" && convId && convId !== "global" ? convId : null;
-    if (isExport) {
+    const injectParentId = (isMultiTargetSub || isList) && targetInfo.targetParent?.toLowerCase() === "current" && convId && convId !== "global" ? convId : null;
+    if (isMultiTargetSub) {
       if (targetInfo.targetParent) resolvedTarget = `parent:${injectParentId || targetInfo.targetParent}`;
       else if (targetInfo.targetIds.length > 1) resolvedTarget = `multi:${[...targetInfo.targetIds].sort().join(",")}`;
       else if (targetInfo.targetIds.length === 1) resolvedTarget = targetInfo.targetIds[0];
@@ -975,9 +1241,9 @@ function checkAgyContextTranscriptCommand(segments, convId, ctx) {
       }
     }
     const wasCur = Boolean(targetInfo.targetId && targetInfo.targetId.toLowerCase() === "current");
-    const injectSelfId = !isList && !(isExport && targetInfo.targetParent) && !targetInfo.explicitFile && (!targetInfo.targetId || wasCur) && convId && convId !== "global" ? convId : null;
+    const injectSelfId = !isList && !(isMultiTargetSub && (targetInfo.targetParent || targetInfo.targetIds.length > 1)) && !targetInfo.explicitFile && (!targetInfo.targetId || wasCur) && convId && convId !== "global" ? convId : null;
     if (injectSelfId) resolvedTarget = convId;
-    return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: true, targetConvId: resolvedTarget, injectSelfId, targetWasCurrentPlaceholder: wasCur, injectParentId };
+    return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: true, targetConvId: resolvedTarget, injectSelfId, targetWasCurrentPlaceholder: wasCur, injectParentId, seg0Start: seg.start, seg0End: seg.end };
   }
   return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: false };
 }
@@ -1180,15 +1446,15 @@ function getProtectedShellOperationReason(text, { isRestrictedChild = false } = 
   }
 
   if (
-    /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?![^\s'"]*[\/\\](?:scratch|browser_sandbox|swarm_view|\.agents)(?:$|[\/\\])|[^\s'"]*\.(?:md|txt|json|png|jpg|jpeg|svg|html|css|webp|pdf)\b)/i.test(text) &&
+    /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?![^\/\\\s'"]+[\/\\](?:scratch|browser_sandbox|swarm_view|\.agents)(?:$|[\/\\])|[^\/\\\s'"]+[\/\\][^\/\\\s'"]+\.(?:md|txt|json|csv|tsv|yaml|yml|xml|zip|png|jpg|jpeg|gif|svg|html|css|webp|bmp|ico|pdf|mp3|wav|mp4|webm|mov)\b)/i.test(text) &&
     /\b(?:ln|cp|mv|rsync|tar|zip|find|readdir|readdirSync|scandir|listdir|walk|glob|iglob|readFile|readFileSync|createReadStream|open|openSync)\b/i.test(text)
   ) return "internal-state";
   return null;
 }
 
 function buildProtectedShellReasonMessage(code, convId, ctx) {
-  if (code === "non-canonical-cli") return "Antigravity Execution Governance: 'agy-context transcript' must be invoked as a single unchained command (no shell chaining, pipes, redirects, subshells, or '..' traversal). Run e.g. 'agy-context transcript read --mode compact' directly via run_command.";
-  if (code === "inline-transcript-core") return "Antigravity Execution Governance: Direct inline script or interpreter imports of 'transcript-core.mjs' or 'bin/agy-context.mjs' are prohibited. Invoke the single unchained 'agy-context transcript ...' CLI directly via run_command instead.";
+  if (code === "non-canonical-cli") return "Antigravity Execution Governance: 'agy-context transcript' must be invoked as a single unchained command or piped strictly to read-only stdin filters (rg/grep/head/tail/jq/wc; no &&, ;, write redirects, subshells, or '..' traversal). Follow: 'list'/'health --parent|--id u1,u2 --json' -> parallel 'outline'/'query'/'read'/'step --id <uuid> --full' ('--out <path>' if >9 KB raw).";
+  if (code === "inline-transcript-core") return "Antigravity Execution Governance: Direct inline script or interpreter imports of 'transcript-core.mjs' or 'bin/agy-context.mjs' are prohibited. Invoke 'agy-context transcript' (read-only '|' ok; no '&&'/';') directly via run_command instead.";
   if (code === "governance-env") return "Antigravity Execution Governance: Overriding Antigravity governance/state environment variables (AGY_TEST_PROFILE_DIR, AGY_BRAIN_DIR, GEMINI_CONVERSATION_ID, or governance-scoped XDG_STATE_HOME/LOCALAPPDATA) inside shell commands is prohibited.";
   return buildInternalStateShellDenial(convId, ctx);
 }
@@ -1344,7 +1610,7 @@ const RTK_HIGH_ROI_SUBCMDS = {
   dotnet: new Set(["build", "restore"]),
   npm: new Set(["run", "lint"]),
   pnpm: new Set(["run", "install", "i", "outdated", "lint", "tsc", "list"]),
-  bun: new Set(["test", "run", "build", "install", "add"]),
+  bun: new Set(["test", "build", "install", "add"]),
   deno: new Set(["test", "compile", "install", "lint", "check"]),
   npx: new Set(["tsc", "eslint", "vitest", "jest", "playwright", "prettier", "prisma", "next", "ng"]),
   bunx: new Set(["tsc", "eslint", "vitest", "jest", "playwright", "prettier", "prisma", "next", "ng"]),
@@ -1359,7 +1625,7 @@ const RTK_HIGH_ROI_SUBCMDS = {
   oc: new Set(["get", "logs", "describe", "apply"]),
   git: new Set(["status", "push", "pull", "fetch"])
 };
-const RTK_HIGH_ROI_PKG_RUN_RE = /^(?:test|tests|build|compile|lint|check|typecheck|type-check|tsc|e2e|ci|format|fmt|vitest|jest|playwright|pytest|coverage|cov|verify-types)(?:$|[:_-])/i;
+const RTK_HIGH_ROI_PKG_RUN_SCRIPTS = new Set(["lint"]);
 const RTK_RUNNER_VALUE_FLAGS = {
   git: new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"]),
   npm: new Set(["--prefix", "-C", "--cwd", "--workspace", "-w"]),
@@ -1385,9 +1651,15 @@ function matchRtkInvocation(text) {
 }
 
 function hasMachineReadableOutputFlag(cmd0, subcmd, tokens) {
+  const effectiveTool = (cmd0 === "npx" || cmd0 === "bunx") ? subcmd : cmd0;
+  const isVitestOrJest = effectiveTool === "vitest" || effectiveTool === "jest";
   for (let i = 1; i < tokens.length; i++) {
     const v = tokens[i].value;
     const low = v.toLowerCase();
+    if (
+      isVitestOrJest &&
+      (low === "--reporter" || low.startsWith("--reporter=") || low === "--reporters" || low.startsWith("--reporters="))
+    ) return true;
     if (
       ["--json", "-json", "--porcelain", "--raw", "-ojson", "-oyaml", "-oname"].includes(low) ||
       low.startsWith("--porcelain=") || low.startsWith("-ojsonpath") || low.startsWith("-ocustom-columns") || low.startsWith("-ogo-template") ||
@@ -1400,6 +1672,77 @@ function hasMachineReadableOutputFlag(cmd0, subcmd, tokens) {
     if (cmd0 === "git" && subcmd === "status" && (v === "--short" || low.startsWith("--porcelain") || (!v.startsWith("--") && /^-[a-zA-Z]*[sz][a-zA-Z]*$/.test(v)))) return true;
   }
   return false;
+}
+
+function findNearestNodeModulesBin(toolName, startDir) {
+  if (!toolName || !startDir) return "";
+  const isWin = os.platform() === "win32";
+  const exts = isWin ? [".cmd", ".exe", ".bat", ""] : [""];
+  let dir = path.resolve(startDir);
+  while (true) {
+    const binDir = path.join(dir, "node_modules", ".bin");
+    for (const ext of exts) {
+      const candidate = path.join(binDir, `${toolName}${ext}`);
+      try {
+        if (fs.statSync(candidate).isFile()) return candidate;
+      } catch {}
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return "";
+}
+
+function isLocalBinShadowedByGlobalPath(toolName, startDir) {
+  const localBin = findNearestNodeModulesBin(toolName, startDir);
+  if (!localBin) return false;
+  const pathBin = findExecutableOnPath(toolName);
+  if (!pathBin) return false;
+  const isCI = os.platform() === "win32" || os.platform() === "darwin";
+  const norm = (p) => {
+    const r = tryRealpath(path.resolve(p)).replace(/\\/g, "/");
+    return isCI ? r.toLowerCase() : r;
+  };
+  return norm(localBin) !== norm(pathBin);
+}
+
+function findNearestVitestMajorVersion(startDir) {
+  if (!startDir) return null;
+  let dir = path.resolve(startDir);
+  while (true) {
+    const pkgPath = path.join(dir, "node_modules", "vitest", "package.json");
+    try {
+      if (fs.statSync(pkgPath).isFile()) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+        const match = String(pkg?.version || "").match(/^(\d+)\./);
+        return match ? parseInt(match[1], 10) : null;
+      }
+    } catch {}
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+function isUnsupportedVitestForRtk(startDir, rtkVersion) {
+  if (!isRtkVersionBelow(rtkVersion, 1, 2)) return false;
+  const major = findNearestVitestMajorVersion(startDir);
+  return major !== null && major >= 5;
+}
+
+function resolveNextSegmentCwd(segText, curCwd) {
+  const trimmed = String(segText || "").trim();
+  if (!trimmed) return curCwd;
+  const body = (splitEnvPrefix(trimmed).body || trimmed).trim();
+  const tokens = tokenizeShellWordsDetailed(body);
+  if (!tokens.length || normalizeCmdName(tokens[0].value) !== "cd") return curCwd;
+  let idx = 1;
+  while (idx < tokens.length && (tokens[idx].value === "-L" || tokens[idx].value === "-P" || tokens[idx].value === "--")) idx++;
+  const target = tokens[idx]?.value || "";
+  if (!target || target === "-" || /[$`]/.test(target)) return curCwd;
+  return path.resolve(curCwd, expandLeadingTilde(target));
 }
 
 function filterAllowedStderrRedirects(tokens) {
@@ -1417,7 +1760,7 @@ function filterAllowedStderrRedirects(tokens) {
   return clean;
 }
 
-function shouldDelegateSegmentToRtk(segText, { inPipeline = false, allowInternalReadRewrite = false } = {}) {
+function shouldDelegateSegmentToRtk(segText, { inPipeline = false, allowInternalReadRewrite = false, cwd = "", rtkVersion = "" } = {}) {
   const trimmed = String(segText || "").trim();
   if (!trimmed || inPipeline) return false;
   const target = (splitEnvPrefix(trimmed).body || trimmed).trim();
@@ -1427,8 +1770,12 @@ function shouldDelegateSegmentToRtk(segText, { inPipeline = false, allowInternal
   if (!tokens || tokens.length === 0) return false;
   const cmd0 = normalizeCmdName(tokens[0].value);
   if (!cmd0) return false;
+  const effectiveCwd = cwd ? path.resolve(expandLeadingTilde(cwd)) : process.cwd();
   if (allowInternalReadRewrite && (cmd0 === "cat" || cmd0 === "head" || cmd0 === "tail")) return true;
-  if (RTK_HIGH_ROI_DIRECT_CMDS.has(cmd0)) return !hasMachineReadableOutputFlag(cmd0, "", tokens);
+  if (RTK_HIGH_ROI_DIRECT_CMDS.has(cmd0)) {
+    if (cmd0 === "vitest" && isUnsupportedVitestForRtk(effectiveCwd, rtkVersion)) return false;
+    return !hasMachineReadableOutputFlag(cmd0, "", tokens);
+  }
   if (cmd0 === "rake") { const sub = normalizeCmdName(tokens[1]?.value); return (sub === "test" || sub.startsWith("test:")) && !hasMachineReadableOutputFlag(cmd0, sub, tokens); }
   if (cmd0 === "python" || cmd0 === "python3") {
     let idx = 1;
@@ -1449,10 +1796,16 @@ function shouldDelegateSegmentToRtk(segText, { inPipeline = false, allowInternal
   const sub = subIdx < tokens.length ? normalizeCmdName(tokens[subIdx].value) : "";
   if (!sub || !allowedSubs.has(sub)) return false;
 
-  if (["npm", "pnpm", "bun"].includes(cmd0) && sub === "run") {
+  if ((cmd0 === "npm" || cmd0 === "pnpm") && sub === "run") {
     const sIdx = advancePastFlags(subIdx + 1, new Set());
-    if (!RTK_HIGH_ROI_PKG_RUN_RE.test(tokens[sIdx]?.value || "")) return false;
+    const scriptName = String(tokens[sIdx]?.value || "").trim().toLowerCase();
+    if (!RTK_HIGH_ROI_PKG_RUN_SCRIPTS.has(scriptName)) return false;
   }
+  if (cmd0 === "npx" || cmd0 === "bunx") {
+    if (isLocalBinShadowedByGlobalPath(sub, effectiveCwd)) return false;
+    if (sub === "vitest" && isUnsupportedVitestForRtk(effectiveCwd, rtkVersion)) return false;
+  }
+  if (cmd0 === "pnpm" && sub === "tsc" && isLocalBinShadowedByGlobalPath("tsc", effectiveCwd)) return false;
   if (cmd0 === "uv" && sub === "run") {
     const rIdx = advancePastFlags(subIdx + 1);
     if (rIdx >= tokens.length) return false;
@@ -1486,8 +1839,18 @@ function delegateRewriteToRtk(rawCmd, rtk) {
   } catch { return { decision: "allow", commandLine: rawCmd }; }
 }
 
-function rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite = false, preSegments = null } = {}) {
+function rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite = false, preSegments = null, cwd = "" } = {}) {
   const segs = preSegments || splitShellSegments(rawCmd);
+  const baseCwd = cwd ? path.resolve(expandLeadingTilde(cwd)) : process.cwd();
+  const segCwds = new Array(segs.length);
+  let curCwd = baseCwd;
+  for (let i = 0; i < segs.length; i++) {
+    segCwds[i] = curCwd;
+    const nextSep = i + 1 < segs.length ? segs[i + 1].leadingSep : "";
+    if (segs[i].leadingSep !== "|" && segs[i].leadingSep !== "|&" && nextSep !== "|" && nextSep !== "|&" && nextSep !== "||") {
+      curCwd = resolveNextSegmentCwd(segs[i].text, curCwd);
+    }
+  }
   let result = rawCmd;
   for (let i = segs.length - 1; i >= 0; i--) {
     const seg = segs[i];
@@ -1495,13 +1858,13 @@ function rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite = f
     if (!trimmed) continue;
     const wrap = unwrapShellWrapper(trimmed);
     if (wrap) {
-      const inner = rewriteCommandViaRtkPreGate(wrap.inner, rtk, { allowInternalReadRewrite: false });
+      const inner = rewriteCommandViaRtkPreGate(wrap.inner, rtk, { allowInternalReadRewrite: false, cwd: segCwds[i] });
       if (inner.decision !== "allow") return inner;
       if (inner.commandLine !== wrap.inner) result = result.slice(0, seg.start) + `${wrap.prefix}${wrap.quote}${inner.commandLine}${wrap.quote}` + result.slice(seg.end);
       continue;
     }
     const inPipe = seg.leadingSep === "|" || seg.leadingSep === "|&" || (i + 1 < segs.length && (segs[i + 1].leadingSep === "|" || segs[i + 1].leadingSep === "|&"));
-    if (!shouldDelegateSegmentToRtk(trimmed, { inPipeline: inPipe, allowInternalReadRewrite: Boolean(allowInternalReadRewrite && segs.length === 1) })) continue;
+    if (!shouldDelegateSegmentToRtk(trimmed, { inPipeline: inPipe, allowInternalReadRewrite: Boolean(allowInternalReadRewrite && segs.length === 1), cwd: segCwds[i], rtkVersion: rtk?.version || "" })) continue;
     const del = delegateRewriteToRtk(trimmed, rtk);
     if (del.decision !== "allow") return del;
     if (del.commandLine && del.commandLine !== trimmed) result = result.slice(0, seg.start) + del.commandLine + result.slice(seg.end);
@@ -1678,7 +2041,7 @@ export async function handleRunCommand(ctx) {
 
   if (rtk) {
     if (rtkMode === "pregate" || (rtkMode === "off" && allowInternalReadRewrite)) {
-      const gated = rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite, preSegments: segments });
+      const gated = rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite, preSegments: segments, cwd });
       if (gated.decision !== "allow") respond({ decision: gated.decision, reason: gated.reason });
       effectiveCmd = gated.commandLine;
     }
@@ -1687,19 +2050,29 @@ export async function handleRunCommand(ctx) {
     }
   }
 
-  // Self-ID / parent-ID injection for `agy-context transcript` in open & self-only modes
-  if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectSelfId) {
-    if (/(^|\s)--id(?:=|\s+)(["']?)current\2(?=\s|$)/i.test(effectiveCmd)) {
-      effectiveCmd = effectiveCmd.replace(/(^|\s)--id(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--id ${agyTranscriptCheck.injectSelfId}`);
-    } else if (agyTranscriptCheck.targetWasCurrentPlaceholder) {
-      const upd = effectiveCmd.replace(/(^|\s)(["']?)current\2(?=(?:\s|$)(?!.*\s["']?current["']?(?:\s|$)))/i, `$1--id ${agyTranscriptCheck.injectSelfId}`);
-      effectiveCmd = upd !== effectiveCmd ? upd : `${effectiveCmd.trim()} --id ${agyTranscriptCheck.injectSelfId}`;
-    } else {
-      effectiveCmd = `${effectiveCmd.trim()} --id ${agyTranscriptCheck.injectSelfId}`;
+  // Self-ID / parent-ID injection for `agy-context transcript` in open & self-only modes (scoped to Segment 0 when piped)
+  if (agyTranscriptCheck.allowed && (agyTranscriptCheck.injectSelfId || agyTranscriptCheck.injectParentId)) {
+    const s0Start = Number.isInteger(agyTranscriptCheck.seg0Start) ? agyTranscriptCheck.seg0Start : 0;
+    const s0End = Number.isInteger(agyTranscriptCheck.seg0End) ? agyTranscriptCheck.seg0End : effectiveCmd.length;
+    let seg0Cmd = effectiveCmd.slice(s0Start, s0End);
+    const appendFlagToSeg0 = (cmdStr, flagStr) => {
+      const m = cmdStr.match(/(\s+2>(?:&1|\s*(?:\/dev\/null|nul)))+\s*$/i);
+      return m ? `${cmdStr.slice(0, m.index).trimEnd()} ${flagStr}${m[0]}` : `${cmdStr.trimEnd()} ${flagStr}`;
+    };
+    if (agyTranscriptCheck.injectSelfId) {
+      if (/(^|\s)--id(?:=|\s+)(["']?)current\2(?=\s|$)/i.test(seg0Cmd)) {
+        seg0Cmd = seg0Cmd.replace(/(^|\s)--id(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--id ${agyTranscriptCheck.injectSelfId}`);
+      } else if (agyTranscriptCheck.targetWasCurrentPlaceholder) {
+        const upd = seg0Cmd.replace(/(^|\s)(["']?)current\2(?=(?:\s|$)(?!.*\s["']?current["']?(?:\s|$)))/i, `$1--id ${agyTranscriptCheck.injectSelfId}`);
+        seg0Cmd = upd !== seg0Cmd ? upd : appendFlagToSeg0(seg0Cmd, `--id ${agyTranscriptCheck.injectSelfId}`);
+      } else {
+        seg0Cmd = appendFlagToSeg0(seg0Cmd, `--id ${agyTranscriptCheck.injectSelfId}`);
+      }
     }
-  }
-  if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectParentId) {
-    effectiveCmd = effectiveCmd.replace(/(^|\s)--parent(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--parent ${agyTranscriptCheck.injectParentId}`);
+    if (agyTranscriptCheck.injectParentId) {
+      seg0Cmd = seg0Cmd.replace(/(^|\s)--parent(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--parent ${agyTranscriptCheck.injectParentId}`);
+    }
+    effectiveCmd = effectiveCmd.slice(0, s0Start) + seg0Cmd + effectiveCmd.slice(s0End);
   }
 
   // Rewrite bare `agy-context` / `agy-context-saver` to installed shim when off PATH
@@ -1755,8 +2128,8 @@ export async function handleRunCommand(ctx) {
         respond({
           decision: "deny",
           reason: rtk
-            ? "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n- Once completed, inspect output using 'rtk read <path>' via run_command.\n- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
-            : "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines).\n- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+            ? "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n- Once completed, inspect output using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines).\n- If actively running, use Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE>)."
+            : "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines).\n- If actively running, use Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE>)."
         });
       }
     }

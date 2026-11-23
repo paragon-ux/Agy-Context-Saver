@@ -64,15 +64,19 @@ try {
   assert.match(wrapperOut.overwrite?.CommandLine || "", /rtk git status && cat package\.json/);
   console.log(`✓ Shell wrapper pre-gated cleanly -> '${wrapperOut.overwrite?.CommandLine}'`);
 
-  // 2b. Narrow High-ROI Pre-Gate: noisy runners delegated; precision inspection commands stay untouched
+  // 2b. Narrow High-ROI Pre-Gate: noisy runners delegated; precision/dead pkg-run/reporter commands stay untouched
+  const cleanCwd = path.join(tempDir, "clean-cwd");
+  fs.mkdirSync(cleanCwd, { recursive: true });
   for (const [rawCmd, expectPrefix] of [
     ["pytest tests/", /^rtk pytest\b/],
     ["cargo test --lib", /^rtk cargo test\b/],
-    ["npm run test", /^rtk npm run test\b/],
+    ["npm run lint", /^rtk lint\b/],
+    ["pnpm run lint", /^rtk lint\b/],
+    ["bun test", /^rtk bun test\b/],
     ["vitest run", /^rtk vitest\b/]
   ]) {
     const out = runHook(
-      { toolCall: { name: "run_command", args: { CommandLine: rawCmd, WaitMsBeforeAsync: 5000 } } },
+      { cwd: cleanCwd, toolCall: { name: "run_command", args: { CommandLine: rawCmd, WaitMsBeforeAsync: 5000 } } },
       testEnv
     );
     assert.equal(out.decision, "allow");
@@ -87,16 +91,69 @@ try {
     "git status --porcelain",
     "ps aux",
     "cat package.json",
+    "npm run test",
+    "npm run build",
+    "pnpm run build",
+    "bun run test",
+    "bun run lint",
+    "vitest run --reporter=verbose",
+    "npx vitest run --reporter=verbose",
+    "npx jest --reporters=default",
     "pytest tests/ | tail -n 20"
   ]) {
     const out = runHook(
-      { toolCall: { name: "run_command", args: { CommandLine: losslessCmd, WaitMsBeforeAsync: 5000 } } },
+      { cwd: cleanCwd, toolCall: { name: "run_command", args: { CommandLine: losslessCmd, WaitMsBeforeAsync: 5000 } } },
       testEnv
     );
     assert.equal(out.decision, "allow");
-    assert.equal(out.overwrite?.CommandLine, undefined, `Precision/piped command '${losslessCmd}' must stay unrewritten under Narrow Pre-Gate`);
+    assert.equal(out.overwrite?.CommandLine, undefined, `Precision/piped/guarded command '${losslessCmd}' must stay unrewritten under Narrow Pre-Gate`);
   }
-  console.log("✓ Narrow High-ROI Pre-Gate verified across high-ROI runners vs lossless inspection/piped commands");
+
+  // 2b-ii. Local node_modules/.bin PATH shadowing & Vitest >= 5 guards against live/shim RTK
+  {
+    const writeExec = (dir, name) => {
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, process.platform === "win32" ? `${name}.cmd` : name);
+      fs.writeFileSync(file, process.platform === "win32" ? "@echo off\r\nexit /b 0\r\n" : "#!/bin/sh\nexit 0\n", "utf-8");
+      if (process.platform !== "win32") fs.chmodSync(file, 0o755);
+    };
+    const shadowProj = path.join(tempDir, "int-shadow-proj");
+    const fakeGlobal = path.join(tempDir, "int-fake-global");
+    writeExec(path.join(shadowProj, "node_modules", ".bin"), "tsc");
+    writeExec(fakeGlobal, "tsc");
+    const shadowEnv = { ...testEnv };
+    prependToPath(fakeGlobal, shadowEnv);
+    const shadowedOut = runHook(
+      { cwd: shadowProj, toolCall: { name: "run_command", args: { CommandLine: "npx tsc --noEmit", WaitMsBeforeAsync: 5000 } } },
+      shadowEnv
+    );
+    assert.equal(shadowedOut.decision, "allow");
+    assert.equal(shadowedOut.overwrite?.CommandLine, undefined, "Shadowed npx tsc must skip RTK delegation");
+
+    const v5Proj = path.join(tempDir, "int-vitest5-proj");
+    fs.mkdirSync(path.join(v5Proj, "node_modules", "vitest"), { recursive: true });
+    fs.writeFileSync(path.join(v5Proj, "node_modules", "vitest", "package.json"), JSON.stringify({ name: "vitest", version: "5.1.1" }), "utf-8");
+    const v3Proj = path.join(tempDir, "int-vitest3-proj");
+    fs.mkdirSync(path.join(v3Proj, "node_modules", "vitest"), { recursive: true });
+    fs.writeFileSync(path.join(v3Proj, "node_modules", "vitest", "package.json"), JSON.stringify({ name: "vitest", version: "3.2.7" }), "utf-8");
+
+    const v3Out = runHook(
+      { cwd: v3Proj, toolCall: { name: "run_command", args: { CommandLine: "npx vitest run", WaitMsBeforeAsync: 5000 } } },
+      testEnv
+    );
+    assert.equal(v3Out.decision, "allow");
+    assert.match(v3Out.overwrite?.CommandLine || "", /^rtk vitest\b/, "Vitest 3 npx vitest run must delegate to rtk vitest");
+
+    if (!hostRtk || /^1\.1\./.test(hostRtk.version || "")) {
+      const v5Out = runHook(
+        { cwd: v5Proj, toolCall: { name: "run_command", args: { CommandLine: "npx vitest run", WaitMsBeforeAsync: 5000 } } },
+        testEnv
+      );
+      assert.equal(v5Out.decision, "allow");
+      assert.equal(v5Out.overwrite?.CommandLine, undefined, "Vitest >= 5 on RTK 1.1.x must skip RTK delegation");
+    }
+  }
+  console.log("✓ Narrow High-ROI Pre-Gate verified across high-ROI runners, dead pkg-run pruning, reporter bypass, PATH shadowing, and Vitest >= 5 guard");
 
   // 2c. Decision B1: AGY_RTK_MODE=pregate|off (no `all` mode; unrecognized values fall back to pregate)
   {

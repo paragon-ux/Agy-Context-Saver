@@ -14,7 +14,6 @@ import {
   MAX_SMALL_AUTO_ALLOW_LINES,
   MAX_SMALL_AUTO_ALLOW_BYTES,
   MAX_SPILLOVER_SLICE_LINES,
-  MAX_FULL_FILE_LINES,
   MAX_FULL_FILE_BYTES,
   MAX_LINE_COUNT_SCAN_BYTES,
   respond,
@@ -27,6 +26,7 @@ import {
   isProtectedInternalState,
   isProtectedInternalStatePath,
   isProtectedGovernanceFileMutationPath,
+  isUserEditableGeminiConfigPath,
   isProtectedBenchmarkFilePath,
   isBenchmarkGuardDisabled,
   isCrossConversationTargetDenied,
@@ -111,6 +111,51 @@ function isSymlinkMaskedInternalPath(rawPath, cwd = "") {
   return isLink || (canonical !== absNorm && /(?:^|\/)\.system_generated\//i.test(canonical));
 }
 
+function isOwnSwarmPlanPath(rawPath, convId, ctx = {}) {
+  if (!rawPath || typeof rawPath !== "string" || !convId || convId === "global") return false;
+  if (/[/\\]/.test(convId) || convId === "." || convId === "..") return false;
+  const cleaned = cleanFileToken(rawPath);
+  if (!cleaned) return false;
+  const cwd = ctx?.cwd || "";
+  const resolved = resolveHookPath(expandLeadingTilde(cleaned), cwd);
+  if (!resolved) return false;
+  const canonical = resolveRealOrAncestorPath(resolved, { cwd });
+
+  const isCI = os.platform() === "win32" || os.platform() === "darwin";
+  const norm = (p) => {
+    const s = String(p || "").replace(/\\/g, "/");
+    return isCI ? s.toLowerCase() : s;
+  };
+  const resolvedNorm = norm(resolved);
+  const canonicalNorm = norm(canonical);
+
+  const brainDirs = getBrainDirs({ activeTranscriptPath: ctx?.transcriptPath || "" });
+  let matchedBrainDir = null;
+  for (const bDir of brainDirs) {
+    if (!bDir) continue;
+    const expectedRaw = path.join(bDir, convId, ".system_generated", "swarm", "plan.json");
+    const expectedCanonical = resolveRealOrAncestorPath(expectedRaw, { cwd });
+    const expRawNorm = norm(expectedRaw);
+    const expCanonNorm = norm(expectedCanonical);
+    if ((resolvedNorm === expRawNorm || resolvedNorm === expCanonNorm) && canonicalNorm === expCanonNorm) {
+      matchedBrainDir = bDir;
+      break;
+    }
+  }
+  if (!matchedBrainDir) return false;
+
+  // Reject any symlink at plan.json or within <convId>/.system_generated/swarm
+  const convDir = path.join(matchedBrainDir, convId);
+  const sysDir = path.join(convDir, ".system_generated");
+  const swarmDir = path.join(sysDir, "swarm");
+  for (const seg of [convDir, sysDir, swarmDir, resolved]) {
+    try {
+      if (fs.lstatSync(seg).isSymbolicLink()) return false;
+    } catch {}
+  }
+  return true;
+}
+
 function isProtectedDiscoveryAncestorPath(candidateTarget, isDiscoveryTool, isRecursiveDiscoveryTool, ctx = {}) {
   if (!isDiscoveryTool) return false;
   const effectiveCandidate = candidateTarget || ctx?.cwd || "";
@@ -178,7 +223,7 @@ async function hasHostRtkAvailable() {
 }
 
 function evaluateReadFileBounds(target, toolName, { rawStart, rawEnd, hasByteOffset, hasSliceParams }, cwd) {
-  const guidance = `Locate the target symbol, heading, or section first with 'grep_search' (or rg/grep via run_command) and pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
+  const guidance = `Check size with 'wc -l -c' or locate targets with 'grep_search' (or 'git grep'/'rg' via run_command), then pass parallel bounded slices ('StartLine' and 'EndLine', <= ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
   const tag = (m) => {
     if (!m || m.exists === false) return "";
     const kib = (m.bytes / 1024).toFixed(1);
@@ -205,7 +250,7 @@ function evaluateReadFileBounds(target, toolName, { rawStart, rawEnd, hasByteOff
       if (metrics && metrics.lineCount !== null) {
         if (startLine > metrics.lineCount || (metrics.lineCount - startLine + 1) <= MAX_SAFE_SLICE_LINES) return { decision: "allow" };
         const rem = metrics.lineCount - startLine + 1;
-        return deny(`Antigravity Governance: Unbounded tail read from StartLine=${startLine} via '${toolName}' (${rem} remaining lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window)${tag(metrics)}. Pass an explicit EndLine (max ${MAX_SAFE_SLICE_LINES} lines) or StartLine=1, EndLine=${metrics.lineCount} if <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${guidance}.`);
+        return deny(`Antigravity Governance: Unbounded tail read from StartLine=${startLine} via '${toolName}' (${rem} remaining lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window)${tag(metrics)}. Pass an explicit EndLine (max ${MAX_SAFE_SLICE_LINES} lines). ${guidance}.`);
       }
       return deny(`Antigravity Governance: Unbounded tail read from StartLine=${startLine} via '${toolName}'${tag(metrics)} requires an explicit EndLine (max ${MAX_SAFE_SLICE_LINES} lines). ${guidance}.`);
     }
@@ -222,12 +267,8 @@ function evaluateReadFileBounds(target, toolName, { rawStart, rawEnd, hasByteOff
       if (startLine > metrics.lineCount) return { decision: "allow" };
       const effSpan = Math.min(endLine, metrics.lineCount) - startLine + 1;
       if (effSpan >= 1 && effSpan <= MAX_SAFE_SLICE_LINES) return { decision: "allow" };
-      if (startLine === 1 && !hasByteOffset && endLine >= metrics.lineCount) {
-        if (!metrics.oversized && metrics.lineCount <= MAX_FULL_FILE_LINES && metrics.bytes <= MAX_FULL_FILE_BYTES) return { decision: "allow" };
-        return deny(`Antigravity Governance: Explicit full-file read via '${toolName}' (${metrics.lineCount} lines, ${(metrics.bytes / 1024).toFixed(1)} KiB) exceeds the full-file audit ceiling (max ${MAX_FULL_FILE_LINES} lines and 45 KiB). ${guidance}.`);
-      }
     }
-    return deny(`Antigravity Governance: Oversized partial file slice via '${toolName}' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window)${tag(metrics)}. Partial slices above ${MAX_SAFE_SLICE_LINES} lines are denied; full-file reads are permitted via StartLine=1, EndLine >= TotalLines when <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${guidance}.`);
+    return deny(`Antigravity Governance: Oversized file slice via '${toolName}' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window)${tag(metrics)}. ${guidance}.`);
   }
 
   const m = getFileMetrics(target, cwd);
@@ -235,7 +276,7 @@ function evaluateReadFileBounds(target, toolName, { rawStart, rawEnd, hasByteOff
   if (m && !m.oversized && m.lineCount !== null && m.lineCount <= MAX_SMALL_AUTO_ALLOW_LINES && m.bytes <= MAX_SMALL_AUTO_ALLOW_BYTES) {
     return { decision: "allow" };
   }
-  return deny(`Antigravity Governance: Full-file inspection via '${toolName}' without explicit bounds is denied${tag(m)} (omitted bounds auto-allow files <= ${MAX_SMALL_AUTO_ALLOW_LINES} lines and <= 24 KiB). ${guidance} (or pass explicit StartLine=1, EndLine=<TotalLines> for a one-pass audit when the file is <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB).`);
+  return deny(`Antigravity Governance: Full-file inspection via '${toolName}' without explicit bounds is denied${tag(m)} (omitted bounds auto-allow files <= ${MAX_SMALL_AUTO_ALLOW_LINES} lines and <= ${Math.round(MAX_SMALL_AUTO_ALLOW_BYTES / 1024)} KiB). ${guidance}.`);
 }
 
 export async function handleInspectionTool(ctx) {
@@ -295,8 +336,13 @@ export async function handleInspectionTool(ctx) {
   }
 
   // Check 2c: Internal state & discovery ancestor roots (never scanning Query/Pattern/Includes/Excludes/Extensions)
+  const isSingleFileReadTool = toolName === "read_file" || toolName === "view_file";
   for (const cand of allCandidates) {
     if (safeHarborCandidates.has(cand)) continue;
+    if (isSingleFileReadTool && !hasByteOffset && isOwnSwarmPlanPath(cand, convId, ctx)) {
+      safeHarborCandidates.add(cand);
+      continue;
+    }
     if (isProtectedInternalStatePath(cand, cwd) || isProtectedDiscoveryAncestorPath(cand, isDiscoveryTool, isRecursiveDiscoveryTool, ctx)) {
       respond({ decision: "deny", reason: buildInternalStateToolDenial(convId, ctx) });
     }
@@ -325,7 +371,7 @@ export async function handleInspectionTool(ctx) {
     respond({ decision: "allow" });
   }
 
-  // Check 2e: Unified 300L / 24 KiB hybrid slice & guarded full-file policy for read_file & view_file
+  // Check 2e: Unified 800L / 45 KiB workspace auto-allow & slice policy for read_file & view_file
   if (toolName === "read_file" || toolName === "view_file") {
     for (const cand of allCandidates) {
       if (safeHarborCandidates.has(cand) || isAntigravitySpecialFile(cand, cwd) || SAFE_MULTIMODAL_MEDIA_RE.test(cand)) continue;
@@ -356,12 +402,17 @@ export function handleMutationTool(ctx) {
   const targetFiles = collectPathAliases(args, MUTATION_PATH_KEYS, false);
   const callerAccess = evaluateCallerTranscriptAccess(convId, ctx);
 
+  let userConfigConfirmTarget = null;
   for (const targetFile of targetFiles) {
-    if (isProtectedInternalStatePath(targetFile, cwd)) {
+    if (isProtectedInternalStatePath(targetFile, cwd) && !isOwnSwarmPlanPath(targetFile, convId, ctx)) {
       respond({ decision: "deny", reason: buildInternalStateToolDenial(convId, ctx) });
     }
     if (isProtectedGovernanceFileMutationPath(targetFile, convId, ctx)) {
-      respond({ decision: "deny", reason: "Antigravity Execution Governance: Direct mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited." });
+      if (isUserEditableGeminiConfigPath(targetFile, convId, ctx)) {
+        if (!userConfigConfirmTarget) userConfigConfirmTarget = targetFile;
+      } else {
+        respond({ decision: "deny", reason: "Antigravity Execution Governance: Direct mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited." });
+      }
     }
     if (isCrossConversationTargetDenied(targetFile, convId, ctx, callerAccess)) {
       respond({ decision: "deny", reason: "Antigravity Execution Governance: Cross-conversation mutation of another session's brain artifacts is prohibited under Parent Transcript Isolation." });
@@ -389,10 +440,17 @@ export function handleMutationTool(ctx) {
         respond({ decision: "deny", reason: "Antigravity Execution Governance: Overriding Antigravity governance/state environment variables inside restricted child scripts is prohibited." });
       }
       if (code === "non-canonical-cli") {
-        respond({ decision: "deny", reason: "Antigravity Execution Governance: 'agy-context transcript' must be invoked as a single unchained command directly via run_command." });
+        respond({ decision: "deny", reason: "Antigravity Execution Governance: 'agy-context transcript' must be invoked directly via run_command (read-only '|' ok; no '&&'/';'), not wrapped inside a script." });
       }
       if (code) respond({ decision: "deny", reason: buildInternalStateToolDenial(convId, ctx) });
     }
+  }
+
+  if (userConfigConfirmTarget) {
+    respond({
+      decision: "force_ask",
+      reason: `[GEMINI CONFIG MUTATION] Editing Antigravity user configuration '${userConfigConfirmTarget}' requires explicit user confirmation.`
+    });
   }
 
   if (!isBenchmarkGuardDisabled(convId, ctx)) {
