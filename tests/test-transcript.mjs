@@ -888,11 +888,13 @@ try {
 
       // 2b. Redaction before 36-char tool truncation, non-priority body key omission, --start/--end, malformed lines, and empty transcript
       const secretEdgeConv = "secret-edge-conv";
+      const synthGhPat = "github_pat_" + "A".repeat(24);
+      const synthNpmTok = "npm_" + "B".repeat(24);
       writeConvLines(brainDir, secretEdgeConv, [
         {
           step_index: 0,
           type: "USER_INPUT",
-          content: "Inspect data:application/octet-stream;base64,SGVsbG8= and token",
+          content: `Inspect data:application/octet-stream;base64,SGVsbG8= and token ${synthGhPat} ${synthNpmTok}`,
           created_at: "2026-11-16T01:01:00Z"
         },
         {
@@ -922,6 +924,9 @@ try {
       assert.equal(secretExport.stdout.includes("1234567890abcdef"), false, "API key prefix must be redacted before 36-char tool truncation");
       assert.equal(secretExport.stdout.includes("RAW_BODY_ONLY_MUST_NOT_LEAK"), false, "Non-priority Content arg must be omitted");
       assert.equal(secretExport.stdout.includes("SGVsbG8="), false, "Non-image data URI base64 must be stripped");
+      assert.equal(secretExport.stdout.includes(synthGhPat), false, "RES-SEC-002 fine-grained github_pat_* token must be redacted");
+      assert.equal(secretExport.stdout.includes(synthNpmTok), false, "RES-SEC-002 npm_* token must be redacted");
+      assert.match(secretExport.stdout, /token \[REDACTED\] \[REDACTED\]/, "RES-SEC-002 both tokens must be replaced with [REDACTED]");
       assert.match(secretExport.stdout, /Steps Shown: 2 of 2/);
       assert.equal(secretExport.stdout.includes("Final step"), false, "--end 1 must exclude step 2");
 
