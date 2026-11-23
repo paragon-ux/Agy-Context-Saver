@@ -455,7 +455,7 @@ export function updateRtkConfigToml(content) {
       continue;
     }
 
-    const sectionMatch = trimmed.match(/^\[\s*([^\]]+)\](?:\s*#.*)?$/);
+    const sectionMatch = trimmed.match(/^\[([^\]]+)\](?:\s*#.*)?$/);
     if (sectionMatch) {
       seenAnySection = true;
       const sectionName = sectionMatch[1].trim().toLowerCase();

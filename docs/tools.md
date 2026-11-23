@@ -61,7 +61,7 @@ Streams conversation turns from `transcript.jsonl` (or `transcript_full.jsonl`) 
 | `--mode` | `compact \| full` | `compact` | Read `transcript.jsonl` (`compact`) or `transcript_full.jsonl` (`full`). |
 | `--last-turns` | `<N>` | `3` | Number of recent turns (`0` returns trailing bounded window up to 200 steps; promptless `/swarm` workers with zero user messages anchor on substantive wakeup `SYSTEM_MESSAGE` steps; aliases: `--last`, `--tail`). |
 | `--offset` / `--limit` | `<N>` | `(none)` | 0-indexed forward step ordinal offset (starts at `0` when `--limit` is passed alone) and maximum steps per page (`50` default, hard-capped at `200` for `read`; `500` default / `2000` with `--full`/`--out` in `--outline` mode). |
-| `--outline` / `--summary` | `(none)` | `false` | Delegate to `query --summary --include-tools` to print a 1-line-per-step outline (ignores `--mode`, `--last-turns`, `--offset`); with `--json`, emits compact `{ step_index, type, role, created_at, status, summary }` items. |
+| `--outline` / `--summary` | `(none)` | `false` | Delegate to `query --summary --include-tools` to print a 1-line-per-step outline (ignores `--mode` and `--offset`; honors `--start`, `--end`, and `--last-turns`); with `--json`, emits compact `{ step_index, type, role, created_at, status, summary }` items. |
 | `--start` / `--end` | `<N>` | `0` / `999999` | Step index bounds in `--outline` / `--summary` mode. |
 | `--full-args` | `(none)` | `false` | Show untruncated tool argument previews in `--outline` mode. |
 | `--include-thinking` | `(none)` | `false` | Include model thinking blocks. |

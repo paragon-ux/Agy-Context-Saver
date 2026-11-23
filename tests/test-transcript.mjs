@@ -3702,13 +3702,20 @@ try {
 
   console.log("\n--- 17. Day-One Audit Regressions (SEC-004, SEC-006, RUN-001..004) ---");
   {
-    // SEC-004: catastrophic regex patterns fall back to literal matching in linear time
-    const evilRx = getCompiledRegex("(a+)+!");
+    // SEC-004 & R2-RUN-001: catastrophic/polynomial regex patterns fall back to literal matching in linear time while benign disjoint classes stay regex
+    const evilPatterns = [
+      "(a+)+!", "(a?a?)+!", "(a{0,1}a{0,1})+!", "((a|aa))+!", "(?:(a|aa))+!",
+      "a+a+a+a+a+a+!", "\\S+\\w+\\S+\\w+\\S+!", "\\w+\\d+\\w+\\d+\\w+!", "a.*a.*a.*a.*a.*!"
+    ];
     const t0 = performance.now();
-    assert.equal(evilRx.test("a".repeat(64) + "X"), false);
-    assert.ok(performance.now() - t0 < 50, "SEC-004 catastrophic regex must run in < 50ms via literal fallback");
+    for (const pat of evilPatterns) {
+      assert.equal(getCompiledRegex(pat).test("a".repeat(36) + "X"), false, `SEC-004 ${pat} must not hang`);
+    }
+    assert.ok(performance.now() - t0 < 50, "SEC-004 catastrophic & polynomial regexes must run in < 50ms via literal fallback");
     assert.equal(getCompiledRegex("ERROR|DENIED").test("found denied"), true, "SEC-004 normal alternation regex preserved");
     assert.equal(getCompiledRegex("step\\s+\\d+").test("step 42"), true, "SEC-004 disjoint wildcard regex preserved");
+    assert.equal(getCompiledRegex("[a-z]+[0-9]+").test("step42"), true, "R2-RUN-001 benign disjoint char classes must stay regex");
+    assert.equal(getCompiledRegex("[A-Z]+[a-z]+").test("Hello"), true, "R2-RUN-001 benign case char classes must stay regex");
 
     // SEC-006: !transcriptFound does not branch on AGY_TEST_PROFILE_DIR
     const sec006Policy = findGoverningPolicyForCaller(

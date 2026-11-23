@@ -426,16 +426,20 @@ console.log("\n--- 6. SCRIPT-004: Fetch Timeout AbortSignal & Manual Install Ins
   }
 }
 
-// SEC-002: updateRtkConfigToml must remain linear O(N) on unclosed bracket headers
+// SEC-002: updateRtkConfigToml must remain linear O(N) on unclosed/malformed bracket headers (non-whitespace terminated so trim() preserves length)
 {
   const t0 = performance.now();
-  const r1 = updateRtkConfigToml("[ " + " ".repeat(20000));
-  const r2 = updateRtkConfigToml("[[ " + " ".repeat(20000));
+  const r1 = updateRtkConfigToml("[" + " ".repeat(20000) + "a");
+  const r2 = updateRtkConfigToml("[" + " ".repeat(20000) + "] bad");
+  const r3 = updateRtkConfigToml("[[" + " ".repeat(20000) + "a");
+  const r4 = updateRtkConfigToml("[hooks]" + " ".repeat(20000) + "bad");
   const elapsed = performance.now() - t0;
   assert.ok(elapsed < 50, `SEC-002 updateRtkConfigToml must run in < 50ms on 20k-space lines (took ${elapsed.toFixed(1)}ms)`);
   assert.equal(r1.changed, true);
   assert.equal(r2.changed, true);
-  console.log(`✓ SEC-002 linear TOML header parsing verified (${elapsed.toFixed(1)}ms on 20k chars)`);
+  assert.equal(r3.changed, true);
+  assert.equal(r4.changed, true);
+  console.log(`✓ SEC-002 linear TOML header parsing verified (${elapsed.toFixed(1)}ms on 4x20k chars)`);
 }
 
 console.log("\n=================================================");
