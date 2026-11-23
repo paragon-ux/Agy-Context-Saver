@@ -78,7 +78,7 @@ agy-context transcript read 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --mode full --f
 
 ### Output budgets
 
-`read`, `outline`, `query`, `tools`, and `export --sanitized` default to 9,200 UTF-8 bytes. `step` defaults to 24,000 bytes. The deep tier (`--full`, `--out`) allows up to 524,288 bytes. An explicit `--max-chars` budget includes serialization and the trailing newline. With `--out`, stdout reports the write and the limit applies to the file.
+`read`, `outline`, `query`, `tools`, and `export --sanitized` default to 9,200 UTF-8 bytes. `step` defaults to 24,000 bytes. The deep tier (`--full`, `--out`) allows up to 524,288 bytes. An explicit `--max-chars` budget includes serialization and the trailing newline. With `--out`, stdout reports the write and the limit applies to the file. To stay under Antigravity's `~10 KB` (`9,892 B`) `run_command` stdout spillover ceiling, read-only `agy-context transcript` commands may pipe stdout through stdin-only filters (`| rg`, `| grep`, `| head`, `| tail`, `| jq`, `| wc`, `| cut`, `| sort`, `| uniq`, `| tr`, plus `2>/dev/null`); for unfiltered dumps `> 9.2 KB`, pass `--out <path>`, which prints exact `lineCount` and `bytesWritten` so you can immediately slice with parallel `<= 800L` `read_file` calls (`45 KiB` each).
 
 `--out` accepts any safe workspace-relative `.md`, `.json`, or `.txt` path outside protected state, governance, and benchmark directories. If you write artifacts under a `scratch/` folder, add `scratch/` to `.gitignore` or `.git/info/exclude` so exports stay untracked. (In `self-only` child mode, `--out` is scoped to `<workspace>/scratch/` or `<brainDir>/<convId>/scratch/`.)
 

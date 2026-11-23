@@ -440,7 +440,7 @@ export function handleMutationTool(ctx) {
         respond({ decision: "deny", reason: "Antigravity Execution Governance: Overriding Antigravity governance/state environment variables inside restricted child scripts is prohibited." });
       }
       if (code === "non-canonical-cli") {
-        respond({ decision: "deny", reason: "Antigravity Execution Governance: 'agy-context transcript' must be invoked as a single unchained command directly via run_command." });
+        respond({ decision: "deny", reason: "Antigravity Execution Governance: 'agy-context transcript' must be invoked directly via run_command (read-only '|' ok; no '&&'/';'), not wrapped inside a script." });
       }
       if (code) respond({ decision: "deny", reason: buildInternalStateToolDenial(convId, ctx) });
     }

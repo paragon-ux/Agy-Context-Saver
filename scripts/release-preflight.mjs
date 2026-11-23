@@ -117,7 +117,7 @@ export function runReleasePreflight() {
     if (agentsRuleText) {
       const agentsRuleBytes = Buffer.byteLength(agentsRuleText, 'utf8');
       if (agentsRuleBytes > 1500) {
-        errors.push(`rules/AGENTS.md exceeds the 1,500-byte always-loaded system-prompt budget (${agentsRuleBytes} bytes). Keep detailed references in skills/context-governance/SKILL.md.`);
+        errors.push(`rules/AGENTS.md exceeds the 1,500-byte always-loaded system-prompt budget (${agentsRuleBytes} bytes). Keep detailed references in skills/context-governance/references/.`);
       }
       if (/[^\x00-\x7F]/.test(agentsRuleText) || /\$/.test(agentsRuleText)) {
         errors.push('rules/AGENTS.md must stay plain ASCII without raw "$" characters.');

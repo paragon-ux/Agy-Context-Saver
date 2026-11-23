@@ -223,7 +223,7 @@ export function handleTaskOrSchedule(ctx) {
       runScheduleBackoff(convId, ctx, {
         kind: "subagent_schedule", key: subKey, duration, hasValidCond,
         breakerReason: (n, s) => `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: direct subagent schedule polling denied ${n} times. Retry 'schedule' with DurationSeconds >= ${s.requiredSec} and TimerCondition="${condHint}", or confirm with the user to proceed.`,
-        denyReason: (n, s) => `Antigravity Execution Governance: ${!hasValidCond ? "Unconditioned subagent polling timers are prohibited." : `Direct subagent stall watchdog duration too short (${duration}s < 30s minimum).`} (${n} denial${n > 1 ? "s" : ""}). For direct invoke_subagent stall safety, retry 'schedule' with DurationSeconds >= ${s.requiredSec} and TimerCondition="${condHint}" so the watchdog auto-cancels at zero cost if the subagent finishes normally.`
+        denyReason: (n, s) => `Antigravity Execution Governance: ${!hasValidCond ? "Unconditioned subagent polling timers are prohibited." : `Direct subagent stall watchdog duration too short (${duration}s < 30s minimum).`} (${n} denial${n > 1 ? "s" : ""}). Prefer Pure Yield (end turn; no 'schedule' timer; subagents notify automatically on completion), or if opting into a stall watchdog retry 'schedule' with DurationSeconds >= ${s.requiredSec} and TimerCondition="${condHint}".`
       });
     }
 

@@ -18,10 +18,10 @@ $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5
 | Check # | Required Cooldown | Purpose | Action if Premature |
 | :---: | :---: | :--- | :--- |
 | **Check 1** | **0s (immediate)** | Initial check upon launch (isolated per task) | **Allowed** (`pollCount = 1`) |
-| **Check 2** | **30s** | Check for fast tasks | **Denied** with remaining cooldown and watchdog guidance |
-| **Check 3** | **75s** | Standard build progress | **Denied** with remaining cooldown and watchdog guidance |
-| **Check 4** | **188s** | Test suite check | **Denied** with remaining cooldown and watchdog guidance |
-| **Check 5** | **469s** | Long build or hung process | **Denied** with remaining cooldown and watchdog guidance |
+| **Check 2** | **30s** | Check for fast tasks | **Denied** with remaining cooldown and Pure Yield guidance |
+| **Check 3** | **75s** | Standard build progress | **Denied** with remaining cooldown and Pure Yield guidance |
+| **Check 4** | **188s** | Test suite check | **Denied** with remaining cooldown and Pure Yield guidance |
+| **Check 5** | **469s** | Long build or hung process | **Denied** with remaining cooldown and Pure Yield guidance |
 | **Check 6+** | **600s** | Prolonged process | **Denied**; trips `force_ask` circuit breaker at 5 denials |
 
 - **Immediate operations:** `manage_task(Action='kill')` and `manage_task(Action='send_input')` are always allowed immediately (`0s` cooldown, zero penalties).

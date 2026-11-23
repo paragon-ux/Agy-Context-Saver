@@ -1438,7 +1438,7 @@ function getProtectedShellOperationReason(text, { isRestrictedChild = false } = 
 
 function buildProtectedShellReasonMessage(code, convId, ctx) {
   if (code === "non-canonical-cli") return "Antigravity Execution Governance: 'agy-context transcript' must be invoked as a single unchained command or piped strictly to read-only stdin filters (rg/grep/head/tail/jq/wc; no &&, ;, write redirects, subshells, or '..' traversal). Follow: 'list'/'health --parent|--id u1,u2 --json' -> parallel 'outline'/'query'/'read'/'step --id <uuid> --full' ('--out <path>' if >9 KB raw).";
-  if (code === "inline-transcript-core") return "Antigravity Execution Governance: Direct inline script or interpreter imports of 'transcript-core.mjs' or 'bin/agy-context.mjs' are prohibited. Invoke the single unchained 'agy-context transcript ...' CLI directly via run_command instead.";
+  if (code === "inline-transcript-core") return "Antigravity Execution Governance: Direct inline script or interpreter imports of 'transcript-core.mjs' or 'bin/agy-context.mjs' are prohibited. Invoke 'agy-context transcript' (read-only '|' ok; no '&&'/';') directly via run_command instead.";
   if (code === "governance-env") return "Antigravity Execution Governance: Overriding Antigravity governance/state environment variables (AGY_TEST_PROFILE_DIR, AGY_BRAIN_DIR, GEMINI_CONVERSATION_ID, or governance-scoped XDG_STATE_HOME/LOCALAPPDATA) inside shell commands is prohibited.";
   return buildInternalStateShellDenial(convId, ctx);
 }
@@ -2015,8 +2015,8 @@ export async function handleRunCommand(ctx) {
         respond({
           decision: "deny",
           reason: rtk
-            ? "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n- Once completed, inspect output using 'rtk read <path>' via run_command.\n- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
-            : "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines).\n- If actively running, yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>)."
+            ? "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n- Once completed, inspect output using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines).\n- If actively running, use Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE>)."
+            : "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines).\n- If actively running, use Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE>)."
         });
       }
     }
