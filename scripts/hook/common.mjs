@@ -28,9 +28,9 @@ import {
 
 export { STATE_TTL_MS };
 
-export const MAX_SAFE_SLICE_LINES = 300;
-export const MAX_SMALL_AUTO_ALLOW_LINES = 300;
-export const MAX_SMALL_AUTO_ALLOW_BYTES = 24 * 1024;
+export const MAX_SAFE_SLICE_LINES = 800;
+export const MAX_SMALL_AUTO_ALLOW_LINES = 800;
+export const MAX_SMALL_AUTO_ALLOW_BYTES = 45 * 1024;
 export const MAX_SPILLOVER_SLICE_LINES = 150;
 export const MAX_FULL_FILE_LINES = 800;
 export const MAX_FULL_FILE_BYTES = 45 * 1024;

@@ -14,7 +14,6 @@ import {
   MAX_SMALL_AUTO_ALLOW_LINES,
   MAX_SMALL_AUTO_ALLOW_BYTES,
   MAX_SPILLOVER_SLICE_LINES,
-  MAX_FULL_FILE_LINES,
   MAX_FULL_FILE_BYTES,
   MAX_LINE_COUNT_SCAN_BYTES,
   respond,
@@ -251,7 +250,7 @@ function evaluateReadFileBounds(target, toolName, { rawStart, rawEnd, hasByteOff
       if (metrics && metrics.lineCount !== null) {
         if (startLine > metrics.lineCount || (metrics.lineCount - startLine + 1) <= MAX_SAFE_SLICE_LINES) return { decision: "allow" };
         const rem = metrics.lineCount - startLine + 1;
-        return deny(`Antigravity Governance: Unbounded tail read from StartLine=${startLine} via '${toolName}' (${rem} remaining lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window)${tag(metrics)}. Pass an explicit EndLine (max ${MAX_SAFE_SLICE_LINES} lines) or StartLine=1, EndLine=${metrics.lineCount} if <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${guidance}.`);
+        return deny(`Antigravity Governance: Unbounded tail read from StartLine=${startLine} via '${toolName}' (${rem} remaining lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window)${tag(metrics)}. Pass an explicit EndLine (max ${MAX_SAFE_SLICE_LINES} lines). ${guidance}.`);
       }
       return deny(`Antigravity Governance: Unbounded tail read from StartLine=${startLine} via '${toolName}'${tag(metrics)} requires an explicit EndLine (max ${MAX_SAFE_SLICE_LINES} lines). ${guidance}.`);
     }
@@ -268,12 +267,8 @@ function evaluateReadFileBounds(target, toolName, { rawStart, rawEnd, hasByteOff
       if (startLine > metrics.lineCount) return { decision: "allow" };
       const effSpan = Math.min(endLine, metrics.lineCount) - startLine + 1;
       if (effSpan >= 1 && effSpan <= MAX_SAFE_SLICE_LINES) return { decision: "allow" };
-      if (startLine === 1 && !hasByteOffset && endLine >= metrics.lineCount) {
-        if (!metrics.oversized && metrics.lineCount <= MAX_FULL_FILE_LINES && metrics.bytes <= MAX_FULL_FILE_BYTES) return { decision: "allow" };
-        return deny(`Antigravity Governance: Explicit full-file read via '${toolName}' (${metrics.lineCount} lines, ${(metrics.bytes / 1024).toFixed(1)} KiB) exceeds the full-file audit ceiling (max ${MAX_FULL_FILE_LINES} lines and 45 KiB). ${guidance}.`);
-      }
     }
-    return deny(`Antigravity Governance: Oversized partial file slice via '${toolName}' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window)${tag(metrics)}. Partial slices above ${MAX_SAFE_SLICE_LINES} lines are denied; full-file reads are permitted via StartLine=1, EndLine >= TotalLines when <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB. ${guidance}.`);
+    return deny(`Antigravity Governance: Oversized file slice via '${toolName}' (${span} lines > ${MAX_SAFE_SLICE_LINES} lines max safe slice window)${tag(metrics)}. ${guidance}.`);
   }
 
   const m = getFileMetrics(target, cwd);
@@ -281,7 +276,7 @@ function evaluateReadFileBounds(target, toolName, { rawStart, rawEnd, hasByteOff
   if (m && !m.oversized && m.lineCount !== null && m.lineCount <= MAX_SMALL_AUTO_ALLOW_LINES && m.bytes <= MAX_SMALL_AUTO_ALLOW_BYTES) {
     return { decision: "allow" };
   }
-  return deny(`Antigravity Governance: Full-file inspection via '${toolName}' without explicit bounds is denied${tag(m)} (omitted bounds auto-allow files <= ${MAX_SMALL_AUTO_ALLOW_LINES} lines and <= 24 KiB). ${guidance} (or pass explicit StartLine=1, EndLine=<TotalLines> for a one-pass audit when the file is <= ${MAX_FULL_FILE_LINES} lines and <= 45 KiB).`);
+  return deny(`Antigravity Governance: Full-file inspection via '${toolName}' without explicit bounds is denied${tag(m)} (omitted bounds auto-allow files <= ${MAX_SMALL_AUTO_ALLOW_LINES} lines and <= ${Math.round(MAX_SMALL_AUTO_ALLOW_BYTES / 1024)} KiB). ${guidance}.`);
 }
 
 export async function handleInspectionTool(ctx) {
@@ -376,7 +371,7 @@ export async function handleInspectionTool(ctx) {
     respond({ decision: "allow" });
   }
 
-  // Check 2e: Unified 300L / 24 KiB hybrid slice & guarded full-file policy for read_file & view_file
+  // Check 2e: Unified 800L / 45 KiB workspace auto-allow & slice policy for read_file & view_file
   if (toolName === "read_file" || toolName === "view_file") {
     for (const cand of allCandidates) {
       if (safeHarborCandidates.has(cand) || isAntigravitySpecialFile(cand, cwd) || SAFE_MULTIMODAL_MEDIA_RE.test(cand)) continue;

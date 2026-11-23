@@ -113,6 +113,17 @@ export function runReleasePreflight() {
       errors.push(`CHANGELOG.md is missing a release heading for current version "## [${pkg.version}]".`);
     }
 
+    const agentsRuleText = readText('rules/AGENTS.md');
+    if (agentsRuleText) {
+      const agentsRuleBytes = Buffer.byteLength(agentsRuleText, 'utf8');
+      if (agentsRuleBytes > 1500) {
+        errors.push(`rules/AGENTS.md exceeds the 1,500-byte always-loaded system-prompt budget (${agentsRuleBytes} bytes). Keep detailed references in skills/context-governance/SKILL.md.`);
+      }
+      if (/[^\x00-\x7F]/.test(agentsRuleText) || /\$/.test(agentsRuleText)) {
+        errors.push('rules/AGENTS.md must stay plain ASCII without raw "$" characters.');
+      }
+    }
+
     const requiredMetadata = [
       ['repository.url', pkg.repository?.url],
       ['homepage', pkg.homepage],

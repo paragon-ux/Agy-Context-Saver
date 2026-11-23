@@ -245,7 +245,7 @@ console.log("\n--- Group C: read_file & view_file Safe Harbor + Hybrid Slice ---
   assert.equal(byteOffsetOnly.decision, "deny", "ByteOffset-only unbounded read_file must be denied");
   assert.equal(byteOffsetOnly.reason.includes("rtk read"), false, "Workspace ByteOffset-only read_file denial must NOT suggest rtk read");
 
-  // Guarded full-file audit (<= 800 lines, <= 45 KiB) using explicit StartLine=1..EndLine >= TotalLines & 300-line slice window
+  // Unified 800L / 45 KiB workspace read_file bounds (omitted-bound auto-allow <= 800L & <= 45 KiB, explicit slices <= 800L)
   const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-audit-file-"));
   try {
     const mediumFile = path.join(auditDir, "medium.js");
@@ -255,17 +255,22 @@ console.log("\n--- Group C: read_file & view_file Safe Harbor + Hybrid Slice ---
     });
     assert.equal(fullMediumAudit.decision, "allow", "Explicit full-file read_file (<=800L & <=45KiB) allowed");
 
-    const partialOver = runHook({
-      toolCall: { name: "read_file", args: { Path: mediumFile, StartLine: 1, EndLine: 350 } }
-    });
-    assert.equal(partialOver.decision, "deny", "Partial slice 1..350 (>300L) of 450-line file must be denied");
-    assert.equal(partialOver.reason.includes("rtk read"), false, "Workspace partial read_file denial must NOT suggest rtk read");
-    assert.match(partialOver.reason, /450 lines/, "Partial slice denial must report actual file line count (FRIC-RUN-010)");
-
     const bigWorkspaceFile = path.join(auditDir, "big.js");
-    fs.writeFileSync(bigWorkspaceFile, Array.from({ length: 850 }, (_, i) => `const y${i} = ${i};`).join("\n"), "utf-8");
-    const fullTooBigAudit = runHook({
+    fs.writeFileSync(bigWorkspaceFile, Array.from({ length: 1200 }, (_, i) => `const y${i} = ${i};`).join("\n"), "utf-8");
+    const partialAllowed = runHook({
+      toolCall: { name: "read_file", args: { Path: bigWorkspaceFile, StartLine: 1, EndLine: 800 } }
+    });
+    assert.equal(partialAllowed.decision, "allow", "Explicit slice 1..800 (<=800L) of 1200-line file must be allowed");
+
+    const partialOver = runHook({
       toolCall: { name: "read_file", args: { Path: bigWorkspaceFile, StartLine: 1, EndLine: 850 } }
+    });
+    assert.equal(partialOver.decision, "deny", "Oversized slice 1..850 (>800L) of 1200-line file must be denied");
+    assert.equal(partialOver.reason.includes("rtk read"), false, "Workspace partial read_file denial must NOT suggest rtk read");
+    assert.match(partialOver.reason, /1200 lines/, "Oversized slice denial must report actual file line count (FRIC-RUN-010)");
+
+    const fullTooBigAudit = runHook({
+      toolCall: { name: "read_file", args: { Path: bigWorkspaceFile, StartLine: 1, EndLine: 1200 } }
     });
     assert.equal(fullTooBigAudit.decision, "deny", "Oversized >800-line full-file read_file must be denied");
     assert.equal(fullTooBigAudit.reason.includes("rtk read"), false, "Workspace oversized read_file denial must NOT suggest rtk read");
@@ -3439,7 +3444,7 @@ console.log("\n--- Group M: Wave 1 Parallel Lock Concurrency, Stateless Fast-Pat
 // ============================================================================
 // GROUP N: v2.1.2 Wave 2 Narrow High-ROI RTK Pre-Gate, Native Discovery, 300L/24KiB read_file & Watchdogs
 // ============================================================================
-console.log("\n--- Group N: Wave 2 Narrow RTK Pre-Gate, 300L/24KiB read_file & Ergonomics ---");
+console.log("\n--- Group N: Wave 2 Narrow RTK Pre-Gate, 800L/45KiB read_file & Ergonomics ---");
 {
   const w2Dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-w2-erg-"));
   try {
@@ -3456,32 +3461,52 @@ console.log("\n--- Group N: Wave 2 Narrow RTK Pre-Gate, 300L/24KiB read_file & E
       "Internal .system_generated media path must remain denied"
     );
 
-    // N.2: FRIC-RUN-002 & FRIC-RUN-010 - Unified 300L / 24 KiB preset, EOF clamping, relaxed full-file audit & exact size reporting
+    // N.2: FRIC-RUN-002 & FRIC-RUN-010 & L61 - Unified 800L / 45 KiB auto-allow, 800L partial slices, EOF clamping & exact size reporting
     const small260 = path.join(w2Dir, "small-260.js");
     fs.writeFileSync(small260, Array.from({ length: 260 }, (_, i) => `const a${i} = ${i};`).join("\n"), "utf-8");
-    assert.equal(runHook({ toolCall: { name: "read_file", args: { Path: small260 } } }).decision, "allow", "Omitted-bound read_file on <=300L & <=24KiB file must auto-allow (FRIC-RUN-002)");
+    assert.equal(runHook({ toolCall: { name: "read_file", args: { Path: small260 } } }).decision, "allow", "Omitted-bound read_file on <=800L & <=45KiB file must auto-allow (FRIC-RUN-002)");
 
     const dense28k = path.join(w2Dir, "dense-28k.json");
     fs.writeFileSync(dense28k, Array.from({ length: 10 }, () => `"${"x".repeat(2800)}"`).join("\n"), "utf-8");
-    const denseDeny = runHook({ toolCall: { name: "read_file", args: { Path: dense28k } } });
-    assert.equal(denseDeny.decision, "deny", "Dense >24 KiB omitted-bound file must be denied even if <=300 lines");
-    assert.match(denseDeny.reason, /10 lines, \d+\.\d KiB/, "Denial must report exact lines and KiB (FRIC-RUN-010)");
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: dense28k } } }).decision,
+      "allow",
+      "Dense <=800L & <=45 KiB omitted-bound file must auto-allow without zero-savings retry denial (L61)"
+    );
+
+    const dense50k = path.join(w2Dir, "dense-50k.json");
+    fs.writeFileSync(dense50k, Array.from({ length: 10 }, () => `"${"x".repeat(5100)}"`).join("\n"), "utf-8");
+    const denseDeny = runHook({ toolCall: { name: "read_file", args: { Path: dense50k } } });
+    assert.equal(denseDeny.decision, "deny", "Dense >45 KiB omitted-bound file must be denied even if <=800 lines");
+    assert.match(denseDeny.reason, /49\.\d KiB > 45 KiB|50\.\d KiB > 45 KiB/, "Denial must report exact KiB > 45 KiB (FRIC-RUN-010)");
 
     const med450 = path.join(w2Dir, "med-450.js");
     fs.writeFileSync(med450, Array.from({ length: 450 }, (_, i) => `const m${i} = ${i};`).join("\n"), "utf-8");
-    const medOmittedDeny = runHook({ toolCall: { name: "read_file", args: { Path: med450 } } });
-    assert.equal(medOmittedDeny.decision, "deny", "Omitted-bound >300L file must be denied");
-    assert.match(medOmittedDeny.reason, /450 lines/, "Omitted-bound denial must report exact TotalLines (FRIC-RUN-010)");
-
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: med450 } } }).decision,
+      "allow",
+      "Omitted-bound <=800L & <=45 KiB file must auto-allow without extra wc/retry turn (L61)"
+    );
     assert.equal(
       runHook({ toolCall: { name: "read_file", args: { Path: med450, StartLine: 1, EndLine: 800 } } }).decision,
       "allow",
-      "Explicit StartLine=1, EndLine >= TotalLines (<=800L & <=45KiB) must allow without exact line-count guessing (FRIC-RUN-002)"
+      "Explicit StartLine=1, EndLine >= TotalLines (<=800L & <=45KiB) must allow (FRIC-RUN-002)"
     );
     assert.equal(
       runHook({ toolCall: { name: "read_file", args: { Path: med450, StartLine: 200, EndLine: 600 } } }).decision,
       "allow",
       "EOF-clamped partial slice (min(600,450)-200+1 = 251 <= 300) must allow (FRIC-RUN-002)"
+    );
+
+    const over850 = path.join(w2Dir, "over-850.js");
+    fs.writeFileSync(over850, Array.from({ length: 850 }, (_, i) => `const n${i} = ${i};`).join("\n"), "utf-8");
+    const overOmittedDeny = runHook({ toolCall: { name: "read_file", args: { Path: over850 } } });
+    assert.equal(overOmittedDeny.decision, "deny", "Omitted-bound >800L file must be denied");
+    assert.match(overOmittedDeny.reason, /850 lines/, "Omitted-bound >800L denial must report exact TotalLines (FRIC-RUN-010)");
+    assert.equal(
+      runHook({ toolCall: { name: "read_file", args: { Path: over850, StartLine: 1, EndLine: 800 } } }).decision,
+      "allow",
+      "Bounded <=800L slice on >800L file must allow without 300L cliff"
     );
 
     const huge60k = path.join(w2Dir, "huge-60k.js");
@@ -3940,23 +3965,23 @@ console.log("\n--- Group P: v2.1.2 Boost Pass Regressions ---");
     const large120k = path.join(boostDir, "large-2000.js");
     fs.writeFileSync(large120k, Array.from({ length: 2000 }, (_, i) => `const line_${i + 1} = "${"x".repeat(50)}";`).join("\n") + "\n", "utf-8");
     assert.equal(
-      runHook({ toolCall: { name: "read_file", args: { Path: large120k, StartLine: 1850, EndLine: 2200 } } }).decision,
+      runHook({ toolCall: { name: "read_file", args: { Path: large120k, StartLine: 1400, EndLine: 2500 } } }).decision,
       "allow",
-      "EOF-clamped slice on >45 KiB (<= 1 MiB) file (2000-1850+1 = 151 <= 300) must allow"
+      "EOF-clamped slice on >45 KiB (<= 1 MiB) file (2000-1400+1 = 601 <= 800) must allow"
     );
-    const largeOversizedDeny = runHook({ toolCall: { name: "read_file", args: { Path: large120k, StartLine: 1, EndLine: 600 } } });
+    const largeOversizedDeny = runHook({ toolCall: { name: "read_file", args: { Path: large120k, StartLine: 1, EndLine: 900 } } });
     assert.equal(largeOversizedDeny.decision, "deny");
-    assert.match(largeOversizedDeny.reason, /2000 lines, .* KiB > 45 KiB/, "Oversized slice on >45 KiB file must include exact TotalLines");
+    assert.match(largeOversizedDeny.reason, /2000 lines, .* KiB > 45 KiB/, "Oversized >800L slice on >45 KiB file must include exact TotalLines");
     // Single-bound EndLine-only and StartLine-only
     assert.equal(
-      runHook({ toolCall: { name: "read_file", args: { Path: large120k, EndLine: 150 } } }).decision,
+      runHook({ toolCall: { name: "read_file", args: { Path: large120k, EndLine: 600 } } }).decision,
       "allow",
-      "Single-bound EndLine=150 (<= 300) must allow"
+      "Single-bound EndLine=600 (<= 800) must allow"
     );
     assert.equal(
-      runHook({ toolCall: { name: "read_file", args: { Path: large120k, StartLine: 1850 } } }).decision,
+      runHook({ toolCall: { name: "read_file", args: { Path: large120k, StartLine: 1400 } } }).decision,
       "allow",
-      "Single-bound StartLine=1850 with 151 remaining lines (<= 300) must allow"
+      "Single-bound StartLine=1400 with 601 remaining lines (<= 800) must allow"
     );
     assert.equal(
       runHook({ toolCall: { name: "read_file", args: { Path: large120k, StartLine: 1 } } }).decision,
@@ -4214,18 +4239,18 @@ console.log("\n--- Group P: v2.1.2 Boost Pass Regressions ---");
       );
     }
 
-    // §3.3: <= 300-line, > 45 KiB file consistent EOF-clamping for StartLine=1, EndLine=400 & EndLine=400
+    // §3.3: <= 800-line, > 45 KiB file consistent EOF-clamping for StartLine=1, EndLine=900 & EndLine=900
     const dense50Lines = path.join(boostDir, "dense-50-60k.js");
     fs.writeFileSync(dense50Lines, Array.from({ length: 50 }, (_, i) => `const row${i} = "${"a".repeat(1200)}";`).join("\n") + "\n", "utf-8");
     assert.equal(
-      runHook({ toolCall: { name: "read_file", args: { Path: dense50Lines, StartLine: 1, EndLine: 400 } } }).decision,
+      runHook({ toolCall: { name: "read_file", args: { Path: dense50Lines, StartLine: 1, EndLine: 900 } } }).decision,
       "allow",
-      "EOF-clamped StartLine=1, EndLine=400 on 50-line (>45 KiB) file must allow consistently (§3.3)"
+      "EOF-clamped StartLine=1, EndLine=900 on 50-line (>45 KiB) file must allow consistently (§3.3)"
     );
     assert.equal(
-      runHook({ toolCall: { name: "read_file", args: { Path: dense50Lines, EndLine: 400 } } }).decision,
+      runHook({ toolCall: { name: "read_file", args: { Path: dense50Lines, EndLine: 900 } } }).decision,
       "allow",
-      "EOF-clamped EndLine=400 on 50-line (>45 KiB) file must allow consistently (§3.3)"
+      "EOF-clamped EndLine=900 on 50-line (>45 KiB) file must allow consistently (§3.3)"
     );
 
     // §3.4: uv pip check/freeze skipped as no-ops; kubectl -o=wide delegates cleanly
@@ -4797,6 +4822,141 @@ console.log("\n--- Group Q: Wave 3 Hardening & Bug-Fix Regressions ---");
     fs.rmSync(sTopDir, { recursive: true, force: true });
     fs.rmSync(sChildDir, { recursive: true, force: true });
     for (const f of [sMcpCfg, sCfg, sHooks, sMcpBak]) { try { fs.unlinkSync(f); } catch {} }
+  }
+}
+
+console.log("\n--- Group T: L61 Multi-ID & --parent transcript health Hook Grants + self-only Isolation ---");
+{
+  const tParent = "conv-l61-health-parent";
+  const tChildSelf = "conv-l61-health-child-self";
+  const tChildOther = "conv-l61-health-child-other";
+  const tBrainDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain");
+  const tParentDir = path.join(tBrainDir, tParent);
+  const tChildSelfDir = path.join(tBrainDir, tChildSelf);
+  const tChildOtherDir = path.join(tBrainDir, tChildOther);
+  const tGrantsDir = path.join(getStateDir(), "grants");
+  const clearGrants = () => {
+    if (!fs.existsSync(tGrantsDir)) return;
+    for (const f of fs.readdirSync(tGrantsDir)) {
+      if (f.startsWith("grant-") && f.endsWith(".json")) {
+        try { fs.unlinkSync(path.join(tGrantsDir, f)); } catch {}
+      }
+    }
+  };
+  const readPendingGrants = () => {
+    if (!fs.existsSync(tGrantsDir)) return [];
+    return fs.readdirSync(tGrantsDir)
+      .filter((f) => f.startsWith("grant-") && f.endsWith(".json"))
+      .map((f) => JSON.parse(fs.readFileSync(path.join(tGrantsDir, f), "utf-8")));
+  };
+
+  for (const dir of [tParentDir, tChildSelfDir, tChildOtherDir]) {
+    fs.mkdirSync(path.join(dir, ".system_generated", "logs"), { recursive: true });
+  }
+  fs.writeFileSync(
+    path.join(tParentDir, ".system_generated", "logs", "transcript.jsonl"),
+    JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "Coordinate health check" }) + "\n"
+  );
+  fs.writeFileSync(
+    path.join(tChildSelfDir, ".system_generated", "logs", "transcript.jsonl"),
+    JSON.stringify({
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `[Message] sender=${tParent} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: self-only]\nSelf-only child task.`
+    }) + "\n"
+  );
+  fs.writeFileSync(
+    path.join(tChildOtherDir, ".system_generated", "logs", "transcript.jsonl"),
+    JSON.stringify({
+      step_index: 0,
+      source: "SYSTEM",
+      type: "SYSTEM_MESSAGE",
+      content: `[Message] sender=${tParent} priority=MESSAGE_PRIORITY_HIGH content=Sibling worker task.`
+    }) + "\n"
+  );
+
+  try {
+    // T.1: Parent (open mode) multi-ID & --parent health commands mint exact grants without injecting --id <parent>
+    clearGrants();
+    const parentCohort = runHook({
+      conversationId: tParent,
+      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript health --parent ${tParent} --json`, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(parentCohort.decision, "allow", "Parent health --parent must allow");
+    assert.equal(parentCohort.overwrite?.CommandLine, undefined, "health --parent <uuid> must not inject --id <parent>");
+    const gParent = readPendingGrants();
+    assert.equal(gParent.length, 1);
+    assert.equal(gParent[0].targetConvId, `parent:${tParent}`);
+
+    clearGrants();
+    const parentCur = runHook({
+      conversationId: tParent,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript stats --parent current --json", WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(parentCur.decision, "allow", "Parent stats --parent current must allow");
+    assert.equal(parentCur.overwrite?.CommandLine, `agy-context transcript stats --parent ${tParent} --json`, "stats --parent current must rewrite --parent without injecting --id");
+    const gParentCur = readPendingGrants();
+    assert.equal(gParentCur.length, 1);
+    assert.equal(gParentCur[0].targetConvId, `parent:${tParent}`);
+
+    for (const [label, cmd] of [
+      ["comma-separated --id", `agy-context transcript health --id ${tChildOther},${tChildSelf} --json`],
+      ["repeatable --id", `agy-context transcript stats --id ${tChildOther} --id ${tChildSelf} --json`],
+      ["positional comma list", `agy-context transcript info ${tChildOther},${tChildSelf} --json`]
+    ]) {
+      clearGrants();
+      const multiRes = runHook({
+        conversationId: tParent,
+        toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(multiRes.decision, "allow", `Parent ${label} must allow`);
+      assert.equal(multiRes.overwrite?.CommandLine, undefined, `Parent ${label} must not inject --id <parent>`);
+      const gMulti = readPendingGrants();
+      assert.equal(gMulti.length, 1);
+      assert.equal(gMulti[0].targetConvId, `multi:${[tChildOther, tChildSelf].sort().join(",")}`, `Parent ${label} must mint sorted multi: grant`);
+    }
+
+    // T.2: Negative security checks — self-only child MUST be blocked on --parent and multi-ID/cross-ID health (strikes 1..4 deny, 5+ escalate to force_ask circuit breaker)
+    const selfOnlyNegativeCases = [
+      ["--parent <parentId>", `agy-context transcript health --parent ${tParent}`],
+      ["--parent current", "agy-context transcript health --parent current"],
+      ["--parent empty", 'agy-context transcript stats --parent ""'],
+      ["multi-ID comma list", `agy-context transcript health --id ${tChildSelf},${tChildOther}`],
+      ["repeatable multi-ID", `agy-context transcript stats --id ${tChildSelf} --id ${tChildOther}`],
+      ["positional multi-ID", `agy-context transcript info ${tChildSelf},${tChildOther}`],
+      ["cross-session single ID", `agy-context transcript health --id ${tChildOther}`]
+    ];
+    for (let i = 0; i < selfOnlyNegativeCases.length; i++) {
+      const [label, cmd] = selfOnlyNegativeCases[i];
+      clearGrants();
+      const denyRes = runHook({
+        conversationId: tChildSelf,
+        toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } }
+      });
+      const expectedDecision = i < 4 ? "deny" : "force_ask";
+      assert.equal(denyRes.decision, expectedDecision, `self-only child running health ${label} must return ${expectedDecision}`);
+      assert.equal(readPendingGrants().length, 0, `blocked self-only health ${label} must not mint a grant`);
+    }
+
+    // T.3: Positive self-only check — child inspecting its own health still allows & injects self ID when omitted
+    clearGrants();
+    const selfAllowed = runHook({
+      conversationId: tChildSelf,
+      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript health --json", WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(selfAllowed.decision, "allow", "self-only child inspecting own health must allow");
+    assert.equal(selfAllowed.overwrite?.CommandLine, `agy-context transcript health --json --id ${tChildSelf}`);
+
+    console.log("✓ Group T: L61 multi-ID & --parent transcript health hook grants and self-only isolation verified");
+  } finally {
+    clearGrants();
+    fs.rmSync(tParentDir, { recursive: true, force: true });
+    fs.rmSync(tChildSelfDir, { recursive: true, force: true });
+    fs.rmSync(tChildOtherDir, { recursive: true, force: true });
+    try { fs.unlinkSync(path.join(getStateDir(), `agy-session-${tChildSelf}.json`)); } catch {}
+    try { fs.unlinkSync(path.join(getStateDir(), `agy-session-${tChildOther}.json`)); } catch {}
+    try { fs.unlinkSync(path.join(getStateDir(), `agy-session-${tParent}.json`)); } catch {}
   }
 }
 

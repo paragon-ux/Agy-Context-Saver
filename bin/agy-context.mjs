@@ -176,13 +176,18 @@ const SUBCOMMAND_HELP = {
   },
   health: {
     title: "transcript health (aliases: stats, info)",
-    usage: "agy-context transcript health [<id>] [options]",
+    usage: "agy-context transcript health [<id[,id...]>] [options]",
     body: [
-      "  --id <uuid>            Conversation UUID (or pass as first positional argument)",
+      "  --id <uuid[,uuid...]>  One or more conversation UUIDs (positional, comma-separated, or repeatable)",
+      "  --parent <uuid>        Audit health across all child sessions belonging to a parent UUID",
       "  --file <path>          Explicit transcript .jsonl path inside Antigravity brain roots",
       "  --json                 Emit structured JSON health metrics"
     ],
-    examples: ["agy-context transcript health", "agy-context transcript stats --json"]
+    examples: [
+      "agy-context transcript health",
+      "agy-context transcript stats --parent current --json",
+      "agy-context transcript info --id <uuid1>,<uuid2> --json"
+    ]
   },
   list: {
     title: "transcript list (alias: ls)",
@@ -481,7 +486,7 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryS
         else delete page.nextCursor;
       }
       if (isBatch) {
-        page.data = payload.data.slice(0, count);
+        if (Array.isArray(payload.data)) page.data = payload.data.slice(0, count);
         page.stepIndices = retained.map((entry) => entry.stepIndex);
         page.stepIndex = retained[0]?.stepIndex ?? null;
       } else if (isRead) {
@@ -516,7 +521,9 @@ function serializeBoundedJsonPayload(payload, maxBytes, { readPageSize, summaryS
   } else if (payload.stepIndex !== undefined) {
     // A single step can carry its selected field without duplicating the entire raw step.
     const { step, data, ...header } = payload;
-    const fitted = tryFit({ ...header, data, clamped: true, ...meta(1) }) || tryFit({ ...header, clamped: true, ...meta(0) });
+    const fitted =
+      (step !== undefined && data !== undefined ? tryFit({ ...header, data, clamped: true, ...meta(1) }) : null) ||
+      tryFit({ ...header, clamped: true, ...meta(0) });
     if (fitted) return fitted;
   }
 
@@ -744,12 +751,30 @@ const TRANSCRIPT_HANDLERS = {
   },
 
   async health(sub, rest) {
-    const { opts, positional } = parseTranscriptSubcommand(sub, rest, { booleans: ["json"], values: ["id", "file"] });
-    if (opts.id === undefined && positional.length === 1) opts.id = positional.shift();
-    pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
+    const { opts, positional } = parseTranscriptSubcommand(sub, rest, {
+      booleans: ["json"],
+      values: ["parent", "file"],
+      multiValues: ["id"]
+    });
+    if ((!opts.id || opts.id.length === 0) && !opts.parent && !opts.file && positional.length === 1) {
+      opts.id = [positional.shift()];
+    }
+    const healthIds = (opts.id || []).flatMap((id) => String(id || "").split(",")).map((id) => id.trim()).filter(Boolean);
+    pendingErrorGrantContext = {
+      subcommand: sub,
+      targetConvId: opts.parent
+        ? `parent:${String(opts.parent).trim()}`
+        : healthIds.length === 1 ? healthIds[0] : healthIds.length > 1 ? `multi:${[...new Set(healthIds)].sort().join(",")}` : null
+    };
     assertNoExtraPositionals(sub, positional);
+    if (opts.parent !== undefined && !String(opts.parent).trim()) {
+      throw new Error("Flag '--parent' must be a non-empty conversation ID or 'current'.");
+    }
     const res = await checkContextHealth({
-      conversationId: opts.id, filePath: validateExplicitFileFlag(opts.file), allowExternalPaths: false
+      conversationIds: opts.id || [],
+      parentId: opts.parent,
+      filePath: validateExplicitFileFlag(opts.file),
+      allowExternalPaths: false
     });
     if (res.isError) emitError(res.text, Boolean(opts.json), res.candidates ? { candidates: res.candidates } : {});
     if (opts.json) {

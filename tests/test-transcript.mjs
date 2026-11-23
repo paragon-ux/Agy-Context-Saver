@@ -1866,11 +1866,13 @@ try {
     assert.deepEqual(parsedFwdOutlineZero.nextCursor, { start: 11, end: 30 }, "count === 0 forward outline must advance to next step");
 
     const batchSteps = ["0", "2", "4", "8"];
-    const batch = runCli(["transcript", "step", "--id", convHuge, "--step", batchSteps.join(","), "--field", "content", "--json", "--max-chars", "15000"]);
-    assertBounded(batch, 15000);
+    const batch = runCli(["transcript", "step", "--id", convHuge, "--step", batchSteps.join(","), "--field", "content", "--json", "--max-chars", "8000"]);
+    assertBounded(batch, 8000);
     const batchPage = JSON.parse(batch.stdout);
     assert.ok(batchPage.steps.length > 0 && batchPage.steps.length < batchSteps.length);
     assert.deepEqual(batchPage.stepIndices, batchPage.steps.map((entry) => entry.stepIndex));
+    assert.equal("data" in batchPage, false, "Deduplicated batch step JSON must not repeat top-level data array");
+    assert.equal("step" in batchPage.steps[0], false, "Projected batch step JSON must omit raw unselected step object");
     const remainder = await getStepDetail({ conversationId: convHuge, stepIndex: batchPage.nextCursor.step, full: true });
     assert.deepEqual(remainder.requestedSteps ?? [remainder.stepIndex], batchSteps.slice(batchPage.steps.length).map(Number));
 
@@ -2729,13 +2731,14 @@ try {
     assert.equal(zip.steps.length, 0, "oversized step 2 must force 0-item fallback under 780 bytes");
     assert.ok(zeroItemPrettyJson.stdout.includes("\n  \"steps\": []"), "0-item JSON fallback fitting budget should use 2-space indentation");
 
+    // Deduplicated single-step projected JSON fits small content directly without raw-step bloat
     const singleStepPrettySelected = runCli(["transcript", "step", String(richAsstStep), convErg, "--field", "content", "--json", "--max-chars", "850"]);
     assertBounded(singleStepPrettySelected, 850);
     const ssps = JSON.parse(singleStepPrettySelected.stdout);
-    assert.equal(ssps.jsonTruncated, true);
-    assert.equal(ssps.jsonItemsIncluded, 1);
+    assert.equal(ssps.jsonTruncated, undefined, "projected --field content omits raw step and fits cleanly in 850 bytes");
+    assert.equal("step" in ssps, false, "projected --field content must not serialize unselected raw step");
     assert.equal(typeof ssps.data, "string");
-    assert.ok(singleStepPrettySelected.stdout.includes("\n  \"stepIndex\":"), "single-step prettySelected must use 2-space indentation when it fits");
+    assert.ok(singleStepPrettySelected.stdout.includes("\n  \"stepIndex\":"), "single-step JSON must use 2-space indentation when it fits");
 
     const singleStepPrettySummary = runCli(["transcript", "step", String(richAsstStep), convErg, "--field", "thinking", "--json", "--max-chars", "750"]);
     assertBounded(singleStepPrettySummary, 750);
@@ -2745,8 +2748,8 @@ try {
     assert.equal(sspsum.data, undefined);
     assert.ok(singleStepPrettySummary.stdout.includes("\n  \"stepIndex\":"), "single-step prettySummary must use 2-space indentation when it fits");
 
-    const batchStepPrettyClamp = runCli(["transcript", "step", "4,5,6,7,8", convNorm, "--field", "content", "--json", "--max-chars", "2200"]);
-    assertBounded(batchStepPrettyClamp, 2200);
+    const batchStepPrettyClamp = runCli(["transcript", "step", "4,5,6,7,8", convNorm, "--field", "content", "--json", "--max-chars", "1200"]);
+    assertBounded(batchStepPrettyClamp, 1200);
     const bspc = JSON.parse(batchStepPrettyClamp.stdout);
     assert.equal(bspc.jsonTruncated, true);
     assert.ok(bspc.steps.length >= 1 && bspc.steps.length < 5);
@@ -3372,6 +3375,255 @@ try {
     assert.equal("l6Safe" in parsedCliSanitized, false);
 
     console.log("✓ Wave 3 regressions (PT-SEC-001, PT-SVC-001, PT-RUN-004, PT-INFO-001, 1B.3) verified");
+
+    // ========================================================================
+    // 16. L61 Quota-Sink Remediations: getStepDetail JSON Dedup, --summary 100 Default & Cohort Health
+    // ========================================================================
+    console.log("\n--- 16. L61 Quota-Sink Remediations (getStepDetail dedup, --summary 100, Cohort Health) ---");
+
+    // 16.1 Deduplicated getStepDetail JSON contract across single/batch and all/projected fields
+    const convDedup = "conv-l61-dedup-step";
+    const dedupLogs = path.join(brainDir, convDedup, ".system_generated", "logs");
+    fs.mkdirSync(dedupLogs, { recursive: true });
+    const dedupSteps = [
+      { step_index: 0, type: "USER_INPUT", content: "Inspect step payload", created_at: "2026-11-22T10:00:00Z" },
+      {
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        thinking: "T".repeat(1200),
+        content: "Checking tool execution.",
+        tool_calls: [{ name: "run_command", args: { CommandLine: "echo hi", WaitMsBeforeAsync: 5000 } }],
+        created_at: "2026-11-22T10:00:01Z"
+      }
+    ];
+    fs.writeFileSync(path.join(dedupLogs, "transcript_full.jsonl"), dedupSteps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf-8");
+
+    const dedupSingleAll = runCli(["transcript", "step", "1", convDedup, "--json"], testEnv);
+    assert.equal(dedupSingleAll.status, 0, dedupSingleAll.stderr);
+    const dsa = JSON.parse(dedupSingleAll.stdout);
+    assert.ok(dsa.step && dsa.step.step_index === 1, "Single-step --field all must emit step");
+    assert.equal("data" in dsa, false, "Single-step --field all must omit duplicate data field");
+
+    const dedupSingleField = runCli(["transcript", "step", "1", convDedup, "--field", "tool_args", "--json"], testEnv);
+    assert.equal(dedupSingleField.status, 0, dedupSingleField.stderr);
+    const dsf = JSON.parse(dedupSingleField.stdout);
+    assert.ok(Array.isArray(dsf.data) && dsf.data.length > 0, "Single-step projected field must emit data");
+    assert.equal("step" in dsf, false, "Single-step projected field must omit unselected raw step");
+    assert.ok(dedupSingleField.stdout.length < dedupSingleAll.stdout.length, "Projected --field tool_args JSON must be smaller than raw --field all JSON");
+
+    const dedupBatchAll = runCli(["transcript", "step", "0,1", convDedup, "--json"], testEnv);
+    assert.equal(dedupBatchAll.status, 0, dedupBatchAll.stderr);
+    const dba = JSON.parse(dedupBatchAll.stdout);
+    assert.equal("data" in dba, false, "Batch --field all must omit duplicate top-level data array");
+    assert.equal(dba.steps.length, 2);
+    assert.ok(dba.steps[0].step && !("data" in dba.steps[0]), "Batch --field all steps[] must emit step without duplicate data");
+
+    const dedupBatchField = runCli(["transcript", "step", "0,1", convDedup, "--field", "content", "--json"], testEnv);
+    assert.equal(dedupBatchField.status, 0, dedupBatchField.stderr);
+    const dbf = JSON.parse(dedupBatchField.stdout);
+    assert.equal("data" in dbf, false, "Batch projected field must omit duplicate top-level data array");
+    assert.equal(dbf.steps.length, 2);
+    assert.ok(typeof dbf.steps[0].data === "string" && !("step" in dbf.steps[0]), "Batch projected steps[] must emit data without raw step");
+    assert.ok(dedupBatchField.stdout.length < dedupBatchAll.stdout.length, "Batch projected --field content JSON must avoid raw-step bloat");
+
+    // 16.2 query --summary defaultMaxResults (100 non-full, 500 with --full), compact outline --full & query --full LARGE_BODY cap (ACS-BUG-01)
+    const convSum100 = "conv-l61-summary-100";
+    const sum100Logs = path.join(brainDir, convSum100, ".system_generated", "logs");
+    fs.mkdirSync(sum100Logs, { recursive: true });
+    const rows75 = Array.from({ length: 75 }, (_, i) =>
+      JSON.stringify({ step_index: i, type: "PLANNER_RESPONSE", status: "DONE", content: `s${i}`, created_at: "2026-11-22T10:00:00Z" })
+    );
+    fs.writeFileSync(path.join(sum100Logs, "transcript.jsonl"), rows75.join("\n") + "\n", "utf-8");
+    const sum75Cli = runCli(["transcript", "query", "--id", convSum100, "--summary", "--json", "--full"], testEnv);
+    assert.equal(sum75Cli.status, 0, sum75Cli.stderr);
+    const sum75Parsed = JSON.parse(sum75Cli.stdout);
+    assert.equal(sum75Parsed.matchedCount, 75);
+    assert.equal(sum75Parsed.displayedCount, 75, "query --summary without --limit must retain all 75 steps");
+    assert.equal(sum75Parsed.clamped, false);
+
+    const convSum120 = "conv-l61-summary-120";
+    const sum120Logs = path.join(brainDir, convSum120, ".system_generated", "logs");
+    fs.mkdirSync(sum120Logs, { recursive: true });
+    const rows120 = Array.from({ length: 120 }, (_, i) =>
+      JSON.stringify({ step_index: i, type: "PLANNER_RESPONSE", status: "DONE", content: `k${i}`, created_at: "2026-11-22T10:00:00Z" })
+    );
+    fs.writeFileSync(path.join(sum120Logs, "transcript.jsonl"), rows120.join("\n") + "\n", "utf-8");
+    const sum120NonFull = await queryTranscript({ conversationId: convSum120, summaryOnly: true, maxOutputChars: 32000 });
+    assert.equal(sum120NonFull.matchedCount, 120);
+    assert.equal(sum120NonFull.displayedCount, 100, "non-full query --summary default cap must be 100 steps");
+    assert.equal(sum120NonFull.clamped, true);
+    assert.deepEqual(sum120NonFull.nextCursor, { end: 19 });
+
+    const sum120Full = await queryTranscript({ conversationId: convSum120, summaryOnly: true, full: true });
+    assert.equal(sum120Full.matchedCount, 120);
+    assert.equal(sum120Full.displayedCount, 120, "query --summary --full must raise default step cap to 500 and return all 120 steps");
+    assert.equal(sum120Full.clamped, false);
+
+    // ACS-BUG-01: query --roles all --include-tools --full returns >5 steps (up to 500) and keeps LARGE_BODY_ARG_KEYS summarized unless --full-args
+    const convFullQuery = "conv-l61-query-full-bug01";
+    const fullQueryLogs = path.join(brainDir, convFullQuery, ".system_generated", "logs");
+    fs.mkdirSync(fullQueryLogs, { recursive: true });
+    const hugeWriteBody = "REPORT_HEADER\n" + "R".repeat(3000) + "\nREPORT_TAIL_MARKER";
+    const fullQuerySteps = Array.from({ length: 15 }, (_, i) => ({
+      step_index: i,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      content: `Audit step ${i}`,
+      tool_calls: i === 14
+        ? [{ name: "write_file", args: { Path: "/repo/report.md", Content: hugeWriteBody } }]
+        : [{ name: "read_file", args: { Path: `/repo/src/f${i}.js`, StartLine: 1, EndLine: 200 } }],
+      created_at: "2026-11-22T10:00:00Z"
+    }));
+    fs.writeFileSync(path.join(fullQueryLogs, "transcript.jsonl"), fullQuerySteps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf-8");
+    const qFullRes = await queryTranscript({ conversationId: convFullQuery, roles: ["all"], includeToolCalls: true, full: true });
+    assert.equal(qFullRes.displayedCount, 15, "query --full without --limit must return all 15 steps instead of capping at 5");
+    assert.equal(qFullRes.clamped, false);
+    assert.equal(qFullRes.text.includes("REPORT_TAIL_MARKER"), false, "query --full without --full-args must keep LARGE_BODY_ARG_KEYS summarized");
+
+    const qFullWithArgs = await queryTranscript({ conversationId: convFullQuery, roles: ["all"], includeToolCalls: true, full: true, fullArgs: true });
+    assert.equal(qFullWithArgs.displayedCount, 15);
+    assert.equal(qFullWithArgs.text.includes("REPORT_TAIL_MARKER"), true, "query --full --full-args must unclamp LARGE_BODY_ARG_KEYS");
+
+    const outlineFullRes = await queryTranscript({ conversationId: convFullQuery, summaryOnly: true, includeToolCalls: true, full: true });
+    assert.equal(outlineFullRes.displayedCount, 15);
+    assert.equal(outlineFullRes.text.includes("REPORT_TAIL_MARKER"), false, "outline/summary --full must keep per-line tool summaries compact");
+    assert.ok(Buffer.byteLength(outlineFullRes.text, "utf8") < 4000, "compact summary --full over 15 steps must stay tiny");
+
+    // 13.3 Multi-ID & --parent cohort transcript health + zero-trust grant enforcement
+    const cohortParent = "conv-l61-cohort-parent";
+    const cohortWorkerA = "conv-l61-cohort-w1";
+    const cohortWorkerB = "conv-l61-cohort-w2";
+    for (const [cid, lines] of [
+      [cohortParent, [{ step_index: 0, type: "USER_INPUT", content: "Run cohort audit", created_at: "2026-11-22T10:00:00Z" }]],
+      [
+        cohortWorkerA,
+        [
+          { step_index: 0, type: "SYSTEM_MESSAGE", content: `[Message] sender=${cohortParent} priority=HIGH content=Worker A`, created_at: "2026-11-22T10:00:01Z" },
+          { step_index: 1, type: "PLANNER_RESPONSE", content: "Done A", tool_calls: [{ name: "read_file", args: { Path: "a.js" } }], created_at: "2026-11-22T10:00:02Z" }
+        ]
+      ],
+      [
+        cohortWorkerB,
+        [
+          { step_index: 0, type: "SYSTEM_MESSAGE", content: `[Message] sender=${cohortParent} priority=HIGH content=Worker B`, created_at: "2026-11-22T10:00:03Z" },
+          {
+            step_index: 1,
+            type: "PLANNER_RESPONSE",
+            content: "Polling swarm illegally",
+            tool_calls: [{ name: "schedule", args: { DurationSeconds: 30, Prompt: "Check swarm board progress" } }],
+            created_at: "2026-11-22T10:00:04Z"
+          }
+        ]
+      ]
+    ]) {
+      const d = path.join(brainDir, cid, ".system_generated", "logs");
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, "transcript.jsonl"), lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf-8");
+    }
+
+    const multiHealthJson = runCli(["transcript", "health", "--id", `${cohortWorkerA},${cohortWorkerB}`, "--json"], testEnv);
+    assert.equal(multiHealthJson.status, 0, multiHealthJson.stderr);
+    const mhj = JSON.parse(multiHealthJson.stdout);
+    assert.equal(mhj.sessionCount, 2);
+    assert.equal(mhj.parentFilter, null);
+    assert.equal(mhj.totals.totalSteps, 4);
+    assert.equal(mhj.totals.toolCalls, 2);
+    assert.equal(mhj.totals.pollingViolations, 1);
+    assert.match(mhj.status, /^WARNING/);
+    assert.deepEqual(mhj.sessions.map((s) => s.convId), [cohortWorkerA, cohortWorkerB]);
+
+    const repeatHealthMd = runCli(["transcript", "stats", "--id", cohortWorkerA, "--id", cohortWorkerB], testEnv);
+    assert.equal(repeatHealthMd.status, 0, repeatHealthMd.stderr);
+    assert.match(repeatHealthMd.stdout, /Cohort Context Health Report: WARNING.*2 sessions/);
+    assert.match(repeatHealthMd.stdout, new RegExp(cohortWorkerA));
+    assert.match(repeatHealthMd.stdout, new RegExp(cohortWorkerB));
+
+    const parentHealthJson = runCli(["transcript", "health", "--parent", cohortParent, "--json"], testEnv);
+    assert.equal(parentHealthJson.status, 0, parentHealthJson.stderr);
+    const phj = JSON.parse(parentHealthJson.stdout);
+    assert.equal(phj.parentFilter, cohortParent);
+    assert.equal(phj.sessionCount, 2);
+    assert.equal(phj.totals.pollingViolations, 1);
+
+    const parentCurHealth = runCli(["transcript", "info", "--parent", "current", "--json"], {
+      ...testEnv,
+      GEMINI_CONVERSATION_ID: cohortParent
+    });
+    assert.equal(parentCurHealth.status, 0, parentCurHealth.stderr);
+    assert.equal(JSON.parse(parentCurHealth.stdout).parentFilter, cohortParent);
+
+    // Validation error checks for cohort health
+    for (const badArgs of [
+      ["transcript", "health", "--parent", ""],
+      ["transcript", "health", "--parent", cohortParent, "--id", cohortWorkerA],
+      ["transcript", "health", "--id", `${cohortWorkerA},current`],
+      ["transcript", "health", "--parent", "conv-l61-no-children"]
+    ]) {
+      const badRes = runCli(badArgs, testEnv);
+      assert.equal(badRes.status, 1, `Expected error for ${badArgs.join(" ")}`);
+    }
+
+    // Zero-trust Tier 4 launch-restriction grant enforcement on health --parent & --id multi without GEMINI_CONVERSATION_ID
+    const t4HealthChildFile = path.join(stateDir, `agy-session-${cohortWorkerA}.json`);
+    fs.writeFileSync(
+      t4HealthChildFile,
+      JSON.stringify({
+        conversationId: cohortWorkerA,
+        lastSeenTime: Date.now(),
+        lineage: { isChildSession: true, isSwarmChild: true, parentConvId: cohortParent, launchDirective: "deny" }
+      }),
+      "utf-8"
+    );
+    const noEnvHealth = { ...testEnv };
+    delete noEnvHealth.GEMINI_CONVERSATION_ID;
+    try {
+      const ungrantedParentHealth = runCli(["transcript", "health", "--parent", cohortParent, "--json"], noEnvHealth);
+      assert.equal(ungrantedParentHealth.status, 1, "Tier 4 active child must block ungranted health --parent without GEMINI_CONVERSATION_ID");
+
+      const ungrantedMultiHealth = runCli(["transcript", "health", "--id", `${cohortWorkerA},${cohortWorkerB}`, "--json"], noEnvHealth);
+      assert.equal(ungrantedMultiHealth.status, 1, "Tier 4 active child must block ungranted health --id multi without GEMINI_CONVERSATION_ID");
+
+      // Mismatched grant must fail
+      recordTranscriptHookGrant({ callerConvId: cohortParent, subcommand: "health", targetConvId: "parent:other-parent", mode: "open" });
+      const mismatchParentHealth = runCli(["transcript", "health", "--parent", cohortParent, "--json"], noEnvHealth);
+      assert.equal(mismatchParentHealth.status, 1, "Mismatched parent: grant must be rejected on health --parent");
+
+      // Matching parent: grant succeeds once and is consumed atomically
+      recordTranscriptHookGrant({ callerConvId: cohortParent, subcommand: "health", targetConvId: `parent:${cohortParent}`, mode: "open" });
+      const grantedParentHealth = runCli(["transcript", "health", "--parent", cohortParent, "--json"], noEnvHealth);
+      assert.equal(grantedParentHealth.status, 0, grantedParentHealth.stderr);
+      assert.equal(JSON.parse(grantedParentHealth.stdout).sessionCount, 2);
+      const replayParentHealth = runCli(["transcript", "health", "--parent", cohortParent, "--json"], noEnvHealth);
+      assert.equal(replayParentHealth.status, 1, "Single-use parent: grant must be consumed on first health --parent call");
+
+      // Matching multi: grant succeeds once and is consumed atomically
+      const multiKey = `multi:${[cohortWorkerA, cohortWorkerB].sort().join(",")}`;
+      recordTranscriptHookGrant({ callerConvId: cohortParent, subcommand: "health", targetConvId: multiKey, mode: "open" });
+      const grantedMultiHealth = runCli(["transcript", "health", "--id", `${cohortWorkerB},${cohortWorkerA}`, "--json"], noEnvHealth);
+      assert.equal(grantedMultiHealth.status, 0, grantedMultiHealth.stderr);
+      assert.equal(JSON.parse(grantedMultiHealth.stdout).sessionCount, 2);
+      const replayMultiHealth = runCli(["transcript", "health", "--id", `${cohortWorkerA},${cohortWorkerB}`, "--json"], noEnvHealth);
+      assert.equal(replayMultiHealth.status, 1, "Single-use multi: grant must be consumed on first health --id multi call");
+
+      // ACS-SEC-01: self-only Tier 4 child must also block ungranted multi: health without GEMINI_CONVERSATION_ID
+      fs.writeFileSync(
+        t4HealthChildFile,
+        JSON.stringify({
+          conversationId: cohortWorkerA,
+          lastSeenTime: Date.now(),
+          lineage: { isChildSession: true, isSwarmChild: true, parentConvId: cohortParent, launchDirective: "self-only" }
+        }),
+        "utf-8"
+      );
+      const ungrantedSelfOnlyMulti = runCli(["transcript", "health", "--id", `${cohortWorkerA},${cohortWorkerB}`, "--json"], noEnvHealth);
+      assert.equal(ungrantedSelfOnlyMulti.status, 1, "ACS-SEC-01: self-only Tier 4 child must block ungranted multi: health without GEMINI_CONVERSATION_ID");
+    } finally {
+      try { fs.unlinkSync(t4HealthChildFile); } catch {}
+      for (const f of listGrantFiles()) { try { fs.unlinkSync(path.join(grantsDir, f)); } catch {} }
+    }
+
+    console.log("✓ Section 16 (L61 getStepDetail dedup, --summary 100 default, cohort health & Tier 4 grants) verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

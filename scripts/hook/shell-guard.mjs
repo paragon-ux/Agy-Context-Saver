@@ -829,7 +829,7 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
     : sub === "step"
       ? new Set(["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "line-start", "line-end", "max-chars", "out", "output", "file"])
       : ["health", "stats", "info"].includes(sub)
-        ? new Set(["id", "file"])
+        ? new Set(["id", "parent", "file"])
         : ["list", "ls"].includes(sub)
           ? new Set(["limit", "parent"])
           : ["export", "dump"].includes(sub)
@@ -859,6 +859,7 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
     opts[key] = val;
   }
 
+  const isMultiCapable = ["export", "dump", "health", "stats", "info"].includes(sub);
   const pos = [...positionals];
   if (["query", "grep", "search", "find", "tools"].includes(sub)) {
     if (opts.query === undefined && pos.length) opts.query = pos.shift();
@@ -867,10 +868,10 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
     if (opts.step === undefined && pos.length) opts.step = pos.shift();
     if (opts.id === undefined && pos.length) { opts.id = pos.shift(); idValues.push(opts.id); }
   } else if (["read", "outline", "summary", "health", "stats", "info", "export", "dump"].includes(sub)) {
-    const canTakeId = (sub !== "export" && sub !== "dump") || (opts.parent === undefined && opts.file === undefined);
+    const canTakeId = !isMultiCapable || (opts.parent === undefined && opts.file === undefined);
     if (opts.id === undefined && canTakeId && pos.length) {
       opts.id = pos.shift();
-      if (sub === "export" || sub === "dump") String(opts.id).split(",").map((s) => s.trim()).filter(Boolean).forEach((p) => idValues.push(p));
+      if (isMultiCapable) String(opts.id).split(",").map((s) => s.trim()).filter(Boolean).forEach((p) => idValues.push(p));
       else idValues.push(opts.id);
     }
   }
@@ -878,7 +879,7 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
 
   const uniqueIds = [...new Set(idValues.map((s) => String(s).trim()).filter(Boolean))];
   return {
-    targetId: (sub === "export" || sub === "dump") && uniqueIds.length === 1 ? uniqueIds[0] : (opts.id ? String(opts.id).trim() : null),
+    targetId: isMultiCapable && uniqueIds.length === 1 ? uniqueIds[0] : (opts.id ? String(opts.id).trim() : null),
     targetIds: uniqueIds,
     targetParent: opts.parent !== undefined ? String(opts.parent).trim() : null,
     outPaths,
@@ -939,6 +940,8 @@ function checkAgyContextTranscriptCommand(segments, convId, ctx) {
     const targetInfo = extractTargetConvIdFromTranscriptTokens(subcommand, restTokens);
     if (targetInfo.error) return fail(targetInfo.error);
     const isExport = subcommand === "export" || subcommand === "dump";
+    const isHealth = subcommand === "health" || subcommand === "stats" || subcommand === "info";
+    const isMultiTargetSub = isExport || isHealth;
     const isList = subcommand === "list" || subcommand === "ls";
     if (isExport && !targetInfo.sanitized) {
       return fail("Antigravity Execution Governance: Flag '--sanitized' is required for 'agy-context transcript export' to enforce transcript isolation (raw transcript export is prohibited).");
@@ -961,9 +964,9 @@ function checkAgyContextTranscriptCommand(segments, convId, ctx) {
 
     if (accessEval.mode === "self-only") {
       if (isList) return denyAccess("'list'/'ls' across sessions is disabled in self-only mode.");
-      if (isExport && targetInfo.targetParent) return denyAccess("'--parent' across sessions is disabled in self-only mode.");
-      if (isExport && (targetInfo.targetIds.length > 1 || targetInfo.targetIds.some((id) => id.toLowerCase() !== "current" && id !== convId))) {
-        return denyAccess("Cross-session or multi-session transcript export is disabled in self-only mode.");
+      if (isMultiTargetSub && targetInfo.targetParent !== null) return denyAccess("'--parent' across sessions is disabled in self-only mode.");
+      if (isMultiTargetSub && (targetInfo.targetIds.length > 1 || targetInfo.targetIds.some((id) => id.toLowerCase() !== "current" && id !== convId))) {
+        return denyAccess(`Cross-session or multi-session transcript ${isExport ? "export" : "health inspection"} is disabled in self-only mode.`);
       }
       if (targetInfo.explicitFile && !isContainedInAnyBrainDir(targetInfo.explicitFile, brainDirs, convId, { cwd })) {
         return denyAccess(`Cross-session '--file' access outside '${convId}' is disabled in self-only mode.`);
@@ -977,8 +980,8 @@ function checkAgyContextTranscriptCommand(segments, convId, ctx) {
     }
 
     let resolvedTarget = targetInfo.targetId || null;
-    const injectParentId = (isExport || isList) && targetInfo.targetParent?.toLowerCase() === "current" && convId && convId !== "global" ? convId : null;
-    if (isExport) {
+    const injectParentId = (isMultiTargetSub || isList) && targetInfo.targetParent?.toLowerCase() === "current" && convId && convId !== "global" ? convId : null;
+    if (isMultiTargetSub) {
       if (targetInfo.targetParent) resolvedTarget = `parent:${injectParentId || targetInfo.targetParent}`;
       else if (targetInfo.targetIds.length > 1) resolvedTarget = `multi:${[...targetInfo.targetIds].sort().join(",")}`;
       else if (targetInfo.targetIds.length === 1) resolvedTarget = targetInfo.targetIds[0];
@@ -992,7 +995,7 @@ function checkAgyContextTranscriptCommand(segments, convId, ctx) {
       }
     }
     const wasCur = Boolean(targetInfo.targetId && targetInfo.targetId.toLowerCase() === "current");
-    const injectSelfId = !isList && !(isExport && targetInfo.targetParent) && !targetInfo.explicitFile && (!targetInfo.targetId || wasCur) && convId && convId !== "global" ? convId : null;
+    const injectSelfId = !isList && !(isMultiTargetSub && (targetInfo.targetParent || targetInfo.targetIds.length > 1)) && !targetInfo.explicitFile && (!targetInfo.targetId || wasCur) && convId && convId !== "global" ? convId : null;
     if (injectSelfId) resolvedTarget = convId;
     return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: true, targetConvId: resolvedTarget, injectSelfId, targetWasCurrentPlaceholder: wasCur, injectParentId };
   }
