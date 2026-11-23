@@ -3702,28 +3702,40 @@ try {
 
   console.log("\n--- 17. Day-One Audit Regressions (SEC-004, SEC-006, RUN-001..004) ---");
   {
-    // SEC-004 & R2-RUN-001: catastrophic/polynomial/case-folded ReDoS patterns fall back to literal matching while truly /i-disjoint regexes stay active
+    // SEC-004 & R2-RUN-001: Thompson NFA executes every regular regex in guaranteed linear O(S*N) time with zero backtracking
     const evilPatterns = [
       "(a+)+!", "(a?a?)+!", "(a{0,1}a{0,1})+!", "((a|aa))+!", "(?:(a|aa))+!",
       "(a|aa)?".repeat(16) + "!", "(a|aa)".repeat(25) + "!", "a?".repeat(26) + "a".repeat(26) + "!",
+      "(a{1,2})".repeat(26) + "!", "a{1,2}\\B".repeat(26) + "!",
       "(a){1,99}".repeat(6) + "!", "a{1,99}A{1,99}".repeat(3) + "!", "a{1,99}b?".repeat(6) + "!",
+      "(a+)(a+)(a+)!", "(a+)(a+)!", "([^x]+)([^x]+)([^x]+)!", "(a{1,999})".repeat(3) + "!",
+      "a+(?:)a+(?:)a+!", "a+(?:b?)a+(?:b?)a+!", "a+(?=a)a+(?=a)a+!", "a+\\Ba+\\Ba+!",
+      "\\x61+a+!", "\\x61+\\x61+\\x61+!", "\\u0061+\\u0061+\\u0061+!", "[\\x61]+a+[\\u0061]+!", "[a-\\d]+\\d+[a-\\d]+!",
+      "a+aa+!", "a+aa+aa+!", "a+a{1}a+a{1}a+!", "[a-z]+a[a-z]+a[a-z]+!", "\\w+a\\w+a\\w+!", "a.*a.*!",
       "a+A+a+!", "a+A+!", "[A-Z]+[a-z]+!", "(a)+(a)+(a)+!", "a.*a.*a.*!",
       "[a-z]+[a-b]+[a-c]+!", "\\w+a+\\w+!", "a+b?a+!", "a+b*a+!",
-      "a+a+a+a+a+a+!", "\\S+\\w+\\S+\\w+\\S+!", "\\w+\\d+\\w+\\d+\\w+!", "a.*a.*a.*a.*a.*!"
+      "a+a+a+a+a+a+!", "\\S+\\w+\\S+\\w+\\S+!", "\\w+\\d+\\w+\\d+\\w+!", "a.*a.*a.*a.*a.*!",
+      "((((?:){200}){200}){200}){200}", "(((a{256}){256}){256})", "(a*)*!", "(|a)+!"
     ];
     const t0 = performance.now();
+    const longA = "a".repeat(2000) + "X";
     for (const pat of evilPatterns) {
-      assert.equal(getCompiledRegex(pat).test("a".repeat(64) + "X"), false, `SEC-004 ${pat} must not hang`);
+      assert.equal(getCompiledRegex(pat).test(longA), false, `SEC-004 ${pat} must not hang`);
     }
-    assert.ok(performance.now() - t0 < 50, "SEC-004 catastrophic & polynomial regexes must run in < 50ms via literal fallback");
+    assert.equal(getCompiledRegex("foo.*bar.*baz").test("foobar".repeat(1200)), false, "SEC-004 foo.*bar.*baz must stay linear on repeated foobar");
+    assert.ok(performance.now() - t0 < 250, "SEC-004 all 45 adversarial ReDoS vectors at n=2000 must finish well under 250ms");
     assert.equal(getCompiledRegex("ERROR|DENIED").test("found denied"), true, "SEC-004 normal alternation regex preserved");
     assert.equal(getCompiledRegex("step\\s+\\d+").test("step 42"), true, "SEC-004 disjoint wildcard regex preserved");
-    assert.equal(getCompiledRegex("[a-z]+[0-9]+").test("step42"), true, "R2-RUN-001 benign /i-disjoint char classes must stay regex");
+    assert.equal(getCompiledRegex("[a-z]+[0-9]+").test("step42"), true, "R2-RUN-001 benign char classes must stay regex");
+    assert.equal(getCompiledRegex("[A-Z]+[a-z]+").test("Hello"), true, "SEC-004 Thompson NFA handles [A-Z]+[a-z]+ safely in linear time");
     assert.equal(getCompiledRegex("[0-9]+[:.-][0-9]+").test("12.34"), true, "R2-RUN-001 benign numeric punctuation pattern must stay regex");
     assert.equal(getCompiledRegex("colou?r").test("color"), true, "SEC-004 benign optional char preserved");
     assert.equal(getCompiledRegex("https?://\\S+").test("https://example.com"), true, "SEC-004 benign URL regex preserved");
     assert.equal(getCompiledRegex("\\w+@\\w+\\.\\w+").test("a@b.co"), true, "SEC-004 benign email regex preserved");
     assert.equal(getCompiledRegex("foo.*bar.*baz").test("foo 1 bar 2 baz"), true, "SEC-004 benign 2-wildcard regex preserved");
+    assert.equal(getCompiledRegex("^start.*end$").test("START middle END"), true, "SEC-004 anchors ^ and $ verified");
+    assert.equal(getCompiledRegex("\\bfoo\\b").test("foobar"), false, "SEC-004 word boundary \\b negative verified");
+    assert.equal(getCompiledRegex("\\bfoo\\b").test("a FOO b"), true, "SEC-004 word boundary \\b positive verified");
 
     // SEC-006: !transcriptFound does not branch on AGY_TEST_PROFILE_DIR
     const sec006Policy = findGoverningPolicyForCaller(
