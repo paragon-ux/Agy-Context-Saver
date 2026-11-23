@@ -3723,7 +3723,25 @@ try {
       assert.equal(getCompiledRegex(pat).test(longA), false, `SEC-004 ${pat} must not hang`);
     }
     assert.equal(getCompiledRegex("foo.*bar.*baz").test("foobar".repeat(1200)), false, "SEC-004 foo.*bar.*baz must stay linear on repeated foobar");
-    assert.ok(performance.now() - t0 < 250, "SEC-004 all 45 adversarial ReDoS vectors at n=2000 must finish well under 250ms");
+    assert.ok(performance.now() - t0 < 250, `SEC-004 all ${evilPatterns.length} adversarial ReDoS vectors at n=2000 must finish well under 250ms`);
+    // R5-SEC-001: Precompiled char-class predicates prevent O(S*C*N) CPU amplification on repeated large classes
+    const tClass = performance.now();
+    const asciiDense = "(([^" + "b".repeat(485) + "]){255}){2}!";
+    const shortDense = "(([^" + "\\d".repeat(240) + "]){255}){2}!";
+    const nonAsciiChars = Array.from({ length: 240 }, (_, i) => String.fromCharCode(0x0100 + i * 2)).join("");
+    const nonAsciiDense = "(([^" + nonAsciiChars + "]){255}){2}!";
+    assert.equal(getCompiledRegex(asciiDense).test("a".repeat(10000)), false, "R5-SEC-001 dense ASCII char class must stay linear at 10KB");
+    assert.equal(getCompiledRegex(shortDense).test("a".repeat(10000)), false, "R5-SEC-001 repeated shorthand char class must stay linear at 10KB");
+    assert.equal(getCompiledRegex(nonAsciiDense).test("\u0500".repeat(10000)), false, "R5-SEC-001 dense non-ASCII char class must stay linear at 10KB");
+    assert.equal(getCompiledRegex(nonAsciiDense).test("\u0500\u0501".repeat(5000)), false, "R5-SEC-001 alternating non-ASCII input must stay linear at 10KB");
+    assert.ok(performance.now() - tClass < 1500, "R5-SEC-001 all 4 dense char-class probes at 10KB must stay linear (< 1500ms vs >12s uncompiled)");
+    // R5-RUN-001: Non-ASCII /i parity inside character classes (plus ECMA-262 non-ASCII->ASCII guard)
+    assert.equal(getCompiledRegex("caf[é]").test("CAFÉ"), true, "R5-RUN-001 caf[é] must match CAFÉ case-insensitively");
+    assert.equal(getCompiledRegex("[ä-ö]").test("Ä"), true, "R5-RUN-001 [ä-ö] must match Ä case-insensitively");
+    assert.equal(getCompiledRegex("[Ä-Ö]").test("ö"), true, "R5-RUN-001 [Ä-Ö] must match ö case-insensitively");
+    assert.equal(getCompiledRegex("[^é]").test("É"), false, "R5-RUN-001 negated [^é] must reject É");
+    assert.equal(getCompiledRegex("[k]").test("\u212a"), false, "R5-RUN-001 non-ASCII Kelvin sign must not fold to ASCII [k]");
+    assert.equal(getCompiledRegex("[\u212a]").test("k"), false, "R5-RUN-001 ASCII k must not fold to non-ASCII [\\u212a]");
     assert.equal(getCompiledRegex("ERROR|DENIED").test("found denied"), true, "SEC-004 normal alternation regex preserved");
     assert.equal(getCompiledRegex("step\\s+\\d+").test("step 42"), true, "SEC-004 disjoint wildcard regex preserved");
     assert.equal(getCompiledRegex("[a-z]+[0-9]+").test("step42"), true, "R2-RUN-001 benign char classes must stay regex");
