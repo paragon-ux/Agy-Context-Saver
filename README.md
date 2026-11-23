@@ -4,6 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-Zensical-purple.svg)](https://paragon-ux.github.io/Agy-Context-Saver/)
 [![CI](https://github.com/paragon-ux/Agy-Context-Saver/actions/workflows/ci-matrix.yml/badge.svg)](https://github.com/paragon-ux/Agy-Context-Saver/actions/workflows/ci-matrix.yml)
+[![CodeQL](https://github.com/paragon-ux/Agy-Context-Saver/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/paragon-ux/Agy-Context-Saver/actions/workflows/github-code-scanning/codeql)
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 

@@ -109,7 +109,7 @@ You can also run the platform installer scripts directly:
 
 ## Health Auditing & Verification
 
-Audit all v2.1.x integration layers from your shell:
+Audit all v2.2.x integration layers from your shell:
 
 ```bash
 agy-context status

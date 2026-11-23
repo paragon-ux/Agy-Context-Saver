@@ -504,6 +504,13 @@ export function parseAndValidateJsonConfig(filePath, configName) {
       );
     }
   }
+  if (configName === "config" && parsed.plugins !== undefined) {
+    if (typeof parsed.plugins !== "object" || parsed.plugins === null || Array.isArray(parsed.plugins)) {
+      throw new Error(
+        `Configuration error: ${filePath} property "plugins" must be a JSON object. Installation aborted to prevent data loss. Original file is unchanged.`
+      );
+    }
+  }
   return parsed;
 }
 
@@ -973,7 +980,7 @@ export async function runUninstall(options = {}) {
   }
 
   // 2. Remove both current and legacy hook keys from hooks.json, and plugin toggle from config.json
-  if (validatedHooks && typeof validatedHooks === "object") {
+  if (validatedHooks && typeof validatedHooks === "object" && (HOOK_KEY in validatedHooks || LEGACY_HOOK_KEY in validatedHooks)) {
     const nextHooks = { ...validatedHooks };
     delete nextHooks[LEGACY_HOOK_KEY];
     delete nextHooks[HOOK_KEY];

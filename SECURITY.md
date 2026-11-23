@@ -2,7 +2,7 @@
 
 ## Supported releases
 
-Security fixes target the latest release (`2.1.x`).
+Security fixes target the latest release (`2.2.x`).
 
 ## Reporting a vulnerability
 
@@ -18,7 +18,7 @@ Maintainers aim to acknowledge reports within 7 calendar days and provide a stat
 
 `Agy-Context-Saver` installs a `PreToolUse` hook, updates user-level Antigravity configuration files, provisions the `rtk` binary with SHA-256 verification, and inspects local session transcripts.
 
-### Transcript access & hook security architecture (`v2.1.x`)
+### Transcript access & hook security architecture (`v2.2.x`)
 
 `scripts/execution-guard-hook.mjs` (routing dynamically to `scripts/hook/file-guard.mjs`, `scripts/hook/shell-guard.mjs`, and `scripts/hook/task-guard.mjs`), `lib/access-policy.mjs`, `lib/path-guards.mjs`, and `lib/transcript-core.mjs` provide **application-layer defense-in-depth** at the Antigravity `PreToolUse` hook and CLI layers rather than an OS-kernel sandbox (`seccomp`, `Landlock`, or container namespace isolation). Within that narrow boundary, they guard accidental bloat, direct internal-state access, symlinks, simple shell wrappers (`sh -c`, `bash -c`, `cmd /c`), and CLI capability grants — without attempting obfuscation decoding or multi-language static analysis, and without blocking unrestricted top-level developer scripts:
 

@@ -7,6 +7,10 @@ copyright = "Copyright &copy; 2026 paragon-ux. Released under the MIT License."
 
 repo_url = "https://github.com/paragon-ux/Agy-Context-Saver"
 repo_name = "paragon-ux/Agy-Context-Saver"
+exclude_docs = """
+plans/**
+reviews/**
+"""
 
 nav = [
   { "Overview" = "index.md" },

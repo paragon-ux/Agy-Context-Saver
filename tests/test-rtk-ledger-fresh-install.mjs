@@ -426,6 +426,18 @@ console.log("\n--- 6. SCRIPT-004: Fetch Timeout AbortSignal & Manual Install Ins
   }
 }
 
+// SEC-002: updateRtkConfigToml must remain linear O(N) on unclosed bracket headers
+{
+  const t0 = performance.now();
+  const r1 = updateRtkConfigToml("[ " + " ".repeat(20000));
+  const r2 = updateRtkConfigToml("[[ " + " ".repeat(20000));
+  const elapsed = performance.now() - t0;
+  assert.ok(elapsed < 50, `SEC-002 updateRtkConfigToml must run in < 50ms on 20k-space lines (took ${elapsed.toFixed(1)}ms)`);
+  assert.equal(r1.changed, true);
+  assert.equal(r2.changed, true);
+  console.log(`✓ SEC-002 linear TOML header parsing verified (${elapsed.toFixed(1)}ms on 20k chars)`);
+}
+
 console.log("\n=================================================");
 console.log("ALL RTK >= 1.1.0 LEDGER CHECKS PASSED!");
 console.log("=================================================");

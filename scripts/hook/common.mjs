@@ -17,7 +17,9 @@ import {
   isContainedInDir,
   isContainedInAnyBrainDir,
   extractConvId,
-  isProtectedBenchmarkPath
+  isProtectedBenchmarkPath,
+  isProtectedBrainSubpath as isProtectedBrainSubpathShared,
+  isProtectedGeminiConfigFile
 } from "../../lib/path-guards.mjs";
 import {
   STATE_TTL_MS,
@@ -290,48 +292,15 @@ export function evaluateCallerTranscriptAccess(convId, ctx = {}) {
 
 // --- Direct Internal State, Governance (1B.1), Benchmark & Cross-Conversation Guards ---
 
-const BRAIN_PREFIX_RE = /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+/gi;
-const USER_BRAIN_SUBDIRS = new Set(["scratch", "browser_sandbox", "swarm_view"]);
-const INTERNAL_BRAIN_SUBDIRS = new Set(["logs", "tasks", "steps"]);
+const INLINE_EXEC_VERB_RE = /\b(?:import|require|spawn|spawnSync|exec|execSync|execFile|execFileSync|popen|system|subprocess)\b/i;
+const INLINE_TRANSCRIPT_TARGET_RE = /(?:\b(?:transcript-core|access-policy)(?:\.m?js)?\b|(?:bin[\/\\]+|\b)agy-context(?:-saver)?\.m?js\b)/i;
 
-// Linear O(N) scan: reads full quote-concatenated shell word and blocks `$`, `..`, and `logs/`|`tasks/`|`steps/` under brain/<id>/ except inside user subdirs
-function isProtectedBrainSubpath(targetPath) {
-  BRAIN_PREFIX_RE.lastIndex = 0;
-  let m;
-  let scanPos = 0;
-  let activeQuote = "";
-  while ((m = BRAIN_PREFIX_RE.exec(targetPath)) !== null) {
-    const startIdx = m.index + m[0].length;
-    for (let i = scanPos; i < startIdx; i++) {
-      const ch = targetPath[i];
-      if (activeQuote) { if (ch === activeQuote) activeQuote = ""; }
-      else if (ch === "'" || ch === '"') activeQuote = ch;
-    }
-    scanPos = startIdx;
-    let quote = activeQuote;
-    let tail = "";
-    for (let i = startIdx; i < targetPath.length; i++) {
-      const ch = targetPath[i];
-      if (quote) {
-        if (ch === quote) { quote = ""; continue; }
-        tail += ch;
-        continue;
-      }
-      if (ch === "'" || ch === '"') { quote = ch; continue; }
-      if (/[\s;|&()<>`,]/.test(ch)) break;
-      tail += ch;
-    }
-    if (!tail) continue;
-    if (tail.includes("$")) return true;
-    const parts = tail.split(/[/\\]+/);
-    if (parts.includes("..")) return true;
-    const topSub = (parts[1] || "").toLowerCase();
-    if (USER_BRAIN_SUBDIRS.has(topSub)) continue;
-    for (let i = 1; i < parts.length - 1; i++) {
-      if (INTERNAL_BRAIN_SUBDIRS.has(parts[i].toLowerCase())) return true;
-    }
-  }
-  return false;
+// Strict O(N) linear detector: finds first exec/import verb once, then checks trailing slice for transcript internals
+export function hasInlineTranscriptCoreInvocation(text) {
+  if (!text || typeof text !== "string") return false;
+  const verbMatch = INLINE_EXEC_VERB_RE.exec(text);
+  if (!verbMatch) return false;
+  return INLINE_TRANSCRIPT_TARGET_RE.test(text.slice(verbMatch.index + verbMatch[0].length));
 }
 
 export function isProtectedInternalState(targetPath) {
@@ -343,7 +312,7 @@ export function isProtectedInternalState(targetPath) {
     /['"]\.['"]\s*(?:[+.]\s*)?['"]system_gen/i.test(targetPath) ||
     /\btranscript(?:_full)?\.jsonl\b/i.test(targetPath) ||
     /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]?)?$/i.test(targetPath) ||
-    isProtectedBrainSubpath(targetPath) ||
+    isProtectedBrainSubpathShared(targetPath) ||
     /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]+)?(?:\.(?!agents(?:$|[\/\\]))|[*?\[])/i.test(targetPath) ||
     /\b(?:transcript-access|agy-session-governance-state|agy-rtk-rewrite-cache)\.json\b/i.test(targetPath) ||
     /\bagy-session-[a-zA-Z0-9_-]+\.json\b/i.test(targetPath) ||
@@ -401,8 +370,7 @@ export function isProtectedGovernanceFileMutationPath(rawPath, convId = "global"
   for (const v of expandAndResolvePathVariants(rawPath, cwd)) {
     const norm = v.replace(/\\/g, "/");
     if (
-      /\/\.gemini\/(?:config|antigravity(?:-cli|-ide)?)\/(?:hooks\.json(?:\.bak)?|mcp_config\.json(?:\.bak)?|config\.json)$/i.test(norm) ||
-      /\/\.gemini\/config\/node\.cmd(?:\.bak)?$/i.test(norm) ||
+      isProtectedGeminiConfigFile(norm) ||
       /\/\.gemini\/config\/scripts\/execution-guard-hook\.mjs$/i.test(norm) ||
       /\/\.gemini\/config\/plugins\/agy-context-saver(?:$|\/)/i.test(norm) ||
       /\/\.gemini\/antigravity(?:-cli|-ide)?\/bin\/agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?$/i.test(norm)

@@ -449,13 +449,13 @@ export function updateRtkConfigToml(content) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
 
-    if (/^\[\[.+?\]\](?:\s*#.*)?$/.test(trimmed)) {
+    if (/^\[\[[^\]\r\n]+\]\](?:\s*#.*)?$/.test(trimmed)) {
       seenAnySection = true;
       inHooks = false;
       continue;
     }
 
-    const sectionMatch = trimmed.match(/^\[\s*([^\]]+?)\s*\](?:\s*#.*)?$/);
+    const sectionMatch = trimmed.match(/^\[\s*([^\]]+)\](?:\s*#.*)?$/);
     if (sectionMatch) {
       seenAnySection = true;
       const sectionName = sectionMatch[1].trim().toLowerCase();

@@ -923,6 +923,12 @@ try {
       assert.deepEqual(afterLegacyRestore["execution-guard"], { PreToolUse: [{ matcher: "from-legacy-bak", hooks: [] }] });
       assert.ok(afterLegacyRestore["stay-intact"], "1B.4: live foreign hook preserved during legacy backup restore");
       assert.equal(afterLegacyRestore["old-foreign-in-bak"], undefined, "1B.4: unrelated foreign keys inside backup must not clobber live hooks.json");
+
+      // SCRIPT-002: runUninstall must not reformat foreign-only hooks.json when ACS keys are absent
+      const compactForeignHooks = '{"foreign-only":{"PreToolUse":[]}}\n';
+      fs.writeFileSync(p.hooksJsonPath, compactForeignHooks, "utf-8");
+      await runUninstall({ silent: true });
+      assert.equal(fs.readFileSync(p.hooksJsonPath, "utf-8"), compactForeignHooks, "SCRIPT-002: foreign-only hooks.json must stay byte-for-byte untouched on uninstall");
     } finally {
       if (prevProfile === undefined) delete process.env.AGY_TEST_PROFILE_DIR;
       else process.env.AGY_TEST_PROFILE_DIR = prevProfile;

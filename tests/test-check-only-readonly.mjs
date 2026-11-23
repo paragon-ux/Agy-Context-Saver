@@ -82,7 +82,20 @@ try {
   });
   assert.notEqual(malformedCheck.status, 0, '--check must exit non-zero when existing hooks.json is malformed (D-06).');
   assert.equal(fs.readFileSync(hooksPath, 'utf8'), malformedHooks, '--check must not modify malformed hooks.json.');
-  console.log('PASS: --check fails closed on malformed configuration without mutating files (D-06).');
+
+  // SCRIPT-001: --check must fail closed when config.json.plugins is not a JSON object
+  const badPluginsHome = path.join(tempRoot, 'check-bad-plugins');
+  const badPluginsCfgDir = path.join(badPluginsHome, '.gemini', 'config');
+  fs.mkdirSync(badPluginsCfgDir, { recursive: true });
+  fs.writeFileSync(path.join(badPluginsCfgDir, 'config.json'), '{"plugins":["antislop"]}\n', 'utf8');
+  const badPluginsCheck = spawnSync(process.execPath, ['scripts/install-register.mjs', '--check'], {
+    cwd: isolatedRepo,
+    env: { ...env, HOME: badPluginsHome, USERPROFILE: badPluginsHome, AGY_TEST_PROFILE_DIR: badPluginsHome },
+    encoding: 'utf8',
+    timeout: 30000
+  });
+  assert.notEqual(badPluginsCheck.status, 0, '--check must exit non-zero when config.json.plugins is not a JSON object (SCRIPT-001).');
+  console.log('PASS: --check fails closed on malformed configuration without mutating files (D-06, SCRIPT-001).');
 
   // D-05: Conflicting read-only + mutating flags (--check --restore-backups) must be rejected without mutating
   const activeHooks = JSON.stringify({ activeHook: { PreToolUse: [] } }, null, 2);

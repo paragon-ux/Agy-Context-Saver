@@ -97,7 +97,7 @@ const COMMON_DEEP_OPTS = [
 ];
 
 const HELP_ALIASES = {
-  outline: "read", summary: "read",
+  outline: "query", summary: "query",
   grep: "query", search: "query", find: "query", tools: "query",
   stats: "health", info: "health",
   ls: "list", dump: "export", policy: "access", install: "setup"
@@ -110,7 +110,7 @@ const SUBCOMMAND_HELP = {
     section: "Subcommands:",
     body: [
       "  read [id]            Stream recent conversation turns (--outline, --full, --out)",
-      "  query [pat] [id]     Search turns and tool calls (aliases: grep, search, find, tools)",
+      "  query [pat] [id]     Search turns and tool calls (grep, search, find, tools, outline)",
       "  step <N|N..M> [id]   Extract untruncated fields for a step, list, or range",
       "  health [id]          Check turn counts, byte size, RTK, and polling (stats, info)",
       "  list                 List recent conversations with optional lineage (alias: ls)",
@@ -121,7 +121,7 @@ const SUBCOMMAND_HELP = {
     footer: "Run 'agy-context transcript <subcommand> --help' for full options."
   },
   read: {
-    title: "transcript read (aliases: outline, summary)",
+    title: "transcript read",
     usage: "agy-context transcript read [<id>] [options]",
     body: [
       "  --id <uuid>            Conversation UUID (or pass as first positional argument)",
@@ -138,7 +138,7 @@ const SUBCOMMAND_HELP = {
     examples: ["agy-context transcript read --last-turns 3", "agy-context transcript read --outline --start 0 --end 50"]
   },
   query: {
-    title: "transcript query (aliases: grep, search, find, tools)",
+    title: "transcript query (grep, search, find, tools, outline, summary)",
     usage: "agy-context transcript query [<pattern>] [<id>] [options]",
     body: [
       "  --query <regex>        Case-insensitive regex or substring pattern (or positional #1)",
@@ -653,17 +653,22 @@ const TRANSCRIPT_HANDLERS = {
     assertNoExtraPositionals(sub, positional);
     const { explicitFile, rawOut, safeOutPath, isFull, effectiveMaxChars } = parseOutputOptions(opts);
     const limit = parsePositiveInt(opts.limit, "limit");
+    const lastTurns = parseLastTurns(opts);
 
-    if (sub === "outline" || sub === "summary" || opts.outline || opts.summary) {
+    if (opts.outline || opts.summary) {
       const { startStep, endStep } = parseStepRange(opts);
+      const useFullRange = startStep === undefined && endStep === undefined && lastTurns === undefined;
+      const effectiveStart = useFullRange ? 0 : startStep;
+      const effectiveEnd = useFullRange ? 999999 : endStep;
       const res = await queryTranscript({
-        conversationId: opts.id, filePath: explicitFile, startStep: startStep ?? 0, endStep: endStep ?? 999999,
+        conversationId: opts.id, filePath: explicitFile, startStep: effectiveStart, endStep: effectiveEnd, lastTurns,
         maxResults: limit ?? ((isFull || safeOutPath) ? 2000 : 500), summaryOnly: true, includeToolCalls: true,
         fullArgs: Boolean(opts["full-args"]), full: isFull, maxOutputChars: effectiveMaxChars,
         includeThinking: Boolean(opts["include-thinking"]), allowExternalPaths: false, subcommand: sub
       });
       return emitTranscriptResult(res, Boolean(opts.json), rawOut, safeOutPath, {
-        label: `transcript ${sub}`, maxBytes: effectiveMaxChars, summaryStart: startStep ?? 0, summaryEnd: endStep ?? 999999
+        label: `transcript ${sub}`, maxBytes: effectiveMaxChars,
+        summaryStart: effectiveStart, summaryEnd: effectiveStart !== undefined ? effectiveEnd : undefined
       });
     }
 
@@ -671,7 +676,6 @@ const TRANSCRIPT_HANDLERS = {
     if (mode !== "compact" && mode !== "full") {
       throw new Error(`Invalid --mode '${mode}' for 'transcript read' (expected 'compact' or 'full').`);
     }
-    const lastTurns = parseLastTurns(opts);
     const offset = parseNonNegInt(opts.offset, "offset");
     const res = await readTranscript({
       conversationId: opts.id, filePath: explicitFile, mode, lastTurns: lastTurns ?? 3, offset, limit,
@@ -688,18 +692,24 @@ const TRANSCRIPT_HANDLERS = {
       booleans: ["summary", "outline", "include-tools", "full-args", "include-thinking", "full", "json"],
       values: ["id", "query", "roles", "mode", "start", "end", "last-turns", "last", "tail", "limit", "field", "max-chars", "out", "output", "file"]
     });
+    const isOutlineSub = sub === "outline" || sub === "summary";
     if (sub === "grep" || sub === "search" || sub === "find") opts["include-tools"] = true;
-    if (sub === "tools") {
-      if (!opts.roles) opts.roles = "assistant";
-      if (!opts.field) opts.field = "tool_args";
+    if (sub === "tools" || isOutlineSub) {
+      if (sub === "tools") {
+        if (!opts.roles) opts.roles = "assistant";
+        if (!opts.field) opts.field = "tool_args";
+      } else {
+        opts.summary = true;
+        if (opts.id === undefined && positional.length >= 1) opts.id = positional.shift();
+      }
       opts["include-tools"] = true;
       if (opts.limit === undefined) opts.limit = (Boolean(opts.full) || opts.out !== undefined || opts.output !== undefined) ? "2000" : "500";
-      if (opts.start === undefined && opts.last === undefined && opts["last-turns"] === undefined && opts.tail === undefined) {
+      if (opts.start === undefined && opts.end === undefined && opts.last === undefined && opts["last-turns"] === undefined && opts.tail === undefined) {
         opts.start = "0";
-        if (opts.end === undefined) opts.end = "999999";
+        opts.end = "999999";
       }
     }
-    if (opts.query === undefined && positional.length >= 1) opts.query = positional.shift();
+    if (!isOutlineSub && opts.query === undefined && positional.length >= 1) opts.query = positional.shift();
     if (opts.id === undefined && positional.length >= 1) opts.id = positional.shift();
     pendingErrorGrantContext = { subcommand: sub, targetConvId: opts.id || null };
     const { rawOut, safeOutPath } = resolveOutFlag(opts);
@@ -729,7 +739,7 @@ const TRANSCRIPT_HANDLERS = {
   async step(sub, rest) {
     const { opts, positional } = parseTranscriptSubcommand(sub, rest, {
       booleans: ["json", "full"],
-      values: ["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "line-start", "line-end", "max-chars", "out", "output", "file"]
+      values: ["id", "step", "start", "end", "field", "tail", "tail-lines", "head", "head-lines", "line-start", "line-end", "max-chars", "out", "output", "file"]
     });
     if (opts.step === undefined && positional.length >= 1) opts.step = positional.shift();
     if (opts.id === undefined && positional.length >= 1) opts.id = positional.shift();
@@ -871,6 +881,9 @@ const TRANSCRIPT_HANDLERS = {
     const hasMutationFlag =
       Boolean(opts.off || opts["deny-children"] || opts.on || opts.reset || opts["self-only"]) ||
       opts.mode !== undefined || opts.allow !== undefined || opts.deny !== undefined || opts.ttl !== undefined;
+    if (opts.status && hasMutationFlag) {
+      throw new Error("Conflicting flags: '--status' cannot be combined with policy mutation flags.");
+    }
     const res = manageTranscriptAccessPolicy({
       status: Boolean(opts.status) || !hasMutationFlag,
       off: Boolean(opts.off), denyChildren: Boolean(opts["deny-children"]), on: Boolean(opts.on),

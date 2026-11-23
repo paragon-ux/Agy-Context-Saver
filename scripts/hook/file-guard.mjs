@@ -25,6 +25,7 @@ import {
   evaluateCallerTranscriptAccess,
   isProtectedInternalState,
   isProtectedInternalStatePath,
+  hasInlineTranscriptCoreInvocation,
   isProtectedGovernanceFileMutationPath,
   isUserEditableGeminiConfigPath,
   isProtectedBenchmarkFilePath,
@@ -386,7 +387,7 @@ export async function handleInspectionTool(ctx) {
 function getRestrictedChildScriptBlockReason(body) {
   if (!body || typeof body !== "string") return null;
   if (isProtectedInternalState(body)) return "internal-state";
-  if (/\b(?:import|require|spawn|spawnSync|exec|execSync|execFile|execFileSync|popen|system|subprocess)\b[\s\S]*?(?:\b(?:transcript-core|access-policy)(?:\.m?js)?\b|(?:bin[\/\\]+|\b)agy-context(?:-saver)?\.m?js\b)/i.test(body)) {
+  if (hasInlineTranscriptCoreInvocation(body)) {
     return "inline-transcript-core";
   }
   if (

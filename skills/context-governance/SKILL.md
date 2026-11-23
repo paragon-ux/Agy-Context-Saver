@@ -4,8 +4,9 @@ description: >-
   Use ONLY when explicitly configuring or troubleshooting Agy-Context-Saver features
   outside rules/AGENTS.md: sanitized transcript export, transcript access policies,
   opt-in stall watchdogs or remote CI timers, RTK pre-gate/config, or agy-context
-  setup/status/uninstall. Do NOT load for routine builds, tests, file reads, or
-  standard transcript queries already covered by rules/AGENTS.md.
+  setup/status/uninstall. Do NOT load for routine quick builds, tests, file reads,
+  or standard transcript queries already covered by rules/AGENTS.md (load for
+  hang-prone/unattended stall watchdogs or remote CI timers).
 ---
 
 # Context Governance (`Agy-Context-Saver` + `RTK`)

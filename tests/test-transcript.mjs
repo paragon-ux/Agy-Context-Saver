@@ -35,6 +35,8 @@ import {
   consumeTranscriptAccessGrant,
   ACTIVE_SWARM_WINDOW_MS
 } from "../lib/transcript-core.mjs";
+import { findGoverningPolicyForCaller } from "../lib/access-policy.mjs";
+import { isProtectedInternalOutPath } from "../lib/path-guards.mjs";
 import { runStatus } from "../scripts/install-register.mjs";
 import { getStateDir } from "../scripts/state-dir.mjs";
 import { createRtkShim, prependToPath } from "./helpers/hermetic-fixture.mjs";
@@ -3696,6 +3698,68 @@ try {
     }
 
     console.log("✓ Section 16 (L61 getStepDetail dedup, --summary 100 default, cohort health & Tier 4 grants) verified");
+  }
+
+  console.log("\n--- 17. Day-One Audit Regressions (SEC-004, SEC-006, RUN-001..004) ---");
+  {
+    // SEC-004: catastrophic regex patterns fall back to literal matching in linear time
+    const evilRx = getCompiledRegex("(a+)+!");
+    const t0 = performance.now();
+    assert.equal(evilRx.test("a".repeat(64) + "X"), false);
+    assert.ok(performance.now() - t0 < 50, "SEC-004 catastrophic regex must run in < 50ms via literal fallback");
+    assert.equal(getCompiledRegex("ERROR|DENIED").test("found denied"), true, "SEC-004 normal alternation regex preserved");
+    assert.equal(getCompiledRegex("step\\s+\\d+").test("step 42"), true, "SEC-004 disjoint wildcard regex preserved");
+
+    // SEC-006: !transcriptFound does not branch on AGY_TEST_PROFILE_DIR
+    const sec006Policy = findGoverningPolicyForCaller(
+      { activeOwnerId: "p-owner", policies: { "p-owner": { ownerId: "p-owner", mode: "deny", allow: [], deny: [] } } },
+      "brand-new-session",
+      { transcriptFound: false, isTopLevelUserSession: false, isChildSession: false, parentConvId: null, rosterName: null }
+    );
+    assert.equal(sec006Policy, null, "SEC-006 !transcriptFound must match production behavior without AGY_TEST_PROFILE_DIR override");
+
+    // RUN-001: outline supports --roles, --query, --last-turns
+    const r1Conv = "dayone-outline-test";
+    const r1Logs = path.join(brainDir, r1Conv, ".system_generated", "logs");
+    fs.mkdirSync(r1Logs, { recursive: true });
+    fs.writeFileSync(path.join(r1Logs, "transcript.jsonl"), [
+      JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "FIRST_TURN_ALPHA", created_at: "2026-11-23T01:00:00Z" }),
+      JSON.stringify({ step_index: 1, source: "MODEL", type: "PLANNER_RESPONSE", content: "Reply 1", created_at: "2026-11-23T01:00:01Z" }),
+      JSON.stringify({ step_index: 2, source: "USER_EXPLICIT", type: "USER_INPUT", content: "SECOND_TURN_BETA", created_at: "2026-11-23T01:00:02Z" }),
+      JSON.stringify({ step_index: 3, source: "MODEL", type: "PLANNER_RESPONSE", content: "Reply 2", created_at: "2026-11-23T01:00:03Z" })
+    ].join("\n") + "\n");
+    const outlineRoles = runCli(["transcript", "outline", r1Conv, "--roles", "user", "--last-turns", "1", "--json"]);
+    assert.equal(outlineRoles.status, 0, outlineRoles.stderr);
+    const outlineItems = JSON.parse(outlineRoles.stdout).items;
+    assert.equal(outlineItems.length, 1, "RUN-001 outline --roles user --last-turns 1 must return only last user turn");
+    assert.equal(outlineItems[0].step_index, 2);
+    const outlineQuery = runCli(["transcript", "outline", r1Conv, "--query", "FIRST_TURN_ALPHA", "--json"]);
+    assert.equal(outlineQuery.status, 0, outlineQuery.stderr);
+    assert.deepEqual(JSON.parse(outlineQuery.stdout).items.map((x) => x.step_index), [0], "RUN-001 outline --query must filter steps");
+
+    // RUN-002: step rejects undocumented --mode
+    const stepBadMode = runCli(["transcript", "step", "0", r1Conv, "--mode", "full"]);
+    assert.notEqual(stepBadMode.status, 0, "RUN-002 step --mode must fail fast");
+    assert.match(stepBadMode.stderr, /Unknown flag/i);
+
+    // RUN-003: access rejects conflicting --status + mutation flags, and isStatusOnly checks denyChildren/ttl
+    for (const conflictArgs of [["--status", "--ttl", "60"], ["--status", "--deny-children"], ["--status", "--off"]]) {
+      const conflictRes = runCli(["transcript", "access", ...conflictArgs]);
+      assert.notEqual(conflictRes.status, 0, `RUN-003 access ${conflictArgs.join(" ")} must fail`);
+      assert.match(conflictRes.stderr, /Conflicting flags/i);
+    }
+    const ttlMut = manageTranscriptAccessPolicy({ status: true, denyChildren: true, ttl: 120, _testAuthorizedOwner: "run003-owner" });
+    assert.equal(ttlMut.mode, "deny", "RUN-003 manageTranscriptAccessPolicy must not short-circuit on status+denyChildren");
+    assert.equal(ttlMut.ttlMs, 120000, "RUN-003 manageTranscriptAccessPolicy must apply ttlMs when provided");
+    manageTranscriptAccessPolicy({ on: true, _testAuthorizedOwner: "run003-owner" });
+
+    // RUN-004: isProtectedInternalOutPath allows brain/<id>/scratch/logs/* while blocking non-user brain logs/ and ..
+    assert.equal(isProtectedInternalOutPath(path.join(brainDir, r1Conv, "scratch", "logs", "report.md")), false, "RUN-004 scratch/logs/ must be allowed for --out");
+    assert.equal(isProtectedInternalOutPath(path.join(brainDir, r1Conv, "logs", "report.md")), true, "RUN-004 direct brain/<id>/logs/ must stay blocked");
+    assert.equal(isProtectedInternalOutPath(path.join(brainDir, r1Conv, "scratch", "logs", "..", "..", "logs", "report.md")), true, "RUN-004 traversal out of scratch must stay blocked");
+
+    fs.rmSync(path.join(brainDir, r1Conv), { recursive: true, force: true });
+    console.log("✓ Section 17 (SEC-004 ReDoS, SEC-006 auth parity, RUN-001..004 CLI & --out parity) verified");
   }
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });

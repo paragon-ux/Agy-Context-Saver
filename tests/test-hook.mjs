@@ -5410,6 +5410,60 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
   }
 }
 
+// --- Group V: Day-One Audit Security & CLI Hook Regressions (SEC-001, SEC-003, RUN-001) ---
+{
+  const vTopConv = "v-dayone-top-001";
+  const vChildConv = "v-dayone-child-001";
+  const vBrainDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain");
+  const vTopLogs = path.join(vBrainDir, vTopConv, ".system_generated", "logs");
+  const vChildLogs = path.join(vBrainDir, vChildConv, ".system_generated", "logs");
+  fs.mkdirSync(vTopLogs, { recursive: true });
+  fs.mkdirSync(vChildLogs, { recursive: true });
+  fs.writeFileSync(path.join(vTopLogs, "transcript.jsonl"), JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "Top session" }) + "\n");
+  fs.writeFileSync(path.join(vChildLogs, "transcript.jsonl"), JSON.stringify({ step_index: 0, type: "SYSTEM_MESSAGE", content: `[Message] sender=${vTopConv} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: deny]\nChild task` }) + "\n");
+
+  const bakTargets = [
+    path.join(hermetic.profileDir, ".gemini", "config", "hooks.json.agy-context-saver.bak"),
+    path.join(hermetic.profileDir, ".gemini", "config", "mcp_config.json.agy-context-saver.bak"),
+    path.join(hermetic.profileDir, ".gemini", "config", "config.json.bak")
+  ];
+  for (const cid of [vTopConv, vChildConv]) {
+    for (const bakPath of bakTargets) {
+      assert.equal(runHook({ conversationId: cid, toolCall: { name: "write_file", args: { Path: bakPath, Content: "{}" } } }).decision, "deny", `SEC-001 write_file must deny ${bakPath} for ${cid}`);
+      assert.equal(runHook({ conversationId: cid, toolCall: { name: "edit_file", args: { Path: bakPath, Target: "a", Replacement: "b" } } }).decision, "deny", `SEC-001 edit_file must deny ${bakPath} for ${cid}`);
+      assert.equal(runHook({ conversationId: cid, toolCall: { name: "run_command", args: { CommandLine: `echo '{}' > "${bakPath}"`, WaitMsBeforeAsync: 5000 } } }).decision, "deny", `SEC-001 shell redirect must deny ${bakPath} for ${cid}`);
+      assert.equal(runHook({ conversationId: cid, toolCall: { name: "run_command", args: { CommandLine: `rm -f "${bakPath}"`, WaitMsBeforeAsync: 5000 } } }).decision, "deny", `SEC-001 rm must deny ${bakPath} for ${cid}`);
+    }
+  }
+
+  // SEC-003: linear O(N) restricted-child inline transcript-core guard
+  const t0 = performance.now();
+  const benignLarge = runHook({
+    conversationId: vChildConv,
+    toolCall: { name: "write_file", args: { Path: path.join(hermetic.profileDir, "benign-big.js"), Content: "import ".repeat(20000) } }
+  });
+  const elapsedMs = performance.now() - t0;
+  assert.equal(benignLarge.decision, "allow", "SEC-003 benign repeated 'import ' write must allow");
+  assert.ok(elapsedMs < 1500, `SEC-003 hook invocation must stay linear (took ${elapsedMs.toFixed(1)}ms)`);
+  assert.equal(
+    runHook({
+      conversationId: vChildConv,
+      toolCall: { name: "write_file", args: { Path: path.join(hermetic.profileDir, "evil.js"), Content: "import ".repeat(100) + "x from 'transcript-core.mjs';" } }
+    }).decision,
+    "deny",
+    "SEC-003 positive verb-before-target detection must still deny"
+  );
+
+  // RUN-001: outline accepts query flags (--roles, --query, --last-turns) through shell-guard
+  const outlineFlagsRes = runHook({
+    conversationId: vTopConv,
+    toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript outline --id ${vTopConv} --roles user --query "Top" --last-turns 1`, WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(outlineFlagsRes.decision, "allow", `RUN-001 outline with --roles/--query/--last-turns must allow, got: ${outlineFlagsRes.reason}`);
+
+  console.log("✓ Group V: Day-One audit regressions (SEC-001 namespaced .bak, SEC-003 linear guard, RUN-001 outline flags) verified");
+}
+
 hermetic.cleanup();
 console.log("\n=================================================");
 console.log("ALL 2.0 PRETOOLUSE HOOK GOVERNANCE TESTS PASSED!");

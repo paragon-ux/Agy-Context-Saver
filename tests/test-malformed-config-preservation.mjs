@@ -70,6 +70,22 @@ try {
   );
   console.log('PASS: malformed hooks.json is preserved and install aborts before changing configuration.');
 
+  // SCRIPT-001: non-object config.json.plugins must fail preflight on a fresh profile before mutating pluginDest or hooks.json
+  const badPluginsHome = path.join(tempRoot, 'bad-plugins-home');
+  const badPluginsCfgDir = path.join(badPluginsHome, '.gemini', 'config');
+  fs.mkdirSync(badPluginsCfgDir, { recursive: true });
+  const badConfigRaw = '{"plugins":["antislop"]}\n';
+  fs.writeFileSync(path.join(badPluginsCfgDir, 'config.json'), badConfigRaw, 'utf8');
+  const badPluginsEnv = { ...env, HOME: badPluginsHome, USERPROFILE: badPluginsHome, AGY_TEST_PROFILE_DIR: badPluginsHome };
+  const badPluginsInstall = spawnSync(process.execPath, ['scripts/install-register.mjs'], {
+    cwd: isolatedRepo, env: badPluginsEnv, encoding: 'utf8', timeout: 30000
+  });
+  assert.notEqual(badPluginsInstall.status, 0, 'SCRIPT-001: install must fail closed on non-object config.json.plugins.');
+  assert.equal(fs.readFileSync(path.join(badPluginsCfgDir, 'config.json'), 'utf8'), badConfigRaw, 'SCRIPT-001: config.json must stay unchanged.');
+  assert.equal(fs.existsSync(path.join(badPluginsCfgDir, 'plugins', 'agy-context-saver')), false, 'SCRIPT-001: pluginDest must not be created on preflight failure.');
+  assert.equal(fs.existsSync(path.join(badPluginsCfgDir, 'hooks.json')), false, 'SCRIPT-001: hooks.json must not be created on preflight failure.');
+  console.log('PASS: non-object config.json.plugins fails closed in preflight without mutating profile (SCRIPT-001).');
+
   // D-04: On Windows, install.ps1 must run install-register.mjs preflight BEFORE touching node.cmd
   if (process.platform === 'win32') {
     const customNodeCmdPath = path.join(configDir, 'node.cmd');

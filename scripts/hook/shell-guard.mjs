@@ -38,6 +38,7 @@ import {
   updateSessionState,
   resolveHookPath,
   expandLeadingTilde,
+  hasInlineTranscriptCoreInvocation,
   cleanFileToken,
   getCallerLineage,
   evaluateCallerTranscriptAccess,
@@ -843,14 +844,14 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
   const valueFlags = ["query", "grep", "search", "find", "tools"].includes(sub)
     ? new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "last", "tail", "limit", "field", "max-chars", "out", "output", "file"])
     : sub === "step"
-      ? new Set(["id", "step", "start", "end", "field", "mode", "tail", "tail-lines", "head", "head-lines", "line-start", "line-end", "max-chars", "out", "output", "file"])
+      ? new Set(["id", "step", "start", "end", "field", "tail", "tail-lines", "head", "head-lines", "line-start", "line-end", "max-chars", "out", "output", "file"])
       : ["health", "stats", "info"].includes(sub)
         ? new Set(["id", "parent", "file"])
         : ["list", "ls"].includes(sub)
           ? new Set(["limit", "parent"])
           : ["export", "dump"].includes(sub)
             ? new Set(["id", "parent", "start", "end", "limit", "max-chars", "out", "output", "file"])
-            : new Set(["id", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "max-chars", "out", "output", "file"]);
+            : new Set(["id", "query", "roles", "field", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "max-chars", "out", "output", "file"]);
 
   const opts = {};
   const idValues = [];
@@ -1430,7 +1431,7 @@ function getProtectedShellOperationReason(text, { isRestrictedChild = false } = 
   if (isProtectedInternalState(text)) return "internal-state";
   if (hasNonCanonicalAgyTranscriptInvocation(text)) return "non-canonical-cli";
   // PT-RUN-001: Only block direct inline import/require/spawn of transcript-core / bin/agy-context for restricted children
-  if (isRestrictedChild && /\b(?:import|require|spawn|spawnSync|exec|execSync|execFile|execFileSync|popen|system|subprocess)\b[\s\S]*?(?:\b(?:transcript-core|access-policy)(?:\.m?js)?\b|(?:bin[\/\\]+|\b)agy-context(?:-saver)?\.m?js\b)/i.test(text)) {
+  if (isRestrictedChild && hasInlineTranscriptCoreInvocation(text)) {
     return "inline-transcript-core";
   }
   if (

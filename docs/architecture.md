@@ -84,7 +84,7 @@ Polling and watchdog counters are tracked per task and per direct subagent insid
 ### 1. Control Surfaces: CLI Policy and Launch Directives
 - **CLI policy (`agy-context transcript access` / `policy`):** Parents update cohort access via `--status`, `--off` (`--deny-children`), `--on` (`--reset`), `--self-only`, `--mode <open|allowlist|self-only|deny>`, `--allow <id,@roster*...>`, `--deny <id,@roster*...>`, `--ttl <sec>`, and `--json` (plus positional shorthands `status`, `off`, `on`, `reset`, `self-only`).
 - **First-line launch directives:** Placing `[agy-transcript-access: deny]`, `[agy-transcript-access: self-only]`, or `[agy-transcript-access: allow]` on the first non-empty line of a `define_subagent` prompt, `invoke_subagent` prompt, or `/swarm` `brief` scopes that child at launch.
-- **Prompt-echo immunity:** Lineage parsing inspects only the first non-empty line of the child's initial assignment (`Step 0` / `Step 1`), stripping leading `#` or `>` markers and ignoring directive strings in later paragraphs or code fences.
+- **Prompt-echo immunity:** Lineage parsing inspects only the first non-empty line of the child's initial assignment (`Step 0` / `Step 1`), matching standalone `[agy-transcript-access: ...]` syntax with an optional `@roster` prefix and ignoring directives in later paragraphs or code fences.
 
 ### 2. 5-Tier Precedence Order
 1. **Tier 1 (Policy Owner):** The parent session (`ownerId`) retains unrestricted read and policy mutation access.
