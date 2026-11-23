@@ -5067,12 +5067,19 @@ console.log("\n--- Group T: L61 Multi-ID & --parent transcript health Hook Grant
       const offPathBin = fs.mkdtempSync(path.join(os.tmpdir(), "agy-t5-empty-path-"));
       const shimBinDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "bin");
       const shimPath = path.join(shimBinDir, process.platform === "win32" ? "agy-context.cmd" : "agy-context");
+      const pluginBinDir = path.join(hermetic.profileDir, ".gemini", "config", "plugins", "agy-context-saver", "bin");
+      const pluginCliPath = path.join(pluginBinDir, "agy-context.mjs");
       const shimExisted = fs.existsSync(shimPath);
+      const pluginCliExisted = fs.existsSync(pluginCliPath);
       try {
         fs.mkdirSync(shimBinDir, { recursive: true });
         if (!shimExisted) {
           fs.writeFileSync(shimPath, process.platform === "win32" ? "@echo off\r\necho ok\r\n" : "#!/bin/sh\necho ok\n", "utf-8");
           if (process.platform !== "win32") fs.chmodSync(shimPath, 0o755);
+        }
+        fs.mkdirSync(pluginBinDir, { recursive: true });
+        if (!pluginCliExisted) {
+          fs.writeFileSync(pluginCliPath, "// stub\n", "utf-8");
         }
         clearGrants();
         const offPathPipe = runHook(
@@ -5080,20 +5087,21 @@ console.log("\n--- Group T: L61 Multi-ID & --parent transcript health Hook Grant
             conversationId: tChildSelf,
             toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript outline --full | rg 'error'", WaitMsBeforeAsync: 5000 } }
           },
-          withEnvPath(process.env, offPathBin)
+          withEnvPath(offPathBin, process.env)
         );
         assert.equal(offPathPipe.decision, "allow", "Off-PATH bare agy-context + self-only + pipe must allow");
-        assert.ok(
-          offPathPipe.overwrite?.CommandLine.endsWith(` transcript outline --full --id ${tChildSelf} | rg 'error'`),
-          `Off-PATH piped rewrite must preserve Segment-0 --id and downstream pipe (got: ${offPathPipe.overwrite?.CommandLine})`
-        );
-        assert.ok(
-          !offPathPipe.overwrite?.CommandLine.startsWith("agy-context "),
-          `Off-PATH bare agy-context must rewrite to installed shim/CLI (got: ${offPathPipe.overwrite?.CommandLine})`
+        const expectedPrefix = process.platform === "win32"
+          ? `node "${pluginCliPath.replace(/\\/g, "/")}"`
+          : shimPath.replace(/\\/g, "/");
+        assert.equal(
+          offPathPipe.overwrite?.CommandLine,
+          `${expectedPrefix} transcript outline --full --id ${tChildSelf} | rg 'error'`,
+          `Off-PATH piped rewrite must rewrite binary and preserve Segment-0 --id and downstream pipe (got: ${offPathPipe.overwrite?.CommandLine})`
         );
       } finally {
         fs.rmSync(offPathBin, { recursive: true, force: true });
         if (!shimExisted) { try { fs.unlinkSync(shimPath); } catch {} }
+        if (!pluginCliExisted) { try { fs.unlinkSync(pluginCliPath); } catch {} }
       }
 
       clearGrants();
