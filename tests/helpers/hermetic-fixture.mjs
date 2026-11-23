@@ -72,6 +72,19 @@ function rewriteSingleSegment(seg) {
   if (m) return envPrefix + "uv run rtk " + m[1] + (m[2] ? " " + m[2].trim() : "");
   m = body.match(/^python3?\\s+-m\\s+(pytest|mypy)(?:\\s+([\\s\\S]*))?$/i);
   if (m) return envPrefix + "rtk " + m[1] + (m[2] ? " " + m[2].trim() : "");
+  m = body.match(/^(?:npm|pnpm)\\s+(?:run\\s+)?lint(?:\\s+([\\s\\S]*))?$/i);
+  if (m) return envPrefix + "rtk lint" + (m[1] ? " " + m[1].trim() : "");
+  m = body.match(/^pnpm\\s+tsc(?:\\s+([\\s\\S]*))?$/i);
+  if (m) return envPrefix + "rtk tsc" + (m[1] ? " " + m[1].trim() : "");
+  m = body.match(/^npx\\s+(?:(?:-y|--yes|--no-install)\\s+)*(tsc|eslint|vitest|jest|playwright|prettier|prisma|next|ng)(?:\\s+([\\s\\S]*))?$/i);
+  if (m) {
+    const tool = m[1].toLowerCase();
+    const rest = (m[2] || "").trim();
+    if (tool === "vitest" && /^run$/i.test(rest)) return envPrefix + "rtk vitest";
+    return envPrefix + "rtk " + tool + (rest ? " " + rest : "");
+  }
+  m = body.match(/^bunx\\s+(tsc|eslint|vitest|jest|playwright|prettier|prisma|next|ng)(?:\\s+([\\s\\S]*))?$/i);
+  if (m) return envPrefix + "rtk bunx " + m[1] + (m[2] ? " " + m[2].trim() : "");
   if (
     /^(?:git|pytest|cargo|go|vitest|jest|tsc|eslint|ruff|mypy|ty|docker|kubectl|oc|pip3?|find|ls|wc|diff|ps)\\b/i.test(body) ||
     /^npm\\s+(?:run|lint)\\b/i.test(body) ||

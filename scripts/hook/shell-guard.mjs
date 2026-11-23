@@ -161,6 +161,19 @@ function spawnRtk(bin, args, opts = {}) {
 
 const getFileMtimeMsSafe = (p) => { if (!p) return 0; try { return Math.trunc(fs.statSync(p).mtimeMs); } catch { return 0; } };
 
+function extractRtkSemver(versionStr) {
+  const match = String(versionStr || "").match(/(\d+\.\d+\.\d+)/);
+  return match ? match[1] : "";
+}
+
+function isRtkVersionBelow(versionStr, targetMajor, targetMinor) {
+  const match = String(versionStr || "").match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return true;
+  const major = parseInt(match[1], 10);
+  const minor = parseInt(match[2], 10);
+  return major < targetMajor || (major === targetMajor && minor < targetMinor);
+}
+
 export function resolveCachedHostEnv() {
   const pathEnv = process.env.PATH || process.env.Path || "";
   const localCandidate = getLocalRtkCandidate();
@@ -174,21 +187,24 @@ export function resolveCachedHostEnv() {
     }
   } catch {}
 
+  const hasValidCachedResolved = (v) => v === null || (Boolean(v) && typeof v.version === "string");
   if (parsed && parsed.pathEnv === pathEnv && parsed.localCandidate === localCandidate && (parsed.winLauncher || "") === winLauncher && typeof parsed.pathCandidate === "string") {
     const fastKey = `${parsed.pathCandidate}::${localCandidate}::${getFileMtimeMsSafe(parsed.pathCandidate)}::${getFileMtimeMsSafe(localCandidate)}::${winLauncher}`;
-    if (parsed.key === fastKey) { cachedRtkKey = fastKey; cachedRtkValue = parsed.resolved ?? null; return { rtk: cachedRtkValue }; }
+    if (parsed.key === fastKey && hasValidCachedResolved(parsed.resolved ?? null)) { cachedRtkKey = fastKey; cachedRtkValue = parsed.resolved ?? null; return { rtk: cachedRtkValue }; }
   }
 
   const pathCandidate = findExecutableOnPath("rtk");
   const key = `${pathCandidate}::${localCandidate}::${getFileMtimeMsSafe(pathCandidate)}::${getFileMtimeMsSafe(localCandidate)}::${winLauncher}`;
   if (cachedRtkKey === key && cachedRtkValue !== undefined) return { rtk: cachedRtkValue };
-  if (parsed && parsed.key === key && typeof parsed.pathEnv !== "string") { cachedRtkKey = key; cachedRtkValue = parsed.resolved ?? null; return { rtk: cachedRtkValue }; }
+  if (parsed && parsed.key === key && typeof parsed.pathEnv !== "string" && hasValidCachedResolved(parsed.resolved ?? null)) { cachedRtkKey = key; cachedRtkValue = parsed.resolved ?? null; return { rtk: cachedRtkValue }; }
 
   const opts = { encoding: "utf-8", timeout: 2000, windowsHide: true };
   let resolved = null;
   if (pathCandidate) {
     const r = spawnRtk(pathCandidate, ["--version"], opts);
-    if (!r.error && r.status === 0 && isCompatibleRtkVersion(r.stdout)) resolved = { exe: pathCandidate, prefix: "rtk" };
+    if (!r.error && r.status === 0 && isCompatibleRtkVersion(r.stdout)) {
+      resolved = { exe: pathCandidate, prefix: "rtk", version: extractRtkSemver(r.stdout) };
+    }
   }
   if (!resolved && localCandidate) {
     const r = spawnRtk(localCandidate, ["--version"], opts);
@@ -197,7 +213,7 @@ export function resolveCachedHostEnv() {
       const prefix = os.platform() === "win32" && winLauncher
         ? `node "${winLauncher.replace(/\\/g, "/")}"`
         : (/\s/.test(normLocal) ? `"${normLocal}"` : normLocal);
-      resolved = { exe: localCandidate, prefix };
+      resolved = { exe: localCandidate, prefix, version: extractRtkSemver(r.stdout) };
     }
   }
 
@@ -1594,7 +1610,7 @@ const RTK_HIGH_ROI_SUBCMDS = {
   dotnet: new Set(["build", "restore"]),
   npm: new Set(["run", "lint"]),
   pnpm: new Set(["run", "install", "i", "outdated", "lint", "tsc", "list"]),
-  bun: new Set(["test", "run", "build", "install", "add"]),
+  bun: new Set(["test", "build", "install", "add"]),
   deno: new Set(["test", "compile", "install", "lint", "check"]),
   npx: new Set(["tsc", "eslint", "vitest", "jest", "playwright", "prettier", "prisma", "next", "ng"]),
   bunx: new Set(["tsc", "eslint", "vitest", "jest", "playwright", "prettier", "prisma", "next", "ng"]),
@@ -1609,7 +1625,7 @@ const RTK_HIGH_ROI_SUBCMDS = {
   oc: new Set(["get", "logs", "describe", "apply"]),
   git: new Set(["status", "push", "pull", "fetch"])
 };
-const RTK_HIGH_ROI_PKG_RUN_RE = /^(?:test|tests|build|compile|lint|check|typecheck|type-check|tsc|e2e|ci|format|fmt|vitest|jest|playwright|pytest|coverage|cov|verify-types)(?:$|[:_-])/i;
+const RTK_HIGH_ROI_PKG_RUN_SCRIPTS = new Set(["lint"]);
 const RTK_RUNNER_VALUE_FLAGS = {
   git: new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"]),
   npm: new Set(["--prefix", "-C", "--cwd", "--workspace", "-w"]),
@@ -1635,9 +1651,15 @@ function matchRtkInvocation(text) {
 }
 
 function hasMachineReadableOutputFlag(cmd0, subcmd, tokens) {
+  const effectiveTool = (cmd0 === "npx" || cmd0 === "bunx") ? subcmd : cmd0;
+  const isVitestOrJest = effectiveTool === "vitest" || effectiveTool === "jest";
   for (let i = 1; i < tokens.length; i++) {
     const v = tokens[i].value;
     const low = v.toLowerCase();
+    if (
+      isVitestOrJest &&
+      (low === "--reporter" || low.startsWith("--reporter=") || low === "--reporters" || low.startsWith("--reporters="))
+    ) return true;
     if (
       ["--json", "-json", "--porcelain", "--raw", "-ojson", "-oyaml", "-oname"].includes(low) ||
       low.startsWith("--porcelain=") || low.startsWith("-ojsonpath") || low.startsWith("-ocustom-columns") || low.startsWith("-ogo-template") ||
@@ -1650,6 +1672,77 @@ function hasMachineReadableOutputFlag(cmd0, subcmd, tokens) {
     if (cmd0 === "git" && subcmd === "status" && (v === "--short" || low.startsWith("--porcelain") || (!v.startsWith("--") && /^-[a-zA-Z]*[sz][a-zA-Z]*$/.test(v)))) return true;
   }
   return false;
+}
+
+function findNearestNodeModulesBin(toolName, startDir) {
+  if (!toolName || !startDir) return "";
+  const isWin = os.platform() === "win32";
+  const exts = isWin ? [".cmd", ".exe", ".bat", ""] : [""];
+  let dir = path.resolve(startDir);
+  while (true) {
+    const binDir = path.join(dir, "node_modules", ".bin");
+    for (const ext of exts) {
+      const candidate = path.join(binDir, `${toolName}${ext}`);
+      try {
+        if (fs.statSync(candidate).isFile()) return candidate;
+      } catch {}
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return "";
+}
+
+function isLocalBinShadowedByGlobalPath(toolName, startDir) {
+  const localBin = findNearestNodeModulesBin(toolName, startDir);
+  if (!localBin) return false;
+  const pathBin = findExecutableOnPath(toolName);
+  if (!pathBin) return false;
+  const isCI = os.platform() === "win32" || os.platform() === "darwin";
+  const norm = (p) => {
+    const r = tryRealpath(path.resolve(p)).replace(/\\/g, "/");
+    return isCI ? r.toLowerCase() : r;
+  };
+  return norm(localBin) !== norm(pathBin);
+}
+
+function findNearestVitestMajorVersion(startDir) {
+  if (!startDir) return null;
+  let dir = path.resolve(startDir);
+  while (true) {
+    const pkgPath = path.join(dir, "node_modules", "vitest", "package.json");
+    try {
+      if (fs.statSync(pkgPath).isFile()) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+        const match = String(pkg?.version || "").match(/^(\d+)\./);
+        return match ? parseInt(match[1], 10) : null;
+      }
+    } catch {}
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+function isUnsupportedVitestForRtk(startDir, rtkVersion) {
+  if (!isRtkVersionBelow(rtkVersion, 1, 2)) return false;
+  const major = findNearestVitestMajorVersion(startDir);
+  return major !== null && major >= 5;
+}
+
+function resolveNextSegmentCwd(segText, curCwd) {
+  const trimmed = String(segText || "").trim();
+  if (!trimmed) return curCwd;
+  const body = (splitEnvPrefix(trimmed).body || trimmed).trim();
+  const tokens = tokenizeShellWordsDetailed(body);
+  if (!tokens.length || normalizeCmdName(tokens[0].value) !== "cd") return curCwd;
+  let idx = 1;
+  while (idx < tokens.length && (tokens[idx].value === "-L" || tokens[idx].value === "-P" || tokens[idx].value === "--")) idx++;
+  const target = tokens[idx]?.value || "";
+  if (!target || target === "-" || /[$`]/.test(target)) return curCwd;
+  return path.resolve(curCwd, expandLeadingTilde(target));
 }
 
 function filterAllowedStderrRedirects(tokens) {
@@ -1667,7 +1760,7 @@ function filterAllowedStderrRedirects(tokens) {
   return clean;
 }
 
-function shouldDelegateSegmentToRtk(segText, { inPipeline = false, allowInternalReadRewrite = false } = {}) {
+function shouldDelegateSegmentToRtk(segText, { inPipeline = false, allowInternalReadRewrite = false, cwd = "", rtkVersion = "" } = {}) {
   const trimmed = String(segText || "").trim();
   if (!trimmed || inPipeline) return false;
   const target = (splitEnvPrefix(trimmed).body || trimmed).trim();
@@ -1677,8 +1770,12 @@ function shouldDelegateSegmentToRtk(segText, { inPipeline = false, allowInternal
   if (!tokens || tokens.length === 0) return false;
   const cmd0 = normalizeCmdName(tokens[0].value);
   if (!cmd0) return false;
+  const effectiveCwd = cwd ? path.resolve(expandLeadingTilde(cwd)) : process.cwd();
   if (allowInternalReadRewrite && (cmd0 === "cat" || cmd0 === "head" || cmd0 === "tail")) return true;
-  if (RTK_HIGH_ROI_DIRECT_CMDS.has(cmd0)) return !hasMachineReadableOutputFlag(cmd0, "", tokens);
+  if (RTK_HIGH_ROI_DIRECT_CMDS.has(cmd0)) {
+    if (cmd0 === "vitest" && isUnsupportedVitestForRtk(effectiveCwd, rtkVersion)) return false;
+    return !hasMachineReadableOutputFlag(cmd0, "", tokens);
+  }
   if (cmd0 === "rake") { const sub = normalizeCmdName(tokens[1]?.value); return (sub === "test" || sub.startsWith("test:")) && !hasMachineReadableOutputFlag(cmd0, sub, tokens); }
   if (cmd0 === "python" || cmd0 === "python3") {
     let idx = 1;
@@ -1699,10 +1796,16 @@ function shouldDelegateSegmentToRtk(segText, { inPipeline = false, allowInternal
   const sub = subIdx < tokens.length ? normalizeCmdName(tokens[subIdx].value) : "";
   if (!sub || !allowedSubs.has(sub)) return false;
 
-  if (["npm", "pnpm", "bun"].includes(cmd0) && sub === "run") {
+  if ((cmd0 === "npm" || cmd0 === "pnpm") && sub === "run") {
     const sIdx = advancePastFlags(subIdx + 1, new Set());
-    if (!RTK_HIGH_ROI_PKG_RUN_RE.test(tokens[sIdx]?.value || "")) return false;
+    const scriptName = String(tokens[sIdx]?.value || "").trim().toLowerCase();
+    if (!RTK_HIGH_ROI_PKG_RUN_SCRIPTS.has(scriptName)) return false;
   }
+  if (cmd0 === "npx" || cmd0 === "bunx") {
+    if (isLocalBinShadowedByGlobalPath(sub, effectiveCwd)) return false;
+    if (sub === "vitest" && isUnsupportedVitestForRtk(effectiveCwd, rtkVersion)) return false;
+  }
+  if (cmd0 === "pnpm" && sub === "tsc" && isLocalBinShadowedByGlobalPath("tsc", effectiveCwd)) return false;
   if (cmd0 === "uv" && sub === "run") {
     const rIdx = advancePastFlags(subIdx + 1);
     if (rIdx >= tokens.length) return false;
@@ -1736,8 +1839,18 @@ function delegateRewriteToRtk(rawCmd, rtk) {
   } catch { return { decision: "allow", commandLine: rawCmd }; }
 }
 
-function rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite = false, preSegments = null } = {}) {
+function rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite = false, preSegments = null, cwd = "" } = {}) {
   const segs = preSegments || splitShellSegments(rawCmd);
+  const baseCwd = cwd ? path.resolve(expandLeadingTilde(cwd)) : process.cwd();
+  const segCwds = new Array(segs.length);
+  let curCwd = baseCwd;
+  for (let i = 0; i < segs.length; i++) {
+    segCwds[i] = curCwd;
+    const nextSep = i + 1 < segs.length ? segs[i + 1].leadingSep : "";
+    if (segs[i].leadingSep !== "|" && segs[i].leadingSep !== "|&" && nextSep !== "|" && nextSep !== "|&" && nextSep !== "||") {
+      curCwd = resolveNextSegmentCwd(segs[i].text, curCwd);
+    }
+  }
   let result = rawCmd;
   for (let i = segs.length - 1; i >= 0; i--) {
     const seg = segs[i];
@@ -1745,13 +1858,13 @@ function rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite = f
     if (!trimmed) continue;
     const wrap = unwrapShellWrapper(trimmed);
     if (wrap) {
-      const inner = rewriteCommandViaRtkPreGate(wrap.inner, rtk, { allowInternalReadRewrite: false });
+      const inner = rewriteCommandViaRtkPreGate(wrap.inner, rtk, { allowInternalReadRewrite: false, cwd: segCwds[i] });
       if (inner.decision !== "allow") return inner;
       if (inner.commandLine !== wrap.inner) result = result.slice(0, seg.start) + `${wrap.prefix}${wrap.quote}${inner.commandLine}${wrap.quote}` + result.slice(seg.end);
       continue;
     }
     const inPipe = seg.leadingSep === "|" || seg.leadingSep === "|&" || (i + 1 < segs.length && (segs[i + 1].leadingSep === "|" || segs[i + 1].leadingSep === "|&"));
-    if (!shouldDelegateSegmentToRtk(trimmed, { inPipeline: inPipe, allowInternalReadRewrite: Boolean(allowInternalReadRewrite && segs.length === 1) })) continue;
+    if (!shouldDelegateSegmentToRtk(trimmed, { inPipeline: inPipe, allowInternalReadRewrite: Boolean(allowInternalReadRewrite && segs.length === 1), cwd: segCwds[i], rtkVersion: rtk?.version || "" })) continue;
     const del = delegateRewriteToRtk(trimmed, rtk);
     if (del.decision !== "allow") return del;
     if (del.commandLine && del.commandLine !== trimmed) result = result.slice(0, seg.start) + del.commandLine + result.slice(seg.end);
@@ -1928,7 +2041,7 @@ export async function handleRunCommand(ctx) {
 
   if (rtk) {
     if (rtkMode === "pregate" || (rtkMode === "off" && allowInternalReadRewrite)) {
-      const gated = rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite, preSegments: segments });
+      const gated = rewriteCommandViaRtkPreGate(rawCmd, rtk, { allowInternalReadRewrite, preSegments: segments, cwd });
       if (gated.decision !== "allow") respond({ decision: gated.decision, reason: gated.reason });
       effectiveCmd = gated.commandLine;
     }

@@ -3536,7 +3536,7 @@ console.log("\n--- Group N: Wave 2 Narrow RTK Pre-Gate, 800L/45KiB read_file & E
       ["pytest tests/unit", /^rtk pytest\b/],
       ["cargo test --lib", /^rtk cargo test\b/],
       ["git -C /tmp/repo status", /^rtk git -C \/tmp\/repo status$/],
-      ["npm run test", /^rtk npm run test$/]
+      ["npm run lint", /^rtk lint$/]
     ]) {
       const res = runHook({ toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } });
       assert.equal(res.decision, "allow");
@@ -3552,6 +3552,8 @@ console.log("\n--- Group N: Wave 2 Narrow RTK Pre-Gate, 800L/45KiB read_file & E
       "git status -s",
       "ps aux",
       "cat package.json",
+      "npm run test",
+      "npm run build",
       "npm test | tail -n 20",
       "pytest tests/ > /tmp/out.txt"
     ]) {
@@ -3919,14 +3921,15 @@ console.log("\n--- Group P: v2.1.2 Boost Pass Regressions ---");
     assert.equal(offSpillRes.decision, "allow", `AGY_RTK_MODE=off must preserve spillover cat -> rtk read parity (${offSpillRes.reason || ""})`);
     assert.match(offSpillRes.overwrite?.CommandLine || "", /\bread\s+\.system_generated\/steps\/1\/output\.txt/);
 
-    // P.3: Pre-Gate calibration (stderr redirects, python -m, narrowed npm/uv/docker compose, 10+ machine flags)
+    // P.3: Pre-Gate calibration (stderr redirects, python -m, narrowed npm/pnpm/bun/uv/docker compose, machine & reporter flags)
     for (const [cmd, expectedRe] of [
       ["pytest tests/ 2>&1", /^rtk pytest tests\/ 2>&1$/],
       ["pytest tests/ 2>/dev/null", /^rtk pytest tests\/ 2>\/dev\/null$/],
       ["python3 -m pytest tests/", /^rtk pytest tests\/$/],
       ["python -m mypy src/", /^rtk mypy src\/$/],
-      ["npm run test:unit", /^rtk npm run test:unit$/],
-      ["pnpm run build", /^rtk pnpm run build$/],
+      ["npm run lint", /^rtk lint$/],
+      ["pnpm run lint", /^rtk lint$/],
+      ["bun test", /^rtk bun test$/],
       ["docker compose ps", /^rtk docker compose ps$/]
     ]) {
       const res = runHook({ toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } });
@@ -3935,8 +3938,18 @@ console.log("\n--- Group P: v2.1.2 Boost Pass Regressions ---");
     }
     for (const skipCmd of [
       "npm test",
+      "npm run test",
+      "npm run test:unit",
+      "npm run build",
+      "npm run typecheck",
+      "npm run lint:fix",
       "npm run preflight",
       "npm run verify:package",
+      "pnpm run build",
+      "pnpm run test",
+      "bun run test",
+      "bun run build",
+      "bun run lint",
       "yarn test",
       "uv run python script.py",
       "docker compose up -d",
@@ -3952,6 +3965,9 @@ console.log("\n--- Group P: v2.1.2 Boost Pass Regressions ---");
       "eslint --format json src/",
       "ruff check --output-format json src/",
       "vitest run --reporter=json",
+      "vitest run --reporter=verbose",
+      "npx vitest run --reporter=verbose",
+      "jest --reporters=default",
       "pip list --format json",
       "mypy --output json src/"
     ]) {
@@ -5193,6 +5209,204 @@ console.log("\n--- Group T: L61 Multi-ID & --parent transcript health Hook Grant
     try { fs.unlinkSync(path.join(getStateDir(), `agy-session-${tChildSelf}.json`)); } catch {}
     try { fs.unlinkSync(path.join(getStateDir(), `agy-session-${tChildOther}.json`)); } catch {}
     try { fs.unlinkSync(path.join(getStateDir(), `agy-session-${tParent}.json`)); } catch {}
+  }
+}
+
+// ============================================================================
+// GROUP U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter bypass, PATH shadow, Vitest >= 5)
+// ============================================================================
+console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter bypass, PATH shadow, Vitest >= 5) ---");
+{
+  const uTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-hook-group-u-"));
+  const writeExec = (dir, name) => {
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, process.platform === "win32" ? `${name}.cmd` : name);
+    fs.writeFileSync(file, process.platform === "win32" ? "@echo off\r\nexit /b 0\r\n" : "#!/bin/sh\nexit 0\n", "utf-8");
+    if (process.platform !== "win32") fs.chmodSync(file, 0o755);
+    return file;
+  };
+  try {
+    const cleanCwd = path.join(uTmpDir, "clean-proj");
+    fs.mkdirSync(cleanCwd, { recursive: true });
+    const cleanPathEnv = withEnvPath(path.join(hermetic.profileDir, "rtk-shim-bin"), process.env);
+
+    // U.1: Keep specialized lint/pnpm/bun runners; skip dead generic npm/pnpm/bun run scripts
+    for (const [cmd, expectedRe] of [
+      ["npm run lint", /^rtk lint$/],
+      ["npm lint", /^rtk lint$/],
+      ["pnpm run lint", /^rtk lint$/],
+      ["pnpm lint", /^rtk lint$/],
+      ["pnpm install", /^rtk pnpm install$/],
+      ["pnpm outdated", /^rtk pnpm outdated$/],
+      ["pnpm list", /^rtk pnpm list$/],
+      ["pnpm tsc --noEmit", /^rtk tsc --noEmit$/],
+      ["bun test", /^rtk bun test$/],
+      ["bun build src/index.ts", /^rtk bun build src\/index\.ts$/],
+      ["bun install", /^rtk bun install$/],
+      ["bun add zod", /^rtk bun add zod$/]
+    ]) {
+      const res = runHook(
+        { cwd: cleanCwd, toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } },
+        cleanPathEnv
+      );
+      assert.equal(res.decision, "allow");
+      assert.match(res.overwrite?.CommandLine || "", expectedRe, `U.1 must delegate '${cmd}', got: ${res.overwrite?.CommandLine}`);
+    }
+    for (const deadRunCmd of [
+      "npm run test",
+      "npm run build",
+      "npm run typecheck",
+      "npm run lint:fix",
+      "pnpm run test",
+      "pnpm run build",
+      "pnpm run typecheck",
+      "bun run test",
+      "bun run build",
+      "bun run lint"
+    ]) {
+      const res = runHook(
+        { cwd: cleanCwd, toolCall: { name: "run_command", args: { CommandLine: deadRunCmd, WaitMsBeforeAsync: 5000 } } },
+        cleanPathEnv
+      );
+      assert.equal(res.decision, "allow");
+      assert.equal(res.overwrite?.CommandLine, undefined, `U.1 must skip dead pkg run '${deadRunCmd}', got: ${res.overwrite?.CommandLine}`);
+    }
+
+    // U.2: Bypass RTK on any explicit --reporter / --reporters flag for vitest / jest (direct, npx, bunx)
+    for (const reporterCmd of [
+      "vitest run --reporter=verbose",
+      "vitest run --reporter verbose",
+      "vitest run --reporters=default",
+      "vitest run --reporters verbose",
+      "npx vitest run --reporter=verbose",
+      "npx vitest run --reporter default",
+      "bunx vitest run --reporter=verbose",
+      "jest --reporters=default",
+      "jest --reporters summary",
+      "npx jest --reporters=verbose",
+      "bunx jest --reporter=default"
+    ]) {
+      const res = runHook(
+        { cwd: cleanCwd, toolCall: { name: "run_command", args: { CommandLine: reporterCmd, WaitMsBeforeAsync: 5000 } } },
+        cleanPathEnv
+      );
+      assert.equal(res.decision, "allow");
+      assert.equal(res.overwrite?.CommandLine, undefined, `U.2 must bypass RTK for '${reporterCmd}', got: ${res.overwrite?.CommandLine}`);
+    }
+    for (const [plainTestCmd, expectedRe] of [
+      ["vitest run", /^rtk vitest\b/],
+      ["npx vitest run", /^rtk vitest\b/],
+      ["npx vitest run --bail 1", /^rtk vitest\b/],
+      ["jest --bail", /^rtk jest --bail$/],
+      ["npx jest --bail", /^rtk jest --bail$/]
+    ]) {
+      const res = runHook(
+        { cwd: cleanCwd, toolCall: { name: "run_command", args: { CommandLine: plainTestCmd, WaitMsBeforeAsync: 5000 } } },
+        cleanPathEnv
+      );
+      assert.equal(res.decision, "allow");
+      assert.match(res.overwrite?.CommandLine || "", expectedRe, `U.2 must still delegate '${plainTestCmd}', got: ${res.overwrite?.CommandLine}`);
+    }
+
+    // U.3: npx/bunx (and pnpm tsc) local node_modules/.bin global PATH shadowing guard
+    const shadowProj = path.join(uTmpDir, "shadow-proj");
+    const shadowNested = path.join(shadowProj, "packages", "web");
+    const localBinDir = path.join(shadowProj, "node_modules", ".bin");
+    const fakeGlobalBin = path.join(uTmpDir, "fake-global-bin");
+    fs.mkdirSync(shadowNested, { recursive: true });
+    writeExec(localBinDir, "tsc");
+    writeExec(fakeGlobalBin, "tsc");
+
+    const shadowedEnv = withEnvPath(`${path.join(hermetic.profileDir, "rtk-shim-bin")}${path.delimiter}${fakeGlobalBin}`, process.env);
+    for (const [label, payload] of [
+      ["npx tsc shadowed in project root", { cwd: shadowProj, toolCall: { name: "run_command", args: { CommandLine: "npx tsc --noEmit", WaitMsBeforeAsync: 5000 } } }],
+      ["npx tsc shadowed in nested subdir walk-up", { cwd: shadowNested, toolCall: { name: "run_command", args: { CommandLine: "npx tsc --noEmit", WaitMsBeforeAsync: 5000 } } }],
+      ["bunx tsc shadowed", { cwd: shadowProj, toolCall: { name: "run_command", args: { CommandLine: "bunx tsc --noEmit", WaitMsBeforeAsync: 5000 } } }],
+      ["pnpm tsc shadowed", { cwd: shadowProj, toolCall: { name: "run_command", args: { CommandLine: "pnpm tsc --noEmit", WaitMsBeforeAsync: 5000 } } }],
+      ["cd into shadowed project then npx tsc", { cwd: cleanCwd, toolCall: { name: "run_command", args: { CommandLine: `cd "${shadowProj}" && npx tsc --noEmit`, WaitMsBeforeAsync: 5000 } } }]
+    ]) {
+      const res = runHook(payload, shadowedEnv);
+      assert.equal(res.decision, "allow");
+      assert.equal(res.overwrite?.CommandLine, undefined, `U.3 (${label}) must skip RTK when global PATH shadows local bin, got: ${res.overwrite?.CommandLine}`);
+    }
+
+    // Same path (local node_modules/.bin first on PATH) -> NOT shadowed -> delegates
+    const localFirstEnv = withEnvPath(`${localBinDir}${path.delimiter}${path.join(hermetic.profileDir, "rtk-shim-bin")}${path.delimiter}${fakeGlobalBin}`, process.env);
+    const localFirstRes = runHook(
+      { cwd: shadowProj, toolCall: { name: "run_command", args: { CommandLine: "npx tsc --noEmit", WaitMsBeforeAsync: 5000 } } },
+      localFirstEnv
+    );
+    assert.equal(localFirstRes.decision, "allow");
+    assert.match(localFirstRes.overwrite?.CommandLine || "", /^rtk tsc --noEmit$/, "U.3 must delegate when local bin is first on PATH (same realpath)");
+
+    // No global tsc on PATH -> NOT shadowed -> delegates
+    const noGlobalRes = runHook(
+      { cwd: shadowProj, toolCall: { name: "run_command", args: { CommandLine: "npx tsc --noEmit", WaitMsBeforeAsync: 5000 } } },
+      cleanPathEnv
+    );
+    assert.equal(noGlobalRes.decision, "allow");
+    assert.match(noGlobalRes.overwrite?.CommandLine || "", /^rtk tsc --noEmit$/, "U.3 must delegate when tool is absent from global PATH");
+
+    // Global tsc present but no local node_modules/.bin/tsc -> NOT shadowed -> delegates
+    const noLocalRes = runHook(
+      { cwd: cleanCwd, toolCall: { name: "run_command", args: { CommandLine: "npx tsc --noEmit", WaitMsBeforeAsync: 5000 } } },
+      shadowedEnv
+    );
+    assert.equal(noLocalRes.decision, "allow");
+    assert.match(noLocalRes.overwrite?.CommandLine || "", /^rtk tsc --noEmit$/, "U.3 must delegate when no local node_modules/.bin exists");
+
+    // U.4: Vitest >= 5 guard on RTK < 1.2.0 (1.1.0), bypassed on Vitest 3 and RTK >= 1.2.0
+    const v5Proj = path.join(uTmpDir, "vitest5-proj");
+    const v5Nested = path.join(v5Proj, "src");
+    fs.mkdirSync(path.join(v5Proj, "node_modules", "vitest"), { recursive: true });
+    fs.mkdirSync(v5Nested, { recursive: true });
+    fs.writeFileSync(path.join(v5Proj, "node_modules", "vitest", "package.json"), JSON.stringify({ name: "vitest", version: "5.1.1" }), "utf-8");
+
+    const v3Proj = path.join(uTmpDir, "vitest3-proj");
+    fs.mkdirSync(path.join(v3Proj, "node_modules", "vitest"), { recursive: true });
+    fs.writeFileSync(path.join(v3Proj, "node_modules", "vitest", "package.json"), JSON.stringify({ name: "vitest", version: "3.2.7" }), "utf-8");
+
+    for (const [label, payload] of [
+      ["direct vitest on Vitest 5", { cwd: v5Proj, toolCall: { name: "run_command", args: { CommandLine: "vitest run", WaitMsBeforeAsync: 5000 } } }],
+      ["npx vitest on Vitest 5", { cwd: v5Proj, toolCall: { name: "run_command", args: { CommandLine: "npx vitest run", WaitMsBeforeAsync: 5000 } } }],
+      ["npx vitest in nested subdir of Vitest 5", { cwd: v5Nested, toolCall: { name: "run_command", args: { CommandLine: "npx vitest run", WaitMsBeforeAsync: 5000 } } }],
+      ["bunx vitest on Vitest 5", { cwd: v5Proj, toolCall: { name: "run_command", args: { CommandLine: "bunx vitest run", WaitMsBeforeAsync: 5000 } } }],
+      ["cd into Vitest 5 project then npx vitest", { cwd: cleanCwd, toolCall: { name: "run_command", args: { CommandLine: `cd "${v5Proj}" && npx vitest run`, WaitMsBeforeAsync: 5000 } } }]
+    ]) {
+      const res = runHook(payload, cleanPathEnv);
+      assert.equal(res.decision, "allow");
+      assert.equal(res.overwrite?.CommandLine, undefined, `U.4 (${label}) must skip RTK on Vitest >= 5 with RTK 1.1.0, got: ${res.overwrite?.CommandLine}`);
+    }
+
+    for (const [cmd, expectedRe] of [
+      ["vitest run", /^rtk vitest\b/],
+      ["npx vitest run", /^rtk vitest\b/],
+      ["bunx vitest run", /^rtk bunx vitest run$/]
+    ]) {
+      const res = runHook(
+        { cwd: v3Proj, toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } },
+        cleanPathEnv
+      );
+      assert.equal(res.decision, "allow");
+      assert.match(res.overwrite?.CommandLine || "", expectedRe, `U.4 must still delegate '${cmd}' on Vitest 3.2.7, got: ${res.overwrite?.CommandLine}`);
+    }
+
+    // RTK 1.2.0 shim unlocks Vitest 5 delegation
+    const rtk12Bin = path.join(uTmpDir, "rtk-1-2-0-bin");
+    createRtkShim(rtk12Bin, "1.2.0");
+    const rtk12Env = withEnvPath(rtk12Bin, process.env);
+    for (const cmd of ["vitest run", "npx vitest run"]) {
+      const res = runHook(
+        { cwd: v5Proj, toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } },
+        rtk12Env
+      );
+      assert.equal(res.decision, "allow");
+      assert.match(res.overwrite?.CommandLine || "", /^rtk vitest\b/, `U.4 must delegate '${cmd}' on Vitest 5 when RTK >= 1.2.0`);
+    }
+
+    console.log("✓ Group U: RTK Pre-Gate hardening (pruned pkg run, --reporter bypass, PATH shadow, Vitest >= 5) verified");
+  } finally {
+    fs.rmSync(uTmpDir, { recursive: true, force: true });
   }
 }
 
