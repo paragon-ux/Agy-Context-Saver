@@ -8,4 +8,4 @@ Agy-Context-Saver active (load `context-governance` for `export`/`access`/watchd
 # Hook Bounds
 - **`read_file`:** `<=800L & <=45 KiB` (media/`SKILL.md`/`AGENTS.md`/own artifacts/`swarm/plan.json`): unbounded; larger: `wc -l -c`/`grep_search` -> parallel `<=800L` slices. No `read_many_files`/`ByteOffset`-only.
 - **Tasks/spillovers:** Background `run_command` -> Pure Yield (end turn; no `schedule`/status card; await `<SYSTEM_MESSAGE>`). No `RUNNING` `tasks/*.log`, `manage_task(status)` loops, `--watch`, or `/swarm`+`schedule`. Spillovers/`COMPLETED` logs: `read_file <=150L` or `rtk read` (`--tail-lines 150` if `>45 KiB`).
-- **Transcripts:** No `.system_generated/` (except own `swarm/plan.json`) or state dir reads. Unchained `agy-context transcript`: `list`/`health --parent|--id u1,u2 --json` -> parallel `outline`/`query`/`read`/`step --full` (`--out` if `>400 KB`).
+- **Transcripts:** No `.system_generated/` (except own `swarm/plan.json`) or state dir. `agy-context transcript` (read-only `|`; no `&&`/`;`): `list`/`health --parent|--id u1,u2 --json` -> parallel `outline`/`query`/`read`/`step --full` (`--out` >9 KB raw).

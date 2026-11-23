@@ -704,7 +704,7 @@ export function getTaskState(match, convId, ctx = {}) {
 
 function buildInternalStateDenial(kindLabel, convId = "global", ctx = {}) {
   const accessEval = evaluateCallerTranscriptAccess(convId, ctx);
-  const taskLine = "- To inspect background tasks: Yield execution turn and rely on native Reactive Wakeup (<SYSTEM_MESSAGE>). Do not read internal task logs.";
+  const taskLine = "- To inspect background tasks: Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE>). Do not read internal task logs.";
   if (!accessEval.allowed) {
     return (
       `Antigravity Execution Governance: Direct ${kindLabel} to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n` +
@@ -715,13 +715,13 @@ function buildInternalStateDenial(kindLabel, convId = "global", ctx = {}) {
   if (accessEval.mode === "self-only") {
     return (
       `Antigravity Execution Governance: Direct ${kindLabel} to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n` +
-      `- Cross-session transcript inspection is DISABLED for this session (mode: self-only). You may only inspect your own transcript via 'agy-context transcript read --id ${convId} --mode compact' via run_command.\n` +
+      `- Cross-session transcript inspection is DISABLED for this session (mode: self-only). You may only inspect your own transcript via 'agy-context transcript' (read-only '|' ok; no '&&'/';'): 'outline'/'query'/'read'/'step --id ${convId} --full' ('--out <path>' if >9 KB raw) via run_command.\n` +
       taskLine
     );
   }
   return (
     `Antigravity Execution Governance: Direct ${kindLabel} to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n` +
-    "- To inspect conversation transcripts: Run 'agy-context transcript read --id <uuid> --mode compact' or 'agy-context transcript query --id <uuid> --query \"<pattern>\" --summary' via run_command.\n" +
+    "- To inspect conversation transcripts: Run 'agy-context transcript' (read-only '|' ok; no '&&'/';') via run_command: 'list'/'health --parent|--id u1,u2 --json' -> parallel 'outline'/'query'/'read'/'step --id <uuid> --full' ('--out <path>' if >9 KB raw).\n" +
     taskLine
   );
 }

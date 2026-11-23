@@ -41,6 +41,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const pkgPath = path.resolve(__dirname, "../package.json");
 
+process.stdout.on("error", (err) => {
+  if (err?.code === "EPIPE") process.exit(0);
+  throw err;
+});
+
 function getVersion() {
   try {
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
@@ -576,11 +581,13 @@ function writeSafeTranscriptOutFile(rawOut, safeOutPath, res, asJson = false, {
   }
 
   const bytesWritten = Buffer.byteLength(content, "utf8");
+  const lineCount = content.length === 0 ? 0 : (content.split("\n").length - (content.endsWith("\n") ? 1 : 0));
   if (asJson) {
     const { text, steps, items, sessions, step, data, _serializedJson, _serializedMarkdown, _summaryDirection, ...compactMeta } = metadata ?? res;
-    console.log(JSON.stringify({ ...compactMeta, outputPath: safeOutPath, bytesWritten, charsWritten: content.length }, null, 2));
+    console.log(JSON.stringify({ ...compactMeta, outputPath: safeOutPath, lineCount, bytesWritten, charsWritten: content.length }, null, 2));
   } else {
-    console.log(customMessage || `[OK] Wrote ${label} (${bytesWritten} bytes) to: ${safeOutPath}`);
+    const msg = typeof customMessage === "function" ? customMessage({ lineCount, bytesWritten, safeOutPath }) : customMessage;
+    console.log(msg || `[OK] Wrote ${label} (${lineCount} lines, ${bytesWritten} bytes) to: ${safeOutPath}`);
   }
 }
 
@@ -842,7 +849,9 @@ const TRANSCRIPT_HANDLERS = {
     });
     emitTranscriptResult(res, asJson, rawOut, safeOutPath, {
       label: "sanitized transcript export",
-      customMessage: safeOutPath ? `[OK] Exported sanitized transcript index (${res.exportedCount} session(s)) to: ${safeOutPath}` : undefined,
+      customMessage: safeOutPath
+        ? ({ lineCount, bytesWritten }) => `[OK] Exported sanitized transcript index (${res.exportedCount} session(s), ${lineCount} lines, ${bytesWritten} bytes) to: ${safeOutPath}`
+        : undefined,
       maxBytes: effectiveMaxChars
     });
   },
@@ -951,6 +960,7 @@ async function main() {
 }
 
 main().catch((err) => {
+  if (err?.code === "EPIPE") process.exit(0);
   const wantsJson = process.argv.includes("--json");
   emitError(err?.message || String(err), wantsJson);
 });

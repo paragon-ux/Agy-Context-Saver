@@ -223,7 +223,7 @@ async function hasHostRtkAvailable() {
 }
 
 function evaluateReadFileBounds(target, toolName, { rawStart, rawEnd, hasByteOffset, hasSliceParams }, cwd) {
-  const guidance = `Locate the target symbol, heading, or section first with 'grep_search' (or rg/grep via run_command) and pass a bounded slice ('StartLine' and 'EndLine', max ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
+  const guidance = `Check size with 'wc -l -c' or locate targets with 'grep_search' (or 'rg' via run_command), then pass parallel bounded slices ('StartLine' and 'EndLine', <= ${MAX_SAFE_SLICE_LINES} lines) to '${toolName}'`;
   const tag = (m) => {
     if (!m || m.exists === false) return "";
     const kib = (m.bytes / 1024).toFixed(1);

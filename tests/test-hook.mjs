@@ -388,7 +388,14 @@ console.log("\n--- Group D: Quote/Heredoc Shell Parser & agy-context CLI Exempti
     `env agy-context transcript health --id abc && head -n 5 package.json`,
     `bash -c "agy-context transcript health --id abc && head -n 5 package.json"`,
     `(agy-context transcript health --id abc)`,
-    `agy-context transcript read --id abc | head -n 5`,
+    `agy-context transcript read --id abc | bash`,
+    `agy-context transcript read --id abc | tee /tmp/leak.txt`,
+    `agy-context transcript read --id abc | head -n 5 "${validBrainTranscript}"`,
+    `agy-context transcript read --id abc | grep -f "${validBrainTranscript}"`,
+    `agy-context transcript read --id abc | rg --pre sh foo`,
+    `agy-context transcript read --id abc | sort -o /tmp/leak.txt`,
+    `agy-context transcript read --id abc | head -n 5 > /tmp/leak.txt`,
+    `agy-context transcript access --off | head -n 5`,
     `agy-context transcript read --file /etc/passwd`,
     `agy-context transcript read --file "${brainDir}/../config/hooks.json"`,
     `rtk read .system_generated/steps/1/output.txt && cat /etc/passwd`,
@@ -4948,7 +4955,228 @@ console.log("\n--- Group T: L61 Multi-ID & --parent transcript health Hook Grant
     assert.equal(selfAllowed.decision, "allow", "self-only child inspecting own health must allow");
     assert.equal(selfAllowed.overwrite?.CommandLine, `agy-context transcript health --json --id ${tChildSelf}`);
 
-    console.log("✓ Group T: L61 multi-ID & --parent transcript health hook grants and self-only isolation verified");
+    // T.4: AGENTS.md-aligned denial hints (Pure Yield on task denials, batched --full transcript workflow, wc -l -c/grep_search/rg on read_file, slim SKILL.md)
+    const hintConv = `conv-t4-hints-${Date.now()}`;
+    const hintDir = path.join(path.dirname(tParentDir), hintConv);
+    const hintTasksDir = path.join(hintDir, ".system_generated", "tasks");
+    fs.mkdirSync(hintTasksDir, { recursive: true });
+    const hintRunLog = path.join(hintTasksDir, "task-99.log");
+    fs.writeFileSync(hintRunLog, "running\n", "utf-8");
+    try {
+      // Check #1 allowed, then immediate Check #2 denied with Pure Yield guidance (no schedule(DurationSeconds=30) watchdog coaching)
+      assert.equal(runHook({ conversationId: hintConv, toolCall: { name: "manage_task", args: { Action: "status", TaskId: `${hintConv}/task-99` } } }).decision, "allow");
+      const backoffDeny = runHook({ conversationId: hintConv, toolCall: { name: "manage_task", args: { Action: "status", TaskId: `${hintConv}/task-99` } } });
+      assert.equal(backoffDeny.decision, "deny");
+      assert.match(backoffDeny.reason, /Pure Yield/i, "manage_task backoff denial must recommend Pure Yield");
+      assert.doesNotMatch(backoffDeny.reason, /Keep a conditioned watchdog armed/i, "manage_task backoff denial must not coach arming a 30s watchdog");
+
+      const runLogDeny = runHook({ conversationId: hintConv, toolCall: { name: "read_file", args: { Path: hintRunLog } } });
+      assert.equal(runLogDeny.decision, "deny");
+      assert.match(runLogDeny.reason, /Pure Yield/i, "RUNNING task log denial must recommend Pure Yield");
+      assert.doesNotMatch(runLogDeny.reason, /Keep a conditioned watchdog armed/i, "RUNNING task log denial must not coach arming a 30s watchdog");
+
+      const openTransDeny = runHook({ conversationId: tParent, toolCall: { name: "read_file", args: { Path: path.join(tParentDir, ".system_generated", "logs", "transcript.jsonl") } } });
+      assert.equal(openTransDeny.decision, "deny");
+      assert.match(openTransDeny.reason, /--full/, "Open internal-state denial must align with AGENTS.md --full workflow");
+      assert.doesNotMatch(openTransDeny.reason, /--mode compact/, "Open internal-state denial must not steer to --mode compact");
+
+      const selfTransDeny = runHook({ conversationId: tChildSelf, toolCall: { name: "read_file", args: { Path: path.join(tChildSelfDir, ".system_generated", "logs", "transcript.jsonl") } } });
+      assert.equal(selfTransDeny.decision, "deny");
+      assert.match(selfTransDeny.reason, /--full/, "self-only internal-state denial must align with AGENTS.md --full workflow");
+      assert.doesNotMatch(selfTransDeny.reason, /--mode compact/, "self-only internal-state denial must not steer to --mode compact");
+
+      const chainDeny = runHook({ conversationId: tParent, toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list && echo done", WaitMsBeforeAsync: 5000 } } });
+      assert.equal(chainDeny.decision, "deny");
+      assert.match(chainDeny.reason, /--full/, "Chained transcript CLI denial must include AGENTS.md --full workflow");
+
+      const readHintDeny = runHook({ conversationId: tParent, toolCall: { name: "read_file", args: { Path: path.join(repoRoot, "lib", "transcript-core.mjs") } } });
+      assert.equal(readHintDeny.decision, "deny");
+      assert.match(readHintDeny.reason, /wc -l -c/, "read_file denial must include AGENTS.md wc -l -c guidance");
+      assert.doesNotMatch(readHintDeny.reason, /rg\/grep/, "read_file denial must not recommend shell grep");
+
+      const skillMd = fs.readFileSync(path.join(repoRoot, "skills", "context-governance", "SKILL.md"), "utf-8");
+      assert.ok(Buffer.byteLength(skillMd, "utf-8") <= 4096, "SKILL.md must stay compact (<= 4 KiB) with detailed refs in references/");
+      assert.match(skillMd, /Do NOT load for routine/i, "SKILL.md description must clearly exclude routine AGENTS.md tasks");
+    } finally {
+      fs.rmSync(hintDir, { recursive: true, force: true });
+      try { fs.unlinkSync(path.join(getStateDir(), `agy-session-${hintConv}.json`)); } catch {}
+    }
+
+    // T.5: Safe stdin-only read-only filter pipes on `agy-context transcript` + Segment-0 ID injection + Tier 4 / red-team isolation
+    const tChildDeny = `conv-t5-deny-${Date.now()}`;
+    const tChildDenyDir = path.join(path.dirname(tParentDir), tChildDeny);
+    fs.mkdirSync(path.join(tChildDenyDir, ".system_generated", "logs"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tChildDenyDir, ".system_generated", "logs", "transcript.jsonl"),
+      JSON.stringify({
+        step_index: 0,
+        source: "SYSTEM",
+        type: "SYSTEM_MESSAGE",
+        content: `[Message] sender=${tParent} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: deny]\nDenied child.`
+      }) + "\n"
+    );
+    try {
+      for (const safePipeCmd of [
+        `agy-context transcript outline --id ${tChildOther} --full | rg -i "DENIED|ERROR"`,
+        `agy-context transcript outline --id ${tChildOther} --full | tail -n 80`,
+        `agy-context transcript read --id ${tChildOther} --full | head -n 5`,
+        `agy-context transcript query --id ${tChildOther} --roles all --full | grep -iE "warn|err" | wc -l`,
+        `agy-context transcript query --id ${tChildOther} --roles all --full | grep -E "foo|bar"`,
+        `agy-context transcript health --id ${tChildOther} --json | jq -r '.turnCount' 2>/dev/null`,
+        `agy-context transcript health --parent ${tParent} --json | jq '.sessions[] | {id, turns}'`,
+        `agy-context transcript outline --id ${tChildOther} --full 2>/dev/null | cut -d: -f1 | sort -u | uniq -c`,
+        `agy-context transcript outline --id ${tChildOther} --full | tr 'A-Z' 'a-z' | head -20`
+      ]) {
+        clearGrants();
+        const okPipe = runHook({
+          conversationId: tParent,
+          toolCall: { name: "run_command", args: { CommandLine: safePipeCmd, WaitMsBeforeAsync: 5000 } }
+        });
+        assert.equal(okPipe.decision, "allow", `Safe stdin-only transcript filter pipe must allow: ${safePipeCmd} (${okPipe.reason || ""})`);
+        assert.equal(readPendingGrants().length, 1, `Safe piped transcript call must mint exactly 1 grant: ${safePipeCmd}`);
+      }
+
+      // Segment-0 self-ID and parent-ID injection must insert flags BEFORE the downstream pipe (and before trailing 2>/dev/null)
+      clearGrants();
+      const selfPipeInject = runHook({
+        conversationId: tChildSelf,
+        toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript outline --full | rg 'error'", WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(selfPipeInject.decision, "allow", "self-only child piping own transcript must allow");
+      assert.equal(selfPipeInject.overwrite?.CommandLine, `agy-context transcript outline --full --id ${tChildSelf} | rg 'error'`);
+      assert.equal(readPendingGrants().length, 1);
+      assert.equal(readPendingGrants()[0].mode, "self-only");
+
+      clearGrants();
+      const stderrPipeInject = runHook({
+        conversationId: tParent,
+        toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript outline --full 2>/dev/null | tail -n 40", WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(stderrPipeInject.decision, "allow");
+      assert.equal(stderrPipeInject.overwrite?.CommandLine, `agy-context transcript outline --full --id ${tParent} 2>/dev/null | tail -n 40`);
+
+      clearGrants();
+      const spacedStderrPipeInject = runHook({
+        conversationId: tParent,
+        toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript outline --full 2> /dev/null | head -n 20", WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(spacedStderrPipeInject.decision, "allow");
+      assert.equal(spacedStderrPipeInject.overwrite?.CommandLine, `agy-context transcript outline --full --id ${tParent} 2> /dev/null | head -n 20`);
+
+      // Off-PATH bare `agy-context` + `self-only` `--id` injection + pipe together must rewrite binary and Segment-0 `--id` cleanly
+      const offPathBin = fs.mkdtempSync(path.join(os.tmpdir(), "agy-t5-empty-path-"));
+      const shimBinDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "bin");
+      const shimPath = path.join(shimBinDir, process.platform === "win32" ? "agy-context.cmd" : "agy-context");
+      const shimExisted = fs.existsSync(shimPath);
+      try {
+        fs.mkdirSync(shimBinDir, { recursive: true });
+        if (!shimExisted) {
+          fs.writeFileSync(shimPath, process.platform === "win32" ? "@echo off\r\necho ok\r\n" : "#!/bin/sh\necho ok\n", "utf-8");
+          if (process.platform !== "win32") fs.chmodSync(shimPath, 0o755);
+        }
+        clearGrants();
+        const offPathPipe = runHook(
+          {
+            conversationId: tChildSelf,
+            toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript outline --full | rg 'error'", WaitMsBeforeAsync: 5000 } }
+          },
+          withEnvPath(process.env, offPathBin)
+        );
+        assert.equal(offPathPipe.decision, "allow", "Off-PATH bare agy-context + self-only + pipe must allow");
+        assert.ok(
+          offPathPipe.overwrite?.CommandLine.endsWith(` transcript outline --full --id ${tChildSelf} | rg 'error'`),
+          `Off-PATH piped rewrite must preserve Segment-0 --id and downstream pipe (got: ${offPathPipe.overwrite?.CommandLine})`
+        );
+        assert.ok(
+          !offPathPipe.overwrite?.CommandLine.startsWith("agy-context "),
+          `Off-PATH bare agy-context must rewrite to installed shim/CLI (got: ${offPathPipe.overwrite?.CommandLine})`
+        );
+      } finally {
+        fs.rmSync(offPathBin, { recursive: true, force: true });
+        if (!shimExisted) { try { fs.unlinkSync(shimPath); } catch {} }
+      }
+
+      clearGrants();
+      const parentCurPipe = runHook({
+        conversationId: tParent,
+        toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript health --parent current --json | jq '.sessions | length'", WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(parentCurPipe.decision, "allow");
+      assert.equal(parentCurPipe.overwrite?.CommandLine, `agy-context transcript health --parent ${tParent} --json | jq '.sessions | length'`);
+      assert.equal(readPendingGrants()[0].targetConvId, `parent:${tParent}`);
+
+      // Tier 4 isolation stays enforced even with safe filter pipes
+      try { fs.unlinkSync(path.join(getStateDir(), `agy-session-${tChildSelf}.json`)); } catch {}
+      clearGrants();
+      assert.equal(
+        runHook({
+          conversationId: tChildDeny,
+          toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript outline --id ${tParent} --full | head -n 5`, WaitMsBeforeAsync: 5000 } }
+        }).decision,
+        "deny",
+        "deny-restricted child piping parent transcript must stay denied"
+      );
+      assert.equal(readPendingGrants().length, 0);
+
+      clearGrants();
+      assert.equal(
+        runHook({
+          conversationId: tChildSelf,
+          toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript outline --id ${tChildOther} --full | head -n 5`, WaitMsBeforeAsync: 5000 } }
+        }).decision,
+        "deny",
+        "self-only child piping sibling transcript must stay denied"
+      );
+      assert.equal(readPendingGrants().length, 0);
+
+      // Unsafe pipe targets, file operands, dangerous flags, redirects, chaining, and subshells stay hard-denied
+      for (const badPipeCmd of [
+        `agy-context transcript outline --id ${tChildOther} --full | bash`,
+        `agy-context transcript outline --id ${tChildOther} --full | sh`,
+        `agy-context transcript outline --id ${tChildOther} --full | node -e "console.log(1)"`,
+        `agy-context transcript outline --id ${tChildOther} --full | python3 -c "print(1)"`,
+        `agy-context transcript outline --id ${tChildOther} --full | xargs cat`,
+        `agy-context transcript outline --id ${tChildOther} --full | awk '{print}'`,
+        `agy-context transcript outline --id ${tChildOther} --full | sed 's/a/b/'`,
+        `agy-context transcript outline --id ${tChildOther} --full | tee scratch/leak.txt`,
+        `agy-context transcript outline --id ${tChildOther} --full | cat`,
+        `agy-context transcript outline --id ${tChildOther} --full | head -n 5 package.json`,
+        `agy-context transcript outline --id ${tChildOther} --full | tail -f`,
+        `agy-context transcript outline --id ${tChildOther} --full | rg "foo" package.json`,
+        `agy-context transcript outline --id ${tChildOther} --full | grep -e "foo" package.json`,
+        `agy-context transcript outline --id ${tChildOther} --full | grep -Ff package.json`,
+        `agy-context transcript outline --id ${tChildOther} --full | rg --pre sh "foo"`,
+        `agy-context transcript outline --id ${tChildOther} --full | rg --files`,
+        `agy-context transcript outline --id ${tChildOther} --full | wc -l package.json`,
+        `agy-context transcript health --id ${tChildOther} --json | jq '.' package.json`,
+        `agy-context transcript health --id ${tChildOther} --json | jq --rawfile x package.json '.'`,
+        `agy-context transcript outline --id ${tChildOther} --full | sort -o scratch/out.txt`,
+        `agy-context transcript outline --id ${tChildOther} --full | uniq a b`,
+        `agy-context transcript outline --id ${tChildOther} --full | cut -f1 package.json`,
+        `agy-context transcript outline --id ${tChildOther} --full | /usr/bin/head -n 5`,
+        `agy-context transcript outline --id ${tChildOther} --full | FOO=1 head -n 5`,
+        `agy-context transcript outline --id ${tChildOther} --full | head -n 5 > scratch/leak.txt`,
+        `agy-context transcript outline --id ${tChildOther} --full | head -n $(echo 5)`,
+        `agy-context transcript outline --id ${tChildOther} --full > scratch/leak.txt`,
+        `agy-context transcript outline --id ${tChildOther} --full && wc -l -c scratch/t.md`,
+        `agy-context transcript outline --id ${tChildOther} --full ; echo hi`,
+        `agy-context transcript outline --id ${tChildOther} --full | head -n 50 | tail -n 40 | grep -v x | sort | uniq | cut -c1-80 | wc -l`,
+        `agy-context transcript access --off | head -n 5`
+      ]) {
+        clearGrants();
+        const badRes = runHook({
+          conversationId: tParent,
+          toolCall: { name: "run_command", args: { CommandLine: badPipeCmd, WaitMsBeforeAsync: 5000 } }
+        });
+        assert.equal(badRes.decision, "deny", `Unsafe piped/chained transcript command must be denied: ${badPipeCmd}`);
+        assert.equal(readPendingGrants().length, 0, `Denied piped/chained transcript command must not mint a grant: ${badPipeCmd}`);
+      }
+    } finally {
+      fs.rmSync(tChildDenyDir, { recursive: true, force: true });
+      try { fs.unlinkSync(path.join(getStateDir(), `agy-session-${tChildDeny}.json`)); } catch {}
+    }
+
+    console.log("✓ Group T: L61 cohort health, self-only isolation, AGENTS.md-aligned hints, and safe read-only transcript pipes verified");
   } finally {
     clearGrants();
     fs.rmSync(tParentDir, { recursive: true, force: true });

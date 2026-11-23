@@ -888,16 +888,246 @@ function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
   };
 }
 
+const SAFE_TRANSCRIPT_FILTER_CMDS = new Set(["head", "tail", "grep", "egrep", "fgrep", "rg", "wc", "jq", "cut", "sort", "uniq", "tr"]);
+const GREP_FILTER_SHORT_BOOL = new Set(["i", "v", "n", "c", "E", "F", "P", "G", "w", "x", "o", "q", "s", "S", "h", "H", "a", "U"]);
+const GREP_FILTER_SHORT_NUM = new Set(["m", "A", "B", "C"]);
+const GREP_FILTER_LONG_BOOL = new Set([
+  "--ignore-case", "--smart-case", "--case-sensitive", "--invert-match", "--line-number", "--no-line-number",
+  "--count", "--only-matching", "--fixed-strings", "--extended-regexp", "--basic-regexp", "--perl-regexp",
+  "--word-regexp", "--line-regexp", "--quiet", "--silent", "--no-heading", "--no-filename", "--with-filename",
+  "--multiline", "--text", "--passthru", "--passthrough", "--json", "--vimgrep", "--stats"
+]);
+const GREP_FILTER_LONG_NUM = new Set(["--max-count", "--after-context", "--before-context", "--context", "--max-columns"]);
+const JQ_FILTER_SHORT_BOOL = new Set(["r", "c", "s", "R", "S", "e", "a", "M", "n", "j"]);
+const JQ_FILTER_LONG_BOOL = new Set([
+  "--raw-output", "--compact-output", "--slurp", "--raw-input", "--sort-keys",
+  "--exit-status", "--ascii-output", "--monochrome-output", "--null-input", "--join-output", "--tab"
+]);
+const WC_FILTER_SHORT_BOOL = new Set(["l", "w", "c", "m", "L"]);
+const WC_FILTER_LONG_BOOL = new Set(["--lines", "--words", "--bytes", "--chars", "--max-line-length"]);
+const CUT_FILTER_SHORT_BOOL = new Set(["s", "n", "z"]);
+const CUT_FILTER_SHORT_VAL = new Set(["d", "f", "c", "b"]);
+const CUT_FILTER_LONG_BOOL = new Set(["--only-delimited", "--complement", "--zero-terminated"]);
+const CUT_FILTER_LONG_VAL = new Set(["--delimiter", "--fields", "--characters", "--bytes", "--output-delimiter"]);
+const SORT_FILTER_SHORT_BOOL = new Set(["r", "n", "u", "f", "h", "V", "b", "d", "i", "M", "R", "s", "z", "c", "C", "g"]);
+const SORT_FILTER_SHORT_VAL = new Set(["k", "t"]);
+const SORT_FILTER_LONG_BOOL = new Set(["--reverse", "--numeric-sort", "--unique", "--ignore-case", "--human-numeric-sort", "--version-sort", "--stable", "--zero-terminated", "--general-numeric-sort"]);
+const SORT_FILTER_LONG_VAL = new Set(["--key", "--field-separator"]);
+const UNIQ_FILTER_SHORT_BOOL = new Set(["c", "d", "D", "u", "i", "z"]);
+const UNIQ_FILTER_SHORT_NUM = new Set(["f", "s", "w"]);
+const UNIQ_FILTER_LONG_BOOL = new Set(["--count", "--repeated", "--all-repeated", "--unique", "--ignore-case", "--zero-terminated"]);
+const UNIQ_FILTER_LONG_NUM = new Set(["--skip-fields", "--skip-chars", "--check-chars"]);
+const TR_FILTER_SHORT_BOOL = new Set(["d", "s", "c", "C", "t"]);
+const TR_FILTER_LONG_BOOL = new Set(["--delete", "--squeeze-repeats", "--complement", "--truncate-set1"]);
+
+function isSafeReadOnlyTranscriptFilterSegment(seg) {
+  if (!seg || (seg.leadingSep !== "|" && seg.leadingSep !== "|&")) return false;
+  if (seg.hasHeredoc || seg.hasSubshell) return false;
+  const rawTokens = getSegTokens(seg);
+  if (!rawTokens || rawTokens.length === 0) return false;
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(rawTokens[0].raw)) return false;
+  const clean = filterAllowedStderrRedirects(rawTokens);
+  if (!clean || clean.length === 0) return false;
+
+  const cmdRaw = clean[0].value;
+  if (!cmdRaw || /[/\\]/.test(cmdRaw)) return false;
+  const cmd = cmdRaw.toLowerCase();
+  if (!SAFE_TRANSCRIPT_FILTER_CMDS.has(cmd)) return false;
+
+  const args = clean.slice(1).map((t) => t.value);
+  let afterDD = false;
+  let posCount = 0;
+
+  if (cmd === "head" || cmd === "tail") {
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") return false;
+      if (/^-\d+$/.test(v)) continue;
+      if (v.startsWith("--")) {
+        if (["--quiet", "--silent", "--verbose", "--zero-terminated"].includes(v)) continue;
+        const eq = v.indexOf("=");
+        const fl = eq === -1 ? v : v.slice(0, eq);
+        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
+        if (fl === "--lines") { if (!/^[+-]?\d+$/.test(val || "")) return false; continue; }
+        if (fl === "--bytes") { if (!/^[+-]?\d+[bkmKMGTPEZY]?$/.test(val || "")) return false; continue; }
+        return false;
+      }
+      for (let j = 1; j < v.length; j++) {
+        const ch = v[j];
+        if (ch === "q" || ch === "v" || ch === "z") continue;
+        if (ch === "n" || ch === "c") {
+          const val = j + 1 < v.length ? v.slice(j + 1) : args[++i];
+          const re = ch === "n" ? /^[+-]?\d+$/ : /^[+-]?\d+[bkmKMGTPEZY]?$/;
+          if (!re.test(val || "")) return false;
+          break;
+        }
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (cmd === "grep" || cmd === "egrep" || cmd === "fgrep" || cmd === "rg") {
+    let hasExplicitPattern = false;
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") { posCount++; continue; }
+      if (v.startsWith("--")) {
+        if (GREP_FILTER_LONG_BOOL.has(v)) continue;
+        const eq = v.indexOf("=");
+        const fl = eq === -1 ? v : v.slice(0, eq);
+        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
+        if (val === undefined) return false;
+        if (fl === "--regexp") { hasExplicitPattern = true; continue; }
+        if (GREP_FILTER_LONG_NUM.has(fl)) { if (!/^\d+$/.test(val)) return false; continue; }
+        if (fl === "--color" || fl === "--colour") { if (!/^(?:always|never|auto|ansi)$/i.test(val)) return false; continue; }
+        return false;
+      }
+      for (let j = 1; j < v.length; j++) {
+        const ch = v[j];
+        if (GREP_FILTER_SHORT_BOOL.has(ch)) continue;
+        if (ch === "e") {
+          hasExplicitPattern = true;
+          if (j + 1 === v.length && ++i >= args.length) return false;
+          break;
+        }
+        if (GREP_FILTER_SHORT_NUM.has(ch)) {
+          const val = j + 1 < v.length ? v.slice(j + 1) : args[++i];
+          if (!/^\d+$/.test(val || "")) return false;
+          break;
+        }
+        return false;
+      }
+    }
+    return hasExplicitPattern ? posCount === 0 : posCount === 1;
+  }
+
+  if (cmd === "wc") {
+    for (const v of args) {
+      if (!v.startsWith("-") || v === "-") return false;
+      if (v.startsWith("--")) { if (!WC_FILTER_LONG_BOOL.has(v)) return false; continue; }
+      for (let j = 1; j < v.length; j++) if (!WC_FILTER_SHORT_BOOL.has(v[j])) return false;
+    }
+    return true;
+  }
+
+  if (cmd === "jq") {
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") { posCount++; continue; }
+      if (v.startsWith("--")) {
+        if (JQ_FILTER_LONG_BOOL.has(v)) continue;
+        if (v === "--arg" || v === "--argjson") { if (i + 2 >= args.length) return false; i += 2; continue; }
+        return false;
+      }
+      for (let j = 1; j < v.length; j++) if (!JQ_FILTER_SHORT_BOOL.has(v[j])) return false;
+    }
+    return posCount <= 1;
+  }
+
+  if (cmd === "cut") {
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") return false;
+      if (v.startsWith("--")) {
+        if (CUT_FILTER_LONG_BOOL.has(v)) continue;
+        const eq = v.indexOf("=");
+        const fl = eq === -1 ? v : v.slice(0, eq);
+        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
+        if (CUT_FILTER_LONG_VAL.has(fl) && val !== undefined) continue;
+        return false;
+      }
+      for (let j = 1; j < v.length; j++) {
+        const ch = v[j];
+        if (CUT_FILTER_SHORT_BOOL.has(ch)) continue;
+        if (CUT_FILTER_SHORT_VAL.has(ch)) { if (j + 1 === v.length && ++i >= args.length) return false; break; }
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (cmd === "sort") {
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") return false;
+      if (v.startsWith("--")) {
+        if (SORT_FILTER_LONG_BOOL.has(v)) continue;
+        const eq = v.indexOf("=");
+        const fl = eq === -1 ? v : v.slice(0, eq);
+        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
+        if (SORT_FILTER_LONG_VAL.has(fl) && val !== undefined) continue;
+        return false;
+      }
+      for (let j = 1; j < v.length; j++) {
+        const ch = v[j];
+        if (SORT_FILTER_SHORT_BOOL.has(ch)) continue;
+        if (SORT_FILTER_SHORT_VAL.has(ch)) { if (j + 1 === v.length && ++i >= args.length) return false; break; }
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (cmd === "uniq") {
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") return false;
+      if (v.startsWith("--")) {
+        if (UNIQ_FILTER_LONG_BOOL.has(v)) continue;
+        const eq = v.indexOf("=");
+        const fl = eq === -1 ? v : v.slice(0, eq);
+        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
+        if (UNIQ_FILTER_LONG_NUM.has(fl) && /^\d+$/.test(val || "")) continue;
+        return false;
+      }
+      for (let j = 1; j < v.length; j++) {
+        const ch = v[j];
+        if (UNIQ_FILTER_SHORT_BOOL.has(ch)) continue;
+        if (UNIQ_FILTER_SHORT_NUM.has(ch)) {
+          const val = j + 1 < v.length ? v.slice(j + 1) : args[++i];
+          if (!/^\d+$/.test(val || "")) return false;
+          break;
+        }
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (cmd === "tr") {
+    for (let i = 0; i < args.length; i++) {
+      const v = args[i];
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (afterDD || !v.startsWith("-") || v === "-") { posCount++; continue; }
+      if (v.startsWith("--")) { if (!TR_FILTER_LONG_BOOL.has(v)) return false; continue; }
+      for (let j = 1; j < v.length; j++) if (!TR_FILTER_SHORT_BOOL.has(v[j])) return false;
+    }
+    return posCount >= 1 && posCount <= 2;
+  }
+
+  return false;
+}
+
 function checkAgyContextTranscriptCommand(segments, convId, ctx) {
   const cwd = ctx?.cwd || "";
   const match = segments.length ? findAgyContextTranscriptUsage(segments, cwd) : null;
   if (!match) return { matched: false, allowed: false };
-  const { seg, segIndex, totalSegs, hadWrapper, subOffset, subcommand, isReadSub, isHelpSub, isAdminSub, isKnownSubcommand, hasNodeFlags, invalidBinaryPath, tokens } = match;
+  const { seg, segIndex, totalSegs, hadWrapper, subOffset, subcommand, isReadSub, isHelpSub, isAdminSub, isKnownSubcommand, hasNodeFlags, invalidBinaryPath } = match;
   const fail = (reason, isAccessDenial = false) => ({ matched: true, allowed: false, isAccessDenial, reason });
 
-  if (totalSegs !== 1 || segIndex !== 0 || (seg.leadingSep && seg.leadingSep !== "\n") || hadWrapper || hasNodeFlags || invalidBinaryPath || seg.hasRedirect || seg.hasHeredoc || seg.hasSubshell) {
-    return fail("Antigravity Execution Governance: 'agy-context transcript' access to .system_generated must be strictly single and unchained (no chaining, wrappers, env prefixes, node flags, redirects, heredocs, or subshells).");
+  const seg0CleanDetailed = !seg.hasRedirect ? getSegTokens(seg) : filterAllowedStderrRedirects(getSegTokens(seg));
+  const hasValidPipeline = totalSegs === 1 || (totalSegs <= 7 && (isReadSub || isHelpSub) && segments.slice(1).every(isSafeReadOnlyTranscriptFilterSegment));
+  if (segIndex !== 0 || !hasValidPipeline || (seg.leadingSep && seg.leadingSep !== "\n") || hadWrapper || hasNodeFlags || invalidBinaryPath || !seg0CleanDetailed || seg.hasHeredoc || seg.hasSubshell) {
+    return fail("Antigravity Execution Governance: 'agy-context transcript' access to .system_generated must be a single unchained command or piped strictly to read-only stdin filters (rg/grep/head/tail/jq/wc/cut/sort/uniq/tr; no &&, ;, write redirects, file operands, wrappers, env prefixes, node flags, heredocs, or subshells). Use: 'list'/'health --parent|--id u1,u2 --json' -> parallel 'outline'/'query'/'read'/'step --id <uuid> --full' ('--out <path>' if >9 KB raw).");
   }
+  const tokens = seg.hasRedirect ? seg0CleanDetailed.map((t) => t.value) : match.tokens;
   if (!isKnownSubcommand) {
     return fail(`Antigravity Execution Governance: Unknown 'agy-context transcript' subcommand '${subcommand}'. Expected read, query, step, health, list, export, or access.`);
   }
@@ -976,7 +1206,7 @@ function checkAgyContextTranscriptCommand(segments, convId, ctx) {
       }
       const wasCur = Boolean(targetInfo.targetId && targetInfo.targetId.toLowerCase() === "current");
       const injectSelfId = !targetInfo.explicitFile && (!targetInfo.targetId || wasCur) && convId && convId !== "global" ? convId : null;
-      return { matched: true, allowed: true, subcommand, mode: "self-only", targetConvId: convId, needsReadGrant: true, injectSelfId, targetWasCurrentPlaceholder: wasCur };
+      return { matched: true, allowed: true, subcommand, mode: "self-only", targetConvId: convId, needsReadGrant: true, injectSelfId, targetWasCurrentPlaceholder: wasCur, seg0Start: seg.start, seg0End: seg.end };
     }
 
     let resolvedTarget = targetInfo.targetId || null;
@@ -997,7 +1227,7 @@ function checkAgyContextTranscriptCommand(segments, convId, ctx) {
     const wasCur = Boolean(targetInfo.targetId && targetInfo.targetId.toLowerCase() === "current");
     const injectSelfId = !isList && !(isMultiTargetSub && (targetInfo.targetParent || targetInfo.targetIds.length > 1)) && !targetInfo.explicitFile && (!targetInfo.targetId || wasCur) && convId && convId !== "global" ? convId : null;
     if (injectSelfId) resolvedTarget = convId;
-    return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: true, targetConvId: resolvedTarget, injectSelfId, targetWasCurrentPlaceholder: wasCur, injectParentId };
+    return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: true, targetConvId: resolvedTarget, injectSelfId, targetWasCurrentPlaceholder: wasCur, injectParentId, seg0Start: seg.start, seg0End: seg.end };
   }
   return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: false };
 }
@@ -1207,7 +1437,7 @@ function getProtectedShellOperationReason(text, { isRestrictedChild = false } = 
 }
 
 function buildProtectedShellReasonMessage(code, convId, ctx) {
-  if (code === "non-canonical-cli") return "Antigravity Execution Governance: 'agy-context transcript' must be invoked as a single unchained command (no shell chaining, pipes, redirects, subshells, or '..' traversal). Run e.g. 'agy-context transcript read --mode compact' directly via run_command.";
+  if (code === "non-canonical-cli") return "Antigravity Execution Governance: 'agy-context transcript' must be invoked as a single unchained command or piped strictly to read-only stdin filters (rg/grep/head/tail/jq/wc; no &&, ;, write redirects, subshells, or '..' traversal). Follow: 'list'/'health --parent|--id u1,u2 --json' -> parallel 'outline'/'query'/'read'/'step --id <uuid> --full' ('--out <path>' if >9 KB raw).";
   if (code === "inline-transcript-core") return "Antigravity Execution Governance: Direct inline script or interpreter imports of 'transcript-core.mjs' or 'bin/agy-context.mjs' are prohibited. Invoke the single unchained 'agy-context transcript ...' CLI directly via run_command instead.";
   if (code === "governance-env") return "Antigravity Execution Governance: Overriding Antigravity governance/state environment variables (AGY_TEST_PROFILE_DIR, AGY_BRAIN_DIR, GEMINI_CONVERSATION_ID, or governance-scoped XDG_STATE_HOME/LOCALAPPDATA) inside shell commands is prohibited.";
   return buildInternalStateShellDenial(convId, ctx);
@@ -1707,19 +1937,29 @@ export async function handleRunCommand(ctx) {
     }
   }
 
-  // Self-ID / parent-ID injection for `agy-context transcript` in open & self-only modes
-  if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectSelfId) {
-    if (/(^|\s)--id(?:=|\s+)(["']?)current\2(?=\s|$)/i.test(effectiveCmd)) {
-      effectiveCmd = effectiveCmd.replace(/(^|\s)--id(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--id ${agyTranscriptCheck.injectSelfId}`);
-    } else if (agyTranscriptCheck.targetWasCurrentPlaceholder) {
-      const upd = effectiveCmd.replace(/(^|\s)(["']?)current\2(?=(?:\s|$)(?!.*\s["']?current["']?(?:\s|$)))/i, `$1--id ${agyTranscriptCheck.injectSelfId}`);
-      effectiveCmd = upd !== effectiveCmd ? upd : `${effectiveCmd.trim()} --id ${agyTranscriptCheck.injectSelfId}`;
-    } else {
-      effectiveCmd = `${effectiveCmd.trim()} --id ${agyTranscriptCheck.injectSelfId}`;
+  // Self-ID / parent-ID injection for `agy-context transcript` in open & self-only modes (scoped to Segment 0 when piped)
+  if (agyTranscriptCheck.allowed && (agyTranscriptCheck.injectSelfId || agyTranscriptCheck.injectParentId)) {
+    const s0Start = Number.isInteger(agyTranscriptCheck.seg0Start) ? agyTranscriptCheck.seg0Start : 0;
+    const s0End = Number.isInteger(agyTranscriptCheck.seg0End) ? agyTranscriptCheck.seg0End : effectiveCmd.length;
+    let seg0Cmd = effectiveCmd.slice(s0Start, s0End);
+    const appendFlagToSeg0 = (cmdStr, flagStr) => {
+      const m = cmdStr.match(/(\s+2>(?:&1|\s*(?:\/dev\/null|nul)))+\s*$/i);
+      return m ? `${cmdStr.slice(0, m.index).trimEnd()} ${flagStr}${m[0]}` : `${cmdStr.trimEnd()} ${flagStr}`;
+    };
+    if (agyTranscriptCheck.injectSelfId) {
+      if (/(^|\s)--id(?:=|\s+)(["']?)current\2(?=\s|$)/i.test(seg0Cmd)) {
+        seg0Cmd = seg0Cmd.replace(/(^|\s)--id(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--id ${agyTranscriptCheck.injectSelfId}`);
+      } else if (agyTranscriptCheck.targetWasCurrentPlaceholder) {
+        const upd = seg0Cmd.replace(/(^|\s)(["']?)current\2(?=(?:\s|$)(?!.*\s["']?current["']?(?:\s|$)))/i, `$1--id ${agyTranscriptCheck.injectSelfId}`);
+        seg0Cmd = upd !== seg0Cmd ? upd : appendFlagToSeg0(seg0Cmd, `--id ${agyTranscriptCheck.injectSelfId}`);
+      } else {
+        seg0Cmd = appendFlagToSeg0(seg0Cmd, `--id ${agyTranscriptCheck.injectSelfId}`);
+      }
     }
-  }
-  if (agyTranscriptCheck.allowed && agyTranscriptCheck.injectParentId) {
-    effectiveCmd = effectiveCmd.replace(/(^|\s)--parent(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--parent ${agyTranscriptCheck.injectParentId}`);
+    if (agyTranscriptCheck.injectParentId) {
+      seg0Cmd = seg0Cmd.replace(/(^|\s)--parent(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--parent ${agyTranscriptCheck.injectParentId}`);
+    }
+    effectiveCmd = effectiveCmd.slice(0, s0Start) + seg0Cmd + effectiveCmd.slice(s0End);
   }
 
   // Rewrite bare `agy-context` / `agy-context-saver` to installed shim when off PATH

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -2272,7 +2272,35 @@ try {
       assert.equal(cappedExpParsed.jsonSessionsIncluded, cappedExpParsed.sessions.length);
       const cappedExpStdout = JSON.parse(cappedExpJsonCli.stdout);
       assert.equal(cappedExpStdout.bytesWritten, cappedExpBytes);
+      const cappedExpText = fs.readFileSync(cappedExpJsonOut, "utf8");
+      const expectedExpLines = cappedExpText.split("\n").length - (cappedExpText.endsWith("\n") ? 1 : 0);
+      assert.equal(cappedExpStdout.lineCount, expectedExpLines, "--out --json must report exact lineCount");
       assert.equal(cappedExpStdout.sessions, undefined);
+
+      // Verify Markdown --out confirmations include exact `(<N> lines, <B> bytes)` for both `outline` and `export`
+      const outLineTestMd = path.join(ergOutDir, "outline-lines.md");
+      const outlineOutCli = runCli(["transcript", "outline", "--id", expChildIds[0], "--full", "--out", outLineTestMd]);
+      assert.equal(outlineOutCli.status, 0, outlineOutCli.stderr);
+      const outlineOutContent = fs.readFileSync(outLineTestMd, "utf8");
+      const expectedOutlineLines = outlineOutContent.split("\n").length - (outlineOutContent.endsWith("\n") ? 1 : 0);
+      const expectedOutlineBytes = Buffer.byteLength(outlineOutContent, "utf8");
+      assert.match(
+        outlineOutCli.stdout,
+        new RegExp(`\\(${expectedOutlineLines} lines, ${expectedOutlineBytes} bytes\\)`),
+        "--out text confirmation must print exact lineCount and bytesWritten"
+      );
+
+      const expLineTestMd = path.join(ergOutDir, "export-lines.md");
+      const expOutCli = runCli(["transcript", "export", "--id", expChildIds[0], "--sanitized", "--out", expLineTestMd]);
+      assert.equal(expOutCli.status, 0, expOutCli.stderr);
+      const expOutContent = fs.readFileSync(expLineTestMd, "utf8");
+      const expectedExpMdLines = expOutContent.split("\n").length - (expOutContent.endsWith("\n") ? 1 : 0);
+      const expectedExpMdBytes = Buffer.byteLength(expOutContent, "utf8");
+      assert.match(
+        expOutCli.stdout,
+        new RegExp(`1 session\\(s\\), ${expectedExpMdLines} lines, ${expectedExpMdBytes} bytes\\)`),
+        "export --out text confirmation must print exact lineCount and bytesWritten"
+      );
 
       // Impossibly small --max-chars must fail nonzero and leave existing artifact untouched
       const sentinelExportPath = path.join(ergOutDir, "preserve-export.json");
@@ -3618,6 +3646,50 @@ try {
       );
       const ungrantedSelfOnlyMulti = runCli(["transcript", "health", "--id", `${cohortWorkerA},${cohortWorkerB}`, "--json"], noEnvHealth);
       assert.equal(ungrantedSelfOnlyMulti.status, 1, "ACS-SEC-01: self-only Tier 4 child must block ungranted multi: health without GEMINI_CONVERSATION_ID");
+
+      // Real piped EPIPE early-close regression: > 100 KB stdout into early-closing consumer must exit 0 with empty stderr
+      const epipeConv = "conv-epipe-stress-16";
+      const epipeLogsDir = path.join(brainDir, epipeConv, ".system_generated", "logs");
+      fs.mkdirSync(epipeLogsDir, { recursive: true });
+      const epipeLines = [
+        JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "Run big audit", created_at: "2026-11-22T02:00:00Z" })
+      ];
+      for (let i = 1; i <= 180; i++) {
+        epipeLines.push(JSON.stringify({
+          step_index: i,
+          source: "MODEL",
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          content: `Step ${i} large payload: ${"A".repeat(900)}`,
+          created_at: `2026-11-22T02:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}Z`
+        }));
+      }
+      fs.writeFileSync(path.join(epipeLogsDir, "transcript.jsonl"), epipeLines.join("\n") + "\n", "utf8");
+      const epipeResult = await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [cliScript, "transcript", "query", "--id", epipeConv, "--roles", "all", "--full"], {
+          env: { ...testEnv, GEMINI_CONVERSATION_ID: epipeConv },
+          stdio: ["ignore", "pipe", "pipe"]
+        });
+        let gotOut = "";
+        let gotErr = "";
+        let destroyed = false;
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk) => {
+          gotOut += chunk;
+          if (!destroyed && gotOut.split("\n").length >= 6) {
+            destroyed = true;
+            child.stdout.destroy();
+          }
+        });
+        child.stderr.on("data", (chunk) => { gotErr += chunk; });
+        child.on("error", reject);
+        child.on("close", (code, signal) => resolve({ code, signal, gotOut, gotErr, destroyed }));
+      });
+      assert.equal(epipeResult.destroyed, true, "EPIPE test must close stdout early after receiving >= 5 lines");
+      assert.equal(epipeResult.code, 0, `Piped EPIPE early-close must exit 0 (got code=${epipeResult.code}, signal=${epipeResult.signal}, stderr=${epipeResult.gotErr})`);
+      assert.equal(epipeResult.gotErr, "", `Piped EPIPE early-close must emit zero stderr stack trace (got: ${epipeResult.gotErr})`);
+      fs.rmSync(path.join(brainDir, epipeConv), { recursive: true, force: true });
     } finally {
       try { fs.unlinkSync(t4HealthChildFile); } catch {}
       for (const f of listGrantFiles()) { try { fs.unlinkSync(path.join(grantsDir, f)); } catch {} }
