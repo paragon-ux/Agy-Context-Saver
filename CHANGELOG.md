@@ -5,6 +5,23 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-11-25
+
+### Removed
+- **Breaking: the transcript CLI is gone.** `agy-context transcript read`, `query`, `step`, `export`, `list`, and `access` no longer exist, along with their aliases (`grep`, `search`, `find`, `tools`, `outline`, `summary`, `ls`, `dump`, `policy`). Scripts and prompts that call them will fail. Read `transcript.jsonl` with `read_file` and `grep_search` instead.
+- **Breaking: transcript access policies are gone.** Parents can no longer allow, deny, or limit what child subagents and `/swarm` workers read. Per-session grants, the `[agy-transcript-access: ...]` first-line directives, the `self-only` and `deny` modes, and the parent allowlist no longer do anything. `agy-context status` no longer prints an access policy line.
+- The hook rule that blocked `read_file`, `grep_search`, and `run_command` on `.system_generated/` transcripts is removed.
+- The `transcript-core` and `access-policy` libraries, the Transcript CLI guide, and its two diagrams are removed from the package and the docs site.
+
+### Changed
+- Native reads of `transcript.jsonl` work again. Writes and deletes under `.system_generated/logs` stay protected.
+- Docs, rules, skills, and diagrams now describe only the features that remain.
+
+### Kept
+- `agy-context transcript health` (aliases `stats`, `info`) still reports turns, steps, raw size, and polling events per session. It is read-only, takes `--id`, `--parent`, and `--json`, and has no access policy.
+- `status`, `setup`, `uninstall`, and `restore-backups` work as before.
+- RTK pre-gate rewrites, bounded `read_file` limits, and background-task polling backoff are unchanged.
+
 ## [2.2.1] - 2026-11-23
 
 ### Added

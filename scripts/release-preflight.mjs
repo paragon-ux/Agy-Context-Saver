@@ -141,9 +141,8 @@ export function runReleasePreflight() {
     }
 
     const requiredPackageFiles = [
-      'lib/transcript-core.mjs',
+      'lib/transcript-health.mjs',
       'lib/path-guards.mjs',
-      'lib/access-policy.mjs',
       'lib/backoff.mjs',
       'bin/agy-context.mjs',
       'scripts/install-register.mjs',

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CircularRingBuffer, queryTranscript, readTranscript } from "../lib/transcript-core.mjs";
+import { checkTranscriptHealth } from "../lib/transcript-health.mjs";
 import { setupHermeticTestEnv } from "./helpers/hermetic-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -97,10 +97,10 @@ console.log("\n--- Probe 2: Hook Fast-Path Bypass & RTK Delegation Latency ---")
   console.log(`✓ 10x live hook-to-rtk delegations completed in ${rtkElapsed.toFixed(1)}ms`);
 }
 
-// --- Probe 3: Batch Full-Transcript Dereferencing & Bounded Streaming Memory (ACS-ARCH-01) ---
-console.log("\n--- Probe 3: Batch Dereferencing & Streaming Ring Bounds ---");
+// --- Probe 3: Streaming Transcript Health ---
+console.log("\n--- Probe 3: Streaming Transcript Health ---");
 {
-  const syntheticConvId = `conv-perf-batch-${Date.now()}`;
+  const syntheticConvId = `00000000-0000-4000-8000-${String(Date.now()).padStart(12, "0").slice(-12)}`;
   const logsDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", syntheticConvId, ".system_generated", "logs");
   fs.mkdirSync(logsDir, { recursive: true });
   const compactFile = path.join(logsDir, "transcript.jsonl");
@@ -130,42 +130,16 @@ console.log("\n--- Probe 3: Batch Dereferencing & Streaming Ring Bounds ---");
     new Promise((r) => wsFull.end(r))
   ]);
 
-  const tRead = performance.now();
-  const readRes = await readTranscript({ conversationId: syntheticConvId, lastTurns: 0, mode: "compact" });
-  const readElapsed = performance.now() - tRead;
-  assert.equal(readRes.totalSteps, TOTAL);
-  assert.ok(readRes.selectedSteps <= 200, "lastTurns=0 must cap buffered steps at <= 200 via CircularRingBuffer");
-
-  const tQuery = performance.now();
-  const qRes = await queryTranscript({
-    conversationId: syntheticConvId,
-    query: "NEEDLE_PERF",
-    mode: "auto",
-    maxResults: 10
-  });
-  const qElapsed = performance.now() - tQuery;
-  assert.ok(qRes.text.includes("Tail payload step 1200 NEEDLE_PERF"));
-
-  // Summary mode skips full hydration unless needed
-  const sumRes = await queryTranscript({
-    conversationId: syntheticConvId,
-    query: "Truncated",
-    mode: "auto",
-    summaryOnly: true,
-    maxResults: 5
-  });
-  assert.ok(sumRes.displayedCount > 0);
-  console.log(`✓ Streamed ${TOTAL} steps in ${readElapsed.toFixed(1)}ms; auto-dereferenced batch query in ${qElapsed.toFixed(1)}ms`);
-}
-
-// Ring buffer O(1) micro-check
-{
-  const ring = new CircularRingBuffer(64);
-  for (let i = 0; i < 10000; i++) ring.push(i);
-  const arr = ring.toArray();
-  assert.equal(arr.length, 64);
-  assert.equal(arr[0], 10000 - 64);
-  assert.equal(arr[63], 9999);
+  const prevBrain = process.env.AGY_TEST_PROFILE_DIR;
+  process.env.AGY_TEST_PROFILE_DIR = hermetic.profileDir;
+  const tHealth = performance.now();
+  const health = await checkTranscriptHealth({ ids: [syntheticConvId] });
+  const healthElapsed = performance.now() - tHealth;
+  if (prevBrain === undefined) delete process.env.AGY_TEST_PROFILE_DIR; else process.env.AGY_TEST_PROFILE_DIR = prevBrain;
+  assert.ok(!health.error, health.error);
+  assert.equal(health.sessions[0].steps, TOTAL);
+  assert.equal(health.sessions[0].turns, TOTAL / 2);
+  console.log(`✓ Streamed ${TOTAL} steps through transcript health in ${healthElapsed.toFixed(1)}ms`);
 }
 
 hermetic.cleanup();

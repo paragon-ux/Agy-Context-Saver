@@ -51,18 +51,10 @@ assert.equal(statusJson.details.mcp.clean, true, "MCP cleanup must report clean=
 
 const healthOut = runCli(["transcript", "health", "--id", HERMETIC_CONV_ID]);
 assert.match(healthOut, /HEALTHY/);
-assert.match(healthOut, /Total Steps: 6/);
-
-const readOut = runCli(["transcript", "read", "--id", HERMETIC_CONV_ID, "--last-turns", "2"]);
-assert.match(readOut, /Step 5 Content/);
-assert.match(readOut, /Step 6 Content/);
-
-const queryOut = runCli(["transcript", "query", "--id", HERMETIC_CONV_ID, "--query", "streaming JSONL", "--summary"]);
-assert.match(queryOut, /Step 3/);
-
-const stepOut = runCli(["transcript", "step", "--id", HERMETIC_CONV_ID, "--step", "2", "--field", "tool_args:CommandLine"]);
-assert.match(stepOut, /rtk git status/);
-console.log("✓ End-to-end CLI status, transcript health, read, query, and step commands verified");
+assert.match(healthOut, /steps: 6/);
+const healthJson = JSON.parse(runCli(["transcript", "stats", "--id", HERMETIC_CONV_ID, "--json"]));
+assert.equal(healthJson.sessions[0].steps, 6);
+console.log("✓ End-to-end CLI status and transcript health verified");
 
 // --- Section 3: RTK Read & Git CLI Parity Probe ---
 console.log("\n--- Section 3: RTK Read & Git CLI Parity Probe ---");

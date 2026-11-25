@@ -7,7 +7,6 @@
  * 1. Safe-Harbor bounded read_file (<=150 lines) and `rtk read` on `.system_generated/steps/<step>/output.txt`
  * 2. Unbounded read_file / view_file on spillover denies and routes to bounded read_file or rtk read
  * 3. Lifecycle-gated `rtk read` / native inspection on task logs (RUNNING backoff vs COMPLETED)
- * 4. CLI `agy-context transcript step|read|query` CRLF stripping and field extraction
  */
 
 import assert from "node:assert/strict";
@@ -647,7 +646,7 @@ try {
         conversationId: convLive,
         toolCall: { name: "run_command", args: { CommandLine: `head -n 150 "${path.join(convDir, "logs", "transcript.jsonl")}"`, WaitMsBeforeAsync: 5000 } }
       });
-      assert.equal(degradedTranscript.decision, "deny", "Degraded mode must still block raw transcript access");
+      assert.equal(degradedTranscript.decision, "allow", "Native bounded transcript reads are allowed again");
     } finally {
       fs.rmSync(degradedProfile, { recursive: true, force: true });
     }
@@ -753,38 +752,6 @@ try {
   if (oldBrain) process.env.AGY_BRAIN_DIR = oldBrain;
   else delete process.env.AGY_BRAIN_DIR;
   try { fs.rmSync(tempBrainDir, { recursive: true, force: true }); } catch {}
-}
-
-// --- Group 3: CLI Forensic Extraction & Git CRLF Warning Stripping ---
-console.log("\n--- Group 3: CLI Step Extraction & CRLF Warning Stripping ---");
-{
-  const stepText = invokeCli(["transcript", "step", "--id", HERMETIC_CONV_ID, "--step", "1", "--field", "content"]);
-  assert.match(stepText, /Step 1 Content/);
-
-  const crlfDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-crlf-cli-"));
-  try {
-    const convId = "crlf-cli-conv";
-    const logsDir = path.join(crlfDir, convId, ".system_generated", "logs");
-    fs.mkdirSync(logsDir, { recursive: true });
-    const tFile = path.join(logsDir, "transcript.jsonl");
-    fs.writeFileSync(
-      tFile,
-      JSON.stringify({
-        step_index: 1,
-        type: "PLANNER_RESPONSE",
-        created_at: new Date().toISOString(),
-        content: "Building...\nwarning: in the working copy of 'sample.ts', LF will be replaced by CRLF the next time Git touches it\nok 1 - build passed\n"
-      }) + "\n",
-      "utf-8"
-    );
-
-    const out = invokeCli(["transcript", "read", "--file", tFile, "--last-turns", "1"]);
-    assert.equal(out.includes("will be replaced by"), false);
-    assert.match(out, /ok 1 - build passed/);
-  } finally {
-    fs.rmSync(crlfDir, { recursive: true, force: true });
-  }
-  console.log("✓ CLI surgical step extraction and CRLF warning stripping verified");
 }
 
 hermetic.cleanup();

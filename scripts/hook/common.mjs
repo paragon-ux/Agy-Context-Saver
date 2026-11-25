@@ -11,24 +11,15 @@ import { fileURLToPath } from "node:url";
 import { getStateDir } from "../state-dir.mjs";
 import {
   getProfileHomeDir,
-  getBrainDir,
   getBrainDirs,
   resolveRealOrAncestorPath,
-  isContainedInDir,
   isContainedInAnyBrainDir,
-  extractConvId,
   isProtectedBenchmarkPath,
   isProtectedBrainSubpath as isProtectedBrainSubpathShared,
   isProtectedGeminiConfigFile
 } from "../../lib/path-guards.mjs";
-import {
-  STATE_TTL_MS,
-  inspectTranscriptLineageFromFile,
-  evaluateCallerTranscriptAccessFromLineage,
-  isTopLevelUnrestrictedSession
-} from "../../lib/access-policy.mjs";
 
-export { STATE_TTL_MS };
+export const STATE_TTL_MS = 3600000;
 
 export const MAX_SAFE_SLICE_LINES = 800;
 export const MAX_SMALL_AUTO_ALLOW_LINES = 800;
@@ -39,18 +30,15 @@ export const MAX_FULL_FILE_BYTES = 45 * 1024;
 export const MAX_LINE_COUNT_SCAN_BYTES = 1024 * 1024;
 export const TASK_TAIL_BYTES = 262144;
 export const TASK_QUIET_MS = 300000;
+export const HOOK_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const MAX_STATE_ENTRIES = 50;
 export const MAX_TASK_BACKOFF_ENTRIES = 64;
-export const HOOK_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const SESSION_LOCK_STALE_MS = 3000;
 const SESSION_LOCK_WAIT_MS = 800;
 const SLEEP_WAIT_ARR = new Int32Array(new SharedArrayBuffer(4));
 
 const heldLocks = new Map();
-const lineageMemo = new Map();
-const accessMemo = new Map();
-const repoNameMemo = new Map();
 
 function releaseAllLocks() {
   for (const lockPath of heldLocks.keys()) {
@@ -235,72 +223,23 @@ export function expandAndResolvePathVariants(rawPath, cwd = "") {
   return [...out];
 }
 
-const EMPTY_LINEAGE = Object.freeze({
-  transcriptFound: false, lineageFinalized: false, isTopLevelUserSession: false,
-  isChildSession: false, isSwarmChild: false, parentConvId: null, rosterName: null,
-  sessionKind: "unknown", launchDirective: null, birthTimeMs: 0
-});
-
-export function getCallerLineage(convId, ctx = {}) {
-  const key = String(convId || "global");
-  if (lineageMemo.has(key)) return lineageMemo.get(key);
-  if (!convId || convId === "global") { lineageMemo.set(key, EMPTY_LINEAGE); return EMPTY_LINEAGE; }
-
-  let targetFile = null;
-  for (const bDir of getBrainDirs({ activeTranscriptPath: ctx?.transcriptPath || "" })) {
-    for (const fname of ["transcript.jsonl", "transcript_full.jsonl"]) {
-      const p = path.join(bDir, convId, ".system_generated", "logs", fname);
-      if (fs.existsSync(p)) { targetFile = p; break; }
-    }
-    if (targetFile) break;
-  }
-
-  const session = getSessionState(convId);
-  let targetStat = null;
-  if (targetFile) { try { targetStat = fs.statSync(targetFile); } catch {} }
-  if (session.lineage?.transcriptFound && session.lineage.lineageVersion === 2) {
-    const l = session.lineage;
-    if (l.isSwarmChild || l.isTopLevelUserSession || l.lineageFinalized ||
-      (targetStat && targetStat.size === l.fileSize && targetStat.mtimeMs === l.fileMtimeMs)) {
-      lineageMemo.set(key, l);
-      return l;
-    }
-  }
-  if (!targetFile) { lineageMemo.set(key, EMPTY_LINEAGE); return EMPTY_LINEAGE; }
-
-  const lineage = {
-    lineageVersion: 2,
-    fileSize: targetStat ? targetStat.size : 0,
-    fileMtimeMs: targetStat ? targetStat.mtimeMs : 0,
-    ...inspectTranscriptLineageFromFile(targetFile)
-  };
-  if (lineage.transcriptFound) updateSessionState(convId, (s) => { s.lineage = lineage; }, { updatePollTime: false });
-  lineageMemo.set(key, lineage);
-  return lineage;
-}
-
-export function evaluateCallerTranscriptAccess(convId, ctx = {}) {
-  const key = String(convId || "global");
-  if (accessMemo.has(key)) return accessMemo.get(key);
-  const res = evaluateCallerTranscriptAccessFromLineage(convId, getCallerLineage(convId, ctx), {
-    getLineage: (id) => getCallerLineage(id, ctx),
-    brainDirs: getBrainDirs({ activeTranscriptPath: ctx?.transcriptPath || "" })
-  });
-  accessMemo.set(key, res);
-  return res;
-}
-
 // --- Direct Internal State, Governance (1B.1), Benchmark & Cross-Conversation Guards ---
 
-const INLINE_EXEC_VERB_RE = /\b(?:import|require|spawn|spawnSync|exec|execSync|execFile|execFileSync|popen|system|subprocess)\b/i;
-const INLINE_TRANSCRIPT_TARGET_RE = /(?:\b(?:transcript-core|access-policy)(?:\.m?js)?\b|(?:bin[\/\\]+|\b)agy-context(?:-saver)?\.m?js\b)/i;
+// Native reads of conversation transcripts are allowed; writes and deletes stay protected via isProtectedInternalState.
+const TRANSCRIPT_LOG_PATH_RE = /[^\s'"`;|&()<>]*\.system_generated[\/\\]+logs[\/\\]+transcript(?:_full)?\.jsonl/gi;
+const TRANSCRIPT_READ_ONLY_CMDS = new Set(["cat", "head", "tail", "rg", "grep", "egrep", "fgrep", "wc", "jq", "less", "more", "ls", "stat", "cut", "sort", "uniq", "tr", "nl", "tac", "file", "du"]);
 
-// Strict O(N) linear detector: finds first exec/import verb once, then checks trailing slice for transcript internals
-export function hasInlineTranscriptCoreInvocation(text) {
-  if (!text || typeof text !== "string") return false;
-  const verbMatch = INLINE_EXEC_VERB_RE.exec(text);
-  if (!verbMatch) return false;
-  return INLINE_TRANSCRIPT_TARGET_RE.test(text.slice(verbMatch.index + verbMatch[0].length));
+export function isTranscriptLogPath(targetPath) {
+  if (!targetPath || typeof targetPath !== "string") return false;
+  return /(?:^|[\/\\])\.system_generated[\/\\]+logs[\/\\]+transcript(?:_full)?\.jsonl$/i.test(targetPath.replace(/[\\/]+$/, ""));
+}
+
+export function stripTranscriptLogRefs(text) {
+  return typeof text === "string" ? text.replace(TRANSCRIPT_LOG_PATH_RE, "TRANSCRIPT_LOG") : text;
+}
+
+export function isReadOnlyTranscriptVerb(verb) {
+  return TRANSCRIPT_READ_ONLY_CMDS.has(verb);
 }
 
 export function isProtectedInternalState(targetPath) {
@@ -314,7 +253,7 @@ export function isProtectedInternalState(targetPath) {
     /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]?)?$/i.test(targetPath) ||
     isProtectedBrainSubpathShared(targetPath) ||
     /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]+)?(?:\.(?!agents(?:$|[\/\\]))|[*?\[])/i.test(targetPath) ||
-    /\b(?:transcript-access|agy-session-governance-state|agy-rtk-rewrite-cache)\.json\b/i.test(targetPath) ||
+    /\b(?:agy-session-governance-state|agy-rtk-rewrite-cache)\.json\b/i.test(targetPath) ||
     /\bagy-session-[a-zA-Z0-9_-]+\.json\b/i.test(targetPath) ||
     /[\/\\](?:\.local[\/\\]+state|AppData[\/\\]+Local)[\/\\]+agy-context-saver(?:$|[\/\\'"`\s])/i.test(targetPath)
   ) return true;
@@ -331,39 +270,6 @@ export function isProtectedInternalStatePath(rawPath, cwd = "") {
   return expandAndResolvePathVariants(rawPath, cwd).some(isProtectedInternalState);
 }
 
-const AGY_PROTECTED_SOURCE_RE =
-  /(?:^|\/)(?:scripts\/hook\/[^/]+|execution-guard-hook\.mjs|install-register\.mjs|state-dir\.mjs|provision-rtk\.mjs|rtk-run\.mjs|hooks\.json|lib\/(?:transcript-core|access-policy|path-guards|backoff)\.mjs|bin\/agy-context\.mjs)$/i;
-
-export function isInsideAgyContextSaverRepo(resolvedPath) {
-  if (!resolvedPath || typeof resolvedPath !== "string") return false;
-  const installedPluginDir = path.join(getProfileHomeDir(), ".gemini", "config", "plugins", "agy-context-saver");
-  if (isContainedInDir(resolvedPath, installedPluginDir) || isContainedInDir(resolvedPath, HOOK_REPO_ROOT)) return true;
-  const canonical = resolveRealOrAncestorPath(resolvedPath);
-  let dir = canonical;
-  try { if (!fs.existsSync(canonical) || fs.statSync(canonical).isFile()) dir = path.dirname(canonical); } catch { dir = path.dirname(canonical); }
-  const visited = [];
-  for (let depth = 0; dir && depth < 10; depth++) {
-    if (repoNameMemo.has(dir)) {
-      const hit = repoNameMemo.get(dir);
-      for (const d of visited) repoNameMemo.set(d, hit);
-      return hit === "agy-context-saver";
-    }
-    visited.push(dir);
-    const pkgPath = path.join(dir, "package.json");
-    if (fs.existsSync(pkgPath)) {
-      let pkgName = "";
-      try { pkgName = String(JSON.parse(fs.readFileSync(pkgPath, "utf-8"))?.name || ""); } catch {}
-      for (const d of visited) repoNameMemo.set(d, pkgName);
-      return pkgName === "agy-context-saver";
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  for (const d of visited) repoNameMemo.set(d, "");
-  return false;
-}
-
 export function isProtectedGovernanceFileMutationPath(rawPath, convId = "global", ctx = {}) {
   if (!rawPath || typeof rawPath !== "string") return false;
   const cwd = ctx?.cwd || "";
@@ -376,12 +282,6 @@ export function isProtectedGovernanceFileMutationPath(rawPath, convId = "global"
       /\/\.gemini\/antigravity(?:-cli|-ide)?\/bin\/agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?$/i.test(norm)
     ) return true;
   }
-  if (evaluateCallerTranscriptAccess(convId, ctx).isRestrictedChild) {
-    const resolved = resolveHookPath(expandLeadingTilde(cleanFileToken(rawPath)), cwd);
-    for (const cand of [resolved, resolveRealOrAncestorPath(resolved, { cwd })]) {
-      if (AGY_PROTECTED_SOURCE_RE.test(cand.replace(/\\/g, "/")) && isInsideAgyContextSaverRepo(cand)) return true;
-    }
-  }
   return false;
 }
 
@@ -391,9 +291,6 @@ const USER_EDITABLE_GEMINI_CONFIG_RE =
 // Top-level unrestricted sessions may edit non-symlink mcp_config.json / config.json via force_ask; hooks.json and all child sessions stay hard-deny
 export function isUserEditableGeminiConfigPath(rawPath, convId = "global", ctx = {}) {
   if (!rawPath || typeof rawPath !== "string") return false;
-  const lineage = getCallerLineage(convId, ctx);
-  const access = evaluateCallerTranscriptAccess(convId, ctx);
-  if (!isTopLevelUnrestrictedSession(convId, lineage, access)) return false;
   const cwd = ctx?.cwd || "";
   const resolved = resolveHookPath(expandLeadingTilde(cleanFileToken(rawPath)), cwd);
   if (!resolved) return false;
@@ -421,26 +318,7 @@ export function isProtectedBenchmarkFilePath(rawPath, cwd = "") {
 
 export function isBenchmarkGuardDisabled(convId = "global", ctx = {}) {
   const raw = String(process.env.AGY_DISABLE_BENCHMARK_GUARD || "").trim().toLowerCase();
-  return (raw === "1" || raw === "true") && !evaluateCallerTranscriptAccess(convId, ctx).isRestrictedChild;
-}
-
-export function extractBrainOwnerConvId(rawPath, ctx = {}) {
-  if (!rawPath || typeof rawPath !== "string") return null;
-  const cwd = ctx?.cwd || "";
-  for (const v of expandAndResolvePathVariants(rawPath, cwd)) {
-    const m = v.replace(/\\/g, "/").match(/(?:^|\/)\.gemini\/antigravity(?:-cli|-ide)?\/brain\/([^/]+)(?:\/|$)/i);
-    if (m?.[1]) return m[1];
-  }
-  const resolved = resolveHookPath(expandLeadingTilde(cleanFileToken(rawPath)), cwd);
-  return resolved ? extractConvId(resolved, { strictBrainContainment: true }) : null;
-}
-
-export function isCrossConversationTargetDenied(rawPath, convId = "global", ctx = {}, callerAccess = null) {
-  if (!rawPath || typeof rawPath !== "string") return false;
-  const access = callerAccess || evaluateCallerTranscriptAccess(convId, ctx);
-  if (!access.isRestrictedChild && access.allowed && access.mode !== "self-only") return false;
-  const ownerConvId = extractBrainOwnerConvId(rawPath, ctx);
-  return Boolean(ownerConvId && (!convId || convId === "global" || ownerConvId !== convId));
+  return (raw === "1" || raw === "true");
 }
 
 // --- Spillover & Task Log Resolution / State Inspection ---
@@ -670,29 +548,13 @@ export function getTaskState(match, convId, ctx = {}) {
   return "UNKNOWN";
 }
 
-function buildInternalStateDenial(kindLabel, convId = "global", ctx = {}) {
-  const accessEval = evaluateCallerTranscriptAccess(convId, ctx);
-  const taskLine = "- To inspect background tasks: Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE>). Do not read internal task logs.";
-  if (!accessEval.allowed) {
-    return (
-      `Antigravity Execution Governance: Direct ${kindLabel} to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n` +
-      "- Transcript inspection ('agy-context transcript' and '.system_generated/logs/') is DISABLED for this session by parent governance (Parent Transcript Isolation). Do NOT retry transcript commands or alternative file/shell reads; proceed using only your assigned workspace files and task brief.\n" +
-      taskLine
-    );
-  }
-  if (accessEval.mode === "self-only") {
-    return (
-      `Antigravity Execution Governance: Direct ${kindLabel} to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited.\n` +
-      `- Cross-session transcript inspection is DISABLED for this session (mode: self-only). You may only inspect your own transcript via 'agy-context transcript' (read-only '|' ok; no '&&'/';'): 'outline'/'query'/'read'/'step --id ${convId} --full' ('--out <path>' if >9 KB raw) via run_command.\n` +
-      taskLine
-    );
-  }
+function buildInternalStateDenial(kindLabel) {
   return (
-    `Antigravity Execution Governance: Direct ${kindLabel} to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n` +
-    "- To inspect conversation transcripts: Run 'agy-context transcript' (read-only '|' ok; no '&&'/';') via run_command: 'list'/'health --parent|--id u1,u2 --json' -> parallel 'outline'/'query'/'read'/'step --id <uuid> --full' ('--out <path>' if >9 KB raw).\n" +
-    taskLine
+    `Antigravity Execution Governance: Direct ${kindLabel} to internal Antigravity execution state (.system_generated and governance state) is strictly prohibited to prevent polling loops and context blowouts.\n` +
+    "- Conversation transcripts (.system_generated/logs/transcript.jsonl) can be read directly with bounded read_file slices, grep_search, or read-only shell commands.\n" +
+    "- To inspect background tasks: Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE>). Do not read internal task logs."
   );
 }
 
-export const buildInternalStateShellDenial = (convId = "global", ctx = {}) => buildInternalStateDenial("shell access", convId, ctx);
-export const buildInternalStateToolDenial = (convId = "global", ctx = {}) => buildInternalStateDenial("access", convId, ctx);
+export const buildInternalStateShellDenial = (convId = "global", ctx = {}) => buildInternalStateDenial("shell access");
+export const buildInternalStateToolDenial = (convId = "global", ctx = {}) => buildInternalStateDenial("access");

@@ -1,12 +1,11 @@
 {
   "name": "agy-context-saver",
   "displayName": "Agy-Context-Saver",
-  "version": "2.2.1",
-  "description": "Save tokens and prevent context bloat in Google Antigravity with RTK shell compression, bounded file reads, background polling protection, and fast CLI transcript search.",
+  "version": "2.3.0",
+  "description": "Save tokens and prevent context bloat in Google Antigravity with RTK shell compression, bounded file reads, and background polling protection.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
-    "Run agy-context transcript health to audit context health and token consumption for this session",
-    "Search this conversation's transcript for earlier tool errors using agy-context transcript query",
-    "Inspect recent conversation turns cleanly without raw JSON bloat using agy-context transcript read"
+    "Run agy-context transcript health to audit context health and polling for this session",
+    "Run agy-context status to check that the Agy-Context-Saver hooks and RTK are active"
   ]
 }

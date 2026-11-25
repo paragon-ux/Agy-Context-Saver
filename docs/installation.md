@@ -109,7 +109,7 @@ You can also run the platform installer scripts directly:
 
 ## Health Auditing & Verification
 
-Audit all v2.2.x integration layers from your shell:
+Audit all v2.3.x integration layers from your shell:
 
 ```bash
 agy-context status
@@ -127,12 +127,10 @@ Checking Agy-Context-Saver installation status...
 - RTK Command Optimizer (>= 1.1.0): INSTALLED (rtk 1.1.0)
 - MCP Cleanup: CLEAN (0 duplicate MCP configs/schemas)
 - Plugin Enabled (config.json): ENABLED
-- Transcript Access Policy: OPEN (default)
 
 Overall Status: HEALTHY & ACTIVE
 ```
 
-When a parent session restricts child transcript inspection via `agy-context transcript access` (for example, `--off`, `--self-only`, or `--mode allowlist`), the `Transcript Access Policy` line reports the active policy mode and owner conversation ID (`DENY (owner: <convId>)` or `SELF-ONLY (owner: <convId>)`).
 
 ---
 
@@ -168,4 +166,4 @@ node scripts/install-register.mjs --uninstall --restore-backups
 
 To prevent restricted subagents or `/swarm` workers from disabling governance mid-run, `PreToolUse` blocks restricted child sessions from:
 - Running plugin lifecycle commands (`setup`, `install`, `uninstall`, `restore-backups`, `--setup`, `--install`, `--uninstall`, `--restore-backups`) via `agy-context` or `scripts/install-register.mjs`.
-- Mutating installed or repository governance files (`~/.gemini/config/plugins/agy-context-saver/`, `~/.gemini/config/hooks.json`, and `<stateDir>/transcript-access.json`) via file tools or shell writes.
+- Mutating installed or repository governance files (`~/.gemini/config/plugins/agy-context-saver/`, and `~/.gemini/config/hooks.json`) via file tools or shell writes.

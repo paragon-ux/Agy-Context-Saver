@@ -105,11 +105,11 @@ const shimStatus = spawnSync(process.platform === "win32" ? "cmd.exe" : installe
 assert.equal(shimStatus.status, 0, `CLI shim failed: ${shimStatus.stderr}`);
 assert.equal(JSON.parse(shimStatus.stdout).isComplete, true);
 
-const shimQuery = spawnSync(process.execPath, [cliScript, "transcript", "query", "--id", HERMETIC_CONV_ID, "--query", "streaming", "--summary"], {
+const shimQuery = spawnSync(process.execPath, [cliScript, "transcript", "health", "--id", HERMETIC_CONV_ID], {
   encoding: "utf-8"
 });
 assert.equal(shimQuery.status, 0);
-assert.match(shimQuery.stdout, /Step 3/);
+assert.match(shimQuery.stdout, /steps: 6/);
 
 // Run the registered global hook command from pluginDest (preserving Windows quoting via /d /s /c + windowsVerbatimArguments)
 const hookPayload = JSON.stringify({

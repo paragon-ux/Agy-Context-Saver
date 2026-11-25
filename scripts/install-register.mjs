@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver Registration & Installation Engine (v2.2.1)
+ * Agy-Context-Saver Registration & Installation Engine (v2.3.0)
  * Zero-delay cross-platform installer with CLI-first shim provisioning,
  * unified hook registration, and legacy MCP retirement/sweep.
  *
@@ -26,7 +26,6 @@ import {
   verifyLocalRtkBinary
 } from "./provision-rtk.mjs";
 import { getStateDir, removeLegacyTmpState } from "./state-dir.mjs";
-import { formatTranscriptAccessStatus } from "../lib/access-policy.mjs";
 
 export { isManagedShimFile, isManagedShimFile as isManagedAgyShimFile };
 export const MIN_NODE_MAJOR = 22;
@@ -54,9 +53,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const PACKAGE_VERSION = (() => {
   try {
-    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.2.1";
+    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.3.0";
   } catch {
-    return "2.2.1";
+    return "2.3.0";
   }
 })();
 
@@ -475,8 +474,7 @@ export function detectExistingInstallation(options = {}) {
       cliShim,
       mcp,
       config: { corrupt: configCorrupt, error: configError, enabled: configEnabled },
-      rtk: rtkInfo,
-      transcriptAccess: formatTranscriptAccessStatus()
+      rtk: rtkInfo
     }
   };
 }
@@ -1137,12 +1135,6 @@ export function runStatus(options = {}) {
     hook.legacyHookPresent ? "legacy 'execution-guard' in global hooks.json" : "",
     hook.legacyMirrorPresent ? `legacy standalone mirror at ${destHook}` : ""
   ].filter(Boolean);
-  const ta = existing.details.transcriptAccess || formatTranscriptAccessStatus();
-  const lr = ta.launchRestrictions;
-  const lrNote = lr?.restrictedCount > 0
-    ? ` | Recent launch-restricted children: ${lr.restrictedCount} (${lr.denyCount} deny, ${lr.selfOnlyCount} self-only; launch directives remain in effect)`
-    : "";
-
   log("Checking Agy-Context-Saver installation status...\n");
   log(`- Native Plugin Link: ${pluginNote}`);
   log(`- Execution Governor Hook (${HOOK_KEY}): ${hookStatusLabel}${hookWarnings.length ? ` (${hookWarnings.join("; ")})` : ""}`);
@@ -1150,7 +1142,6 @@ export function runStatus(options = {}) {
   log(`- RTK Command Optimizer (>= 1.1.0): ${rtk ? `INSTALLED (${rtk.version})` : "MISSING"}`);
   log(`- MCP Cleanup: ${mcp.corrupt ? `CORRUPT (${mcp.error})` : mcp.clean ? "CLEAN (0 duplicate MCP configs/schemas)" : `${mcp.duplicateCount} legacy MCP config/schema entries present`}`);
   log(`- Plugin Enabled (config.json): ${config.corrupt ? `CORRUPT (${config.error})` : config.enabled ? "ENABLED" : "DISABLED"}`);
-  log(`- Transcript Access Policy: ${ta.active ? `${ta.mode.toUpperCase()} (owner: ${ta.ownerId})` : (lr?.restrictedCount > 0 ? "OPEN (parent CLI policy)" : "OPEN (default)")}${lrNote}`);
 
   const hasCorruption = hook.corrupt || mcp.corrupt || config.corrupt;
   const overallLabel = existing.isComplete
@@ -1168,7 +1159,7 @@ export function runStatus(options = {}) {
   if (onlyMissingRtk) {
     log(
       "Next step (degraded mode: RTK >= 1.1.0 is the only missing component):\n" +
-      "  - Hook governance and the agy-context transcript CLI are active.\n" +
+      "  - Hook governance and the agy-context CLI are active.\n" +
       "  - To enable RTK command compression, install RTK >= 1.1.0 manually on PATH:\n" +
       "      brew install rtk | cargo install --locked rtk | https://github.com/rtk-ai/rtk/releases/tag/v1.1.0\n" +
       "    then re-run 'agy-context setup', or run 'agy-context setup --allow-degraded' to stay in hook-only degraded mode.\n"

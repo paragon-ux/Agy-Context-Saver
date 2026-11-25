@@ -80,10 +80,10 @@
     <!-- Check 1 -->
     <rect x="32" y="200" width="192" height="134" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
     <text class="node-title" x="128" y="228">State &amp; Log Guard</text>
-    <text class="node-sub" x="128" y="254">Blocks direct reads of</text>
-    <text class="node-sub" x="128" y="272">internal transcripts,</text>
+    <text class="node-sub" x="128" y="254">Blocks writes to</text>
+    <text class="node-sub" x="128" y="272">internal logs,</text>
     <text class="node-sub" x="128" y="290">running task logs, and</text>
-    <text class="node-sub" x="128" y="308">policy state files</text>
+    <text class="node-sub" x="128" y="308">hook state files</text>
 
     <!-- Check 2 -->
     <rect x="240" y="200" width="192" height="134" rx="6" fill="var(--card)" stroke="var(--card-border)" stroke-width="1"/>
@@ -138,6 +138,6 @@
     <rect x="452" y="452" width="396" height="80" rx="6" fill="var(--allow-bg)" stroke="var(--allow-border)" stroke-width="1.25"/>
     <text class="node-title" x="650" y="476" style="fill:var(--green)">Allow (Direct or Rewritten)</text>
     <text class="node-sub" x="650" y="497">Passes safe file slices, skill docs, and valid checks</text>
-    <text class="node-sub" x="650" y="515">Applies RTK compression or short-lived CLI access</text>
+    <text class="node-sub" x="650" y="515">Applies RTK compression to noisy output</text>
   </g>
 </svg>

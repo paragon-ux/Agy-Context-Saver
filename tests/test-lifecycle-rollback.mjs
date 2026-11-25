@@ -158,7 +158,7 @@ try {
   assert.equal(copyRes.isComplete, true);
   assert.equal(fs.lstatSync(pluginDest).isSymbolicLink(), false, "forceCopyFallback must replace prior symlink with real directory copy (ACS-SCRIPT-003)");
   assert.ok(fs.existsSync(path.join(pluginDest, "bin", "agy-context.mjs")), "Copied plugin must contain CLI binary");
-  assert.ok(fs.existsSync(path.join(pluginDest, "lib", "transcript-core.mjs")), "Copied plugin must contain transcript engine");
+  assert.ok(fs.existsSync(path.join(pluginDest, "lib", "transcript-health.mjs")), "Copied plugin must contain transcript health module");
 
   // Re-running normal runInstall() when pluginDest is a stale real directory must refresh/re-link it cleanly (L46)
   fs.writeFileSync(path.join(pluginDest, "stale-copy-file.txt"), "stale");

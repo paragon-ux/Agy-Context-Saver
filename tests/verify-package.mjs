@@ -15,10 +15,9 @@ const REQUIRED = [
   "assets/architecture-overview.svg",
   "assets/logo.svg",
   "bin/agy-context.mjs",
-  "lib/access-policy.mjs",
   "lib/backoff.mjs",
   "lib/path-guards.mjs",
-  "lib/transcript-core.mjs",
+  "lib/transcript-health.mjs",
   "scripts/execution-guard-hook.mjs",
   "scripts/hook/common.mjs",
   "scripts/hook/file-guard.mjs",
@@ -42,13 +41,10 @@ const REQUIRED = [
   "docs/roadmap.md",
   "docs/RTK-SUPPORT-MATRIX.md",
   "docs/tools.md",
-  "docs/transcript-cli.md",
   "docs/assets/architecture-overview.svg",
   "docs/assets/default-vs-context-saver.svg",
   "docs/assets/hook-interception-flow.svg",
-  "docs/assets/roadmap-phases.svg",
-  "docs/assets/transcript-access-governance.svg",
-  "docs/assets/transcript-cli-vs-native.svg"
+  "docs/assets/roadmap-phases.svg"
 ];
 
 const RETIRED_DENYLIST = [
@@ -130,8 +126,8 @@ function selfTest() {
       `Expected synthetic package with ${bad} to be rejected`);
   }
   assert.throws(() => validate([{ files: REQUIRED
-    .filter((p) => p !== "lib/transcript-core.mjs").map((p) => ({ path: p })) }]),
-    /Missing required npm package file: lib\/transcript-core\.mjs/);
+    .filter((p) => p !== "lib/transcript-health.mjs").map((p) => ({ path: p })) }]),
+    /Missing required npm package file: lib\/transcript-health\.mjs/);
   console.log(`Package verifier self-test passed (positive + ${badCases.length + 1} negatives)`);
 }
 

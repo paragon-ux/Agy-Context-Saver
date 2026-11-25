@@ -1,11 +1,11 @@
 # Layer 1–3 Execution Guardrails (`PreToolUse` Hook Reference)
 
-Detailed reference for `Agy-Context-Saver` (`v2.2.1`) + `RTK` (`>= 1.1.0`) hooks. For the concise Turn-1 invariants, see `rules/AGENTS.md`.
+Detailed reference for `Agy-Context-Saver` (`v2.3.0`) + `RTK` (`>= 1.1.0`) hooks. For the concise Turn-1 invariants, see `rules/AGENTS.md`.
 
 ## Architectural Boundary
 
 - **RTK (`>= 1.1.0`)**: Compresses noisy test, build, lint, container, and `git status`/`push`/`pull`/`fetch` stdout via the Narrow High-ROI Pre-Gate (`AGY_RTK_MODE=pregate|off`, default `pregate`), reads step spillovers and completed task logs (`rtk read`), and remains available explicitly (`rtk <cmd>`, `rtk err`, `rtk summary`). Precision inspection tools (`find`, `grep`, `rg`, `ls`, `wc`, `diff`, workspace `cat`/`head`/`tail`, `ps`, `git diff`/`show`/`log`), pipelines, redirects, and `--json`/`--porcelain` commands stay untouched and lossless (`2>&1` and `2>/dev/null` pass through).
-- **Agy-Context-Saver (`v2.2.1`)**: Exposes the two-tier `agy-context transcript` CLI (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode) and enforces Layer 1–3 `PreToolUse` guardrails.
+- **Agy-Context-Saver (`v2.3.0`)**: Exposes the read-only `agy-context transcript health` check and enforces Layer 1–3 `PreToolUse` guardrails.
 
 ## Layer 1: Background Tasks, Remote CI & Proportional Backoff
 
@@ -22,11 +22,11 @@ Detailed reference for `Agy-Context-Saver` (`v2.2.1`) + `RTK` (`>= 1.1.0`) hooks
 ## Layer 2: Narrow High-ROI RTK Pre-Gate, File Bounds & Config Protection
 
 - **Narrow High-ROI RTK Pre-Gate (`AGY_RTK_MODE=pregate|off`, default `pregate`)**: Delegates noisy runners (`pytest`, `python -m pytest`/`mypy`, `uv run pytest`/`ruff`/`mypy`/`ty`, `cargo`, `go`, `vitest`, `jest`, `tsc`, `eslint`, `ruff`, `npm`/`pnpm` `lint` & `run lint`, `pnpm install`/`outdated`/`tsc`/`list`, `bun test`/`build`/`install`/`add`, `docker build`/`ps`/`logs`/`compose ps|logs|build`, `kubectl get`/`logs`/`describe`/`apply`, `git status`/`push`/`pull`/`fetch`) via `rtk hook antigravity` (explicit `rtk <cmd>` always works). Precision tools (`find`, `grep`, `rg`, `ls`, `wc`, `diff`, `ps`, `git diff`/`show`/`log`, workspace `cat`/`head`/`tail`), generic `npm`/`pnpm`/`bun` `run` scripts, pipes, stdout/file redirects, machine-readable flags (`--json`, `--porcelain`, `git status -sb`, `-o json`, etc.), any explicit `--reporter`/`--reporters` flag on `vitest`/`jest`, global-`PATH`-shadowed `npx`/`bunx`/`pnpm tsc` local binaries, and `vitest >= 5` projects on RTK `< 1.2.0` (`1.1.0`) stay untouched and lossless.
-- **Workspace discovery & `read_file` bounds**: Native `grep_search`, `find_by_name`, and `list_dir` work on workspace paths (blocked on `.system_generated/`, `getStateDir()`, and protected brain roots). On `read_file`:
+- **Workspace discovery & `read_file` bounds**: Native `grep_search`, `find_by_name`, and `list_dir` work on workspace paths (blocked on `getStateDir()` and protected brain roots). On `read_file`:
   - Files `<= 800` lines and `<= 45 KiB`, safe media (`.png`, `.jpg`, `.webp`, `.pdf`, audio/video), and special files (`SKILL.md`, `AGENTS.md`, own brain artifacts, own non-symlink `.system_generated/swarm/plan.json` for `read_file`/`write_file`/`edit_file`, `swarm_view/`, `.gemini/config/`) need no line bounds.
   - Larger files (`> 800` lines or `> 45 KiB`) require explicit `StartLine`/`EndLine` slices up to `800` lines (EOF-clamped up to `1 MiB`, single-bound supported; issue parallel `<= 800`-line slices in one turn when auditing a large file). `read_many_files` and `ByteOffset`-only reads are denied.
 - **Spillovers & completed task logs**: Both `.system_generated/steps/<step>/output.txt` and `COMPLETED` `tasks/<taskId>.log` accept bounded `read_file` (`<= 150` lines) or single unchained `rtk read <path>` (`cat`/`head -n 150`/`tail -n 150` auto-rewrite to `rtk read`; `--head-lines 150` / `--tail-lines 150` required above `45 KiB`).
-- **Brain subdirs & user config protection**: Direct access to `.system_generated/` (except own non-symlink `swarm/plan.json`) or `getStateDir()` is blocked across all brain roots. User-owned `scratch/`, `browser_sandbox/`, and `swarm_view/` brain subdirs allow nested `logs/`/`tasks/`/`steps/` paths (while `..`, `$`, dotfiles, `.system_generated/`, and `transcript*.jsonl` stay denied). Top-level unrestricted non-symlink edits to `~/.gemini/{config,antigravity*}/{mcp_config.json,config.json}` prompt via `force_ask`, while global `hooks.json`, `*.bak`, destructive shell verbs (`rm`, `mv`, `ln`, `truncate`, `shred`, `dd`, `chmod`, `chown`, `find`), ACS files, symlinks, and all child sessions stay hard-`deny`.
+- **Brain subdirs & user config protection**: Native reads of `transcript.jsonl` work again. Writes and deletes under `.system_generated/logs` and direct access to `getStateDir()` stay blocked. User-owned `scratch/`, `browser_sandbox/`, and `swarm_view/` brain subdirs allow nested `logs/`/`tasks/`/`steps/` paths (while `..`, `$`, dotfiles, and `.system_generated/` writes stay denied). Top-level unrestricted non-symlink edits to `~/.gemini/{config,antigravity*}/{mcp_config.json,config.json}` prompt via `force_ask`, while global `hooks.json`, `*.bak`, destructive shell verbs (`rm`, `mv`, `ln`, `truncate`, `shred`, `dd`, `chmod`, `chown`, `find`), ACS files, symlinks, and all child sessions stay hard-`deny`.
 
 ## Layer 3: Synchronous Window, Targeted Fail-Fast Tests & Benchmark Integrity
 

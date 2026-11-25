@@ -180,11 +180,10 @@ try {
     console.log("✓ Decision B1 (AGY_RTK_MODE=pregate|off, no `all` mode) verified");
   }
 
-  // 3. Real `rtk hook antigravity` never mutates `agy-context transcript` invocations (including list --parent/--lineage and export --sanitized)
+  // 3. Real `rtk hook antigravity` never mutates `agy-context transcript health` invocations
   for (const cmd of [
     "agy-context transcript health --id 1234",
-    "agy-context transcript list --parent 1234 --lineage --json",
-    "agy-context transcript export --parent 1234 --sanitized --out scratch/index.md"
+    "agy-context transcript health --parent 1234 --json"
   ]) {
     const agyCmd = runHook(
       { toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } },
@@ -193,7 +192,7 @@ try {
     assert.equal(agyCmd.decision, "allow", `Expected allow for '${cmd}'`);
     assert.equal(agyCmd.overwrite?.CommandLine, undefined, `'${cmd}' must pass through unrewritten by rtk`);
   }
-  console.log("✓ 'agy-context transcript' (health, list --parent/--lineage, export --sanitized) passes through rtk unrewritten");
+  console.log("✓ 'agy-context transcript health' passes through rtk unrewritten");
 
   // 4. PT-RUN-002: Bare `rg` and `grep` pass through untouched & lossless even when host `rg` is absent from PATH
   let rtkExeDir = path.join(tempDir, "shim-bin");

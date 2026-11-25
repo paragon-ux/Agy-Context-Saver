@@ -22,16 +22,14 @@ import {
   cleanFileToken,
   expandAndResolvePathVariants,
   isExecutableScriptPath,
-  evaluateCallerTranscriptAccess,
   isProtectedInternalState,
   isProtectedInternalStatePath,
-  hasInlineTranscriptCoreInvocation,
   isProtectedGovernanceFileMutationPath,
   isUserEditableGeminiConfigPath,
   isProtectedBenchmarkFilePath,
   isBenchmarkGuardDisabled,
-  isCrossConversationTargetDenied,
   isStepSpilloverPath,
+  isTranscriptLogPath,
   matchTaskLogToken,
   getTaskState,
   isOversizedInternalTarget,
@@ -305,9 +303,6 @@ export async function handleInspectionTool(ctx) {
   // Checks 2a (step spillovers) & 2b (task logs) across EVERY candidate path
   for (const cand of allCandidates) {
     if (isStepSpilloverPath(cand) || expandAndResolvePathVariants(cand, cwd).some(isStepSpilloverPath)) {
-      if (isCrossConversationTargetDenied(cand, convId, ctx)) {
-        respond({ decision: "deny", reason: "Antigravity Execution Governance: Cross-conversation inspection of another session's step spillover is prohibited under Parent Transcript Isolation." });
-      }
       if (!isSymlinkMaskedInternalPath(cand, cwd) && isBoundedInternalSlice) { safeHarborCandidates.add(cand); continue; }
       const spillCmd = (await hasHostRtkAvailable())
         ? (isOversizedInternalTarget(cand, convId, ctx, null, true) ? `'rtk read --tail-lines 150 ${cand}' (or '--head-lines 150')` : `'rtk read ${cand}'`)
@@ -317,9 +312,6 @@ export async function handleInspectionTool(ctx) {
 
     const taskMatch = matchTaskLogToken(cand, convId, ctx);
     if (taskMatch) {
-      if (isCrossConversationTargetDenied(taskMatch.realPath || cand, convId, ctx)) {
-        respond({ decision: "deny", reason: "Antigravity Execution Governance: Cross-conversation inspection of another session's task log is prohibited under Parent Transcript Isolation." });
-      }
       const state = getTaskState(taskMatch, convId, ctx);
       if (state === "RUNNING") {
         const { denyRunningTask } = await import("./task-guard.mjs");
@@ -339,20 +331,13 @@ export async function handleInspectionTool(ctx) {
   // Check 2c: Internal state & discovery ancestor roots (never scanning Query/Pattern/Includes/Excludes/Extensions)
   const isSingleFileReadTool = toolName === "read_file" || toolName === "view_file";
   for (const cand of allCandidates) {
-    if (safeHarborCandidates.has(cand)) continue;
+    if (safeHarborCandidates.has(cand) || isTranscriptLogPath(cand) || expandAndResolvePathVariants(cand, cwd).some(isTranscriptLogPath)) continue;
     if (isSingleFileReadTool && !hasByteOffset && isOwnSwarmPlanPath(cand, convId, ctx)) {
       safeHarborCandidates.add(cand);
       continue;
     }
     if (isProtectedInternalStatePath(cand, cwd) || isProtectedDiscoveryAncestorPath(cand, isDiscoveryTool, isRecursiveDiscoveryTool, ctx)) {
-      respond({ decision: "deny", reason: buildInternalStateToolDenial(convId, ctx) });
-    }
-  }
-
-  // Check 2d: Cross-conversation brain artifact isolation
-  for (const cand of allCandidates) {
-    if (isCrossConversationTargetDenied(cand, convId, ctx)) {
-      respond({ decision: "deny", reason: "Antigravity Execution Governance: Cross-conversation inspection of another session's brain artifacts is prohibited under Parent Transcript Isolation." });
+      respond({ decision: "deny", reason: buildInternalStateToolDenial() });
     }
   }
 
@@ -384,29 +369,14 @@ export async function handleInspectionTool(ctx) {
   respond({ decision: "allow" });
 }
 
-function getRestrictedChildScriptBlockReason(body) {
-  if (!body || typeof body !== "string") return null;
-  if (isProtectedInternalState(body)) return "internal-state";
-  if (hasInlineTranscriptCoreInvocation(body)) {
-    return "inline-transcript-core";
-  }
-  if (
-    /(?:^|[\s;|&(])(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID|XDG_STATE_HOME|LOCALAPPDATA)=/i.test(body) ||
-    /(?:process\.env|os\.environ)\s*(?:\.\s*(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID|XDG_STATE_HOME|LOCALAPPDATA)\b|\[\s*['"](?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID|XDG_STATE_HOME|LOCALAPPDATA)['"]\s*\])/i.test(body)
-  ) return "governance-env";
-  if (/\bagy-context(?:-saver)?(?:\.(?:m?js|cmd|exe|bat))?[\s'",\[\]()]{1,24}transcript\b/i.test(body)) return "non-canonical-cli";
-  return null;
-}
-
 export function handleMutationTool(ctx) {
   const { args, convId, cwd } = ctx;
   const targetFiles = collectPathAliases(args, MUTATION_PATH_KEYS, false);
-  const callerAccess = evaluateCallerTranscriptAccess(convId, ctx);
 
   let userConfigConfirmTarget = null;
   for (const targetFile of targetFiles) {
     if (isProtectedInternalStatePath(targetFile, cwd) && !isOwnSwarmPlanPath(targetFile, convId, ctx)) {
-      respond({ decision: "deny", reason: buildInternalStateToolDenial(convId, ctx) });
+      respond({ decision: "deny", reason: buildInternalStateToolDenial() });
     }
     if (isProtectedGovernanceFileMutationPath(targetFile, convId, ctx)) {
       if (isUserEditableGeminiConfigPath(targetFile, convId, ctx)) {
@@ -414,36 +384,6 @@ export function handleMutationTool(ctx) {
       } else {
         respond({ decision: "deny", reason: "Antigravity Execution Governance: Direct mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited." });
       }
-    }
-    if (isCrossConversationTargetDenied(targetFile, convId, ctx, callerAccess)) {
-      respond({ decision: "deny", reason: "Antigravity Execution Governance: Cross-conversation mutation of another session's brain artifacts is prohibited under Parent Transcript Isolation." });
-    }
-  }
-
-  // Scan script bodies ONLY for restricted child sessions (Finding #7: unrestricted top-level devs pass cleanly)
-  if (callerAccess.isRestrictedChild) {
-    const bodyParts = [
-      args.Content, args.content, args.file_content, args.CodeContent, args.codeContent, args.code_content,
-      args.Replacement, args.replacement, args.ReplacementContent, args.replacementContent, args.new_string
-    ].filter((v) => typeof v === "string" && v);
-    const rawChunks = Array.isArray(args.ReplacementChunks) ? args.ReplacementChunks : (Array.isArray(args.replacementChunks) ? args.replacementChunks : []);
-    for (const ch of rawChunks) {
-      const cb = ch && typeof ch === "object" ? (ch.ReplacementContent || ch.replacementContent || ch.Replacement || ch.replacement || ch.Content || ch.content || "") : "";
-      if (typeof cb === "string" && cb) bodyParts.push(cb);
-    }
-    const bodyContent = bodyParts.join("\n");
-    if (bodyContent && (targetFiles.some(isExecutableScriptPath) || /^\s*#!/.test(bodyContent))) {
-      const code = getRestrictedChildScriptBlockReason(bodyContent);
-      if (code === "inline-transcript-core") {
-        respond({ decision: "deny", reason: "Antigravity Execution Governance: Direct inline script or interpreter imports of 'transcript-core.mjs' or 'bin/agy-context.mjs' are prohibited for restricted child sessions." });
-      }
-      if (code === "governance-env") {
-        respond({ decision: "deny", reason: "Antigravity Execution Governance: Overriding Antigravity governance/state environment variables inside restricted child scripts is prohibited." });
-      }
-      if (code === "non-canonical-cli") {
-        respond({ decision: "deny", reason: "Antigravity Execution Governance: 'agy-context transcript' must be invoked directly via run_command (read-only '|' ok; no '&&'/';'), not wrapped inside a script." });
-      }
-      if (code) respond({ decision: "deny", reason: buildInternalStateToolDenial(convId, ctx) });
     }
   }
 

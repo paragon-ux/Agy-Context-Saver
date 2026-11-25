@@ -217,7 +217,7 @@ export function seedHermeticConversationFixture(profileDir, convId = HERMETIC_CO
     {
       step_index: 3,
       type: "USER_INPUT",
-      content: "Step 3 Content: Confirm that agy-context transcript health and query handle streaming JSONL cleanly.",
+      content: "Step 3 Content: Confirm that agy-context transcript health handles streaming JSONL cleanly.",
       created_at: "2026-10-12T12:01:00Z"
     },
     {

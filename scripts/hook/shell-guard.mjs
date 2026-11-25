@@ -3,7 +3,6 @@
  * - Clean quote- & heredoc-aware shell parser (parsed once per call)
  * - Concise LH-09-B governance & benchmark mutation checks
  * - Blocking CI watch loop guard (`gh pr checks --watch`, `gh run watch`)
- * - `agy-context transcript` CLI governance + atomic 10s capability grants
  * - Narrow High-ROI RTK Pre-Gate (`AGY_RTK_MODE=pregate|off`, lossless `rg`/`grep`)
  * - Unchained `rtk read` / degraded bounded `head -n 150`/`tail -n 150` spillover & task-log parity
  */
@@ -19,15 +18,8 @@ import {
   getProfileHomeDir,
   getBrainDirs,
   tryRealpath,
-  isContainedInAnyBrainDir,
-  isProtectedExportOutPath,
-  isSafeSelfOnlyOutPath
+  isContainedInAnyBrainDir
 } from "../../lib/path-guards.mjs";
-import {
-  readTranscriptAccessStore,
-  recordTranscriptHookGrant,
-  findGoverningPolicyForCaller
-} from "../../lib/access-policy.mjs";
 import {
   HOOK_REPO_ROOT,
   MAX_SPILLOVER_SLICE_LINES,
@@ -38,19 +30,16 @@ import {
   updateSessionState,
   resolveHookPath,
   expandLeadingTilde,
-  hasInlineTranscriptCoreInvocation,
   cleanFileToken,
-  getCallerLineage,
-  evaluateCallerTranscriptAccess,
   isProtectedInternalState,
-  isInsideAgyContextSaverRepo,
   isProtectedGovernanceFileMutationPath,
   isUserEditableGeminiConfigPath,
   isProtectedGovernanceDirPath,
   isProtectedBenchmarkFilePath,
   isBenchmarkGuardDisabled,
-  isCrossConversationTargetDenied,
   isStepSpilloverPath,
+  stripTranscriptLogRefs,
+  isReadOnlyTranscriptVerb,
   isExecutableScriptPath,
   matchTaskLogToken,
   extractTaskLogMatches,
@@ -748,508 +737,6 @@ function checkShellMutations(segments, convId, ctx, depth = 0) {
 }
 
 // ============================================================================
-// `agy-context transcript` CLI Governance & Parent Transcript Isolation
-// ============================================================================
-
-const TRANSCRIPT_READ_SUBCOMMANDS = new Set(["read", "query", "step", "health", "list", "ls", "export", "dump", "grep", "search", "find", "stats", "info", "tools", "outline", "summary"]);
-const TRANSCRIPT_HELP_SUBCOMMANDS = new Set(["help", "--help", "-h"]);
-const TRANSCRIPT_ADMIN_SUBCOMMANDS = new Set(["access", "policy"]);
-const ADMIN_MUTATION_TOKENS = new Set(["--off", "--deny-children", "--on", "--reset", "--self-only", "--mode", "--allow", "--deny", "--ttl", "off", "deny", "lock", "on", "open", "reset", "unlock", "self-only"]);
-
-function isAllowedAgyContextScriptPath(scriptToken, cwd = "") {
-  if (!scriptToken || hasDotDotTraversal(scriptToken)) return false;
-  const norm = scriptToken.replace(/\\/g, "/");
-  if (!norm.endsWith("/bin/agy-context.mjs") && norm !== "bin/agy-context.mjs") return false;
-  const pluginRoot = path.join(getProfileHomeDir(), ".gemini", "config", "plugins", "agy-context-saver");
-  const allowed = new Set([tryRealpath(path.join(HOOK_REPO_ROOT, "bin", "agy-context.mjs")), tryRealpath(path.join(pluginRoot, "bin", "agy-context.mjs"))]);
-  return norm === "bin/agy-context.mjs" || allowed.has(tryRealpath(resolveHookPath(scriptToken, cwd)));
-}
-
-function isAllowedAgyContextBinaryToken(binToken, cwd = "") {
-  if (!binToken || hasDotDotTraversal(binToken)) return false;
-  const norm = binToken.replace(/\\/g, "/");
-  if (!norm.includes("/")) return ["agy-context", "agy-context-saver"].includes(normalizeCmdName(norm));
-  return isAllowedAgyContextScriptPath(binToken, cwd) || /\/\.gemini\/antigravity(?:-cli|-ide)?\/bin\/agy-context(?:-saver)?(?:\.(?:exe|cmd|bat))?$/i.test(norm);
-}
-
-function parseAgyContextTranscriptTokens(tokens, cwd = "") {
-  if (!Array.isArray(tokens) || tokens.length === 0) return null;
-  const cmd0 = normalizeCmdName(tokens[0]);
-  let subOffset = -1;
-  let hasNodeFlags = false;
-  let invalidBinaryPath = false;
-  if ((cmd0 === "agy-context" || cmd0 === "agy-context-saver") && tokens[1] === "transcript") {
-    subOffset = 2;
-    invalidBinaryPath = !isAllowedAgyContextBinaryToken(tokens[0], cwd);
-  } else if (cmd0 === "node" && tokens.length >= 3) {
-    for (let i = 1; i < tokens.length - 1; i++) {
-      if ((isAllowedAgyContextScriptPath(tokens[i], cwd) || ["agy-context", "agy-context-saver"].includes(normalizeCmdName(tokens[i]))) && tokens[i + 1] === "transcript") {
-        subOffset = i + 2;
-        hasNodeFlags = i !== 1;
-        invalidBinaryPath = !isAllowedAgyContextScriptPath(tokens[i], cwd);
-        break;
-      }
-    }
-  }
-  if (subOffset === -1) return null;
-  const subcommand = tokens[subOffset] !== undefined ? String(tokens[subOffset]).trim() : "help";
-  const isReadSub = TRANSCRIPT_READ_SUBCOMMANDS.has(subcommand);
-  const isHelpSub = TRANSCRIPT_HELP_SUBCOMMANDS.has(subcommand);
-  const isAdminSub = TRANSCRIPT_ADMIN_SUBCOMMANDS.has(subcommand);
-  return { subOffset, subcommand, isReadSub, isHelpSub, isAdminSub, isKnownSubcommand: isReadSub || isHelpSub || isAdminSub, hasNodeFlags, invalidBinaryPath, tokens };
-}
-
-function findAgyContextTranscriptUsage(segments, cwd = "", depth = 0) {
-  if (depth > 4) return null;
-  for (let idx = 0; idx < segments.length; idx++) {
-    const seg = segments[idx];
-    let text = (seg.text || "").trim();
-    let inSub = false;
-    while (text.startsWith("(") && text.endsWith(")")) { inSub = true; text = text.slice(1, -1).trim(); }
-    const { prefix: envPrefix, body } = splitEnvPrefix(text);
-    const parsedDirect = parseAgyContextTranscriptTokens(tokenizeShellWords(body || text), cwd);
-    if (parsedDirect) return { ...parsedDirect, seg, segIndex: idx, totalSegs: segments.length, hadWrapper: inSub || Boolean(envPrefix.trim()) };
-    const detailed = tokenizeShellWordsDetailed(text);
-    for (const startPos of collectSegmentCommandStartIndices(detailed)) {
-      const cmdIdx = stripLeadingShellPrefixes(detailed, startPos);
-      if (cmdIdx > 0 && cmdIdx < detailed.length) {
-        const parsedPrefixed = parseAgyContextTranscriptTokens(detailed.slice(cmdIdx).map((t) => t.value), cwd);
-        if (parsedPrefixed) return { ...parsedPrefixed, seg, segIndex: idx, totalSegs: segments.length, hadWrapper: true };
-      }
-    }
-    const wrapped = extractSimpleWrappedScript(text);
-    if (wrapped?.innerScript) {
-      const m = findAgyContextTranscriptUsage(splitShellSegments(wrapped.innerScript), cwd, depth + 1);
-      if (m) return { ...m, hadWrapper: true, totalSegs: Math.max(segments.length, m.totalSegs) };
-    }
-    for (const sub of seg.subshells || []) {
-      const m = findAgyContextTranscriptUsage(splitShellSegments(sub), cwd, depth + 1);
-      if (m) return { ...m, hadWrapper: true, totalSegs: Math.max(segments.length, 2) };
-    }
-  }
-  return null;
-}
-
-function canCallerMutateTranscriptAccess(convId, ctx = {}) {
-  const lineage = getCallerLineage(convId, ctx);
-  if (lineage.isChildSession || lineage.isSwarmChild || lineage.launchDirective === "deny" || lineage.launchDirective === "self-only") return false;
-  const policy = findGoverningPolicyForCaller(readTranscriptAccessStore(), convId, lineage, {
-    getLineage: (id) => getCallerLineage(id, ctx),
-    brainDirs: getBrainDirs({ activeTranscriptPath: ctx?.transcriptPath || "" })
-  });
-  return !(policy && convId && policy.ownerId !== convId && !lineage.isTopLevelUserSession);
-}
-
-function extractTargetConvIdFromTranscriptTokens(sub, restTokens) {
-  const valueFlags = ["query", "grep", "search", "find", "tools"].includes(sub)
-    ? new Set(["id", "query", "roles", "mode", "start", "end", "last-turns", "last", "tail", "limit", "field", "max-chars", "out", "output", "file"])
-    : sub === "step"
-      ? new Set(["id", "step", "start", "end", "field", "tail", "tail-lines", "head", "head-lines", "line-start", "line-end", "max-chars", "out", "output", "file"])
-      : ["health", "stats", "info"].includes(sub)
-        ? new Set(["id", "parent", "file"])
-        : ["list", "ls"].includes(sub)
-          ? new Set(["limit", "parent"])
-          : ["export", "dump"].includes(sub)
-            ? new Set(["id", "parent", "start", "end", "limit", "max-chars", "out", "output", "file"])
-            : new Set(["id", "query", "roles", "field", "mode", "last-turns", "last", "tail", "offset", "limit", "start", "end", "max-chars", "out", "output", "file"]);
-
-  const opts = {};
-  const idValues = [];
-  const outPaths = [];
-  const positionals = [];
-  let sanitized = false;
-  for (let i = 0; i < restTokens.length; i++) {
-    const tok = restTokens[i];
-    if (!tok.startsWith("-") || tok === "-") { positionals.push(tok); continue; }
-    if (!tok.startsWith("--")) continue;
-    const eq = tok.indexOf("=");
-    const key = eq === -1 ? tok.slice(2) : tok.slice(2, eq);
-    if (key === "sanitized") {
-      sanitized = eq === -1 ? true : tok.slice(eq + 1) === "true";
-      continue;
-    }
-    if (!valueFlags.has(key)) continue;
-    const val = eq === -1 ? (i + 1 < restTokens.length ? restTokens[++i] : null) : tok.slice(eq + 1);
-    if (val === null) continue;
-    if (key === "id") String(val).split(",").map((s) => s.trim()).filter(Boolean).forEach((p) => idValues.push(p));
-    if ((key === "out" || key === "output") && String(val).trim()) outPaths.push(String(val).trim());
-    opts[key] = val;
-  }
-
-  const isMultiCapable = ["export", "dump", "health", "stats", "info"].includes(sub);
-  const pos = [...positionals];
-  if (["query", "grep", "search", "find", "tools"].includes(sub)) {
-    if (opts.query === undefined && pos.length) opts.query = pos.shift();
-    if (opts.id === undefined && pos.length) { opts.id = pos.shift(); idValues.push(opts.id); }
-  } else if (sub === "step") {
-    if (opts.step === undefined && pos.length) opts.step = pos.shift();
-    if (opts.id === undefined && pos.length) { opts.id = pos.shift(); idValues.push(opts.id); }
-  } else if (["read", "outline", "summary", "health", "stats", "info", "export", "dump"].includes(sub)) {
-    const canTakeId = !isMultiCapable || (opts.parent === undefined && opts.file === undefined);
-    if (opts.id === undefined && canTakeId && pos.length) {
-      opts.id = pos.shift();
-      if (isMultiCapable) String(opts.id).split(",").map((s) => s.trim()).filter(Boolean).forEach((p) => idValues.push(p));
-      else idValues.push(opts.id);
-    }
-  }
-  if (pos.length) return { error: `Antigravity Execution Governance: Unexpected positional arguments '${pos.join(" ")}' for 'agy-context transcript ${sub}'.` };
-
-  const uniqueIds = [...new Set(idValues.map((s) => String(s).trim()).filter(Boolean))];
-  return {
-    targetId: isMultiCapable && uniqueIds.length === 1 ? uniqueIds[0] : (opts.id ? String(opts.id).trim() : null),
-    targetIds: uniqueIds,
-    targetParent: opts.parent !== undefined ? String(opts.parent).trim() : null,
-    outPaths,
-    explicitFile: opts.file ? String(opts.file).trim() : null,
-    sanitized
-  };
-}
-
-const SAFE_TRANSCRIPT_FILTER_CMDS = new Set(["head", "tail", "grep", "egrep", "fgrep", "rg", "wc", "jq", "cut", "sort", "uniq", "tr"]);
-const GREP_FILTER_SHORT_BOOL = new Set(["i", "v", "n", "c", "E", "F", "P", "G", "w", "x", "o", "q", "s", "S", "h", "H", "a", "U"]);
-const GREP_FILTER_SHORT_NUM = new Set(["m", "A", "B", "C"]);
-const GREP_FILTER_LONG_BOOL = new Set([
-  "--ignore-case", "--smart-case", "--case-sensitive", "--invert-match", "--line-number", "--no-line-number",
-  "--count", "--only-matching", "--fixed-strings", "--extended-regexp", "--basic-regexp", "--perl-regexp",
-  "--word-regexp", "--line-regexp", "--quiet", "--silent", "--no-heading", "--no-filename", "--with-filename",
-  "--multiline", "--text", "--passthru", "--passthrough", "--json", "--vimgrep", "--stats"
-]);
-const GREP_FILTER_LONG_NUM = new Set(["--max-count", "--after-context", "--before-context", "--context", "--max-columns"]);
-const JQ_FILTER_SHORT_BOOL = new Set(["r", "c", "s", "R", "S", "e", "a", "M", "n", "j"]);
-const JQ_FILTER_LONG_BOOL = new Set([
-  "--raw-output", "--compact-output", "--slurp", "--raw-input", "--sort-keys",
-  "--exit-status", "--ascii-output", "--monochrome-output", "--null-input", "--join-output", "--tab"
-]);
-const WC_FILTER_SHORT_BOOL = new Set(["l", "w", "c", "m", "L"]);
-const WC_FILTER_LONG_BOOL = new Set(["--lines", "--words", "--bytes", "--chars", "--max-line-length"]);
-const CUT_FILTER_SHORT_BOOL = new Set(["s", "n", "z"]);
-const CUT_FILTER_SHORT_VAL = new Set(["d", "f", "c", "b"]);
-const CUT_FILTER_LONG_BOOL = new Set(["--only-delimited", "--complement", "--zero-terminated"]);
-const CUT_FILTER_LONG_VAL = new Set(["--delimiter", "--fields", "--characters", "--bytes", "--output-delimiter"]);
-const SORT_FILTER_SHORT_BOOL = new Set(["r", "n", "u", "f", "h", "V", "b", "d", "i", "M", "R", "s", "z", "c", "C", "g"]);
-const SORT_FILTER_SHORT_VAL = new Set(["k", "t"]);
-const SORT_FILTER_LONG_BOOL = new Set(["--reverse", "--numeric-sort", "--unique", "--ignore-case", "--human-numeric-sort", "--version-sort", "--stable", "--zero-terminated", "--general-numeric-sort"]);
-const SORT_FILTER_LONG_VAL = new Set(["--key", "--field-separator"]);
-const UNIQ_FILTER_SHORT_BOOL = new Set(["c", "d", "D", "u", "i", "z"]);
-const UNIQ_FILTER_SHORT_NUM = new Set(["f", "s", "w"]);
-const UNIQ_FILTER_LONG_BOOL = new Set(["--count", "--repeated", "--all-repeated", "--unique", "--ignore-case", "--zero-terminated"]);
-const UNIQ_FILTER_LONG_NUM = new Set(["--skip-fields", "--skip-chars", "--check-chars"]);
-const TR_FILTER_SHORT_BOOL = new Set(["d", "s", "c", "C", "t"]);
-const TR_FILTER_LONG_BOOL = new Set(["--delete", "--squeeze-repeats", "--complement", "--truncate-set1"]);
-
-function isSafeReadOnlyTranscriptFilterSegment(seg) {
-  if (!seg || (seg.leadingSep !== "|" && seg.leadingSep !== "|&")) return false;
-  if (seg.hasHeredoc || seg.hasSubshell) return false;
-  const rawTokens = getSegTokens(seg);
-  if (!rawTokens || rawTokens.length === 0) return false;
-  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(rawTokens[0].raw)) return false;
-  const clean = filterAllowedStderrRedirects(rawTokens);
-  if (!clean || clean.length === 0) return false;
-
-  const cmdRaw = clean[0].value;
-  if (!cmdRaw || /[/\\]/.test(cmdRaw)) return false;
-  const cmd = cmdRaw.toLowerCase();
-  if (!SAFE_TRANSCRIPT_FILTER_CMDS.has(cmd)) return false;
-
-  const args = clean.slice(1).map((t) => t.value);
-  let afterDD = false;
-  let posCount = 0;
-
-  if (cmd === "head" || cmd === "tail") {
-    for (let i = 0; i < args.length; i++) {
-      const v = args[i];
-      if (!afterDD && v === "--") { afterDD = true; continue; }
-      if (afterDD || !v.startsWith("-") || v === "-") return false;
-      if (/^-\d+$/.test(v)) continue;
-      if (v.startsWith("--")) {
-        if (["--quiet", "--silent", "--verbose", "--zero-terminated"].includes(v)) continue;
-        const eq = v.indexOf("=");
-        const fl = eq === -1 ? v : v.slice(0, eq);
-        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
-        if (fl === "--lines") { if (!/^[+-]?\d+$/.test(val || "")) return false; continue; }
-        if (fl === "--bytes") { if (!/^[+-]?\d+[bkmKMGTPEZY]?$/.test(val || "")) return false; continue; }
-        return false;
-      }
-      for (let j = 1; j < v.length; j++) {
-        const ch = v[j];
-        if (ch === "q" || ch === "v" || ch === "z") continue;
-        if (ch === "n" || ch === "c") {
-          const val = j + 1 < v.length ? v.slice(j + 1) : args[++i];
-          const re = ch === "n" ? /^[+-]?\d+$/ : /^[+-]?\d+[bkmKMGTPEZY]?$/;
-          if (!re.test(val || "")) return false;
-          break;
-        }
-        return false;
-      }
-    }
-    return true;
-  }
-
-  if (cmd === "grep" || cmd === "egrep" || cmd === "fgrep" || cmd === "rg") {
-    let hasExplicitPattern = false;
-    for (let i = 0; i < args.length; i++) {
-      const v = args[i];
-      if (!afterDD && v === "--") { afterDD = true; continue; }
-      if (afterDD || !v.startsWith("-") || v === "-") { posCount++; continue; }
-      if (v.startsWith("--")) {
-        if (GREP_FILTER_LONG_BOOL.has(v)) continue;
-        const eq = v.indexOf("=");
-        const fl = eq === -1 ? v : v.slice(0, eq);
-        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
-        if (val === undefined) return false;
-        if (fl === "--regexp") { hasExplicitPattern = true; continue; }
-        if (GREP_FILTER_LONG_NUM.has(fl)) { if (!/^\d+$/.test(val)) return false; continue; }
-        if (fl === "--color" || fl === "--colour") { if (!/^(?:always|never|auto|ansi)$/i.test(val)) return false; continue; }
-        return false;
-      }
-      for (let j = 1; j < v.length; j++) {
-        const ch = v[j];
-        if (GREP_FILTER_SHORT_BOOL.has(ch)) continue;
-        if (ch === "e") {
-          hasExplicitPattern = true;
-          if (j + 1 === v.length && ++i >= args.length) return false;
-          break;
-        }
-        if (GREP_FILTER_SHORT_NUM.has(ch)) {
-          const val = j + 1 < v.length ? v.slice(j + 1) : args[++i];
-          if (!/^\d+$/.test(val || "")) return false;
-          break;
-        }
-        return false;
-      }
-    }
-    return hasExplicitPattern ? posCount === 0 : posCount === 1;
-  }
-
-  if (cmd === "wc") {
-    for (const v of args) {
-      if (!v.startsWith("-") || v === "-") return false;
-      if (v.startsWith("--")) { if (!WC_FILTER_LONG_BOOL.has(v)) return false; continue; }
-      for (let j = 1; j < v.length; j++) if (!WC_FILTER_SHORT_BOOL.has(v[j])) return false;
-    }
-    return true;
-  }
-
-  if (cmd === "jq") {
-    for (let i = 0; i < args.length; i++) {
-      const v = args[i];
-      if (!afterDD && v === "--") { afterDD = true; continue; }
-      if (afterDD || !v.startsWith("-") || v === "-") { posCount++; continue; }
-      if (v.startsWith("--")) {
-        if (JQ_FILTER_LONG_BOOL.has(v)) continue;
-        if (v === "--arg" || v === "--argjson") { if (i + 2 >= args.length) return false; i += 2; continue; }
-        return false;
-      }
-      for (let j = 1; j < v.length; j++) if (!JQ_FILTER_SHORT_BOOL.has(v[j])) return false;
-    }
-    return posCount <= 1;
-  }
-
-  if (cmd === "cut") {
-    for (let i = 0; i < args.length; i++) {
-      const v = args[i];
-      if (!afterDD && v === "--") { afterDD = true; continue; }
-      if (afterDD || !v.startsWith("-") || v === "-") return false;
-      if (v.startsWith("--")) {
-        if (CUT_FILTER_LONG_BOOL.has(v)) continue;
-        const eq = v.indexOf("=");
-        const fl = eq === -1 ? v : v.slice(0, eq);
-        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
-        if (CUT_FILTER_LONG_VAL.has(fl) && val !== undefined) continue;
-        return false;
-      }
-      for (let j = 1; j < v.length; j++) {
-        const ch = v[j];
-        if (CUT_FILTER_SHORT_BOOL.has(ch)) continue;
-        if (CUT_FILTER_SHORT_VAL.has(ch)) { if (j + 1 === v.length && ++i >= args.length) return false; break; }
-        return false;
-      }
-    }
-    return true;
-  }
-
-  if (cmd === "sort") {
-    for (let i = 0; i < args.length; i++) {
-      const v = args[i];
-      if (!afterDD && v === "--") { afterDD = true; continue; }
-      if (afterDD || !v.startsWith("-") || v === "-") return false;
-      if (v.startsWith("--")) {
-        if (SORT_FILTER_LONG_BOOL.has(v)) continue;
-        const eq = v.indexOf("=");
-        const fl = eq === -1 ? v : v.slice(0, eq);
-        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
-        if (SORT_FILTER_LONG_VAL.has(fl) && val !== undefined) continue;
-        return false;
-      }
-      for (let j = 1; j < v.length; j++) {
-        const ch = v[j];
-        if (SORT_FILTER_SHORT_BOOL.has(ch)) continue;
-        if (SORT_FILTER_SHORT_VAL.has(ch)) { if (j + 1 === v.length && ++i >= args.length) return false; break; }
-        return false;
-      }
-    }
-    return true;
-  }
-
-  if (cmd === "uniq") {
-    for (let i = 0; i < args.length; i++) {
-      const v = args[i];
-      if (!afterDD && v === "--") { afterDD = true; continue; }
-      if (afterDD || !v.startsWith("-") || v === "-") return false;
-      if (v.startsWith("--")) {
-        if (UNIQ_FILTER_LONG_BOOL.has(v)) continue;
-        const eq = v.indexOf("=");
-        const fl = eq === -1 ? v : v.slice(0, eq);
-        const val = eq === -1 ? args[++i] : v.slice(eq + 1);
-        if (UNIQ_FILTER_LONG_NUM.has(fl) && /^\d+$/.test(val || "")) continue;
-        return false;
-      }
-      for (let j = 1; j < v.length; j++) {
-        const ch = v[j];
-        if (UNIQ_FILTER_SHORT_BOOL.has(ch)) continue;
-        if (UNIQ_FILTER_SHORT_NUM.has(ch)) {
-          const val = j + 1 < v.length ? v.slice(j + 1) : args[++i];
-          if (!/^\d+$/.test(val || "")) return false;
-          break;
-        }
-        return false;
-      }
-    }
-    return true;
-  }
-
-  if (cmd === "tr") {
-    for (let i = 0; i < args.length; i++) {
-      const v = args[i];
-      if (!afterDD && v === "--") { afterDD = true; continue; }
-      if (afterDD || !v.startsWith("-") || v === "-") { posCount++; continue; }
-      if (v.startsWith("--")) { if (!TR_FILTER_LONG_BOOL.has(v)) return false; continue; }
-      for (let j = 1; j < v.length; j++) if (!TR_FILTER_SHORT_BOOL.has(v[j])) return false;
-    }
-    return posCount >= 1 && posCount <= 2;
-  }
-
-  return false;
-}
-
-function checkAgyContextTranscriptCommand(segments, convId, ctx) {
-  const cwd = ctx?.cwd || "";
-  const match = segments.length ? findAgyContextTranscriptUsage(segments, cwd) : null;
-  if (!match) return { matched: false, allowed: false };
-  const { seg, segIndex, totalSegs, hadWrapper, subOffset, subcommand, isReadSub, isHelpSub, isAdminSub, isKnownSubcommand, hasNodeFlags, invalidBinaryPath } = match;
-  const fail = (reason, isAccessDenial = false) => ({ matched: true, allowed: false, isAccessDenial, reason });
-
-  const seg0CleanDetailed = !seg.hasRedirect ? getSegTokens(seg) : filterAllowedStderrRedirects(getSegTokens(seg));
-  const hasValidPipeline = totalSegs === 1 || (totalSegs <= 7 && (isReadSub || isHelpSub) && segments.slice(1).every(isSafeReadOnlyTranscriptFilterSegment));
-  if (segIndex !== 0 || !hasValidPipeline || (seg.leadingSep && seg.leadingSep !== "\n") || hadWrapper || hasNodeFlags || invalidBinaryPath || !seg0CleanDetailed || seg.hasHeredoc || seg.hasSubshell) {
-    return fail("Antigravity Execution Governance: 'agy-context transcript' access to .system_generated must be a single unchained command or piped strictly to read-only stdin filters (rg/grep/head/tail/jq/wc/cut/sort/uniq/tr; no &&, ;, write redirects, file operands, wrappers, env prefixes, node flags, heredocs, or subshells). Use: 'list'/'health --parent|--id u1,u2 --json' -> parallel 'outline'/'query'/'read'/'step --id <uuid> --full' ('--out <path>' if >9 KB raw).");
-  }
-  const tokens = seg.hasRedirect ? seg0CleanDetailed.map((t) => t.value) : match.tokens;
-  if (!isKnownSubcommand) {
-    return fail(`Antigravity Execution Governance: Unknown 'agy-context transcript' subcommand '${subcommand}'. Expected read, query, step, health, list, export, or access.`);
-  }
-
-  const brainDirs = getBrainDirs({ activeTranscriptPath: ctx?.transcriptPath || "" });
-  const dirDesc = brainDirs.length === 1 ? `'${brainDirs[0]}'` : `'${brainDirs.join("' or '")}'`;
-  for (let i = subOffset + 1; i < tokens.length; i++) {
-    const tok = tokens[i];
-    if (tok === "--file" || tok.startsWith("--file=")) {
-      const val = tok === "--file" ? tokens[++i] : tok.slice("--file=".length);
-      if (!val || hasDotDotTraversal(val) || !isContainedInAnyBrainDir(val, brainDirs, null, { cwd })) {
-        return fail(`Antigravity Execution Governance: '--file' in 'agy-context transcript' must stay inside ${dirDesc} without '..' path traversal.`);
-      }
-      continue;
-    }
-    if (hasDotDotTraversal(tok)) return fail("Antigravity Execution Governance: Path traversal ('..') is prohibited in 'agy-context transcript' commands.");
-  }
-
-  const restTokens = tokens.slice(subOffset + 1);
-  if (isHelpSub || (restTokens.length === 1 && (restTokens[0] === "--help" || restTokens[0] === "-h"))) {
-    return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: false };
-  }
-
-  if (isAdminSub) {
-    const hasMut = restTokens.some((t) => { const l = String(t).toLowerCase(); return ADMIN_MUTATION_TOKENS.has(l) || /^--(?:mode|allow|deny|ttl)=/.test(l); });
-    if (hasMut && !canCallerMutateTranscriptAccess(convId, ctx)) {
-      return fail("Antigravity Execution Governance: Only the parent/coordinator session may modify 'agy-context transcript access' policy. Child sessions cannot unlock or alter transcript governance.", true);
-    }
-    return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: false, isAccessMutation: hasMut };
-  }
-
-  if (isReadSub) {
-    const accessEval = evaluateCallerTranscriptAccess(convId, ctx);
-    const denyAccess = (detail = "") => {
-      const label = accessEval.rosterName ? `@${accessEval.rosterName} (${convId})` : convId;
-      return fail(`Antigravity Execution Governance: 'agy-context transcript ${subcommand}' is restricted for this session (${label}) by parent governance [mode=${accessEval.mode}, source=${accessEval.source}].${detail ? " " + detail : ""} Do NOT retry transcript inspection commands or attempt direct '.system_generated' file/shell reads; proceed with your assigned task using your workspace files and task brief.`, true);
-    };
-    if (!accessEval.allowed) return denyAccess();
-
-    const targetInfo = extractTargetConvIdFromTranscriptTokens(subcommand, restTokens);
-    if (targetInfo.error) return fail(targetInfo.error);
-    const isExport = subcommand === "export" || subcommand === "dump";
-    const isHealth = subcommand === "health" || subcommand === "stats" || subcommand === "info";
-    const isMultiTargetSub = isExport || isHealth;
-    const isList = subcommand === "list" || subcommand === "ls";
-    if (isExport && !targetInfo.sanitized) {
-      return fail("Antigravity Execution Governance: Flag '--sanitized' is required for 'agy-context transcript export' to enforce transcript isolation (raw transcript export is prohibited).");
-    }
-
-    for (const outPath of targetInfo.outPaths || []) {
-      const resolvedOut = resolveHookPath(outPath, cwd);
-      if (
-        /^~/.test(outPath) || /\$|%[A-Za-z_][A-Za-z0-9_]*%/.test(outPath) || hasDotDotTraversal(outPath) ||
-        isProtectedInternalState(outPath) || isProtectedInternalState(resolvedOut) ||
-        isProtectedBenchmarkFilePath(outPath, cwd) || isProtectedGovernanceFileMutationPath(outPath, convId, ctx) ||
-        isProtectedExportOutPath(outPath, resolvedOut, { cwd }) || !/\.(?:md|json|txt)$/i.test(outPath)
-      ) {
-        return fail(`Antigravity Execution Governance: '--out' path '${outPath}' in 'agy-context transcript ${subcommand}' must be a literal (no shell variables, '~', UNC, or device prefixes) safe .md/.json/.txt artifact outside protected internal state, governance, and benchmark directories.`);
-      }
-      if (accessEval.mode === "self-only" && !isSafeSelfOnlyOutPath(outPath, resolvedOut, convId, { cwd })) {
-        return denyAccess(`'--out' must stay under '<workspace>/scratch/' or '<brainDir>/${convId}/scratch/' in self-only mode (received '${outPath}').`);
-      }
-    }
-
-    if (accessEval.mode === "self-only") {
-      if (isList) return denyAccess("'list'/'ls' across sessions is disabled in self-only mode.");
-      if (isMultiTargetSub && targetInfo.targetParent !== null) return denyAccess("'--parent' across sessions is disabled in self-only mode.");
-      if (isMultiTargetSub && (targetInfo.targetIds.length > 1 || targetInfo.targetIds.some((id) => id.toLowerCase() !== "current" && id !== convId))) {
-        return denyAccess(`Cross-session or multi-session transcript ${isExport ? "export" : "health inspection"} is disabled in self-only mode.`);
-      }
-      if (targetInfo.explicitFile && !isContainedInAnyBrainDir(targetInfo.explicitFile, brainDirs, convId, { cwd })) {
-        return denyAccess(`Cross-session '--file' access outside '${convId}' is disabled in self-only mode.`);
-      }
-      if (targetInfo.targetId && targetInfo.targetId.toLowerCase() !== "current" && targetInfo.targetId !== convId) {
-        return denyAccess(`Cross-session inspection of '${targetInfo.targetId}' is disabled in self-only mode (you may only inspect your own session '${convId}').`);
-      }
-      const wasCur = Boolean(targetInfo.targetId && targetInfo.targetId.toLowerCase() === "current");
-      const injectSelfId = !targetInfo.explicitFile && (!targetInfo.targetId || wasCur) && convId && convId !== "global" ? convId : null;
-      return { matched: true, allowed: true, subcommand, mode: "self-only", targetConvId: convId, needsReadGrant: true, injectSelfId, targetWasCurrentPlaceholder: wasCur, seg0Start: seg.start, seg0End: seg.end };
-    }
-
-    let resolvedTarget = targetInfo.targetId || null;
-    const injectParentId = (isMultiTargetSub || isList) && targetInfo.targetParent?.toLowerCase() === "current" && convId && convId !== "global" ? convId : null;
-    if (isMultiTargetSub) {
-      if (targetInfo.targetParent) resolvedTarget = `parent:${injectParentId || targetInfo.targetParent}`;
-      else if (targetInfo.targetIds.length > 1) resolvedTarget = `multi:${[...targetInfo.targetIds].sort().join(",")}`;
-      else if (targetInfo.targetIds.length === 1) resolvedTarget = targetInfo.targetIds[0];
-    }
-    if (targetInfo.explicitFile) {
-      const matchedDir = isContainedInAnyBrainDir(targetInfo.explicitFile, brainDirs, null, { cwd });
-      if (accessEval.ownerId && !accessEval.isOwner && !matchedDir) return denyAccess(`'--file' paths outside ${dirDesc} are disabled while a parent transcript access policy is active.`);
-      if (matchedDir) {
-        const firstSeg = path.relative(tryRealpath(path.resolve(matchedDir)), tryRealpath(resolveHookPath(targetInfo.explicitFile, cwd))).split(path.sep)[0];
-        if (firstSeg && firstSeg !== "." && firstSeg !== "..") resolvedTarget = firstSeg;
-      }
-    }
-    const wasCur = Boolean(targetInfo.targetId && targetInfo.targetId.toLowerCase() === "current");
-    const injectSelfId = !isList && !(isMultiTargetSub && (targetInfo.targetParent || targetInfo.targetIds.length > 1)) && !targetInfo.explicitFile && (!targetInfo.targetId || wasCur) && convId && convId !== "global" ? convId : null;
-    if (injectSelfId) resolvedTarget = convId;
-    return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: true, targetConvId: resolvedTarget, injectSelfId, targetWasCurrentPlaceholder: wasCur, injectParentId, seg0Start: seg.start, seg0End: seg.end };
-  }
-  return { matched: true, allowed: true, subcommand, mode: "open", needsReadGrant: false };
-}
-
-// ============================================================================
 // Prose-Flag Exemptions, Shell Safety Inspection & Blocking Watch Loop Guard
 // ============================================================================
 
@@ -1417,23 +904,27 @@ function collectInspectableTexts(segments, depth = 0) {
   return texts;
 }
 
-function hasNonCanonicalAgyTranscriptInvocation(text, depth = 0) {
-  if (!text || typeof text !== "string" || depth > 4 || !/agy-context(?:-saver)?/i.test(text) || !/\btranscript\b/i.test(text)) return false;
-  if (/\b(?:exec|execSync|execFile|execFileSync|spawn|spawnSync|popen|system|subprocess|child_process)\b/i.test(text) &&
-      /\bagy-context(?:-saver)?(?:\.(?:m?js|cmd|exe|bat))?[\s'",\[\]()]{1,24}transcript\b/i.test(text)) return true;
-  const segs = splitShellSegments(text);
-  if (findAgyContextTranscriptUsage(segs, "", depth)) return true;
-  return segs.some((seg) => (seg.heredocBodies || []).some((hd) => hd && hasNonCanonicalAgyTranscriptInvocation(hd, depth + 1)));
+function areAllSegmentsReadOnlyTranscriptReads(segments) {
+  if (!segments.length) return false;
+  for (const seg of segments) {
+    if (seg.hasWriteRedirect) return false;
+    const tokens = getSegTokens(seg);
+    const starts = collectSegmentCommandStartIndices(tokens);
+    if (!starts.length) return false;
+    for (const startPos of starts) {
+      const cmdIdx = stripLeadingShellPrefixes(tokens, startPos);
+      if (cmdIdx >= tokens.length) return false;
+      const verb = normalizeCmdName(tokens[cmdIdx].value);
+      const rtkRead = verb === "rtk" && ["read", "grep", "ls"].includes(String(tokens[cmdIdx + 1]?.value || ""));
+      if (!isReadOnlyTranscriptVerb(verb) && !rtkRead) return false;
+    }
+  }
+  return true;
 }
 
-function getProtectedShellOperationReason(text, { isRestrictedChild = false } = {}) {
+function getProtectedShellOperationReason(text) {
   if (!text || typeof text !== "string") return null;
   if (isProtectedInternalState(text)) return "internal-state";
-  if (hasNonCanonicalAgyTranscriptInvocation(text)) return "non-canonical-cli";
-  // PT-RUN-001: Only block direct inline import/require/spawn of transcript-core / bin/agy-context for restricted children
-  if (isRestrictedChild && hasInlineTranscriptCoreInvocation(text)) {
-    return "inline-transcript-core";
-  }
   if (
     /(?:^|[\s;|&(])(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)=/i.test(text) ||
     /(?:process\.env|os\.environ)\s*(?:\.\s*(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)\b|\[\s*['"](?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID)['"]\s*\])/i.test(text)
@@ -1442,7 +933,7 @@ function getProtectedShellOperationReason(text, { isRestrictedChild = false } = 
   const touchesStateEnv =
     /(?:^|[\s;|&(])(?:XDG_STATE_HOME|LOCALAPPDATA)=/i.test(text) ||
     /(?:process\.env|os\.environ)\s*(?:\.\s*(?:XDG_STATE_HOME|LOCALAPPDATA)\b|\[\s*['"](?:XDG_STATE_HOME|LOCALAPPDATA)['"]\s*\])/i.test(text);
-  if (touchesStateEnv && (isRestrictedChild || /\bagy-context(?:-saver)?\b|\bexecution-guard\b|\btranscript(?:-access|-core)?\b|\.gemini\b/i.test(text))) {
+  if (touchesStateEnv && /\bagy-context(?:-saver)?\b|\bexecution-guard\b|\.gemini\b/i.test(text)) {
     return "governance-env";
   }
 
@@ -1454,48 +945,8 @@ function getProtectedShellOperationReason(text, { isRestrictedChild = false } = 
 }
 
 function buildProtectedShellReasonMessage(code, convId, ctx) {
-  if (code === "non-canonical-cli") return "Antigravity Execution Governance: 'agy-context transcript' must be invoked as a single unchained command or piped strictly to read-only stdin filters (rg/grep/head/tail/jq/wc; no &&, ;, write redirects, subshells, or '..' traversal). Follow: 'list'/'health --parent|--id u1,u2 --json' -> parallel 'outline'/'query'/'read'/'step --id <uuid> --full' ('--out <path>' if >9 KB raw).";
-  if (code === "inline-transcript-core") return "Antigravity Execution Governance: Direct inline script or interpreter imports of 'transcript-core.mjs' or 'bin/agy-context.mjs' are prohibited. Invoke 'agy-context transcript' (read-only '|' ok; no '&&'/';') directly via run_command instead.";
   if (code === "governance-env") return "Antigravity Execution Governance: Overriding Antigravity governance/state environment variables (AGY_TEST_PROFILE_DIR, AGY_BRAIN_DIR, GEMINI_CONVERSATION_ID, or governance-scoped XDG_STATE_HOME/LOCALAPPDATA) inside shell commands is prohibited.";
   return buildInternalStateShellDenial(convId, ctx);
-}
-
-// 1B.1: Repo-scoped restricted-child lifecycle guard (zero hardcoded `/agy-squad/` regex)
-function isRestrictedLifecycleInvocation(segments, cwd = "", depth = 0) {
-  if (depth > 4) return false;
-  const isOwnLifecycleScript = (tok) => {
-    const clean = cleanFileToken(tok).replace(/\\/g, "/");
-    return /(?:^|\/)(?:install-register\.mjs|install\.sh|install\.ps1)$/i.test(clean) && isInsideAgyContextSaverRepo(resolveHookPath(expandLeadingTilde(clean), cwd));
-  };
-  for (const seg of segments) {
-    if (/\bagy-context(?:-saver)?(?:\.m?js)?\s+(?:--?(?:setup|install|uninstall|restore-backups)|setup|install|uninstall|restore-backups)\b/i.test(String(seg.text || ""))) return true;
-    const tokens = getSegTokens(seg);
-    for (const startPos of collectSegmentCommandStartIndices(tokens)) {
-      const cmdIdx = stripLeadingShellPrefixes(tokens, startPos);
-      if (cmdIdx >= tokens.length) continue;
-      const cmdTok = tokens[cmdIdx].value;
-      const cmd = normalizeCmdName(cmdTok);
-      if (cmd === "npm" || cmd === "pnpm" || cmd === "bun") {
-        let prefixDir = "";
-        let runSub = "";
-        for (let i = cmdIdx + 1; i < tokens.length; i++) {
-          const v = tokens[i].value;
-          if (["--prefix", "-C", "--dir", "--cwd"].includes(v) && tokens[i + 1]) { prefixDir = tokens[++i].value; continue; }
-          if (v.startsWith("--prefix=")) { prefixDir = v.slice(9); continue; }
-          if (v === "run" && tokens[i + 1]) { runSub = tokens[i + 1].value.toLowerCase(); break; }
-        }
-        if ((runSub === "setup" || runSub === "uninstall") && isInsideAgyContextSaverRepo(resolveHookPath(prefixDir || ".", cwd))) return true;
-      }
-      if (isOwnLifecycleScript(cmdTok)) return true;
-      if (["node", "npx", "bun", "bash", "sh", "zsh", "dash", "pwsh", "powershell"].includes(cmd)) {
-        for (let i = cmdIdx + 1; i < tokens.length; i++) if (!tokens[i].value.startsWith("-") && isOwnLifecycleScript(tokens[i].value)) return true;
-      }
-    }
-    const w = extractSimpleWrappedScript(seg.text);
-    if (w?.innerScript && isRestrictedLifecycleInvocation(splitShellSegments(w.innerScript), cwd, depth + 1)) return true;
-    for (const sub of seg.subshells || []) if (isRestrictedLifecycleInvocation(splitShellSegments(sub), cwd, depth + 1)) return true;
-  }
-  return false;
 }
 
 const GH_VALUE_FLAGS = new Set(["-R", "--repo", "-i", "--interval", "-q", "--jq", "-t", "--template", "-H", "--hostname"]);
@@ -1948,30 +1399,12 @@ export async function handleRunCommand(ctx) {
     });
   }
 
-  const agyTranscriptCheck = checkAgyContextTranscriptCommand(segments, convId, ctx);
-  if (agyTranscriptCheck.matched && !agyTranscriptCheck.allowed) {
-    if (agyTranscriptCheck.isAccessDenial) {
-      const { result } = updateSessionState(convId, (session) => {
-        session.transcriptDenials = (session.transcriptDenials || 0) + 1;
-        return {
-          updatePollTime: false,
-          result: session.transcriptDenials >= 5
-            ? { decision: "force_ask", reason: `[CIRCUIT BREAKER ACTIVATED] Autonomous loop suspended: restricted session '${convId}' attempted forbidden 'agy-context transcript' access ${session.transcriptDenials} times. ${agyTranscriptCheck.reason}` }
-            : { decision: "deny", reason: agyTranscriptCheck.reason }
-        };
-      });
-      respond(result);
-    }
-    respond({ decision: "deny", reason: agyTranscriptCheck.reason });
-  }
-
   let isSpillover = false;
   let spilloverTok = null;
   let taskMatch = null;
   let taskState = null;
 
-  if (!agyTranscriptCheck.allowed) {
-    const callerAccess = evaluateCallerTranscriptAccess(convId, ctx);
+  {
     const inspectableTexts = collectInspectableTexts(segments);
     const inspectableCombined = inspectableTexts.join("\n");
     const singleTokens = segments.length === 1 ? getSegTokens(segments[0]).map((t) => t.value) : [];
@@ -1980,10 +1413,6 @@ export async function handleRunCommand(ctx) {
     isSpillover = spilloverTokens.length > 0;
     const taskMatches = extractTaskLogMatches(inspectableCombined, convId, ctx, singleTokens);
     taskMatch = taskMatches[0] || null;
-
-    if (callerAccess.isRestrictedChild && isRestrictedLifecycleInvocation(segments, cwd)) {
-      respond({ decision: "deny", reason: "Antigravity Execution Governance: Restricted child sessions cannot execute plugin lifecycle setup or uninstall commands." });
-    }
 
     if ((isSpillover || taskMatch) && !isSingleUnchainedShellCmd(segments)) {
       const hasRtk = Boolean(resolveCachedHostEnv().rtk);
@@ -2020,18 +1449,9 @@ export async function handleRunCommand(ctx) {
       }
     }
 
-    const protectedReason = getProtectedShellOperationReason(inspectRemainder, { isRestrictedChild: callerAccess.isRestrictedChild });
+    if (areAllSegmentsReadOnlyTranscriptReads(segments)) inspectRemainder = stripTranscriptLogRefs(inspectRemainder);
+    const protectedReason = getProtectedShellOperationReason(inspectRemainder);
     if (protectedReason) respond({ decision: "deny", reason: buildProtectedShellReasonMessage(protectedReason, convId, ctx) });
-  }
-
-  if (agyTranscriptCheck.allowed && (agyTranscriptCheck.needsReadGrant || agyTranscriptCheck.isAccessMutation)) {
-    recordTranscriptHookGrant({
-      callerConvId: convId,
-      subcommand: agyTranscriptCheck.subcommand,
-      targetConvId: agyTranscriptCheck.targetConvId || null,
-      mode: agyTranscriptCheck.mode || "open",
-      isMutation: Boolean(agyTranscriptCheck.isAccessMutation)
-    });
   }
 
   // Narrow High-ROI RTK Pre-Gate (`AGY_RTK_MODE=pregate|off`)
@@ -2051,33 +1471,8 @@ export async function handleRunCommand(ctx) {
     }
   }
 
-  // Self-ID / parent-ID injection for `agy-context transcript` in open & self-only modes (scoped to Segment 0 when piped)
-  if (agyTranscriptCheck.allowed && (agyTranscriptCheck.injectSelfId || agyTranscriptCheck.injectParentId)) {
-    const s0Start = Number.isInteger(agyTranscriptCheck.seg0Start) ? agyTranscriptCheck.seg0Start : 0;
-    const s0End = Number.isInteger(agyTranscriptCheck.seg0End) ? agyTranscriptCheck.seg0End : effectiveCmd.length;
-    let seg0Cmd = effectiveCmd.slice(s0Start, s0End);
-    const appendFlagToSeg0 = (cmdStr, flagStr) => {
-      const m = cmdStr.match(/(\s+2>(?:&1|\s*(?:\/dev\/null|nul)))+\s*$/i);
-      return m ? `${cmdStr.slice(0, m.index).trimEnd()} ${flagStr}${m[0]}` : `${cmdStr.trimEnd()} ${flagStr}`;
-    };
-    if (agyTranscriptCheck.injectSelfId) {
-      if (/(^|\s)--id(?:=|\s+)(["']?)current\2(?=\s|$)/i.test(seg0Cmd)) {
-        seg0Cmd = seg0Cmd.replace(/(^|\s)--id(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--id ${agyTranscriptCheck.injectSelfId}`);
-      } else if (agyTranscriptCheck.targetWasCurrentPlaceholder) {
-        const upd = seg0Cmd.replace(/(^|\s)(["']?)current\2(?=(?:\s|$)(?!.*\s["']?current["']?(?:\s|$)))/i, `$1--id ${agyTranscriptCheck.injectSelfId}`);
-        seg0Cmd = upd !== seg0Cmd ? upd : appendFlagToSeg0(seg0Cmd, `--id ${agyTranscriptCheck.injectSelfId}`);
-      } else {
-        seg0Cmd = appendFlagToSeg0(seg0Cmd, `--id ${agyTranscriptCheck.injectSelfId}`);
-      }
-    }
-    if (agyTranscriptCheck.injectParentId) {
-      seg0Cmd = seg0Cmd.replace(/(^|\s)--parent(?:=|\s+)(["']?)current\2(?=\s|$)/gi, `$1--parent ${agyTranscriptCheck.injectParentId}`);
-    }
-    effectiveCmd = effectiveCmd.slice(0, s0Start) + seg0Cmd + effectiveCmd.slice(s0End);
-  }
-
   // Rewrite bare `agy-context` / `agy-context-saver` to installed shim when off PATH
-  if (agyTranscriptCheck.allowed || (isSingleUnchainedShellCmd(segments) && !isSpillover && !taskMatch)) {
+  if (isSingleUnchainedShellCmd(segments) && !isSpillover && !taskMatch) {
     const bareAgy = effectiveCmd.match(/^(\s*)(agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?)(?=\s|$)/i);
     if (bareAgy && !findExecutableOnPath(normalizeCmdName(bareAgy[2]))) {
       const localAgyCmd = resolveInstalledAgyContextCommand(normalizeCmdName(bareAgy[2]));
@@ -2101,13 +1496,7 @@ export async function handleRunCommand(ctx) {
       respond({ decision: "deny", reason: "Antigravity Execution Governance: Internal step spillovers and task logs must be inspected strictly one file at a time using 'rtk read <path>' with valid read flags (multi-file operands and mixed targets are prohibited)." });
     }
 
-    const callerAccess = evaluateCallerTranscriptAccess(convId, ctx);
-    const isRestricted = Boolean(callerAccess.isRestrictedChild || !callerAccess.allowed || callerAccess.mode === "self-only");
-
     if (isSpillover) {
-      if (isCrossConversationTargetDenied(spilloverTok || parsedEff?.operands?.[0] || "", convId, ctx, callerAccess)) {
-        respond({ decision: "deny", reason: "Antigravity Execution Governance: Cross-conversation inspection of another session's step spillover is prohibited under Parent Transcript Isolation." });
-      }
       if (rtk ? !parsedEff : !isDegradedBoundedRead) {
         respond({
           decision: "deny",
@@ -2119,11 +1508,8 @@ export async function handleRunCommand(ctx) {
     }
 
     if (taskMatch) {
-      if (isCrossConversationTargetDenied(taskMatch.realPath || taskMatch.token || parsedEff?.operands?.[0] || "", convId, ctx, callerAccess)) {
-        respond({ decision: "deny", reason: "Antigravity Execution Governance: Cross-conversation inspection of another session's task log is prohibited under Parent Transcript Isolation." });
-      }
       const allowedTaskRead = rtk
-        ? (taskState === "COMPLETED" ? Boolean(parsedEff) : (!isRestricted && Boolean(parsedRaw && parsedEff)))
+        ? (taskState === "COMPLETED" ? Boolean(parsedEff) : Boolean(parsedRaw && parsedEff))
         : (taskState === "COMPLETED" && isDegradedBoundedRead);
       if (!allowedTaskRead) {
         respond({

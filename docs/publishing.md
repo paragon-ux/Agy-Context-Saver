@@ -48,25 +48,24 @@ Run all four stages before tagging a release:
 node scripts/release-preflight.mjs
 node scripts/install-register.mjs --check
 ```
-`scripts/release-preflight.mjs` checks `package.json` metadata, `plugin.json` and `hooks.json` validity, `lib/transcript-core.mjs`, `bin/agy-context.mjs`, and modular `lib/` + `scripts/hook/` runtime entrypoints, absence of legacy root `mcp/` or `mcp_config.json`, `docs/publishing.md` test suite count parity (12 suites), `SECURITY.md`/`CONTRIBUTING.md`/`CODE_OF_CONDUCT.md` presence, `MIN_RTK_VERSION >= 1.1.0`, and zero runtime npm dependencies. `node scripts/install-register.mjs --check` validates RTK `>= 1.1.0` and user config syntax without writing to disk.
+`scripts/release-preflight.mjs` checks `package.json` metadata, `plugin.json` and `hooks.json` validity, `bin/agy-context.mjs`, and modular `lib/` + `scripts/hook/` runtime entrypoints, absence of legacy root `mcp/` or `mcp_config.json`, `docs/publishing.md` test suite count parity (12 suites), `SECURITY.md`/`CONTRIBUTING.md`/`CODE_OF_CONDUCT.md` presence, `MIN_RTK_VERSION >= 1.1.0`, and zero runtime npm dependencies. `node scripts/install-register.mjs --check` validates RTK `>= 1.1.0` and user config syntax without writing to disk.
 
 ### Stage 2: Automated test matrix
 ```bash
 npm test
 ```
-Runs all 12 test suites in isolated temporary profiles:
-1. Hook governance, RTK `>= 1.1.0` delegation, `agy-context transcript` pass-through, `self-only` `--id <convId>` injection, and transcript access hardening (`tests/test-hook.mjs`)
-2. Streaming transcript core, CLI aliases, step range slicing, and single-use capability grants (`tests/test-transcript.mjs`)
-3. Live host RTK `>= 1.1.0` integration contract and `agy-context transcript` pass-through (`tests/test-rtk-integration.mjs`)
-4. Output spillover and completed task log lifecycle gating (`tests/test-output-governance.mjs`)
-5. End-to-end edge cases and fail-closed probes (`tests/test-e2e-probes.mjs`)
-6. Performance, streaming, and file-descriptor cleanup probes (`tests/test-performance-probes.mjs`)
-7. Installed system verification (`tests/test-installed-verification.mjs`)
-8. Lifecycle installation, stale MCP cleanup, and backup rollback (`tests/test-lifecycle-rollback.mjs`)
-9. Check-only read-only isolation regression check (`tests/test-check-only-readonly.mjs`)
-10. Malformed config preservation fail-closed check (`tests/test-malformed-config-preservation.mjs`)
-11. RTK ledger fresh-install verification (`tests/test-rtk-ledger-fresh-install.mjs`)
-12. Package whitelist and tarball verification self-test (`tests/verify-package.mjs`)
+Runs all 11 test suites in isolated temporary profiles:
+1. Hook governance, RTK `>= 1.1.0` delegation, and native read and write guards (`tests/test-hook.mjs`)
+2. Live host RTK `>= 1.1.0` integration contract (`tests/test-rtk-integration.mjs`)
+3. Output spillover and completed task log lifecycle gating (`tests/test-output-governance.mjs`)
+4. End-to-end edge cases and fail-closed probes (`tests/test-e2e-probes.mjs`)
+5. Performance, streaming, and file-descriptor cleanup probes (`tests/test-performance-probes.mjs`)
+6. Installed system verification (`tests/test-installed-verification.mjs`)
+7. Lifecycle installation, stale MCP cleanup, and backup rollback (`tests/test-lifecycle-rollback.mjs`)
+8. Check-only read-only isolation regression check (`tests/test-check-only-readonly.mjs`)
+9. Malformed config preservation fail-closed check (`tests/test-malformed-config-preservation.mjs`)
+10. RTK ledger fresh-install verification (`tests/test-rtk-ledger-fresh-install.mjs`)
+11. Package whitelist and tarball verification self-test (`tests/verify-package.mjs`)
 
 ### Stage 3: Tarball & package manifest verification
 ```bash
@@ -87,7 +86,7 @@ Validates Markdown links, navigation entries, and SVG assets.
 Pushing a `v*` tag triggers `.github/workflows/release-tag.yml`, which runs the verification matrix across Linux, macOS, and Windows (Node 22 and 24), creates the GitHub Release, and publishes to npm via OIDC Trusted Publishing (`npm publish --access public --provenance`):
 
 ```bash
-git commit -m "chore(release): v2.2.1"
-git tag -a v2.2.1 -m "Release v2.2.1"
+git commit -m "chore(release): v2.3.0"
+git tag -a v2.3.0 -m "Release v2.3.0"
 git push origin main --follow-tags
 ```

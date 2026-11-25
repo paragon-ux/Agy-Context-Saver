@@ -1,7 +1,7 @@
 [project]
 site_url = "https://paragon-ux.github.io/Agy-Context-Saver/"
 site_name = "Agy-Context-Saver Documentation"
-site_description = "Save tokens and prevent context bloat in Google Antigravity with RTK shell compression, bounded file reads, and fast CLI transcript search."
+site_description = "Save tokens and prevent context bloat in Google Antigravity with RTK shell compression, bounded file reads, and a read-only session health check."
 site_author = "paragon-ux"
 copyright = "Copyright &copy; 2026 paragon-ux. Released under the MIT License."
 
@@ -16,7 +16,6 @@ nav = [
   { "Overview" = "index.md" },
   { "Installation & Setup" = "installation.md" },
   { "CLI & Hook Reference" = "tools.md" },
-  { "Transcript CLI" = "transcript-cli.md" },
   { "Lifecycle Governance" = "governance.md" },
   { "Architecture & Internals" = "architecture.md" },
   { "Installer Hardening" = "INSTALLER-HARDENING.md" },
