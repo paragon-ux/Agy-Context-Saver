@@ -8,17 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.3.0] - 2026-11-25
 
 ### Removed
-- **Breaking: the transcript CLI is gone.** `agy-context transcript read`, `query`, `step`, `export`, `list`, and `access` no longer exist, along with their aliases (`grep`, `search`, `find`, `tools`, `outline`, `summary`, `ls`, `dump`, `policy`). Scripts and prompts that call them will fail. Read `transcript.jsonl` with `read_file` and `grep_search` instead.
-- **Breaking: transcript access policies are gone.** Parents can no longer allow, deny, or limit what child subagents and `/swarm` workers read. Per-session grants, the `[agy-transcript-access: ...]` first-line directives, the `self-only` and `deny` modes, and the parent allowlist no longer do anything. `agy-context status` no longer prints an access policy line.
-- The hook rule that blocked `read_file`, `grep_search`, and `run_command` on `.system_generated/` transcripts is removed.
-- The `transcript-core` and `access-policy` libraries, the Transcript CLI guide, and its two diagrams are removed from the package and the docs site.
+- **Breaking: the transcript read, query, step, export, and list subcommands are gone.** `agy-context transcript read`, `query`, `step`, `export`, and `list`, plus their aliases, no longer exist. Scripts and prompts that call them will fail. Read `transcript.jsonl` with `read_file` and `grep_search` instead.
+- **Breaking: the old transcript access model is gone.** Allowlists, TTLs, per-session grants, the `[agy-transcript-access: ...]` launch directives, and the CLI flag policing no longer do anything. Existing directives and allowlists are ignored. The `transcript-core` library and the old access-policy library are removed from the package.
+- The hook rule that blocked native `read_file`, `grep_search`, and shell reads of `.system_generated/` transcripts is removed.
+- Hook blocking of `setup`, `uninstall`, and other lifecycle commands for child sessions, and inline script scanning, are removed.
 
 ### Changed
-- Native reads of `transcript.jsonl` work again. Writes and deletes under `.system_generated/logs` stay protected.
-- Docs, rules, skills, and diagrams now describe only the features that remain.
+- Native reads of `transcript.jsonl` and `transcript_full.jsonl` work again in the default `open` mode. Writes and deletes under `.system_generated/logs` are denied in every mode.
+- One simple parent-set policy replaces the old access model. The session that sets it owns it, and it applies to the sessions that session launched.
+- Top-level sessions (not a child, not under a restrictive policy) get a confirmation prompt for `mcp_config.json` and `config.json` edits. Child sessions are denied. `AGY_DISABLE_BENCHMARK_GUARD=1` applies only to unrestricted sessions.
+- `agy-context status` prints no access-policy line.
+- The package now includes `lib/transcript-health.mjs`, `lib/transcript-policy.mjs`, and `scripts/hook/transcript-guard.mjs`, and the test matrix has a new transcript guard suite.
+
+### Added
+- `agy-context transcript access [status | set <open|self-only|deny>]`.
+- `open` (default): children read transcripts natively with bounded `read_file` slices, `grep_search`, or read-only shell commands.
+- `self-only`: a child reads only its own transcript. Sibling, parent, glob, and symlink paths are denied, and `transcript health` with `--id` or `--parent` is denied.
+- `deny`: children read no transcripts.
+- Enforcement by the `PreToolUse` hook (`scripts/hook/transcript-guard.mjs`) across file tools and shell commands, using real paths so symlinks cannot bypass it. Callers that cannot be identified fall back to `self-only` while a restrictive policy exists. The policy is stored in `transcript-policy.json` in the plugin state directory, written only by the CLI.
 
 ### Kept
-- `agy-context transcript health` (aliases `stats`, `info`) still reports turns, steps, raw size, and polling events per session. It is read-only, takes `--id`, `--parent`, and `--json`, and has no access policy.
+- `agy-context transcript health` (aliases `stats`, `info`) reports turns, steps, raw size, and polling events per session. It is read-only and takes `--id`, `--parent`, and `--json`.
 - `status`, `setup`, `uninstall`, and `restore-backups` work as before.
 - RTK pre-gate rewrites, bounded `read_file` limits, and background-task polling backoff are unchanged.
 

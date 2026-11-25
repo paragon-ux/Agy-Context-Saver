@@ -9,6 +9,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { getStateDir } from "../state-dir.mjs";
+import { getEffectiveMode, isTopLevelUnrestricted } from "../../lib/transcript-policy.mjs";
 import {
   getProfileHomeDir,
   getBrainDirs,
@@ -253,7 +254,7 @@ export function isProtectedInternalState(targetPath) {
     /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]?)?$/i.test(targetPath) ||
     isProtectedBrainSubpathShared(targetPath) ||
     /\.gemini[\/\\]+antigravity(?:-cli|-ide)?[\/\\]+brain[\/\\]+(?:[^\/\\\s'"]+[\/\\]+)?(?:\.(?!agents(?:$|[\/\\]))|[*?\[])/i.test(targetPath) ||
-    /\b(?:agy-session-governance-state|agy-rtk-rewrite-cache)\.json\b/i.test(targetPath) ||
+    /\b(?:transcript-policy|agy-session-governance-state|agy-rtk-rewrite-cache)\.json\b/i.test(targetPath) ||
     /\bagy-session-[a-zA-Z0-9_-]+\.json\b/i.test(targetPath) ||
     /[\/\\](?:\.local[\/\\]+state|AppData[\/\\]+Local)[\/\\]+agy-context-saver(?:$|[\/\\'"`\s])/i.test(targetPath)
   ) return true;
@@ -291,6 +292,7 @@ const USER_EDITABLE_GEMINI_CONFIG_RE =
 // Top-level unrestricted sessions may edit non-symlink mcp_config.json / config.json via force_ask; hooks.json and all child sessions stay hard-deny
 export function isUserEditableGeminiConfigPath(rawPath, convId = "global", ctx = {}) {
   if (!rawPath || typeof rawPath !== "string") return false;
+  if (!isTopLevelUnrestricted(convId)) return false;
   const cwd = ctx?.cwd || "";
   const resolved = resolveHookPath(expandLeadingTilde(cleanFileToken(rawPath)), cwd);
   if (!resolved) return false;
@@ -318,7 +320,7 @@ export function isProtectedBenchmarkFilePath(rawPath, cwd = "") {
 
 export function isBenchmarkGuardDisabled(convId = "global", ctx = {}) {
   const raw = String(process.env.AGY_DISABLE_BENCHMARK_GUARD || "").trim().toLowerCase();
-  return (raw === "1" || raw === "true");
+  return (raw === "1" || raw === "true") && !getEffectiveMode(convId).restricted;
 }
 
 // --- Spillover & Task Log Resolution / State Inspection ---

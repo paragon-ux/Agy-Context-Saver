@@ -15,7 +15,7 @@
     "status": "node scripts/install-register.mjs --status",
     "preflight": "node scripts/release-preflight.mjs",
     "verify:package": "node tests/verify-package.mjs --self-test && npm pack --dry-run --json | node tests/verify-package.mjs -",
-    "test": "node tests/test-hook.mjs && node tests/test-rtk-integration.mjs && node tests/test-output-governance.mjs && node tests/test-e2e-probes.mjs && node tests/test-performance-probes.mjs && node tests/test-installed-verification.mjs && node tests/test-lifecycle-rollback.mjs && node tests/test-check-only-readonly.mjs && node tests/test-malformed-config-preservation.mjs && node tests/test-rtk-ledger-fresh-install.mjs && node tests/verify-package.mjs --self-test"
+    "test": "node tests/test-hook.mjs && node tests/test-transcript-guard.mjs && node tests/test-rtk-integration.mjs && node tests/test-output-governance.mjs && node tests/test-e2e-probes.mjs && node tests/test-performance-probes.mjs && node tests/test-installed-verification.mjs && node tests/test-lifecycle-rollback.mjs && node tests/test-check-only-readonly.mjs && node tests/test-malformed-config-preservation.mjs && node tests/test-rtk-ledger-fresh-install.mjs && node tests/verify-package.mjs --self-test"
   },
   "repository": {
     "type": "git",

@@ -32,7 +32,7 @@ Agy-Context-Saver layers a lightweight pre-tool hook on top of Google Antigravit
 
 ## Session health
 
-`agy-context transcript health` is a read-only check that reports turns, steps, raw transcript size, and background-polling events for one or more sessions. Antigravity transcript files can be read natively with `read_file` and `grep_search`; Agy-Context-Saver does not intercept those reads.
+`agy-context transcript health` is a read-only check that reports turns, steps, raw transcript size, and background-polling events for one or more sessions. By default, Antigravity transcript files can be read natively with `read_file` and `grep_search`. A parent session can run `agy-context transcript access set self-only` or `deny` so the subagents and `/swarm` workers it launches can read only their own transcript or none. This is a simple guardrail, not a sandbox.
 
 ## Documentation
 

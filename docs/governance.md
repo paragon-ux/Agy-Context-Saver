@@ -11,7 +11,7 @@ The single global `PreToolUse` hook (`agy-context-saver`, registered in `~/.gemi
 ### Layer 1: Reactive Lifecycle & Polling Backoff
 
 #### 1. Pure Yield Default, Per-Task Exponential Backoff & Opt-In Watchdogs
-Instead of polling `manage_task(Action='status')` in loops or firing intermediate timers on routine local builds, agents default to **Pure Yield**—ending their turn immediately (no `schedule` timer, no Pre-Yield Status Card) and letting **Reactive Wakeup** (`<SYSTEM_MESSAGE>`) resume execution once on process exit. Diagnostic status checks and opt-in conditioned stall watchdogs are tracked per task (`session.taskBackoff[taskKey]`, automatically pruned when `getTaskState()` reports `COMPLETED` or past TTL, with flat `session.pollCount` kept only as a fallback for unkeyed calls) along an exponential cooldown curve:
+Instead of polling `manage_task(Action='status')` in loops or firing intermediate timers on routine local builds, agents default to **Pure Yield** and end their turn immediately (no `schedule` timer, no Pre-Yield Status Card) and letting **Reactive Wakeup** (`<SYSTEM_MESSAGE>`) resume execution once on process exit. Diagnostic status checks and opt-in conditioned stall watchdogs are tracked per task (`session.taskBackoff[taskKey]`, automatically pruned when `getTaskState()` reports `COMPLETED` or past TTL, with flat `session.pollCount` kept only as a fallback for unkeyed calls) along an exponential cooldown curve:
 
 $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5^{\max(0, \text{pollCount} - 1)}\right)\right)$$
 
@@ -40,23 +40,47 @@ $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5
 1. **Narrow High-ROI RTK Pre-Gate:** `run_command` segments delegate to `rtk hook antigravity` only for noisy test, build, lint, container, and `git status`/`push`/`pull`/`fetch` runners (plus `npm`/`pnpm` `lint` & `run lint`, `pnpm install`/`outdated`/`tsc`/`list`, `bun test`/`build`/`install`/`add`, and scoped internal spillover/completed task-log `cat`/`head`/`tail` reads), configurable via `AGY_RTK_MODE=pregate|off` (default `pregate`; `2>&1` and `2>/dev/null` stderr redirects pass through). Precision inspection commands (`find`, `grep`, `rg`, `ls`, `wc`, `diff`, `ps`, `git diff`/`show`/`log`, workspace `cat`/`head`/`tail`), generic `npm`/`pnpm`/`bun` `run` scripts, pipes, stdout/file redirects, machine-readable flags (`--json`, `--porcelain`, `git status -sb`, `-o json`, etc.), any explicit `--reporter`/`--reporters` flag on `vitest`/`jest`, global-`PATH`-shadowed `npx`/`bunx`/`pnpm tsc` local binaries, and `vitest >= 5` projects on RTK `< 1.2.0` (`1.1.0`) run natively and losslessly without spawning `rtk`.
 2. **Workspace file bounds & native discovery:** Native `grep_search`, `find_by_name`, and `list_dir` are allowed on workspace paths (while remaining blocked on `getStateDir()` and protected brain roots). For `read_file` / `view_file`: files `<= 800` lines and `<= 45 KiB`, safe workspace multimodal media (`.png`, `.jpg`, `.webp`, `.pdf`, audio/video), and Antigravity special files (`SKILL.md`, `AGENTS.md`, own brain artifacts, own `.system_generated/swarm/plan.json`, `swarm_view/`, `.gemini/config/`) pass without slice bounds; larger files (`> 800` lines or `> 45 KiB`) deny omitted bounds and accept explicit `StartLine`/`EndLine` slices up to `800` lines (EOF-clamped via `1 MiB` newline scan, single-bound supported). `read_many_files` and `ByteOffset`-only reads remain denied. The Swarm UI Overview allowlist (`<ownBrainDir>/.system_generated/swarm/plan.json`) applies strictly to single-file `read_file`/`view_file`/`write_file`/`edit_file` on the active session's own non-symlink path (symlinks, sibling sessions, other `.system_generated/` files, `ByteOffset`-only reads, `read_many_files`, and discovery tools stay denied).
 3. **Step output spillovers:** `.system_generated/steps/<step>/output.txt` files are readable via bounded `read_file(StartLine, EndLine <= 150)` or a single unchained `rtk read <path>` command (`cat`, and single unquoted forward-slash `head -n <N>` / `tail -n <N>` auto-rewrite via `rtk`; explicit `--head-lines 150` / `--tail-lines 150` required above `45 KiB`).
-4. **Transcript write protection, brain subdirs & state protection:** Writes and deletes to `.system_generated/logs/transcript*` and direct file or shell access (including via `multi_replace_file_content` or symlinks) to `getStateDir()` (`~/.local/state/agy-context-saver` on POSIX or `%LOCALAPPDATA%\agy-context-saver` on Windows) are blocked, while native reads of `transcript.jsonl` work. Inside a conversation's brain directory (`<brainDir>/<convId>/`), user-owned `scratch/`, `browser_sandbox/`, and `swarm_view/` subtrees allow nested `logs/`, `tasks/`, and `steps/` paths (while `..` traversal, `$`, dotfiles, and `.system_generated/` writes remain denied), and direct shell artifact operations allow safe extensions (`.md`, `.txt`, `.json`, `.csv`, `.tsv`, `.yaml`, `.yml`, `.xml`, `.zip`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.html`, `.css`, `.webp`, `.bmp`, `.ico`, `.pdf`, `.mp3`, `.wav`, `.mp4`, `.webm`, `.mov`) while keeping `.jsonl`, `.log`, dotfiles, and bare brain directories denied.
+4. **Transcript write protection, brain subdirs & state protection:** Writes and deletes to `.system_generated/logs/transcript*` and direct file or shell access (including via `multi_replace_file_content` or symlinks) to `getStateDir()` (`~/.local/state/agy-context-saver` on POSIX or `%LOCALAPPDATA%\agy-context-saver` on Windows) are blocked, while native reads of `transcript.jsonl` follow the transcript mode below. Inside a conversation's brain directory (`<brainDir>/<convId>/`), user-owned `scratch/`, `browser_sandbox/`, and `swarm_view/` subtrees allow nested `logs/`, `tasks/`, and `steps/` paths (while `..` traversal, `$`, dotfiles, and `.system_generated/` writes remain denied), and direct shell artifact operations allow safe extensions (`.md`, `.txt`, `.json`, `.csv`, `.tsv`, `.yaml`, `.yml`, `.xml`, `.zip`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.html`, `.css`, `.webp`, `.bmp`, `.ico`, `.pdf`, `.mp3`, `.wav`, `.mp4`, `.webm`, `.mov`) while keeping `.jsonl`, `.log`, dotfiles, and bare brain directories denied.
 
 ---
 
 ### Layer 3: Synchronous Execution & Benchmark Integrity
 
 1. **10s synchronous window:** On non-daemon `run_command` calls where `WaitMsBeforeAsync` is omitted, the hook sets `WaitMsBeforeAsync` to `10,000ms` while preserving explicit caller timeouts.
-2. **Benchmark file protection:** Edits or writes targeting `benchmarks/`, `evaluation/`, `evaluators/`, `scoring/`, `ground_truth/`, or `prompt_templates/` require `force_ask` user confirmation by default to prevent evaluation contamination. For normal application repositories that contain source directories with those names, set `AGY_DISABLE_BENCHMARK_GUARD=1` in your shell or IDE environment to disable this prompt for top-level non-restricted sessions (restricted child sessions keep benchmark protection active).
+2. **Benchmark file protection:** Edits or writes targeting `benchmarks/`, `evaluation/`, `evaluators/`, `scoring/`, `ground_truth/`, or `prompt_templates/` require `force_ask` user confirmation by default to prevent evaluation contamination. For normal application repositories that contain source directories with those names, set `AGY_DISABLE_BENCHMARK_GUARD=1` in your shell or IDE environment to disable this prompt for unrestricted sessions (child sessions under a restrictive transcript policy keep benchmark protection active).
 
 ---
 
 ## Configuration and State Protection
 
-- **Native transcript reads work:** `read_file` and `grep_search` can read `transcript.jsonl` directly, and `agy-context transcript health` reports session metrics. The hook no longer restricts transcript reads.
-- **Protected state:** Writes and deletes under `.system_generated/logs` and direct file or shell access to `getStateDir()` stay blocked.
-- **Configuration edits:** Non-symlink edits to `~/.gemini/{config,antigravity*}/{mcp_config.json,config.json}` via native file edits or non-destructive shell edits prompt via `force_ask` (supporting `/plugin`, `/migrate-agent-settings`, and MCP setup). Global `~/.gemini/config/hooks.json`, `*.bak` backups, `~/.gemini/config/plugins/agy-context-saver/`, symlinks, and destructive shell verbs (`rm`, `mv`, `ln`, `truncate`, `shred`, `dd`, `chmod`, `chown`, `find`) remain hard-`deny`.
+- **Protected state:** Writes and deletes under `.system_generated/logs` are denied in every transcript mode. Direct file or shell access to `getStateDir()` stays blocked.
+- **Configuration edits:** Top-level sessions (not a child, not under a restrictive transcript policy) get a confirmation prompt (`force_ask`) for non-symlink edits to `~/.gemini/{config,antigravity*}/{mcp_config.json,config.json}`, via native file edits or non-destructive shell edits (supporting `/plugin`, `/migrate-agent-settings`, and MCP setup). Child sessions are hard-denied from those edits. Global `~/.gemini/config/hooks.json`, `*.bak` backups, `~/.gemini/config/plugins/agy-context-saver/` (plugin and hook source), symlinks, and destructive shell verbs (`rm`, `mv`, `ln`, `truncate`, `shred`, `dd`, `chmod`, `chown`, `find`) are hard-denied for everyone.
 - **Scope:** These controls are application-layer `PreToolUse` guardrails, not an OS-kernel sandbox.
+
+---
+
+## Transcript Isolation
+
+A parent session can limit which transcripts the sessions it launches may read. The default is `open`, so nothing changes until a parent opts in.
+
+```bash
+agy-context transcript access            # show the current policy
+agy-context transcript access set self-only
+```
+
+| Mode | What a child session may read | Notes |
+| :--- | :--- | :--- |
+| **`open`** (default) | Any `transcript.jsonl` or `transcript_full.jsonl`, using bounded `read_file` slices, `grep_search`, or read-only shell commands such as `head`, `tail`, `rg`, `grep`, `jq`, and `wc`. | The hook skips the transcript check when no restrictive policy exists, so it costs nothing. |
+| **`self-only`** | Only its own transcript. | Sibling, parent, glob, and symlink paths are denied. `agy-context transcript health` with `--id` or `--parent` is denied. |
+| **`deny`** | No transcripts. | Child sessions cannot read any transcript file. |
+
+How it works:
+
+- **Parent-set:** The session that runs `set` becomes the owner. The policy applies to the sessions it launched (its descendants, found from the sender id in each child's first system message). The nearest ancestor's policy wins. The setting never restricts the session that set it.
+- **Hook-enforced:** `scripts/hook/transcript-guard.mjs` checks `read_file`, `view_file`, `read_many_files`, `grep_search`, `find_by_name`, `list_dir`, and `run_command`. It resolves real paths, so symlinks cannot bypass it.
+- **Fail-closed:** While any restrictive policy exists, a caller that cannot be identified is treated as `self-only`.
+- **Tamper-resistant storage:** The policy lives in one small file, `transcript-policy.json`, in the plugin state directory (`{"version":1,"policies":{"<ownerConvId>":{"mode":"..."}}}`). Only the CLI writes it, and the hook denies native and shell writes to it.
+- **Scope:** This is application-layer defense in depth, not a sandbox. It does not stop a determined process outside the hook from reading files on disk.
 
 ---
 

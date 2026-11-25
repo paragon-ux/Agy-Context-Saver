@@ -7,7 +7,9 @@
  */
 
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
+import { getStateDir } from "./state-dir.mjs";
 
 const INSPECTION_TOOLS = new Set(["read_file", "view_file", "read_many_files", "grep_search", "find_by_name", "list_dir"]);
 const MUTATION_TOOLS = new Set(["write_file", "write_to_file", "edit_file", "replace_file_content", "multi_replace_file_content"]);
@@ -51,6 +53,12 @@ try {
     cwd: typeof rawCwd === "string" ? rawCwd.trim() : "",
     transcriptPath: typeof payload.transcriptPath === "string" ? payload.transcriptPath.trim() : ""
   };
+
+  // Transcript isolation only applies once a parent has set a policy; skip the import otherwise.
+  if ((toolName === "run_command" || INSPECTION_TOOLS.has(toolName)) && fs.existsSync(path.join(getStateDir(), "transcript-policy.json"))) {
+    const { handleTranscriptGuard } = await import("./hook/transcript-guard.mjs");
+    handleTranscriptGuard(ctx);
+  }
 
   if (toolName === "run_command") {
     const { handleRunCommand } = await import("./hook/shell-guard.mjs");

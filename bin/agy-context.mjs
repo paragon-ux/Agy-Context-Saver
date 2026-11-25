@@ -3,13 +3,14 @@
 /**
  * Agy-Context-Saver CLI (v2.3.0)
  *
- * Lifecycle commands (status, setup, uninstall, restore-backups) plus a read-only
- * `transcript health` report.
+ * Lifecycle commands (status, setup, uninstall, restore-backups), a read-only
+ * `transcript health` report, and `transcript access` for child transcript isolation.
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readPolicies, setPolicy } from "../lib/transcript-policy.mjs";
 import { checkTranscriptHealth, formatTranscriptHealth } from "../lib/transcript-health.mjs";
 import {
   assertSupportedNodeVersion,
@@ -46,6 +47,7 @@ Usage:
 
 Diagnostics:
   transcript health            Report turns, steps, raw size, and polling events (aliases: stats, info)
+  transcript access            Show or set child transcript access: open, self-only, deny
 
 Lifecycle Commands:
   status [--json]              Audit plugin link, hook, CLI shims, and RTK
@@ -68,10 +70,25 @@ const HELP_ALIASES = { stats: "health", info: "health", install: "setup" };
 const SUBCOMMAND_HELP = {
   transcript: {
     title: "transcript",
-    usage: "agy-context transcript health [options]",
+    usage: "agy-context transcript <health|access> [options]",
     section: "Subcommands:",
-    body: ["  health               Report turns, steps, raw size, and polling events (aliases: stats, info)"],
+    body: [
+      "  health               Report turns, steps, raw size, and polling events (aliases: stats, info)",
+      "  access               Show or set child transcript access: open, self-only, deny"
+    ],
     examples: ["agy-context transcript health", "agy-context transcript health --parent current --json"]
+  },
+  access: {
+    title: "transcript access",
+    usage: "agy-context transcript access [status | set <open|self-only|deny>]",
+    section: "Modes:",
+    body: [
+      "  open        Child sessions may read transcripts (default)",
+      "  self-only   Child sessions may read only their own transcript",
+      "  deny        Child sessions may not read any transcript",
+      "  Applies to sessions launched by the session that runs 'set'. Enforced by the hook."
+    ],
+    examples: ["agy-context transcript access set self-only", "agy-context transcript access status"]
   },
   health: {
     title: "transcript health (aliases: stats, info)",
@@ -219,8 +236,20 @@ async function handleTranscriptCommand(argv) {
     printSubcommandHelp("transcript");
     process.exit(0);
   }
+  if (sub === "access") {
+    const [verb = "status", mode, ...extra] = argv.slice(1);
+    if (verb === "--help" || verb === "-h") { printSubcommandHelp("access"); process.exit(0); }
+    if (extra.length || (verb === "status" && mode) || !["status", "set"].includes(verb)) {
+      throw new Error("Usage: agy-context transcript access [status | set <open|self-only|deny>]");
+    }
+    const owner = (process.env.GEMINI_CONVERSATION_ID || "").trim();
+    const policies = verb === "set" ? setPolicy(owner, mode) : readPolicies();
+    const mine = policies[owner]?.mode || "open";
+    console.log(verb === "set" ? `Transcript access for sessions launched by ${owner}: ${mine}` : `Transcript access for sessions launched by ${owner || "(unknown session)"}: ${mine}\nActive policies: ${Object.keys(policies).length}`);
+    return;
+  }
   if ((HELP_ALIASES[sub] || sub) !== "health") {
-    throw new Error(`Unknown transcript subcommand '${sub}'. Only 'health' is available (aliases: stats, info).`);
+    throw new Error(`Unknown transcript subcommand '${sub}'. Expected health or access.`);
   }
   const { opts, positional } = parseFlags(argv.slice(1), { booleans: ["json"], values: ["parent"], multiValues: ["id"] });
   if (opts.help) {

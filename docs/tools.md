@@ -2,7 +2,7 @@
 
 `Agy-Context-Saver` (`v2.3.0`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the single global `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs` routing dynamically to `scripts/hook/{file,shell,task}-guard.mjs`), paired with **RTK (`>= 1.1.0`)** via the Narrow High-ROI Pre-Gate (`AGY_RTK_MODE=pregate|off`, default `pregate`).
 
-Native `read_file` and `grep_search` read Antigravity's `transcript.jsonl` files directly. `agy-context transcript health` is the only transcript command; it is read-only.
+Native `read_file` and `grep_search` read Antigravity's `transcript.jsonl` files directly when the transcript mode is `open` (the default). The transcript commands are `agy-context transcript health` (read-only metrics) and `agy-context transcript access` (a parent-set read policy for the sessions it launches).
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
@@ -23,7 +23,7 @@ Native `grep_search`, `find_by_name`, and `list_dir` run directly on workspace p
 ## 1. `agy-context transcript health`
 
 - **Aliases:** `stats`, `info`
-- **Usage:** `agy-context transcript health [<id[,id...]>] [--id <uuid[,uuid...]>] [--parent <uuid|current>] [--file <path>] [--json]`
+- **Usage:** `agy-context transcript health [<id[,id...]>] [--id <uuid[,uuid...]>] [--parent <uuid|current>] [--json]`
 
 Streams `transcript.jsonl` to report step counts, user turns, tool call counts, transcript byte size, per-task and direct-subagent backoff-aware busy-polling events (`>= 30s` per task and `>= 180s` per conditioned direct subagent stall watchdog, while flagging `/swarm` one-shot polls and unconditioned loops), and local RTK status. Passing multiple `--id` values (comma-separated, repeatable, or positional) or `--parent <uuid|current>` emits a combined cohort health table (or structured `sessions[]` + `totals` JSON) in a single call.
 
@@ -31,7 +31,6 @@ Streams `transcript.jsonl` to report step counts, user turns, tool call counts, 
 | :--- | :---: | :---: | :--- |
 | `[<id[,id...]>]` / `--id` | `<uuid[,uuid...]>` | No* | One or more conversation UUIDs (positional, comma-separated, or repeatable `--id`). (*Omit to check the current session.) |
 | `--parent` | `<uuid \| current>` | No | Audit health across all child sessions belonging to `<uuid>` in one call. |
-| `--file` | `<path>` | No | Explicit path to `transcript.jsonl` inside Antigravity's brain roots (`antigravity`, `antigravity-cli`, `antigravity-ide`). |
 | `--json` | `(none)` | No | Output JSON instead of Markdown. |
 
 ```bash
@@ -49,7 +48,29 @@ agy-context transcript health --id <uuid1>,<uuid2> --json
 
 ---
 
-## 2. `agy-context status`, `setup`, `uninstall` & `restore-backups`
+## 2. `agy-context transcript access`
+
+- **Usage:** `agy-context transcript access [status | set <open|self-only|deny>]`
+
+Shows or sets which transcripts the sessions you launch may read. The session that runs `set` becomes the owner, and the policy applies to its descendants only (the nearest ancestor policy wins). It never restricts the owner. The hook enforces it, and only this command writes `transcript-policy.json` in the plugin state directory.
+
+| Mode | Child session access |
+| :--- | :--- |
+| `open` (default) | Reads `transcript.jsonl` and `transcript_full.jsonl` natively, with bounded `read_file` slices, `grep_search`, or read-only shell commands. |
+| `self-only` | Reads only its own transcript. `transcript health` with `--id` or `--parent` is denied. |
+| `deny` | Reads no transcripts. |
+
+```bash
+agy-context transcript access
+agy-context transcript access set self-only
+agy-context transcript access set open
+```
+
+See [Transcript Isolation](governance.md#transcript-isolation) for how enforcement works.
+
+---
+
+## 3. `agy-context status, `setup`, `uninstall` & `restore-backups`
 
 Audits, synchronizes, removes, or restores validated non-clobbering backups for the plugin link, single global `PreToolUse` hook, CLI shims, RTK configuration, and stale MCP entries (reload Antigravity Desktop IDE or start a new session after `setup` or `uninstall` so hook registrations activate or clear from memory cleanly):
 

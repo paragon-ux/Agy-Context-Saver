@@ -361,13 +361,13 @@ console.log("\n--- Group D: Quote/Heredoc Shell Parser & agy-context CLI Exempti
   const outCliQuery = runHook({
     toolCall: {
       name: "run_command",
-      args: { CommandLine: `agy-context transcript query --id fcda194f-62d6-46aa-b545-b2de8fa5774e --query ".system_generated" --summary`, WaitMsBeforeAsync: 5000 }
+      args: { CommandLine: `agy-context transcript health --id fcda194f-62d6-46aa-b545-b2de8fa5774e`, WaitMsBeforeAsync: 5000 }
     }
   });
   const outCliFileOk = runHook({
     toolCall: {
       name: "run_command",
-      args: { CommandLine: `agy-context transcript read --file "${validBrainTranscript}"`, WaitMsBeforeAsync: 5000 }
+      args: { CommandLine: `agy-context transcript health --id fcda194f-62d6-46aa-b545-b2de8fa5774e`, WaitMsBeforeAsync: 5000 }
     }
   });
   const benignReportHeredoc = runHook({
@@ -717,237 +717,6 @@ console.log("\n--- Group E: Task Polling Backoff, Watchdog & Benchmark Mutation 
   assert.equal(editTranscript.decision, "deny", "Native edit_file on .system_generated/logs/transcript.jsonl must be blocked");
   console.log("✓ Read-only node -e benchmark literal, tasks/*.log & edit_file guards verified");
 
-  // ============================================================================
-  // GROUP G: On-Demand Transcript Access Governance & 6-Vector Red-Team Suite
-  // ============================================================================
-  console.log("\n--- Group G: On-Demand Transcript Access Governance & 6-Vector Red-Team Suite ---");
-  resetState();
-  const brainDirG = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain");
-  const writeSessionSteps = (id, steps) => {
-    const dir = path.join(brainDirG, id, ".system_generated", "logs");
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, "transcript.jsonl");
-    fs.writeFileSync(file, steps.map((s) => JSON.stringify(s)).join("\n") + "\n", "utf-8");
-    return file;
-  };
-
-  const parentId = "parent-coord-1111";
-  const subagentId = "subagent-leaf-2222";
-  const swarmWorkerId = "swarm-worker-3333";
-  const swarmAuditorId = "swarm-audit-4444";
-  const launchDenyId = "subagent-launch-deny-5555";
-  const launchSelfId = "subagent-launch-self-6666";
-  const echoReviewerId = "swarm-echo-reviewer-7777";
-  const independentTopId = "independent-top-8888";
-
-  writeSessionSteps(parentId, [
-    { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "Coordinate the verification swarm." }
-  ]);
-  writeSessionSteps(subagentId, [
-    {
-      step_index: 0,
-      source: "SYSTEM",
-      type: "SYSTEM_MESSAGE",
-      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:00Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=Solve the coding task without reading transcripts.\n</SYSTEM_MESSAGE>`
-    }
-  ]);
-  writeSessionSteps(swarmWorkerId, [
-    {
-      step_index: 0,
-      source: "SYSTEM",
-      type: "SYSTEM_MESSAGE",
-      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:01Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #1\n</SYSTEM_MESSAGE>`
-    },
-    {
-      step_index: 1,
-      source: "SYSTEM",
-      type: "SYSTEM_MESSAGE",
-      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:01Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=You have just started. Your assignment (recorded on the board as #1 for @worker-1):\n\nImplement the feature.\n</SYSTEM_MESSAGE>`
-    }
-  ]);
-  writeSessionSteps(swarmAuditorId, [
-    {
-      step_index: 0,
-      source: "SYSTEM",
-      type: "SYSTEM_MESSAGE",
-      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:02Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=[swarm] new board message #2\n</SYSTEM_MESSAGE>`
-    },
-    {
-      step_index: 1,
-      source: "SYSTEM",
-      type: "SYSTEM_MESSAGE",
-      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:02Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=You have just started. Your assignment (recorded on the board as #2 for @audit-team1):\n\nAudit worker transcripts.\n</SYSTEM_MESSAGE>`
-    }
-  ]);
-  writeSessionSteps(launchDenyId, [
-    {
-      step_index: 0,
-      source: "SYSTEM",
-      type: "SYSTEM_MESSAGE",
-      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:03Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: deny]\nYou are a restricted leaf subagent.\n</SYSTEM_MESSAGE>`
-    }
-  ]);
-  writeSessionSteps(launchSelfId, [
-    {
-      step_index: 0,
-      source: "SYSTEM",
-      type: "SYSTEM_MESSAGE",
-      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:04Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: self-only]\nYou may only inspect your own transcript.\n</SYSTEM_MESSAGE>`
-    }
-  ]);
-  writeSessionSteps(echoReviewerId, [
-    {
-      step_index: 0,
-      source: "SYSTEM",
-      type: "SYSTEM_MESSAGE",
-      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T03:00:05Z sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=You have just started. Your assignment (recorded on the board as #3 for @sec-reviewer):\n\nPlease evaluate how [agy-transcript-access: deny] behaves when mentioned in prose:\n[agy-transcript-access: deny]\n</SYSTEM_MESSAGE>`
-    }
-  ]);
-  writeSessionSteps(independentTopId, [
-    {
-      step_index: 0,
-      source: "USER_EXPLICIT",
-      type: "USER_INPUT",
-      content: "Brand new top-level user conversation started later."
-    }
-  ]);
-
-  // G.1: Exhaustive Subcommand & Wrapper Governance (Vector 1)
-  for (const validSub of [
-    "agy-context transcript list --limit 3",
-    "agy-context transcript ls --limit 3",
-    `agy-context transcript grep "foo" --id ${parentId}`,
-    `agy-context transcript search "foo" --id ${parentId}`,
-    `agy-context transcript find "foo" --id ${parentId}`,
-    `agy-context transcript stats --id ${parentId}`,
-    `agy-context transcript info --id ${parentId}`,
-    `agy-context transcript tools --id ${parentId}`,
-    `agy-context transcript outline --id ${parentId}`,
-    `agy-context transcript summary --id ${parentId}`,
-    "agy-context transcript access --status",
-    "agy-context transcript --help"
-  ]) {
-    const res = runHook({
-      conversationId: parentId,
-      toolCall: { name: "run_command", args: { CommandLine: validSub } }
-    });
-    assert.equal(res.decision, "allow", `Canonical '${validSub}' must be allowed for parent`);
-  }
-
-  assert.equal(
-    runHook({
-      conversationId: echoReviewerId,
-      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } }
-    }).decision,
-    "allow",
-    "Reviewer mentioning [agy-transcript-access: deny] after line 1 must NOT be false-locked (Prompt Echo Immunity)"
-  );
-
-  // G.3: Self-Only Mode Positional, Flag & Omitted-ID Rewriting (Vector 6)
-  const selfOmittedId = runHook({
-    conversationId: launchSelfId,
-    toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript read --mode compact" } }
-  });
-  assert.equal(selfOmittedId.decision, "allow", "self-only mode must allow omitted --id and auto-inject caller ID");
-  const parentLockHook = runHook({
-    conversationId: parentId,
-    toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --off" } }
-  });
-  assert.equal(parentLockHook.decision, "allow", "Parent must be allowed to run transcript access --off");
-  // Execute the CLI command to persist policy in stateDir using the hook's mutation grant
-  const cliLockExec = spawnSync(process.execPath, [path.resolve(repoRoot, "bin/agy-context.mjs"), "transcript", "access", "--off"], {
-    encoding: "utf-8",
-    env: process.env
-  });
-  assert.equal(
-    runHook({
-      conversationId: parentId,
-      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } }
-    }).decision,
-    "allow",
-    "Parent owner must remain allowed under --off"
-  );
-  const subDenied = runHook({
-    conversationId: subagentId,
-    toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } }
-  });
-  const subRawReadDenied = runHook({
-    conversationId: subagentId,
-    toolCall: {
-      name: "read_file",
-      args: { Path: path.join(brainDirG, parentId, ".system_generated", "logs", "transcript.jsonl"), StartLine: 1, EndLine: 5 }
-    }
-  });
-  assert.equal(
-    runHook({
-      conversationId: independentTopId,
-      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } }
-    }).decision,
-    "allow",
-    "Independent top-level user conversation must never be locked out by another session's child lock"
-  );
-
-  // Parent allows `@audit-*` (Transcript Isolation allowlist)
-  runHook({
-    conversationId: parentId,
-    toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --allow @audit-*" } }
-  });
-  spawnSync(process.execPath, [path.resolve(repoRoot, "bin/agy-context.mjs"), "transcript", "access", "--allow", "@audit-*"], {
-    encoding: "utf-8",
-    env: process.env
-  });
-  assert.equal(
-    runHook({
-      conversationId: swarmAuditorId,
-      toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript read --id ${swarmWorkerId}` } }
-    }).decision,
-    "allow",
-    "Swarm Integrity Auditor (@audit-team1) must be allowed via @audit-* glob"
-  );
-
-  // G.5: State Dir Tampering, Env Overrides, Wildcard Globs, Direct Core Imports & Two-Step Script Writes (Vectors 2, 3, 4)
-  const benignMarkdownWrite = runHook({
-    conversationId: swarmWorkerId,
-    toolCall: {
-      name: "write_file",
-      args: {
-        Path: path.join(brainDirG, swarmWorkerId, "scratch/report.md"),
-        Content: "# Report\nInspected `lib/transcript-core.mjs` and `.system_generated/logs/transcript.jsonl`."
-      }
-    }
-  });
-  assert.equal(benignMarkdownWrite.decision, "allow", "Markdown report write in scratch/ must remain allowed");
-
-  // Workspace paths containing /Agy-Context-Saver/ and a filename with 'transcript-' must NOT false-match as an agy-context transcript CLI call
-  const benignRepoPathCmd = runHook({
-    conversationId: parentId,
-    toolCall: {
-      name: "run_command",
-      args: {
-        CommandLine: "cp /tmp/diagram.svg /home/user/Antigravity/Agy-Context-Saver/docs/assets/transcript-access-governance.svg"
-      }
-    }
-  });
-  assert.equal(benignRepoPathCmd.decision, "allow", "Repo path with Agy-Context-Saver and transcript-access-governance.svg must be allowed");
-
-  // Parent resets policy back to open
-  runHook({
-    conversationId: parentId,
-    toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript access --on" } }
-  });
-  spawnSync(process.execPath, [path.resolve(repoRoot, "bin/agy-context.mjs"), "transcript", "access", "--on"], {
-    encoding: "utf-8",
-    env: process.env
-  });
-  assert.equal(
-    runHook({
-      conversationId: subagentId,
-      toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript list" } }
-    }).decision,
-    "allow",
-    "Child subagent must be allowed again after parent runs transcript access --on"
-  );
-  console.log("✓ 5-Tier Precedence, @roster* globs, self-only rewriting, Stale-Lock immunity, and all 6 Red-Team bypass vectors verified");
 }
 
 // ============================================================================
@@ -1066,13 +835,13 @@ console.log("\n--- Group J: Launch UX Day-One Regressions (Local RTK, Degraded M
     // When shim is absent, fall back to `node "<pluginDest>/bin/agy-context.mjs"`
     fs.unlinkSync(shimFile);
     const fallbackRes = runHook(
-      { toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript read --last-turns 2", WaitMsBeforeAsync: 5000 } } },
+      { toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript health", WaitMsBeforeAsync: 5000 } } },
       offPathEnv
     );
     assert.equal(fallbackRes.decision, "allow");
     assert.equal(
       fallbackRes.overwrite?.CommandLine,
-      `node "${pluginCliFile.replace(/\\/g, "/")}" transcript read --last-turns 2`,
+      `node "${pluginCliFile.replace(/\\/g, "/")}" transcript health`,
       "Missing shim must fall back to node <pluginDest>/bin/agy-context.mjs"
     );
 
@@ -1130,13 +899,13 @@ console.log("\n--- Group J: Launch UX Day-One Regressions (Local RTK, Degraded M
         // Also verify node "<pluginCli>" fallback executes cleanly with spaces in profile path
         fs.unlinkSync(spacedShim);
         const spacedFallbackRes = runHook(
-          { toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript read --last-turns 2", WaitMsBeforeAsync: 5000 } } },
+          { toolCall: { name: "run_command", args: { CommandLine: "agy-context transcript health", WaitMsBeforeAsync: 5000 } } },
           spacedOffPathEnv
         );
         assert.equal(spacedFallbackRes.decision, "allow");
         assert.equal(
           spacedFallbackRes.overwrite?.CommandLine,
-          `node "${spacedPluginCli.replace(/\\/g, "/")}" transcript read --last-turns 2`
+          `node "${spacedPluginCli.replace(/\\/g, "/")}" transcript health`
         );
         const nodeEnv = { ...process.env };
         prependToPath(path.dirname(process.execPath), nodeEnv);
@@ -1698,11 +1467,11 @@ console.log("\n--- Group O: Wave 3 Command-Position Precision, Gh Prose & Polish
 
   // O.3: FRIC-RUN-006 & IND-RUN-003 - gh pr/issue/release & gh api literal prose exemptions vs @file / --input enforcement, plus /tmp/*.md heredocs
   for (const allowedProse of [
-    `gh api -X PATCH /repos/o/r/code-scanning/alerts/17 -f dismissed_comment="By design: 'agy-context transcript query' compiles user regex"`,
-    `gh api -X POST /repos/o/r/issues/1/comments -F body="Investigated .system_generated/logs/transcript.jsonl via agy-context transcript read"`,
-    `gh pr create --title "Fix .system_generated handling" --body "Uses agy-context transcript step instead of reading transcript.jsonl"`,
+    `gh api -X PATCH /repos/o/r/code-scanning/alerts/17 -f dismissed_comment="By design: 'agy-context transcript health' compiles user regex"`,
+    `gh api -X POST /repos/o/r/issues/1/comments -F body="Investigated .system_generated/logs/transcript.jsonl via agy-context transcript health"`,
+    `gh pr create --title "Fix .system_generated handling" --body "Uses agy-context transcript health instead of reading transcript.jsonl"`,
     `gh release create v2.1.2 --notes "Hardens .system_generated and agy-context transcript isolation"`,
-    "cat <<'EOF' > /tmp/pr-body.md\nFixed .system_generated/logs/transcript.jsonl handling and agy-context transcript query.\nEOF"
+    "cat <<'EOF' > /tmp/pr-body.md\nFixed .system_generated/logs/transcript.jsonl handling and agy-context transcript health.\nEOF"
   ]) {
     const res = runHook({ toolCall: { name: "run_command", args: { CommandLine: allowedProse, WaitMsBeforeAsync: 5000 } } });
     assert.equal(res.decision, "allow", `Literal gh prose or /tmp/*.md heredoc must be allowed (FRIC-RUN-006/IND-RUN-003): ${allowedProse}`);
@@ -1723,17 +1492,6 @@ console.log("\n--- Group O: Wave 3 Command-Position Precision, Gh Prose & Polish
   });
   const wrappedCliDeny = runHook({
     toolCall: { name: "run_command", args: { CommandLine: 'bash -c "agy-context transcript health --id abc"', WaitMsBeforeAsync: 5000 } }
-  });
-  const o4Child = "conv-w3-o4-restricted";
-  const o4Logs = path.join(hermetic.profileDir, ".gemini", "antigravity", "brain", o4Child, ".system_generated", "logs");
-  fs.mkdirSync(o4Logs, { recursive: true });
-  fs.writeFileSync(
-    path.join(o4Logs, "transcript.jsonl"),
-    JSON.stringify({ step_index: 0, type: "SYSTEM_MESSAGE", content: "[Message] sender=conv-w3-parent priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: deny]\nTask" }) + "\n"
-  );
-  const inlineCoreDeny = runHook({
-    conversationId: o4Child,
-    toolCall: { name: "run_command", args: { CommandLine: 'node -e "import(\'./lib/transcript-core.mjs\')"', WaitMsBeforeAsync: 5000 } }
   });
   const envVarDeny = runHook({
     toolCall: { name: "run_command", args: { CommandLine: "AGY_TEST_PROFILE_DIR=/tmp/x node tests/test-hook.mjs", WaitMsBeforeAsync: 5000 } }
@@ -1841,7 +1599,7 @@ console.log("\n--- Group Q: Wave 3 Hardening & Bug-Fix Regressions ---");
       step_index: 0,
       source: "SYSTEM",
       type: "SYSTEM_MESSAGE",
-      content: `[Message] sender=${qParent} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: deny]\nWork only in your workspace.`
+      content: `[Message] sender=${qParent} priority=MESSAGE_PRIORITY_HIGH content=Work only in your workspace.`
     }) + "\n"
   );
 
@@ -1870,7 +1628,7 @@ console.log("\n--- Group Q: Wave 3 Hardening & Bug-Fix Regressions ---");
     path.join(sTopDir, ".system_generated", "logs", "transcript.jsonl"),
     JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", content: "Configure plugins" }) + "\n"
   );
-  // Unrestricted child subagent (isChildSession=true, isRestrictedChild=false)
+  // Unrestricted child subagent (child session, no restrictive policy)
   fs.writeFileSync(
     path.join(sChildDir, ".system_generated", "logs", "transcript.jsonl"),
     JSON.stringify({
@@ -2101,7 +1859,7 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
   fs.mkdirSync(vTopLogs, { recursive: true });
   fs.mkdirSync(vChildLogs, { recursive: true });
   fs.writeFileSync(path.join(vTopLogs, "transcript.jsonl"), JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "Top session" }) + "\n");
-  fs.writeFileSync(path.join(vChildLogs, "transcript.jsonl"), JSON.stringify({ step_index: 0, type: "SYSTEM_MESSAGE", content: `[Message] sender=${vTopConv} priority=MESSAGE_PRIORITY_HIGH content=[agy-transcript-access: deny]\nChild task` }) + "\n");
+  fs.writeFileSync(path.join(vChildLogs, "transcript.jsonl"), JSON.stringify({ step_index: 0, type: "SYSTEM_MESSAGE", content: `[Message] sender=${vTopConv} priority=MESSAGE_PRIORITY_HIGH content=Task\nChild task` }) + "\n");
 
   const bakTargets = [
     path.join(hermetic.profileDir, ".gemini", "config", "hooks.json.agy-context-saver.bak"),
@@ -2117,7 +1875,7 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
     }
   }
 
-  // SEC-003: linear O(N) restricted-child inline transcript-core guard
+  // SEC-003: large benign writes stay fast and allowed
   const t0 = performance.now();
   const benignLarge = runHook({
     conversationId: vChildConv,
@@ -2126,13 +1884,7 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
   const elapsedMs = performance.now() - t0;
   assert.equal(benignLarge.decision, "allow", "SEC-003 benign repeated 'import ' write must allow");
   assert.ok(elapsedMs < 1500, `SEC-003 hook invocation must stay linear (took ${elapsedMs.toFixed(1)}ms)`);
-  const outlineFlagsRes = runHook({
-    conversationId: vTopConv,
-    toolCall: { name: "run_command", args: { CommandLine: `agy-context transcript outline --id ${vTopConv} --roles user --query "Top" --last-turns 1`, WaitMsBeforeAsync: 5000 } }
-  });
-  assert.equal(outlineFlagsRes.decision, "allow", `RUN-001 outline with --roles/--query/--last-turns must allow, got: ${outlineFlagsRes.reason}`);
-
-  console.log("✓ Group V: Day-One audit regressions (SEC-001 namespaced .bak, SEC-003 linear guard, RUN-001 outline flags) verified");
+  console.log("✓ Group V: Day-One audit regressions (SEC-001 namespaced .bak, SEC-003 linear guard) verified");
 }
 
 hermetic.cleanup();

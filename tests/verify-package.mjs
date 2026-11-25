@@ -18,6 +18,8 @@ const REQUIRED = [
   "lib/backoff.mjs",
   "lib/path-guards.mjs",
   "lib/transcript-health.mjs",
+  "lib/transcript-policy.mjs",
+  "scripts/hook/transcript-guard.mjs",
   "scripts/execution-guard-hook.mjs",
   "scripts/hook/common.mjs",
   "scripts/hook/file-guard.mjs",

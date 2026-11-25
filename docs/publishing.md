@@ -54,18 +54,19 @@ node scripts/install-register.mjs --check
 ```bash
 npm test
 ```
-Runs all 11 test suites in isolated temporary profiles:
+Runs all 12 test suites in isolated temporary profiles:
 1. Hook governance, RTK `>= 1.1.0` delegation, and native read and write guards (`tests/test-hook.mjs`)
-2. Live host RTK `>= 1.1.0` integration contract (`tests/test-rtk-integration.mjs`)
-3. Output spillover and completed task log lifecycle gating (`tests/test-output-governance.mjs`)
-4. End-to-end edge cases and fail-closed probes (`tests/test-e2e-probes.mjs`)
-5. Performance, streaming, and file-descriptor cleanup probes (`tests/test-performance-probes.mjs`)
-6. Installed system verification (`tests/test-installed-verification.mjs`)
-7. Lifecycle installation, stale MCP cleanup, and backup rollback (`tests/test-lifecycle-rollback.mjs`)
-8. Check-only read-only isolation regression check (`tests/test-check-only-readonly.mjs`)
-9. Malformed config preservation fail-closed check (`tests/test-malformed-config-preservation.mjs`)
-10. RTK ledger fresh-install verification (`tests/test-rtk-ledger-fresh-install.mjs`)
-11. Package whitelist and tarball verification self-test (`tests/verify-package.mjs`)
+2. Transcript isolation guard: open, self-only, and deny modes (`tests/test-transcript-guard.mjs`)
+3. Live host RTK `>= 1.1.0` integration contract (`tests/test-rtk-integration.mjs`)
+4. Output spillover and completed task log lifecycle gating (`tests/test-output-governance.mjs`)
+5. End-to-end edge cases and fail-closed probes (`tests/test-e2e-probes.mjs`)
+6. Performance, streaming, and file-descriptor cleanup probes (`tests/test-performance-probes.mjs`)
+7. Installed system verification (`tests/test-installed-verification.mjs`)
+8. Lifecycle installation, stale MCP cleanup, and backup rollback (`tests/test-lifecycle-rollback.mjs`)
+9. Check-only read-only isolation regression check (`tests/test-check-only-readonly.mjs`)
+10. Malformed config preservation fail-closed check (`tests/test-malformed-config-preservation.mjs`)
+11. RTK ledger fresh-install verification (`tests/test-rtk-ledger-fresh-install.mjs`)
+12. Package whitelist and tarball verification self-test (`tests/verify-package.mjs`)
 
 ### Stage 3: Tarball & package manifest verification
 ```bash

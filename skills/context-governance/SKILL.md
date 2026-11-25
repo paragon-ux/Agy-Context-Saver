@@ -10,7 +10,7 @@ description: >-
 
 # Context Governance (`Agy-Context-Saver` + `RTK`)
 
-`rules/AGENTS.md` already covers everyday execution, `read_file` bounds, Pure Yield, and native transcript reads. Use this skill for the 3 on-demand workflows below, loading a reference file only when you need full flag matrices or hook internals.
+`rules/AGENTS.md` already covers everyday execution, `read_file` bounds, Pure Yield, and native transcript reads. Use this skill for the 4 on-demand workflows below, loading a reference file only when you need full flag matrices or hook internals.
 
 ## Quick Reference (On-Demand Workflows)
 
@@ -18,9 +18,10 @@ description: >-
 | --- | --- |
 | **Opt-in watchdogs & remote CI** | Default local tasks use Pure Yield (no `schedule`). For unattended `/goal` or hang-prone jobs, bind `TimerCondition="<convId>/task-X"` (`45-60s` quick/hang-risk, `120-180s` test suites/builds, `300-600s` E2E/Docker; hard floor `30s -> 75s -> 188s -> 469s -> 600s`). Direct subagents: `TimerCondition="<subagentConvId>"` (`180s -> 450s -> 600s`). Remote CI (`gh pr checks`/`gh run list`): `schedule >= 30s` (no `--watch`). |
 | **RTK & config flags** | `AGY_RTK_MODE=pregate\|off` (default `pregate`; explicit `rtk <cmd>` always works; precision tools & `--json`/`--porcelain` pass through). `AGY_DISABLE_BENCHMARK_GUARD=1` opts top-level sessions out of `benchmarks/`/`evaluation/` `force_ask`. |
-| **Setup / status / lifecycle** | `agy-context transcript health [--id <u1,u2>] [--parent <id>] [--json]` (read-only session metrics), `agy-context status [--json]`, `agy-context setup [--check] [--allow-degraded]`, `agy-context uninstall [--restore-backups]`, `agy-context restore-backups` (only run `uninstall`/`restore-backups` when explicitly asked) |
+| **Transcript health & isolation** | `agy-context transcript health [--id <u1,u2>] [--parent <id>] [--json]` (read-only session metrics). `agy-context transcript access [status \| set <open\|self-only\|deny>]` sets what sessions you launch may read (`open` default; the setting never limits the session that set it). |
+| **Setup / status / lifecycle** |  `agy-context status [--json]`, `agy-context setup [--check] [--allow-degraded]`, `agy-context uninstall [--restore-backups]`, `agy-context restore-backups` (only run `uninstall`/`restore-backups` when explicitly asked) |
 
 ## Detailed References (Read Only If Needed)
 
-- **Layer 1–3 Hook Guardrails, Watchdog Backoff, RTK Allowlist & Config Protection:** Read [guardrails.md](references/guardrails.md)
+- **Layer 1 to 3 Hook Guardrails, Watchdog Backoff, RTK Allowlist & Config Protection:** Read [guardrails.md](references/guardrails.md)
 - **Full `agy-context` CLI Flag Reference:** Read [cli.md](references/cli.md)

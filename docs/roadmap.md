@@ -27,7 +27,7 @@
    - Shipped `agy-context transcript health` (aliases `stats`, `info`) for read-only session metrics.
    - Registered the `PreToolUse` hook in both plugin `hooks.json` and global `~/.gemini/config/hooks.json` so `/swarm` workers inherit governance automatically.
 3. **Transcript CLI removal *(Shipped in v2.3.0)*:**
-   - Removed the transcript read, query, step, export, and list subcommands plus per-session access policies. Native `read_file` and `grep_search` read `transcript.jsonl` again; `transcript health` stays.
+   - Removed the transcript read, query, step, export, and list subcommands plus per-session access policies. Native `read_file` and `grep_search` read `transcript.jsonl` again; `transcript health` stays, and a simple parent-set `transcript access` policy (`open`, `self-only`, `deny`) replaces the old model.
 
 ---
 
