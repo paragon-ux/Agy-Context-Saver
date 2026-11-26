@@ -11,6 +11,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { getEffectiveMode } from "../../lib/transcript-policy.mjs";
+import { mintHookIdentity } from "../../lib/hook-identity.mjs";
 import { getStateDir } from "../state-dir.mjs";
 import { quoteForCmd } from "../rtk-run.mjs";
 import { isCompatibleRtkVersion } from "../provision-rtk.mjs";
@@ -296,7 +298,7 @@ function readBacktickSubshell(cmd, startPos) {
   return { inner, nextIndex: i };
 }
 
-function splitShellSegments(command) {
+export function splitShellSegments(command) {
   if (!command || typeof command !== "string") return [];
   const segments = [];
   const pendingHeredocs = [];
@@ -394,7 +396,7 @@ function splitShellSegments(command) {
   return segments;
 }
 
-function tokenizeShellWordsDetailed(text) {
+export function tokenizeShellWordsDetailed(text) {
   const tokens = [];
   for (let i = 0; i < text.length;) {
     while (i < text.length && /\s/.test(text[i])) i++;
@@ -526,7 +528,7 @@ function getSegmentCmdName(seg) {
   return idx < tokens.length ? normalizeCmdName(tokens[idx].value) : "";
 }
 
-function extractRedirectTargets(tokens, writeOnly = false) {
+export function extractRedirectTargets(tokens, writeOnly = false) {
   const targets = [];
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
@@ -545,7 +547,7 @@ function unwrapShellWrapper(segText) {
   return m ? { prefix: m[1], quote: m[2], inner: m[3] } : null;
 }
 
-function extractSimpleWrappedScript(segText) {
+export function extractSimpleWrappedScript(segText) {
   const trimmed = String(segText || "").trim();
   if (!trimmed) return null;
   const { prefix: envPrefix, body } = splitEnvPrefix(trimmed);
@@ -907,7 +909,7 @@ function collectInspectableTexts(segments, depth = 0) {
 function areAllSegmentsReadOnlyTranscriptReads(segments) {
   if (!segments.length) return false;
   for (const seg of segments) {
-    if (seg.hasWriteRedirect) return false;
+    if (seg.hasSubshell || seg.hasHeredoc || seg.hasWriteRedirect) return false;
     const tokens = getSegTokens(seg);
     const starts = collectSegmentCommandStartIndices(tokens);
     if (!starts.length) return false;
@@ -917,12 +919,19 @@ function areAllSegmentsReadOnlyTranscriptReads(segments) {
       const verb = normalizeCmdName(tokens[cmdIdx].value);
       const rtkRead = verb === "rtk" && ["read", "grep", "ls"].includes(String(tokens[cmdIdx + 1]?.value || ""));
       if (!isReadOnlyTranscriptVerb(verb) && !rtkRead) return false;
+      const args = tokens.slice(cmdIdx + 1).map((t) => t.value);
+      if (verb === "sort" && args.some((v) => v === "--output" || v.startsWith("--output=") || /^-[^-]*o/.test(v) || v === "--compress-program" || v.startsWith("--compress-program="))) return false;
+      if (verb === "rg" && args.some((v) => /^(?:--pre|--hostname-bin)(?:=|$)/.test(v))) return false;
+      if (verb === "file" && args.some((v) => v === "--compile" || /^-[^-]*C/.test(v))) return false;
+      if (verb === "uniq" && args.filter((v) => !v.startsWith("-")).length > 1) return false;
+      // jq can load modules or run scripts; only ordinary filters get the read exemption.
+      if (verb === "jq" && args.some((v) => /^(?:-L|--(?:argfile|slurpfile|rawfile|from-file))/.test(v))) return false;
     }
   }
   return true;
 }
 
-function getProtectedShellOperationReason(text) {
+function getProtectedShellOperationReason(text, convId, ctx) {
   if (!text || typeof text !== "string") return null;
   if (isProtectedInternalState(text)) return "internal-state";
   if (
@@ -933,7 +942,7 @@ function getProtectedShellOperationReason(text) {
   const touchesStateEnv =
     /(?:^|[\s;|&(])(?:XDG_STATE_HOME|LOCALAPPDATA)=/i.test(text) ||
     /(?:process\.env|os\.environ)\s*(?:\.\s*(?:XDG_STATE_HOME|LOCALAPPDATA)\b|\[\s*['"](?:XDG_STATE_HOME|LOCALAPPDATA)['"]\s*\])/i.test(text);
-  if (touchesStateEnv && /\bagy-context(?:-saver)?\b|\bexecution-guard\b|\.gemini\b/i.test(text)) {
+  if (touchesStateEnv && (/\bagy-context(?:-saver)?\b|\bexecution-guard\b|\.gemini\b/i.test(text) || getEffectiveMode(convId, undefined, getBrainDirs({ activeTranscriptPath: ctx?.transcriptPath || "" })).restricted)) {
     return "governance-env";
   }
 
@@ -1450,7 +1459,7 @@ export async function handleRunCommand(ctx) {
     }
 
     if (areAllSegmentsReadOnlyTranscriptReads(segments)) inspectRemainder = stripTranscriptLogRefs(inspectRemainder);
-    const protectedReason = getProtectedShellOperationReason(inspectRemainder);
+    const protectedReason = getProtectedShellOperationReason(inspectRemainder, convId, ctx);
     if (protectedReason) respond({ decision: "deny", reason: buildProtectedShellReasonMessage(protectedReason, convId, ctx) });
   }
 
@@ -1542,6 +1551,15 @@ export async function handleRunCommand(ctx) {
     }
   }
 
+  const invocation = parseTranscriptInvocation(rawCmd);
+  if (invocation && !invocation.clean && ctx.convId && ctx.convId !== "global") {
+    respond({ decision: "deny", reason: "Antigravity Governance: Run transcript commands as a single direct command so the hook can pass the caller identity." });
+  }
+  if (invocation?.clean) {
+    const nonce = mintHookIdentity(ctx, invocation.command);
+    if (nonce) effectiveCmd += ` --hook-grant=${nonce}`;
+  }
+
   const isDaemon = args.IsDaemon === true || args.isDaemon === true;
   const rawWaitMs = args.WaitMsBeforeAsync !== undefined ? args.WaitMsBeforeAsync : args.waitMsBeforeAsync;
   const waitMs = rawWaitMs === null ? undefined : rawWaitMs;
@@ -1550,4 +1568,39 @@ export async function handleRunCommand(ctx) {
   if (!isDaemon && waitMs === undefined) overwrite.WaitMsBeforeAsync = Number(process.env.AGY_MAX_WAIT_MS) || 10000;
 
   respond(Object.keys(overwrite).length > 0 ? { decision: "allow", overwrite } : { decision: "allow" });
+}
+
+/** Recognize the actual argv, including quoted executable/subcommand words. */
+export function parseTranscriptInvocation(command, depth = 0) {
+  if (depth > 12) return { clean: false };
+  if (!command.includes("transcript") && !/['"\\]/.test(command)) return null;
+  const segments = splitShellSegments(command);
+  let seen = false;
+  let invocation = null;
+  for (const seg of segments) {
+    const detailed = getSegTokens(seg);
+    const words = detailed.map((t) => t.value);
+    for (let i = 0; i < words.length; i++) {
+      const name = normalizeCmdName(words[i]);
+      const direct = /^agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?$/.test(name);
+      const node = /^node(?:\.exe)?$/.test(name) && /(?:^|[\\/])agy-context\.mjs$/i.test(words[i + 1] || "");
+      const start = i + (node ? 2 : 1);
+      if ((!direct && !node) || words[start] !== "transcript") continue;
+      seen = true;
+      const sub = words[start + 1];
+      if (!["access", "health", "stats", "info"].includes(sub)) continue;
+      invocation = {
+        command: sub === "access" ? "access" : "health", args: words.slice(start + 2),
+        clean: segments.length === 1 && i === 0 && !seg.hasSubshell && !seg.hasHeredoc && !seg.hasRedirect &&
+          /^[ \t]*$/.test(command.slice(0, seg.start)) && /^[ \t]*$/.test(command.slice(seg.end)) &&
+          !detailed.some((t) => !t.quoted && t.raw.startsWith("#")) &&
+          !words.some((w) => w.startsWith("--hook-grant"))
+      };
+      i = start + 1;
+    }
+    const wrapper = extractSimpleWrappedScript(seg.text);
+    if (wrapper?.innerScript && parseTranscriptInvocation(wrapper.innerScript, depth + 1)) seen = true;
+    for (const sub of [...(seg.subshells || []), ...(seg.heredocBodies || [])]) if (parseTranscriptInvocation(sub, depth + 1)) seen = true;
+  }
+  return invocation || (seen ? { clean: false } : null);
 }

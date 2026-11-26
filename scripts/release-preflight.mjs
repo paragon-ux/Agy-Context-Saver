@@ -143,6 +143,7 @@ export function runReleasePreflight() {
     const requiredPackageFiles = [
       'lib/transcript-health.mjs',
       'lib/transcript-policy.mjs',
+      'lib/hook-identity.mjs',
       'scripts/hook/transcript-guard.mjs',
       'lib/path-guards.mjs',
       'lib/backoff.mjs',

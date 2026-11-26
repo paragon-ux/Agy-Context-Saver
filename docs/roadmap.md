@@ -38,7 +38,7 @@
    - Validate hook latency and CLI ergonomics against new Antigravity releases and model backends.
 2. **Multi-plugin and `/swarm` stress testing:**
    - Verify co-existence with third-party hooks in `hooks.json` and external MCP servers in `mcp_config.json` without config contention (including validated, non-clobbering `.agy-context-saver.bak` key-merge restores).
-   - Stress-test concurrent `/swarm` cohorts (multi-agent specialists and reviewer workers) under the single global hook surface and lazy-loaded 3-module hook split (`scripts/hook/{file,shell,task}-guard.mjs`) to keep hook dispatch overhead minimal.
+   - Stress-test concurrent `/swarm` cohorts (multi-agent specialists and reviewer workers) under the single global hook surface and lazy-loaded hook modules (`scripts/hook/{file,shell,task,transcript}-guard.mjs`) to keep hook dispatch overhead minimal.
 3. **Editor status visibility:**
    - Keep `rules/AGENTS.md`, `skills/context-governance/SKILL.md`, and `plugin.json` prompts concise and aligned with Antigravity UI panels.
 

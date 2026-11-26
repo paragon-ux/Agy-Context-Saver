@@ -1,6 +1,6 @@
 # Architecture & Internals
 
-`Agy-Context-Saver` (`v2.3.0`) pairs a thin lazy-loaded `PreToolUse` hook router (`scripts/execution-guard-hook.mjs` dynamically importing `scripts/hook/{file,shell,task}-guard.mjs`) with a small CLI (`bin/agy-context.mjs`), shared governance libraries (`lib/path-guards.mjs`, `lib/backoff.mjs`, `scripts/state-dir.mjs`, `scripts/rtk-run.mjs`), and **RTK (`>= 1.1.0`)**, a CLI proxy that compresses noisy shell and test output.
+`Agy-Context-Saver` (`v2.3.0`) pairs a thin lazy-loaded `PreToolUse` hook router (`scripts/execution-guard-hook.mjs` dynamically importing `scripts/hook/{file,shell,task,transcript}-guard.mjs`) with a small CLI (`bin/agy-context.mjs`), shared governance libraries (`lib/path-guards.mjs`, `lib/backoff.mjs`, `scripts/state-dir.mjs`, `scripts/rtk-run.mjs`), and **RTK (`>= 1.1.0`)**, a CLI proxy that compresses noisy shell and test output.
 
 ![Agy-Context-Saver and RTK execution topology](assets/architecture-overview.svg)
 
@@ -32,12 +32,12 @@
 ### Single Global Hook Surface (No Standalone Mirror)
 `agy-context setup` registers a single `PreToolUse` entry in `~/.gemini/config/hooks.json` pointing directly to `~/.gemini/config/plugins/agy-context-saver/scripts/execution-guard-hook.mjs` (the plugin's own `hooks.json` is `{}`). Every governed tool call across top-level sessions, subagents, and `/swarm` workers spawns **1** Node.js process with zero standalone `~/.gemini/config/scripts/` mirror copy and zero dual-hook deduplication or lockfile overhead (`setup` and `uninstall` automatically remove any legacy `~/.gemini/config/scripts/execution-guard-hook.mjs` mirror from earlier v2.x releases).
 
-### Lazy-Loaded 3-Module Hook & Shared Libraries
+### Lazy-Loaded Hook Modules & Shared Libraries
 Running directly inside the installed plugin directory allows the hook to stay modular and share single-source-of-truth helpers across the hook, CLI, and installer:
 - **`scripts/execution-guard-hook.mjs`**: Thin stdin/stdout router that exits immediately for non-governed tools and dynamically `import()`s only the matching tool-family module:
   - **`scripts/hook/file-guard.mjs`**: Workspace discovery, unified `800L / 45 KiB` `read_file` bounds, bounded spillover/completed task-log reads (`<= 150` lines), narrow own-session `.system_generated/swarm/plan.json` allowlist (`read_file`/`write_file`/`edit_file` only), and file-write internal-state, user-config (`force_ask` for non-symlink `mcp_config.json`/`config.json`; hard-`deny` for global `hooks.json`, `*.bak`, symlinks, and ACS files), and benchmark checks.
   - **`scripts/hook/shell-guard.mjs`**: Segment-level Narrow High-ROI RTK Pre-Gate (`AGY_RTK_MODE=pregate|off`), direct `.system_generated/` and `getStateDir()` checks, linear brain subdir carve-outs (`scratch/`/`browser_sandbox/`/`swarm_view/`) and safe direct artifact extensions, non-destructive `force_ask` vs. destructive hard-`deny` on user configs, simple shell wrapper unwrapping (`sh -c`, `bash -c`, `cmd /c`), and `gh` blocking-watch protection.
-  - **`scripts/hook/transcript-guard.mjs`**: Transcript isolation for `open`, `self-only`, and `deny` modes. It identifies the caller's ancestors from the first system message, reads the policy from `transcript-policy.json` via `lib/transcript-policy.mjs`, resolves real paths (so symlinks cannot bypass it), fails closed to `self-only` for unidentified callers while a restrictive policy exists, and is skipped when no restrictive policy exists.
+  - **`scripts/hook/transcript-guard.mjs`**: Transcript isolation for `open`, `self-only`, and `deny` modes. It identifies the caller's ancestors from the first system message, reads the policy from `transcript-policy.json` via `lib/transcript-policy.mjs`, resolves real paths (so symlinks cannot bypass it), fails closed to the strictest active mode for unidentified callers while a restrictive policy exists, and is skipped when no restrictive policy exists.
   - **`scripts/hook/task-guard.mjs`**: Per-task and direct-subagent backoff ledger, remote CI `schedule` timers, conditioned watchdog auto-clamping, and 5-strike `force_ask` circuit breaker.
   - **`scripts/hook/common.mjs`**: Shared hook session-state, logging, and decision-response helpers.
 - **Shared libraries**: `lib/path-guards.mjs` (canonical symlink-following `resolveRealOrAncestorPath()` and containment helpers), `lib/backoff.mjs` (shared backoff curve and polling detectors), `scripts/state-dir.mjs`, and `scripts/rtk-run.mjs`.
@@ -81,3 +81,9 @@ Polling and watchdog counters are tracked per task and per direct subagent insid
 - **Lazy hook dispatch & direct RTK delegation:** Non-governed tools exit immediately in `scripts/execution-guard-hook.mjs` without loading guard modules; eligible `run_command` segments spawn `rtk hook antigravity` directly over stdin JSON, falling back to plugin binary paths only on `ENOENT`.
 - **256 KB tail-window task resolution & TTL pruning:** Task state checks scan the trailing 256 KB of `transcript.jsonl` once per pruning pass with literal substring matching before falling back to full-file reads, and expired `agy-session-*.json` files are pruned automatically past the 1-hour TTL.
 - **Fast denial ordering:** Internal state guards and running task log denials execute before spawning `rtk hook antigravity`.
+
+## Transcript command identity
+
+The hook adds a random identity token only to a simple, verified transcript access or health command. The CLI consumes its protected state record once, within 15 seconds, and uses the hook's session ID and active transcript root instead of any inherited session environment variable. Invalid, expired, or reused tokens fail closed. Terminal calls without a token can use `GEMINI_CONVERSATION_ID`.
+
+Only top-level sessions may manage transcript access. The health library checks the caller's inherited policy before opening any transcript: `deny` blocks all reads, and `self-only` permits only the caller's own session. Unresolved launch headers, missing ancestors, cycles, and excessive ancestry depth fail closed while a restrictive policy exists. Concurrent policy updates share a lock; resetting the last policy to `open` removes the state file and restores the hook's import-free path.

@@ -1,12 +1,9 @@
-/**
- * PreToolUse guard for per-session transcript isolation.
- * Applies only when a restrictive policy exists (agy-context transcript access set <mode>),
- * so the common path is one small file read. Modes: open (default), self-only, deny.
- */
-
-import { getBrainDirs } from "../../lib/path-guards.mjs";
+/** Transcript isolation, loaded only while a parent has an active policy. */
+import path from "node:path";
+import { getBrainDirs, resolveRealOrAncestorPath } from "../../lib/path-guards.mjs";
 import { readPolicies, hasRestrictivePolicy, getEffectiveMode } from "../../lib/transcript-policy.mjs";
 import { respond, expandAndResolvePathVariants } from "./common.mjs";
+import { splitShellSegments, tokenizeShellWordsDetailed, extractSimpleWrappedScript, parseTranscriptInvocation } from "./shell-guard.mjs";
 
 const PATH_KEYS = [
   "Path", "path", "AbsolutePath", "absolutePath", "absolute_path", "FilePath", "filePath", "file_path",
@@ -14,54 +11,79 @@ const PATH_KEYS = [
   "dirPath", "dir_path", "directory", "SearchDirectory", "searchDirectory", "search_directory",
   "SearchPath", "searchPath", "search_path", "SearchRoot", "searchRoot", "search_root"
 ];
-const LOGS_RE = /(?:^|\/)([^/]+)\/\.system_generated\/logs(?:\/|$)/i;
-const LOGS_ANY_RE = /\.system_generated\/logs(?:\/|$)/i;
-const HEALTH_RE = /\bagy-context(?:-saver)?(?:\.\w+)?\s+(?:\S+\s+)*?transcript\s+(?:health|stats|info)\b/i;
+const outside = (rel) => rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
 
-// Owner id of a logs path across raw and resolved variants; "" when unknown or mismatched, null when the path does not touch logs.
-function logsOwner(rawPath, cwd) {
+function logsOwner(raw, cwd, brainDirs) {
   const owners = new Set();
-  let touches = false;
-  for (const v of expandAndResolvePathVariants(rawPath, cwd)) {
-    const norm = v.replace(/\\/g, "/");
-    if (!LOGS_ANY_RE.test(norm)) continue;
-    touches = true;
-    owners.add(norm.match(LOGS_RE)?.[1] || "");
+  const wildcard = raw.search(/[*?\[]/);
+  const prefix = wildcard < 0 ? raw : raw.slice(0, wildcard);
+  const target = wildcard < 0 ? prefix : prefix.endsWith(path.sep) || prefix.endsWith("/") ? prefix : path.dirname(prefix);
+  for (const variant of expandAndResolvePathVariants(target, cwd)) {
+    const canonical = resolveRealOrAncestorPath(variant);
+    for (const brain of brainDirs) {
+      const root = resolveRealOrAncestorPath(brain);
+      const ancestor = path.relative(canonical, root);
+      if (!outside(ancestor)) { owners.add(""); continue; }
+      const rel = path.relative(root, canonical);
+      if (outside(rel)) continue;
+      const parts = rel.split(path.sep);
+      if (parts.length === 1 || (parts[1] === ".system_generated" && (parts.length === 2 || parts[2] === "logs"))) {
+        owners.add(parts[0]);
+      }
+    }
+    const norm = variant.replace(/\\/g, "/");
+    if (/\.system_generated\/logs(?:\/|$)/i.test(norm)) owners.add(norm.match(/(?:^|\/)([^/]+)\/\.system_generated\/logs(?:\/|$)/i)?.[1] || "");
   }
-  return !touches ? null : owners.size === 1 ? [...owners][0] : "";
+  return !owners.size ? null : owners.size === 1 ? [...owners][0] : "";
 }
 
-function commandTokens(cmd) {
-  return [...cmd.matchAll(/"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s"'()=;,|&<>]+)/g)].map((m) => m[1] ?? m[2] ?? m[3] ?? "");
+function shellTargets(command, cwd, out, depth = 0) {
+  if (depth > 12) throw new Error("Shell nesting exceeds transcript inspection limit.");
+  for (const seg of splitShellSegments(command)) {
+    const words = tokenizeShellWordsDetailed(seg.text).map((t) => t.value);
+    if (words[0] === "cd" && words[1]) cwd = path.resolve(cwd, words[1]);
+    const verb = path.basename((words[0] || "").replace(/\\/g, "/")).replace(/\.(?:exe|cmd|bat)$/i, "").toLowerCase();
+    if (["rg", "grep", "egrep", "fgrep", "find", "ls"].includes(verb)) out.push({ value: cwd || ".", cwd });
+    for (const word of words) out.push({ value: word, cwd });
+    const wrapper = extractSimpleWrappedScript(seg.text);
+    if (wrapper?.innerScript) shellTargets(wrapper.innerScript, cwd, out, depth + 1);
+    for (const sub of seg.subshells || []) shellTargets(sub, cwd, out, depth + 1);
+    for (const body of seg.heredocBodies || []) shellTargets(body, cwd, out, depth + 1);
+  }
 }
 
 export function handleTranscriptGuard(ctx) {
   const policies = readPolicies();
   if (!hasRestrictivePolicy(policies)) return;
-  const { mode, restricted, unknown } = getEffectiveMode(ctx.convId, policies, getBrainDirs({ activeTranscriptPath: ctx.transcriptPath || "" }));
+  const brainDirs = getBrainDirs({ activeTranscriptPath: ctx.transcriptPath || "" });
+  const { mode, restricted, unknown } = getEffectiveMode(ctx.convId, policies, brainDirs);
   if (!restricted) return;
-
-  const cwd = ctx.cwd || "";
+  const deny = () => respond({ decision: "deny", reason: `Antigravity Execution Governance: Transcript access is ${mode} for this session.` });
   const targets = [];
   if (ctx.toolName === "run_command") {
-    const cmd = String(ctx.args.CommandLine ?? ctx.args.command ?? "");
-    if (HEALTH_RE.test(cmd) && (mode === "deny" || /--(?:id|parent)\b/.test(cmd))) {
-      respond({ decision: "deny", reason: `Antigravity Execution Governance: 'agy-context transcript health' for other sessions is disabled for this session (transcript access: ${mode}).` });
+    const command = String(ctx.args.CommandLine ?? ctx.args.command ?? "");
+    const invocation = parseTranscriptInvocation(command);
+    if (invocation) {
+      if (!invocation.clean || invocation.command === "access" || mode === "deny" || unknown) deny();
+      for (let i = 0; i < invocation.args.length; i++) {
+        const arg = invocation.args[i];
+        if (arg === "--parent" || arg.startsWith("--parent=")) deny();
+        if (arg === "--id" || arg.startsWith("--id=")) {
+          const value = arg === "--id" ? invocation.args[++i] : arg.slice(5);
+          if (!value || value.split(",").some((id) => id !== "current" && id !== ctx.convId)) deny();
+        }
+      }
     }
-    for (const tok of commandTokens(cmd)) targets.push(tok);
+    shellTargets(command, ctx.cwd || "", targets);
   } else {
-    for (const k of PATH_KEYS) if (typeof ctx.args[k] === "string") targets.push(ctx.args[k]);
-    for (const arr of [ctx.args.paths, ctx.args.Paths]) if (Array.isArray(arr)) targets.push(...arr.filter((v) => typeof v === "string"));
+    for (const key of PATH_KEYS) if (typeof ctx.args[key] === "string") targets.push({ value: ctx.args[key], cwd: ctx.cwd || "" });
+    for (const arr of [ctx.args.paths, ctx.args.Paths]) if (Array.isArray(arr)) {
+      for (const value of arr) if (typeof value === "string") targets.push({ value, cwd: ctx.cwd || "" });
+    }
   }
-
-  for (const t of targets) {
-    if (!t) continue;
-    const owner = logsOwner(t, cwd);
-    if (owner === null) continue;
-    if (mode === "self-only" && !unknown && owner && owner === ctx.convId) continue;
-    const why = unknown
-      ? "this session could not be identified, so transcript access fails closed"
-      : mode === "deny" ? "transcript access is denied for this session by its parent" : "this session may read only its own transcript (self-only, set by its parent)";
-    respond({ decision: "deny", reason: `Antigravity Execution Governance: Reading conversation transcripts under .system_generated/logs is blocked: ${why}. Use your task brief and workspace files instead.` });
+  for (const { value, cwd } of targets) {
+    if (!value) continue;
+    const owner = logsOwner(value, cwd, brainDirs);
+    if (owner !== null && !(mode === "self-only" && !unknown && owner === ctx.convId)) deny();
   }
 }

@@ -41,6 +41,16 @@ function invokeCli(args) {
   return res.stdout;
 }
 
+// Fresh sessions must resolve missing task paths without a hook exception.
+for (const toolCall of [
+  { name: "run_command", args: { CommandLine: "rtk read tasks/task-unknown-1.log", WaitMsBeforeAsync: 5000 } },
+  { name: "read_file", args: { Path: "tasks/task-unknown-1.log", StartLine: 1, EndLine: 20 } }
+]) {
+  const result = invokeHook({ conversationId: "fresh-session-no-transcript", cwd: hermetic.profileDir, toolCall });
+  assert.equal(result.decision, toolCall.name === "run_command" ? "allow" : "deny");
+  assert.doesNotMatch(result.reason || "", /Exception encountered|ReferenceError/);
+}
+
 // --- Group 1: Safe-Harbor rtk read & Bounded read_file for Runtime Spillover Files ---
 console.log("--- Group 1: Spillover Safe Harbor ---");
 {

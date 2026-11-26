@@ -9,9 +9,10 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { getStateDir } from "../state-dir.mjs";
-import { getEffectiveMode, isTopLevelUnrestricted } from "../../lib/transcript-policy.mjs";
+import { isTopLevelUnrestricted } from "../../lib/transcript-policy.mjs";
 import {
   getProfileHomeDir,
+  getBrainDir,
   getBrainDirs,
   resolveRealOrAncestorPath,
   isContainedInAnyBrainDir,
@@ -228,7 +229,7 @@ export function expandAndResolvePathVariants(rawPath, cwd = "") {
 
 // Native reads of conversation transcripts are allowed; writes and deletes stay protected via isProtectedInternalState.
 const TRANSCRIPT_LOG_PATH_RE = /[^\s'"`;|&()<>]*\.system_generated[\/\\]+logs[\/\\]+transcript(?:_full)?\.jsonl/gi;
-const TRANSCRIPT_READ_ONLY_CMDS = new Set(["cat", "head", "tail", "rg", "grep", "egrep", "fgrep", "wc", "jq", "less", "more", "ls", "stat", "cut", "sort", "uniq", "tr", "nl", "tac", "file", "du"]);
+const TRANSCRIPT_READ_ONLY_CMDS = new Set(["cat", "head", "tail", "rg", "grep", "egrep", "fgrep", "wc", "jq", "ls", "stat", "cut", "sort", "uniq", "tr", "nl", "tac", "file", "du"]);
 
 export function isTranscriptLogPath(targetPath) {
   if (!targetPath || typeof targetPath !== "string") return false;
@@ -292,7 +293,7 @@ const USER_EDITABLE_GEMINI_CONFIG_RE =
 // Top-level unrestricted sessions may edit non-symlink mcp_config.json / config.json via force_ask; hooks.json and all child sessions stay hard-deny
 export function isUserEditableGeminiConfigPath(rawPath, convId = "global", ctx = {}) {
   if (!rawPath || typeof rawPath !== "string") return false;
-  if (!isTopLevelUnrestricted(convId)) return false;
+  if (!isTopLevelUnrestricted(convId, undefined, getBrainDirs({ activeTranscriptPath: ctx?.transcriptPath || "" }))) return false;
   const cwd = ctx?.cwd || "";
   const resolved = resolveHookPath(expandLeadingTilde(cleanFileToken(rawPath)), cwd);
   if (!resolved) return false;
@@ -320,7 +321,7 @@ export function isProtectedBenchmarkFilePath(rawPath, cwd = "") {
 
 export function isBenchmarkGuardDisabled(convId = "global", ctx = {}) {
   const raw = String(process.env.AGY_DISABLE_BENCHMARK_GUARD || "").trim().toLowerCase();
-  return (raw === "1" || raw === "true") && !getEffectiveMode(convId).restricted;
+  return (raw === "1" || raw === "true") && isTopLevelUnrestricted(convId, undefined, getBrainDirs({ activeTranscriptPath: ctx?.transcriptPath || "" }));
 }
 
 // --- Spillover & Task Log Resolution / State Inspection ---

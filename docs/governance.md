@@ -1,6 +1,6 @@
 # Lifecycle Governance & Hooks
 
-The single global `PreToolUse` hook (`agy-context-saver`, registered in `~/.gemini/config/hooks.json` and routed via `scripts/execution-guard-hook.mjs` into lazy-loaded `scripts/hook/{file,shell,task}-guard.mjs` modules) evaluates tool calls before Antigravity executes shell commands, file reads/writes, or background task checks.
+The single global `PreToolUse` hook (`agy-context-saver`, registered in `~/.gemini/config/hooks.json` and routed via `scripts/execution-guard-hook.mjs` into lazy-loaded `scripts/hook/{file,shell,task,transcript}-guard.mjs` modules) evaluates tool calls before Antigravity executes shell commands, file reads/writes, or background task checks.
 
 ![PreToolUse hook interception flow](assets/hook-interception-flow.svg)
 
@@ -71,14 +71,14 @@ agy-context transcript access set self-only
 | Mode | What a child session may read | Notes |
 | :--- | :--- | :--- |
 | **`open`** (default) | Any `transcript.jsonl` or `transcript_full.jsonl`, using bounded `read_file` slices, `grep_search`, or read-only shell commands such as `head`, `tail`, `rg`, `grep`, `jq`, and `wc`. | The hook skips the transcript check when no restrictive policy exists, so it costs nothing. |
-| **`self-only`** | Only its own transcript. | Sibling, parent, glob, and symlink paths are denied. `agy-context transcript health` with `--id` or `--parent` is denied. |
+| **`self-only`** | Only its own transcript. | Sibling, parent, glob, and symlink paths are denied. Health checks allow only its own UUID or `current`; `--parent` is denied. |
 | **`deny`** | No transcripts. | Child sessions cannot read any transcript file. |
 
 How it works:
 
 - **Parent-set:** The session that runs `set` becomes the owner. The policy applies to the sessions it launched (its descendants, found from the sender id in each child's first system message). The nearest ancestor's policy wins. The setting never restricts the session that set it.
 - **Hook-enforced:** `scripts/hook/transcript-guard.mjs` checks `read_file`, `view_file`, `read_many_files`, `grep_search`, `find_by_name`, `list_dir`, and `run_command`. It resolves real paths, so symlinks cannot bypass it.
-- **Fail-closed:** While any restrictive policy exists, a caller that cannot be identified is treated as `self-only`.
+- **Fail-closed:** While any restrictive policy exists, a caller that cannot be identified uses the strictest active mode.
 - **Tamper-resistant storage:** The policy lives in one small file, `transcript-policy.json`, in the plugin state directory (`{"version":1,"policies":{"<ownerConvId>":{"mode":"..."}}}`). Only the CLI writes it, and the hook denies native and shell writes to it.
 - **Scope:** This is application-layer defense in depth, not a sandbox. It does not stop a determined process outside the hook from reading files on disk.
 
@@ -89,3 +89,9 @@ How it works:
 1. **Foreign configuration preservation:** Existing third-party hooks in `~/.gemini/config/hooks.json` and third-party MCP servers in `~/.gemini/config/mcp_config.json` remain untouched during setup, uninstall, and backup restoration.
 2. **Namespaced, non-clobbering backups:** Modifying global `hooks.json` or cleaning stale `agy-context-saver*` entries from `mcp_config.json` writes namespaced backups (`hooks.json.agy-context-saver.bak` and `mcp_config.json.agy-context-saver.bak`) first; restores validate JSON before key-merging so other installed plugins' hooks and MCP servers are never overwritten.
 3. **Fail-closed on governed tools:** If an unexpected error occurs while evaluating a governed tool (`run_command`, `read_file`, `edit_file`, `write_file`, `manage_task`, `schedule`), the hook returns `decision: "deny"`.
+
+## Transcript command identity
+
+The hook adds a random identity token only to a simple, verified transcript access or health command. The CLI consumes its protected state record once, within 15 seconds, and uses the hook's session ID and active transcript root instead of any inherited session environment variable. Invalid, expired, or reused tokens fail closed. Terminal calls without a token can use `GEMINI_CONVERSATION_ID`.
+
+Only top-level sessions may manage transcript access. The health library checks the caller's inherited policy before opening any transcript: `deny` blocks all reads, and `self-only` permits only the caller's own session. Unresolved launch headers, missing ancestors, cycles, and excessive ancestry depth fail closed while a restrictive policy exists. Concurrent policy updates share a lock; resetting the last policy to `open` removes the state file and restores the hook's import-free path.

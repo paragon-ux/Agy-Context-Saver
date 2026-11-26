@@ -3,11 +3,11 @@
 Run `agy-context` via `run_command` (`~/.gemini/antigravity/bin/agy-context`). `transcript health` is read-only. To inspect transcript contents, use native `read_file` (`<= 800L` slices) and `grep_search` on `transcript.jsonl`; in `self-only` or `deny` mode the hook limits which transcripts a child session may read.
 
 ## 1. `agy-context transcript health` (aliases: `stats`, `info`)
-Checks turn counts, step counts, raw transcript size, RTK status, and busy-polling events for a single session, comma-separated/repeatable `--id` list, or an entire parent cohort via `--parent <uuid|current>`.
+Checks turn counts, step counts, raw transcript size and busy-polling events for a single session, comma-separated/repeatable `--id` list, or an entire parent cohort via `--parent <uuid|current>`.
 ```bash
-agy-context transcript health [<id[,id...]>] [--id <conv[,conv...]>] [--parent <uuid|current>] [--json]
+agy-context transcript health [--id <uuid[,uuid...]|current>] [--parent <uuid|current>] [--json]
 ```
-With `self-only`, `--id` and `--parent` are denied for child sessions.
+A child in `self-only` mode may check itself with no selector, `--id current`, or its own UUID; `--parent` and other UUIDs are denied. In `deny` mode, every health check is denied. `--json` returns `{ "sessions": [...] }`; text output lists each session separately. A session becomes `WARNING` above 40 user turns or on one to three polling violations, and `CRITICAL` above three polling violations.
 
 ## 2. `agy-context transcript access`
 Sets which transcripts the sessions you launch may read. The session that runs `set` becomes the owner; the policy covers its descendants (nearest ancestor wins) and never limits the owner. The policy is stored in `transcript-policy.json` in the plugin state directory, which only this command writes.

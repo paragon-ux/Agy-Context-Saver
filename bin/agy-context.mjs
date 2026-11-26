@@ -10,7 +10,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readPolicies, setPolicy } from "../lib/transcript-policy.mjs";
+import { readPolicies, setPolicy, getLineage, hasRestrictivePolicy } from "../lib/transcript-policy.mjs";
+import { resolveCallerIdentity } from "../lib/hook-identity.mjs";
+import { getBrainDirs } from "../lib/path-guards.mjs";
 import { checkTranscriptHealth, formatTranscriptHealth } from "../lib/transcript-health.mjs";
 import {
   assertSupportedNodeVersion,
@@ -230,7 +232,11 @@ function emitError(message, asJson = false) {
 }
 
 async function handleTranscriptCommand(argv) {
+  const grantArgs = argv.filter((arg) => arg.startsWith("--hook-grant="));
+  if (grantArgs.length > 1) throw new Error("Duplicate hook identity grant.");
+  argv = argv.filter((arg) => !arg.startsWith("--hook-grant="));
   const sub = argv[0];
+  const identity = resolveCallerIdentity(grantArgs[0]?.slice("--hook-grant=".length), sub === "access" ? "access" : "health");
   if (!sub || sub === "--help" || sub === "-h" || sub === "help") {
     if (argv.length > 1) throw new Error("Conflicting flags: '--help' cannot be combined with operational flags or arguments.");
     printSubcommandHelp("transcript");
@@ -242,8 +248,14 @@ async function handleTranscriptCommand(argv) {
     if (extra.length || (verb === "status" && mode) || !["status", "set"].includes(verb)) {
       throw new Error("Usage: agy-context transcript access [status | set <open|self-only|deny>]");
     }
-    const owner = (process.env.GEMINI_CONVERSATION_ID || "").trim();
-    const policies = verb === "set" ? setPolicy(owner, mode) : readPolicies();
+    const owner = identity.callerConvId;
+    if (!owner) throw new Error("No caller session; run this from inside an Antigravity session.");
+    const previous = readPolicies();
+    const lineage = getLineage(owner, getBrainDirs(identity));
+    if (lineage.isChild || ((!lineage.found || lineage.unresolved) && hasRestrictivePolicy(previous))) {
+      throw new Error("Only a confirmed top-level session may manage transcript access.");
+    }
+    const policies = verb === "set" ? setPolicy(owner, mode) : previous;
     const mine = policies[owner]?.mode || "open";
     console.log(verb === "set" ? `Transcript access for sessions launched by ${owner}: ${mine}` : `Transcript access for sessions launched by ${owner || "(unknown session)"}: ${mine}\nActive policies: ${Object.keys(policies).length}`);
     return;
@@ -258,7 +270,7 @@ async function handleTranscriptCommand(argv) {
     process.exit(0);
   }
   if (positional.length > 0) throw new Error(`Unexpected arguments for 'transcript ${sub}': ${positional.join(" ")}`);
-  const res = await checkTranscriptHealth({ ids: opts.id || [], parent: opts.parent ?? null });
+  const res = await checkTranscriptHealth({ ids: opts.id || [], parent: opts.parent ?? null, ...identity });
   if (res.error) throw new Error(res.error);
   console.log(opts.json ? JSON.stringify(res, null, 2) : formatTranscriptHealth(res));
 }

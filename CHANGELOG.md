@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 - **Breaking: the transcript read, query, step, export, and list subcommands are gone.** `agy-context transcript read`, `query`, `step`, `export`, and `list`, plus their aliases, no longer exist. Scripts and prompts that call them will fail. Read `transcript.jsonl` with `read_file` and `grep_search` instead.
-- **Breaking: the old transcript access model is gone.** Allowlists, TTLs, per-session grants, the `[agy-transcript-access: ...]` launch directives, and the CLI flag policing no longer do anything. Existing directives and allowlists are ignored. The `transcript-core` library and the old access-policy library are removed from the package.
+- **Breaking: the old transcript access model is gone.** Allowlists, policy TTLs, the old per-session access grants, the `[agy-transcript-access: ...]` launch directives, and the CLI flag policing no longer do anything. Existing directives and allowlists are ignored. The `transcript-core` library and the old access-policy library are removed from the package.
 - The hook rule that blocked native `read_file`, `grep_search`, and shell reads of `.system_generated/` transcripts is removed.
 - Hook blocking of `setup`, `uninstall`, and other lifecycle commands for child sessions, and inline script scanning, are removed.
 
@@ -20,12 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `agy-context status` prints no access-policy line.
 - The package now includes `lib/transcript-health.mjs`, `lib/transcript-policy.mjs`, and `scripts/hook/transcript-guard.mjs`, and the test matrix has a new transcript guard suite.
 
+### Fixed
+- Transcript commands receive the active session identity from the hook through a protected, single-use token that expires after 15 seconds, so current-session commands work without an inherited environment variable.
+- Child health checks enforce the parent's policy inside the health reader. Incomplete launch records and ancestor chains fail closed while restrictions are active.
+- Concurrent policy updates preserve every parent's setting, and resetting the last policy removes the state file.
+- Shell substitutions, output-writing read flags, quoted paths, and directory symlinks cannot bypass transcript protections.
+
 ### Added
 - `agy-context transcript access [status | set <open|self-only|deny>]`.
 - `open` (default): children read transcripts natively with bounded `read_file` slices, `grep_search`, or read-only shell commands.
-- `self-only`: a child reads only its own transcript. Sibling, parent, glob, and symlink paths are denied, and `transcript health` with `--id` or `--parent` is denied.
+- `self-only`: a child reads only its own transcript. Sibling, parent, glob, and symlink paths are denied, and health checks permit only its own UUID or `current`; `--parent` is denied.
 - `deny`: children read no transcripts.
-- Enforcement by the `PreToolUse` hook (`scripts/hook/transcript-guard.mjs`) across file tools and shell commands, using real paths so symlinks cannot bypass it. Callers that cannot be identified fall back to `self-only` while a restrictive policy exists. The policy is stored in `transcript-policy.json` in the plugin state directory, written only by the CLI.
+- Enforcement by the `PreToolUse` hook (`scripts/hook/transcript-guard.mjs`) across file tools and shell commands, using real paths so symlinks cannot bypass it. Callers that cannot be identified use the strictest active mode while a restrictive policy exists. The policy is stored in `transcript-policy.json` in the plugin state directory, written only by the CLI.
 
 ### Kept
 - `agy-context transcript health` (aliases `stats`, `info`) reports turns, steps, raw size, and polling events per session. It is read-only and takes `--id`, `--parent`, and `--json`.

@@ -1,6 +1,6 @@
 # CLI & Hook Reference
 
-`Agy-Context-Saver` (`v2.3.0`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the single global `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs` routing dynamically to `scripts/hook/{file,shell,task}-guard.mjs`), paired with **RTK (`>= 1.1.0`)** via the Narrow High-ROI Pre-Gate (`AGY_RTK_MODE=pregate|off`, default `pregate`).
+`Agy-Context-Saver` (`v2.3.0`) provides the `agy-context` CLI (`bin/agy-context.mjs`, installed to `~/.gemini/antigravity/bin/agy-context`) and the single global `agy-context-saver` `PreToolUse` hook (`scripts/execution-guard-hook.mjs` routing dynamically to `scripts/hook/{file,shell,task,transcript}-guard.mjs`), paired with **RTK (`>= 1.1.0`)** via the Narrow High-ROI Pre-Gate (`AGY_RTK_MODE=pregate|off`, default `pregate`).
 
 Native `read_file` and `grep_search` read Antigravity's `transcript.jsonl` files directly when the transcript mode is `open` (the default). The transcript commands are `agy-context transcript health` (read-only metrics) and `agy-context transcript access` (a parent-set read policy for the sessions it launches).
 
@@ -22,29 +22,29 @@ Native `grep_search`, `find_by_name`, and `list_dir` run directly on workspace p
 
 ## 1. `agy-context transcript health`
 
-- **Aliases:** `stats`, `info`
-- **Usage:** `agy-context transcript health [<id[,id...]>] [--id <uuid[,uuid...]>] [--parent <uuid|current>] [--json]`
+The aliases are `stats` and `info`. Run:
 
-Streams `transcript.jsonl` to report step counts, user turns, tool call counts, transcript byte size, per-task and direct-subagent backoff-aware busy-polling events (`>= 30s` per task and `>= 180s` per conditioned direct subagent stall watchdog, while flagging `/swarm` one-shot polls and unconditioned loops), and local RTK status. Passing multiple `--id` values (comma-separated, repeatable, or positional) or `--parent <uuid|current>` emits a combined cohort health table (or structured `sessions[]` + `totals` JSON) in a single call.
+```bash
+agy-context transcript health [--id <uuid[,uuid...]|current>] [--parent <uuid|current>] [--json]
+```
 
-| Flag / Argument | Value | Required | Description |
-| :--- | :---: | :---: | :--- |
-| `[<id[,id...]>]` / `--id` | `<uuid[,uuid...]>` | No* | One or more conversation UUIDs (positional, comma-separated, or repeatable `--id`). (*Omit to check the current session.) |
-| `--parent` | `<uuid \| current>` | No | Audit health across all child sessions belonging to `<uuid>` in one call. |
-| `--json` | `(none)` | No | Output JSON instead of Markdown. |
+The command reports user and model turns, steps, tool calls, raw transcript bytes, polling violations, and unparsed lines for each selected session. Omit selectors to check the current session. Repeat `--id` or provide comma-separated UUIDs to check several sessions. Use `--parent` to check a parent's children; do not combine it with `--id`.
 
 ```bash
 agy-context transcript health
-agy-context transcript stats 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc
-agy-context transcript info --parent 68cbb7bc-ce63-4be7-accb-b0e3d37f8ecc --json
-agy-context transcript health --id <uuid1>,<uuid2> --json
+agy-context transcript stats --id current
+agy-context transcript info --parent current --json
 ```
+
+Without `--json`, the command prints plain text for each session. JSON output has the form `{ "sessions": [...] }`; each session includes `id`, `file`, `status`, `turns`, `modelTurns`, `steps`, `toolCalls`, `rawBytes`, `pollingEvents`, and `corruptLines`.
 
 | Status | Condition | Action |
 | :--- | :--- | :--- |
-| **`HEALTHY`** | Polling $= 0$, User turns $\le 40$ (advisory reminder from $35\text{--}40$ turns) | Proceed normally (summarize and start a fresh conversation when turns reach $35+$). |
-| **`WARNING`** | User turns $> 40$ or $1\text{--}3$ polling violations | Stop polling violations immediately and/or summarize progress in a fresh conversation. |
-| **`CRITICAL`** | Busy-polling events $> 3$ | Stop polling `manage_task(Action='status')` and wait for Reactive Wakeup (`<SYSTEM_MESSAGE>`). |
+| `HEALTHY` | No polling violations and at most 40 user turns | Continue normally. |
+| `WARNING` | More than 40 user turns or one to three polling violations | Stop polling and consider starting a fresh conversation. |
+| `CRITICAL` | More than three polling violations | Stop polling and wait for the completion message. |
+
+A child in `self-only` mode may check itself with no selector, `--id current`, or its own UUID. It cannot check another session or a parent cohort. `deny` blocks every health check, including checks of the caller's own session.
 
 ---
 
@@ -57,7 +57,7 @@ Shows or sets which transcripts the sessions you launch may read. The session th
 | Mode | Child session access |
 | :--- | :--- |
 | `open` (default) | Reads `transcript.jsonl` and `transcript_full.jsonl` natively, with bounded `read_file` slices, `grep_search`, or read-only shell commands. |
-| `self-only` | Reads only its own transcript. `transcript health` with `--id` or `--parent` is denied. |
+| `self-only` | Reads only its own transcript. Health checks allow only its own UUID or `current`; `--parent` is denied. |
 | `deny` | Reads no transcripts. |
 
 ```bash
@@ -70,7 +70,7 @@ See [Transcript Isolation](governance.md#transcript-isolation) for how enforceme
 
 ---
 
-## 3. `agy-context status, `setup`, `uninstall` & `restore-backups`
+## 3. `agy-context status`, `setup`, `uninstall` & `restore-backups`
 
 Audits, synchronizes, removes, or restores validated non-clobbering backups for the plugin link, single global `PreToolUse` hook, CLI shims, RTK configuration, and stale MCP entries (reload Antigravity Desktop IDE or start a new session after `setup` or `uninstall` so hook registrations activate or clear from memory cleanly):
 
