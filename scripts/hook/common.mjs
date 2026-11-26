@@ -311,7 +311,7 @@ export function isUserEditableGeminiConfigPath(rawPath, convId = "global", ctx =
 
 export function isProtectedGovernanceDirPath(rawPath, cwd = "") {
   return Boolean(rawPath && typeof rawPath === "string" && expandAndResolvePathVariants(rawPath, cwd).some((v) =>
-    /\/\.gemini\/(?:config(?:\/(?:scripts|plugins))?|antigravity(?:-cli|-ide)?\/bin)\/?$/i.test(v.replace(/\\/g, "/"))
+    /\/\.gemini\/(?:config(?:\/(?:scripts|plugins))?|antigravity(?:-cli|-ide)?(?:\/bin)?)\/?$/i.test(v.replace(/\\/g, "/"))
   ));
 }
 

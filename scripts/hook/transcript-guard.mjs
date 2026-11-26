@@ -2,8 +2,8 @@
 import path from "node:path";
 import { getBrainDirs, resolveRealOrAncestorPath } from "../../lib/path-guards.mjs";
 import { readPolicies, hasRestrictivePolicy, getEffectiveMode } from "../../lib/transcript-policy.mjs";
-import { respond, expandAndResolvePathVariants } from "./common.mjs";
-import { splitShellSegments, tokenizeShellWordsDetailed, extractSimpleWrappedScript, parseTranscriptInvocation, expandInlinePathCandidates, needsImplicitRecursiveCwd, getInspectableTextForSegment, segmentPipesToShell } from "./shell-guard.mjs";
+import { respond, expandAndResolvePathVariants, expandLeadingTilde } from "./common.mjs";
+import { parseTranscriptInvocation, inspectShellCommandScope, collapseActiveShellGlob } from "./shell-guard.mjs";
 
 const PATH_KEYS = [
   "Path", "path", "AbsolutePath", "absolutePath", "absolute_path", "FilePath", "filePath", "file_path",
@@ -13,11 +13,9 @@ const PATH_KEYS = [
 ];
 const outside = (rel) => rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
 
-function logsOwner(raw, cwd, brainDirs) {
+function logsOwner(raw, cwd, brainDirs, globPositions = null) {
   const owners = new Set();
-  const wildcard = raw.search(/[*?\[]/);
-  const prefix = wildcard < 0 ? raw : raw.slice(0, wildcard);
-  const target = wildcard < 0 ? prefix : prefix.endsWith(path.sep) || prefix.endsWith("/") ? prefix : path.dirname(prefix);
+  const target = collapseActiveShellGlob(raw, globPositions);
   for (const variant of expandAndResolvePathVariants(target, cwd)) {
     const canonical = resolveRealOrAncestorPath(variant);
     for (const brain of brainDirs) {
@@ -35,28 +33,6 @@ function logsOwner(raw, cwd, brainDirs) {
     if (/\.system_generated\/logs(?:\/|$)/i.test(norm)) owners.add(norm.match(/(?:^|\/)([^/]+)\/\.system_generated\/logs(?:\/|$)/i)?.[1] || "");
   }
   return !owners.size ? null : owners.size === 1 ? [...owners][0] : "";
-}
-
-function shellTargets(command, cwd, out, depth = 0) {
-  if (depth > 12) throw new Error("Shell nesting exceeds transcript inspection limit.");
-  const segments = splitShellSegments(command);
-  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
-    const seg = segments[segIdx];
-    const detailed = tokenizeShellWordsDetailed(seg.text);
-    const words = detailed.map((t) => t.value);
-    if (words[0] === "cd") {
-      const cdTarget = words.slice(1).find((w, idx, arr) => arr[idx - 1] === "--" || (!w.startsWith("-") && w !== "--" && w.toLowerCase() !== "/d"));
-      if (cdTarget) cwd = path.resolve(cwd, cdTarget);
-    }
-    if (needsImplicitRecursiveCwd(detailed)) out.push({ value: cwd || ".", cwd });
-    for (const word of getInspectableTextForSegment(seg, { hasDownstreamPipe: segmentPipesToShell(segments, segIdx), asWords: true })) {
-      for (const value of expandInlinePathCandidates(word)) out.push({ value, cwd });
-    }
-    const wrapper = extractSimpleWrappedScript(seg.text);
-    if (wrapper?.innerScript) shellTargets(wrapper.innerScript, cwd, out, depth + 1);
-    for (const sub of seg.subshells || []) shellTargets(sub, cwd, out, depth + 1);
-    for (const body of seg.heredocBodies || []) shellTargets(body, cwd, out, depth + 1);
-  }
 }
 
 export function handleTranscriptGuard(ctx) {
@@ -81,16 +57,23 @@ export function handleTranscriptGuard(ctx) {
         }
       }
     }
-    shellTargets(command, ctx.cwd || "", targets);
+    const scoped = inspectShellCommandScope(command, ctx.cwd || "", { protectedDirs: brainDirs });
+    for (const entry of scoped) {
+      if (entry.depthExceeded || entry.uncertainFailClosed) deny();
+      if (entry.uncertainCwd && (entry.recursive || !path.isAbsolute(expandLeadingTilde(entry.value)))) {
+        deny();
+      }
+      targets.push({ value: entry.value, cwd: entry.cwd, globPositions: entry.globPositions, isOperand: entry.isOperand });
+    }
   } else {
-    for (const key of PATH_KEYS) if (typeof ctx.args[key] === "string") targets.push({ value: ctx.args[key], cwd: ctx.cwd || "" });
+    for (const key of PATH_KEYS) if (typeof ctx.args[key] === "string") targets.push({ value: ctx.args[key], cwd: ctx.cwd || "", globPositions: null, isOperand: true });
     for (const arr of [ctx.args.paths, ctx.args.Paths]) if (Array.isArray(arr)) {
-      for (const value of arr) if (typeof value === "string") targets.push({ value, cwd: ctx.cwd || "" });
+      for (const value of arr) if (typeof value === "string") targets.push({ value, cwd: ctx.cwd || "", globPositions: null, isOperand: true });
     }
   }
-  for (const { value, cwd } of targets) {
-    if (!value) continue;
-    const owner = logsOwner(value, cwd, brainDirs);
+  for (const { value, cwd, globPositions, isOperand } of targets) {
+    if (!value || (!isOperand && value.startsWith("-"))) continue;
+    const owner = logsOwner(value, cwd, brainDirs, globPositions);
     if (owner !== null && !(mode === "self-only" && !unknown && owner === ctx.convId)) deny();
   }
 }

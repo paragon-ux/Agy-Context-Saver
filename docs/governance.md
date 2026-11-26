@@ -53,7 +53,7 @@ $$\text{requiredBackoffSeconds} = \min\left(600, \text{round}\left(30 \times 2.5
 
 ## Configuration and State Protection
 
-- **Protected state:** Writes and deletes under `.system_generated/logs` are denied in every transcript mode. Direct file or shell access to `getStateDir()` stays blocked.
+- **Protected state:** Writes and deletes under `.system_generated/logs` are denied in every transcript mode. Direct file or shell access to `getStateDir()` stays blocked. When `git grep` runs in default tracked mode from a parent directory such as `$HOME`, the hook checks the repository's tracked file list and allows the search only when no tracked candidate touches protected plugin state or a restricted transcript.
 - **Configuration edits:** Top-level sessions (not a child, not under a restrictive transcript policy) get a confirmation prompt (`force_ask`) for non-symlink edits to `~/.gemini/{config,antigravity*}/{mcp_config.json,config.json}`, via native file edits or non-destructive shell edits (supporting `/plugin`, `/migrate-agent-settings`, and MCP setup). Child sessions are hard-denied from those edits. Global `~/.gemini/config/hooks.json`, `*.bak` backups, `~/.gemini/config/plugins/agy-context-saver/` (plugin and hook source), symlinks, and destructive shell verbs (`rm`, `mv`, `ln`, `truncate`, `shred`, `dd`, `chmod`, `chown`, `find`) are hard-denied for everyone.
 - **Scope:** These controls are application-layer `PreToolUse` guardrails, not an OS-kernel sandbox.
 

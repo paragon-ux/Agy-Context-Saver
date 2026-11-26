@@ -461,6 +461,443 @@ parseTranscriptInvocation(longTranscriptCmd);
 assert.ok(performance.now() - start < 250, "Transcript CLI recognition must remain linear at 6000 repetitions");
 console.log("✓ hardened launch attribution, six-process updates and grant consumption, real hook-to-CLI identity, policy authorization, shell and symlink attacks, and health metrics");
 
+console.log("--- A1: Redirect-prefixed executables, compound positions, missing targets & fd preservation ---");
+async function testA1RedirectAndCompoundNormalization() {
+  setPolicy(P, "self-only");
+  const cliFwd = cliScript.replace(/\\/g, "/");
+  for (const unsafeCli of [
+    `2>/dev/null agy-context transcript health --id ${B}`,
+    `2> /dev/null agy-context transcript health --id ${B}`,
+    `</dev/null agy-context transcript access set open`,
+    `< /dev/null agy-context transcript access set open`,
+    `2>&1 node "${cliFwd}" transcript health --json`,
+    `0</dev/null node "${cliFwd}" transcript access set open`,
+    `agy-context 2>/dev/null transcript health --id ${B}`,
+    `node 2>/dev/null "${cliFwd}" transcript access set open`,
+    `2>/dev/null sh -c 'agy-context transcript access set open'`,
+    `(agy-context transcript access set open)`,
+    `if true; then agy-context transcript access set open; fi`
+  ]) {
+    const parsed = parseTranscriptInvocation(unsafeCli);
+    assert.ok(parsed && parsed.clean === false, `Expected unclean transcript invocation for: ${unsafeCli}`);
+    assert.equal(executeHookedShell(A, unsafeCli).blocked, true, `Hook-to-CLI boundary must block: ${unsafeCli}`);
+  }
+  // Verify policy was not modified by any blocked child command
+  assert.equal(readPolicies()[P]?.mode, "self-only");
+  // Unknown caller with inherited GEMINI_CONVERSATION_ID must also be denied on transcript CLI
+  assert.equal(hookCommand("global", `node "${cliFwd}" transcript access set open`, realShellEnv).decision, "deny");
+
+  // Redirect-prefixed & compound protected mutations
+  for (const unsafeMut of [
+    `2>/dev/null rm -f "${cfg}"`,
+    `2> /dev/null rm -f "${cfg}"`,
+    `</dev/null rm -f "${cfg}"`,
+    `if true; then 2>/dev/null rm -f "${cfg}"; fi`,
+    `find "${path.dirname(cfg)}" -exec rm {} \\;`,
+    `echo x > "${tfile(A)}"`,
+    `echo x >"${tfile(A)}"`,
+    `echo x >| "${tfile(A)}"`,
+    `(echo x) > "${tfile(A)}"`,
+    `2>"${path.join(hermetic.profileDir, ".gemini", "config", "hooks.json")}" echo hi`
+  ]) {
+    assert.equal(shell(P, unsafeMut), "deny", `Protected mutation must deny: ${unsafeMut}`);
+  }
+  assert.equal(shell(P, `2>"${cfg}" echo hi`), "force_ask", "Top-level redirect write to mcp_config.json prompts via force_ask");
+  assert.equal(shell(A, `2>"${cfg}" echo hi`), "deny", "Child redirect write to mcp_config.json denies");
+
+  // Redirect-prefixed implicit home search
+  for (const unsafeHomeSearch of [
+    "2>/dev/null rg needle",
+    "2> /dev/null rg needle",
+    "</dev/null grep -rn needle",
+    "2>&1 find",
+    "2>/dev/null ls",
+    "if true; then rg needle; fi"
+  ]) {
+    assert.equal(shellFromHome(P, unsafeHomeSearch), "deny", `Implicit home search must deny: ${unsafeHomeSearch}`);
+  }
+
+  // Redirect-prefixed & compound blocking CI watch loops
+  for (const watchCmd of [
+    "2>/dev/null gh pr checks --watch",
+    "</dev/null gh run watch",
+    "gh 2>/dev/null pr checks -w",
+    "if true; then 2>/dev/null gh run watch; fi",
+    "2>/dev/null sh -c 'gh pr checks --watch'"
+  ]) {
+    const res = hookCommand(P, watchCmd);
+    assert.equal(res.decision, "deny", `Watch loop must deny: ${watchCmd}`);
+    assert.match(res.reason || "", /Blocking CI watch loop/);
+  }
+
+  // Attached & separated input redirects reading sibling transcript or protected state
+  const stateProbeFile = path.join(getStateDir(), "a1-probe.json");
+  fs.writeFileSync(stateProbeFile, '{"secret":true}');
+  try {
+    for (const unsafeInputRedir of [
+      `< "${tfile(B)}" cat`,
+      `<"${tfile(B)}" head -n 1`,
+      `0<"${work}/lnk/transcript.jsonl" head -n 1`,
+      `< "${stateProbeFile}" cat`
+    ]) {
+      assert.equal(shell(A, unsafeInputRedir), "deny", `Protected input redirect must deny: ${unsafeInputRedir}`);
+    }
+  } finally {
+    fs.rmSync(stateProbeFile, { force: true });
+  }
+
+  // Missing redirect targets & malformed compound syntax fail closed on protected boundaries
+  for (const malformed of [
+    "rg needle ./projects/example 2>",
+    "cat ./projects/example/a.txt <",
+    "then ls ./projects/example",
+    "if true; then ls ./projects/example"
+  ]) {
+    assert.equal(shellFromHome(A, malformed), "deny", `Malformed syntax from $HOME must deny: ${malformed}`);
+  }
+
+  // Legitimate-use controls: safe redirected reads, fd duplication preserved, prose `do`/`then`/`-exec`
+  const fdAlias = path.join(work, "1");
+  fs.symlinkSync(logsOf(B), fdAlias, process.platform === "win32" ? "junction" : "dir");
+  try {
+    assert.equal(shell(A, `2>/dev/null head -n 5 "${path.join(work, "note.txt")}"`), "allow");
+    assert.equal(shell(A, `</dev/null cat "${path.join(work, "note.txt")}"`), "allow");
+    assert.equal(shell(A, `head -n 5 "${tfile(A)}" 2>/dev/null`), "allow");
+    assert.equal(shell(A, `head -n 5 "${path.join(work, "note.txt")}" 2>&1`), "allow", "2>&1 duplicates fd 1, not symlink './1'");
+    assert.equal(shell(A, `cat "${path.join(work, "note.txt")}" 2>&-`), "allow", "2>&- closes fd 2");
+    assert.equal(shell(A, `cat "1/transcript.jsonl"`), "deny", "Explicit path through './1' remains denied");
+  } finally {
+    fs.rmSync(fdAlias, { recursive: true, force: true });
+  }
+  for (const proseCmd of ["echo do ls", "echo then rg", "printf '%s\\n' else find", "echo -exec ls"]) {
+    assert.equal(shellFromHome(A, proseCmd), "allow", `Prose words must not invent command starts: ${proseCmd}`);
+  }
+  setPolicy(P, "open");
+}
+await testA1RedirectAndCompoundNormalization();
+console.log("✓ A1 passed");
+
+console.log("--- A2: Execution-directory scope across consumers, branches & wrappers ---");
+function testA2ExecutionDirectoryScope() {
+  const subDir = path.join(work, "a2-sub");
+  fs.mkdirSync(subDir, { recursive: true });
+  const subLnk = path.join(subDir, "sib-logs");
+  fs.symlinkSync(logsOf(B), subLnk, process.platform === "win32" ? "junction" : "dir");
+  const subStateLnk = path.join(subDir, "state-lnk");
+  fs.symlinkSync(getStateDir(), subStateLnk, process.platform === "win32" ? "junction" : "dir");
+  const stateSentinel = path.join(getStateDir(), "a2-state.json");
+  fs.writeFileSync(stateSentinel, "{}");
+
+  try {
+    setPolicy(P, "self-only");
+    // Plain, command-prefixed, builtin, env-var, and redirected `cd` followed by sibling symlink read
+    for (const prefix of ["cd", "command cd", "command -p cd", "builtin cd", "2>/dev/null cd", "FOO=1 cd"]) {
+      assert.equal(shell(A, `${prefix} a2-sub && head -n 1 sib-logs/transcript.jsonl`), "deny", `Transcript check after '${prefix}'`);
+      assert.equal(shell(P, `${prefix} a2-sub && cat state-lnk/a2-state.json`), "deny", `State check after '${prefix}'`);
+    }
+    assert.equal(shell(P, `2>/dev/null cd "${path.dirname(cfg)}" && rm -f mcp_config.json`), "deny", "Mutation check after redirected cd");
+
+    // Real shell oracle for failed `cd` followed by `;`: shell stays in original cwd
+    if (process.platform !== "win32") {
+      const shProbe = spawnSync("/bin/sh", ["-c", "cd ./definitely-missing-dir 2>/dev/null; pwd"], { cwd: work, encoding: "utf-8" });
+      assert.equal(fs.realpathSync.native(shProbe.stdout.trim()), fs.realpathSync.native(work));
+    }
+
+    // Ambiguous / conditional / failed `cd` control flow must inspect conservative directory set or reject
+    for (const ambiguousCmd of [
+      `cd "${projDir}" || head -n 1 lnk/transcript.jsonl`,
+      `cd ./definitely-missing-dir 2>/dev/null; head -n 1 lnk/transcript.jsonl`,
+      `if false; then cd "${projDir}"; fi; head -n 1 lnk/transcript.jsonl`,
+      `cd "$UNKNOWN_DIR" && head -n 1 note.txt`,
+      `cd - && head -n 1 note.txt`,
+      `env -C "${work}/lnk" head -n 1 transcript.jsonl`
+    ]) {
+      assert.equal(shell(A, ambiguousCmd), "deny", `Ambiguous or wrapper directory access must deny: ${ambiguousCmd}`);
+    }
+
+    // Legitimate-use controls: safe project-relative read, subshell/child-shell/wrapper isolation
+    const shellFromProj = (id, cmd) => JSON.parse(spawnSync(process.execPath, [hookScript], {
+      encoding: "utf-8", env: process.env,
+      input: JSON.stringify({ conversationId: id, cwd: projDir, toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } })
+    }).stdout).decision;
+
+    assert.equal(shell(A, `cd "${projDir}" && head -n 5 a.txt`), "allow");
+    assert.equal(shellFromHome(A, "command cd ./projects/example && rg needle ."), "allow");
+    assert.equal(shellFromHome(A, "2>/dev/null cd ./projects/example && rg needle ."), "allow");
+    assert.equal(shellFromProj(A, "(cd ../.. && echo hi) && rg needle ."), "allow", "Subshell cd must not leak to outer shell");
+    assert.equal(shellFromProj(A, "if true; then (cd ../.. && echo hi); fi && rg needle ."), "allow", "Compound subshell cd must not leak to outer shell");
+    assert.equal(shellFromProj(A, "(cd ../.. && rg needle) && echo hi"), "deny", "Unsafe implicit search inside subshell remains denied");
+    assert.equal(shell(A, `(cat "${work.replace(/\\/g, "/")}/lnk/transcript.jsonl")`), "deny", "Unsafe sibling read inside subshell remains denied");
+    assert.equal(shellFromProj(A, "sh -c 'cd ../.. && echo hi' && rg needle ."), "allow", "Child-shell cd must not leak to outer shell");
+    assert.equal(shellFromProj(A, `env -C "${hermetic.profileDir.replace(/\\/g, "/")}" echo hi && rg needle .`), "allow", "Wrapper-local env -C must not leak to next segment");
+    assert.equal(shellFromProj(A, "cd ../.. && rg needle ."), "deny", "Same-shell cd to parent home remains denied");
+  } finally {
+    fs.rmSync(stateSentinel, { force: true });
+    fs.rmSync(subDir, { recursive: true, force: true });
+    setPolicy(P, "open");
+  }
+}
+testA2ExecutionDirectoryScope();
+console.log("✓ A2 passed");
+
+console.log("--- A3: Command-specific argument roles, option arity, `--` operands & active globs ---");
+function testA3CommandArgumentRolesAndGlobs() {
+  const oracleDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), "agy-a3-oracle-"));
+  const dashAlias = path.join(work, "-dash-lnk");
+  const dashStateAlias = path.join(work, "-dash-state");
+  fs.symlinkSync(logsOf(B), dashAlias, process.platform === "win32" ? "junction" : "dir");
+  fs.symlinkSync(getStateDir(), dashStateAlias, process.platform === "win32" ? "junction" : "dir");
+  const stateMarker = path.join(getStateDir(), "a3-secret.json");
+  fs.writeFileSync(stateMarker, '{"nonce":"secret"}\n');
+
+  try {
+    fs.writeFileSync(path.join(oracleDir, "sample.txt"), "needle_token\n");
+    const rgVer = spawnSync("rg", ["--version"], { encoding: "utf-8" });
+    if (!rgVer.error && rgVer.status === 0) {
+      const rgDot = spawnSync("rg", [".", "sample.txt"], { cwd: oracleDir, encoding: "utf-8" });
+      assert.equal(rgDot.status, 0);
+      assert.match(rgDot.stdout, /needle_token/);
+    }
+    const grepVer = spawnSync("grep", ["--version"], { encoding: "utf-8" });
+    if (!grepVer.error && grepVer.status === 0 && /GNU grep/i.test(grepVer.stdout)) {
+      const gTab = spawnSync("grep", ["-T", "needle_token", "sample.txt"], { cwd: oracleDir, encoding: "utf-8" });
+      assert.equal(gTab.status, 0);
+      assert.match(gTab.stdout, /needle_token/);
+      const gColor = spawnSync("grep", ["--color", "needle_token", "sample.txt"], { cwd: oracleDir, encoding: "utf-8" });
+      assert.equal(gColor.status, 0);
+      assert.match(gColor.stdout, /needle_token/);
+    }
+
+    setPolicy(P, "self-only");
+    for (const unsafeRoleCmd of [
+      `grep -T ok "${work}/lnk/transcript.jsonl"`,
+      `grep --color ok "${work}/lnk/transcript.jsonl"`,
+      `grep -rnT ok "${work}/lnk"`,
+      `rg -Tjs ok "${work}/lnk"`,
+      `rg -T js ok "${work}/lnk"`,
+      `git grep --no-index -O ok "${work}/lnk/transcript.jsonl"`,
+      `grep -f "${tfile(B)}" ok "${work}/note.txt"`,
+      `rg -f"${tfile(B)}" "${work}/note.txt"`,
+      `rg --file="${tfile(B)}" "${work}/note.txt"`,
+      `rg --ignore-file "${tfile(B)}" ok "${work}/note.txt"`,
+      `grep --exclude-from="${tfile(B)}" -r ok "${projDir}"`,
+      `grep --bogus-flag ok "${work}/lnk/transcript.jsonl"`,
+      `rg -Z ok "${work}/lnk/transcript.jsonl"`,
+      `ag -Q ok "${work}/lnk/transcript.jsonl"`,
+      `rg ok -- -dash-lnk/transcript.jsonl`,
+      `grep -e ok -- -dash-lnk/transcript.jsonl`,
+      `cat -- -dash-lnk/transcript.jsonl`,
+      `ls -- -dash-lnk`,
+      `head -n 5 "${work}"/"lnk"/t*`,
+      `cat "${work}"/lnk/[t]ranscript.jsonl`
+    ]) {
+      assert.equal(shell(A, unsafeRoleCmd), "deny", `A3 unsafe transcript access must deny: ${unsafeRoleCmd}`);
+    }
+
+    // State-target equivalents (`--` dash alias, `grep -T`, `grep --color`)
+    for (const unsafeStateCmd of [
+      `grep -T secret "${dashStateAlias.replace(/\\/g, "/")}/a3-secret.json"`,
+      `grep --color secret "${dashStateAlias.replace(/\\/g, "/")}/a3-secret.json"`,
+      `rg secret -- -dash-state/a3-secret.json`,
+      `cat -- -dash-state/a3-secret.json`,
+      `cat "${path.dirname(getStateDir()).replace(/\\/g, "/")}"/*/a3-secret.json`
+    ]) {
+      assert.equal(shell(P, unsafeStateCmd), "deny", `A3 unsafe state access must deny: ${unsafeStateCmd}`);
+    }
+
+    // Unknown flags from $HOME must trigger conservative uncertainty (implicit cwd denied)
+    for (const uncertainHomeCmd of [
+      "grep --bogus-flag needle ./projects/example",
+      "rg --bogus-flag needle ./projects/example",
+      "ls --bogus-flag ./projects/example",
+      "find ./projects/example -bogus-pred",
+      "ls *"
+    ]) {
+      assert.equal(shellFromHome(A, uncertainHomeCmd), "deny", `Uncertain or active-glob command from $HOME must deny: ${uncertainHomeCmd}`);
+    }
+
+    // Legitimate-use controls from $HOME under both self-only and open
+    for (const mode of ["self-only", "open"]) {
+      setPolicy(P, mode);
+      const caller = mode === "self-only" ? A : P;
+      for (const safeCmd of [
+        "rg '.' ./projects/example",
+        "rg '/' ./projects/example",
+        "rg '*.txt' ./projects/example",
+        "rg -Tjs needle ./projects/example",
+        "rg --color=never needle ./projects/example",
+        "grep -T needle ./projects/example/a.txt",
+        "grep --color needle ./projects/example/a.txt",
+        "grep --color=always -rn needle ./projects/example",
+        "find ./projects/example -name '*.txt'",
+        "find ./projects/example -name -exec",
+        "ls -I '*.bak' ./projects/example",
+        "cat '*.txt'",
+        "cat \\*.txt",
+        "head -n 5 ./projects/example/a.txt"
+      ]) {
+        assert.equal(shellFromHome(caller, safeCmd), "allow", `A3 safe control (${mode}) must allow: ${safeCmd}`);
+      }
+    }
+  } finally {
+    fs.rmSync(stateMarker, { force: true });
+    fs.rmSync(dashAlias, { recursive: true, force: true });
+    fs.rmSync(dashStateAlias, { recursive: true, force: true });
+    fs.rmSync(oracleDir, { recursive: true, force: true });
+    setPolicy(P, "open");
+  }
+}
+testA3CommandArgumentRolesAndGlobs();
+console.log("✓ A3 passed");
+
+console.log("--- A4: Scope-based Git search authorization (tracked safe vs tracked protected vs failed/truncated) ---");
+function testA4GitGrepScopedAuthorization() {
+  const dotHome = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), "agy-a4-home-"));
+  const bigIdxRepo = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), "agy-a4-big-"));
+  const nonGitHome = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), "agy-a4-nongit-"));
+  const stateHomeFor = (profileRoot) =>
+    process.platform === "win32"
+      ? path.join(profileRoot, "AppData", "Local")
+      : path.join(profileRoot, ".local", "state");
+  const makeProfileEnv = (profileRoot) => {
+    const sh = stateHomeFor(profileRoot);
+    const env = { ...process.env, AGY_TEST_PROFILE_DIR: profileRoot, XDG_STATE_HOME: sh };
+    if (process.platform === "win32") env.LOCALAPPDATA = sh;
+    return env;
+  };
+  const dotStateHome = stateHomeFor(dotHome);
+  const dotStateDir = path.join(dotStateHome, "agy-context-saver");
+  const dotBrain = path.join(dotHome, ".gemini", "antigravity", "brain");
+  const dotEnv = makeProfileEnv(dotHome);
+
+  const gitRun = (cwd, args, opts = {}) => {
+    const r = spawnSync("git", args, { cwd, encoding: "utf-8", ...opts });
+    assert.equal(r.status, 0, r.stderr || `git ${args.join(" ")} failed`);
+    return r;
+  };
+  const dotHook = (id, cmd, cwd = dotHome, env = dotEnv) => {
+    const r = spawnSync(process.execPath, [hookScript], {
+      encoding: "utf-8",
+      env,
+      input: JSON.stringify({ conversationId: id, cwd, toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } })
+    });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout).decision;
+  };
+
+  try {
+    const gitVer = gitRun(dotHome, ["--version"]).stdout.trim();
+    assert.match(gitVer, /^git version /);
+
+    // Seed dotHome as a dotfiles Git repository with `*` ignored, safe `.bashrc` tracked, and untracked state + transcripts
+    gitRun(dotHome, ["init", "-q"]);
+    gitRun(dotHome, ["config", "user.email", "test@example.com"]);
+    gitRun(dotHome, ["config", "user.name", "Test"]);
+    fs.writeFileSync(path.join(dotHome, ".gitignore"), "*\n!.gitignore\n!.bashrc\n");
+    fs.writeFileSync(path.join(dotHome, ".bashrc"), "export SAFE_DOTFILE_MARKER=1\n");
+    fs.mkdirSync(path.join(dotHome, "projects", "sub"), { recursive: true });
+    fs.writeFileSync(path.join(dotHome, "projects", "sub", "app.js"), "const SAFE_DOTFILE_MARKER = 2;\n");
+    gitRun(dotHome, ["add", "-f", ".gitignore", ".bashrc", "projects/sub/app.js"]);
+    gitRun(dotHome, ["commit", "-q", "-m", "init dotfiles"]);
+
+    fs.mkdirSync(dotStateDir, { recursive: true });
+    const dotStateSecret = path.join(dotStateDir, "secret-grant.json");
+    fs.writeFileSync(dotStateSecret, '{"sentinel":"PROTECTED_STATE_SENTINEL"}\n');
+
+    const seedDotSession = (id, parent, extra = "") => {
+      const f = path.join(dotBrain, id, ".system_generated", "logs", "transcript.jsonl");
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      const first = parent
+        ? { step_index: 0, type: "SYSTEM_MESSAGE", source: "SYSTEM", content: header(parent, "work") }
+        : { step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", content: "hello" };
+      fs.writeFileSync(f, JSON.stringify(first) + "\n" + JSON.stringify({ step_index: 1, type: "PLANNER_RESPONSE", content: `ok ${extra}` }) + "\n");
+      return f;
+    };
+    seedDotSession(P, null);
+    seedDotSession(A, P);
+    const dotSibFile = seedDotSession(B, P, "PROTECTED_SIBLING_SENTINEL");
+
+    // Set self-only policy in dotHome's stateDir
+    fs.writeFileSync(path.join(dotStateDir, "transcript-policy.json"), JSON.stringify({ version: 1, policies: { [P]: { mode: "self-only" } } }));
+
+    // Real git grep oracle: tracked search finds SAFE_DOTFILE_MARKER and does NOT match untracked sentinels
+    const safeGrep = spawnSync("git", ["grep", "SAFE_DOTFILE_MARKER"], { cwd: dotHome, encoding: "utf-8" });
+    assert.equal(safeGrep.status, 0);
+    assert.match(safeGrep.stdout, /\.bashrc/);
+    const untrackedCheck = spawnSync("git", ["grep", "PROTECTED_STATE_SENTINEL"], { cwd: dotHome, encoding: "utf-8" });
+    assert.equal(untrackedCheck.status, 1);
+
+    // Safe controls: plain tracked `git grep` from $HOME dotfiles repo is allowed for both P and self-only A
+    for (const safeGitCmd of [
+      "git grep SAFE_DOTFILE_MARKER",
+      "git grep SAFE_DOTFILE_MARKER .",
+      "git grep -n SAFE_DOTFILE_MARKER -- .bashrc",
+      "git grep -i safe_dotfile_marker projects/sub"
+    ]) {
+      assert.equal(dotHook(P, safeGitCmd), "allow", `Top-level safe dotfiles git grep: ${safeGitCmd}`);
+      assert.equal(dotHook(A, safeGitCmd), "allow", `Self-only safe dotfiles git grep: ${safeGitCmd}`);
+    }
+
+    // Unsafe modes in safe dotfile repo: untracked, no-index, cached, submodule, revision/treeish, config override
+    for (const unsafeModeCmd of [
+      "git grep --untracked PROTECTED_SIBLING_SENTINEL",
+      "git grep -u PROTECTED_SIBLING_SENTINEL",
+      "git grep -nu PROTECTED_SIBLING_SENTINEL",
+      "git grep --no-index PROTECTED_SIBLING_SENTINEL",
+      "git grep --cached SAFE_DOTFILE_MARKER",
+      "git grep --recurse-submodules SAFE_DOTFILE_MARKER",
+      "git grep SAFE_DOTFILE_MARKER HEAD",
+      "git grep SAFE_DOTFILE_MARKER HEAD -- .bashrc",
+      "git -c grep.patternType=extended grep SAFE_DOTFILE_MARKER"
+    ]) {
+      assert.equal(dotHook(A, unsafeModeCmd), "deny", `Unsafe git grep mode must deny: ${unsafeModeCmd}`);
+    }
+    // Scoped untracked search inside safe subdir remains allowed
+    assert.equal(dotHook(A, "git grep --untracked SAFE_DOTFILE_MARKER projects/sub"), "allow");
+
+    // Unsafe case 1: Staged/tracked protected state file -> real `git grep` reads it, hook MUST deny!
+    const dotHomeFwd = dotHome.replace(/\\/g, "/");
+    gitRun(dotHome, ["add", "-f", dotStateSecret]);
+    const leakedStateOracle = spawnSync("git", ["grep", "PROTECTED_STATE_SENTINEL"], { cwd: dotHome, encoding: "utf-8" });
+    assert.equal(leakedStateOracle.status, 0, "Real git grep returns sentinel from staged state file");
+    assert.equal(dotHook(P, "git grep PROTECTED_STATE_SENTINEL"), "deny", "Tracked state file must deny plain git grep");
+    assert.equal(dotHook(P, `git -C "${dotHomeFwd}" grep PROTECTED_STATE_SENTINEL`, work), "deny", "git -C to repo with tracked state must deny");
+    assert.equal(dotHook(P, `git --git-dir="${dotHomeFwd}/.git" --work-tree="${dotHomeFwd}" grep PROTECTED_STATE_SENTINEL`, work), "deny", "--work-tree to repo with tracked state must deny");
+    gitRun(dotHome, ["rm", "-q", "--cached", dotStateSecret]);
+    assert.equal(dotHook(P, "git grep SAFE_DOTFILE_MARKER"), "allow", "Removing tracked state restores safe git grep");
+
+    // Unsafe case 2: Staged/tracked sibling transcript file -> real `git grep` reads it, hook MUST deny!
+    gitRun(dotHome, ["add", "-f", dotSibFile]);
+    const leakedSibOracle = spawnSync("git", ["grep", "PROTECTED_SIBLING_SENTINEL"], { cwd: dotHome, encoding: "utf-8" });
+    assert.equal(leakedSibOracle.status, 0, "Real git grep returns sentinel from staged sibling transcript");
+    assert.equal(dotHook(A, "git grep PROTECTED_SIBLING_SENTINEL"), "deny", "Tracked sibling transcript must deny child git grep");
+    assert.equal(dotHook(A, `git -C "${dotHomeFwd}" grep PROTECTED_SIBLING_SENTINEL`, work), "deny", "git -C to repo with tracked sibling transcript must deny");
+    gitRun(dotHome, ["rm", "-q", "--cached", dotSibFile]);
+
+    // Unsafe case 3: Non-git directory fails closed
+    fs.mkdirSync(path.join(stateHomeFor(nonGitHome), "agy-context-saver"), { recursive: true });
+    const nonGitEnv = makeProfileEnv(nonGitHome);
+    assert.equal(dotHook(P, "git grep anything", nonGitHome, nonGitEnv), "deny", "Failed git scope discovery in non-repo must deny");
+
+    // Unsafe case 4: Truncated / overflowed candidate count (> 10,000 tracked index entries) fails closed
+    gitRun(bigIdxRepo, ["init", "-q"]);
+    fs.mkdirSync(path.join(stateHomeFor(bigIdxRepo), "agy-context-saver"), { recursive: true });
+    const blobSha = gitRun(bigIdxRepo, ["hash-object", "-w", "--stdin"], { input: "safe content\n" }).stdout.trim();
+    const indexLines = Array.from({ length: 10050 }, (_, i) => `100644 ${blobSha} 0\tsafe/file_${String(i).padStart(5, "0")}.txt`).join("\n") + "\n";
+    gitRun(bigIdxRepo, ["update-index", "--index-info"], { input: indexLines });
+    const bigEnv = makeProfileEnv(bigIdxRepo);
+    const bigFwd = bigIdxRepo.replace(/\\/g, "/");
+    assert.equal(dotHook(P, "git grep safe", bigIdxRepo, bigEnv), "deny", "Overflowed git ls-files candidate set must fail closed");
+    assert.equal(dotHook(P, `git --git-dir="${bigFwd}/.git" --work-tree="${bigFwd}" grep safe`, work, bigEnv), "deny", "--work-tree overflowed candidate set must fail closed");
+  } finally {
+    fs.rmSync(dotHome, { recursive: true, force: true });
+    fs.rmSync(bigIdxRepo, { recursive: true, force: true });
+    fs.rmSync(nonGitHome, { recursive: true, force: true });
+  }
+}
+testA4GitGrepScopedAuthorization();
+console.log("✓ A4 passed");
+
 } finally {
   fs.rmSync(work, { recursive: true, force: true });
   hermetic.cleanup();
