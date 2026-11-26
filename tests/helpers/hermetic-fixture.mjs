@@ -299,7 +299,7 @@ export function runRtkCli(args, options = {}) {
  * or mutate the host's `~/.gemini` profile or require pre-installed global binaries.
  */
 export async function setupHermeticTestEnv(options = {}) {
-  const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-hermetic-profile-"));
+  const profileDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), "agy-hermetic-profile-"));
   process.env.AGY_TEST_PROFILE_DIR = profileDir;
   if (!process.env.GIT_CONFIG_GLOBAL) {
     process.env.GIT_CONFIG_GLOBAL = path.join(profileDir, ".gitconfig");

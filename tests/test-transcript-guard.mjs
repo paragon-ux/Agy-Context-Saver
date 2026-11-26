@@ -234,6 +234,14 @@ for (const mode of ["open", "self-only", "deny"]) {
   ]) assert.equal(shell(A, command), "deny", command);
   const pending = mintHookIdentity({ convId: P }, "health");
   const pendingPath = path.join(getStateDir(), `transcript-hook-grant-${pending}.json`);
+  const pendingAliasDir = path.join(work, "pending state alias");
+  fs.symlinkSync(getStateDir(), pendingAliasDir, process.platform === "win32" ? "junction" : "dir");
+  const pendingAlias = path.join(pendingAliasDir, path.basename(pendingPath));
+  assert.equal(readFile(A, pendingAlias), "deny");
+  for (const command of [`cat "${pendingAlias}"`, `head -n 1 "${pendingAlias}"`, `gh pr create --body-file="${pendingAlias}"`, `gh pr review 1 -cF"${pendingAlias}"`, `cat < "${pendingAlias}"`, `echo 'cat "${pendingAlias}"' | sh`, `sh -c 'cat "${pendingAlias}"'`]) {
+    assert.equal(shell(A, command), "deny", "Protected grant state cannot be read through an alias");
+  }
+  fs.rmSync(pendingAliasDir, { recursive: true, force: true });
   assert.equal(readFile(A, pendingPath), "deny");
   assert.equal(shell(A, `cat "${pendingPath}"`), "deny");
   assert.equal(hook(A, "write_file", { Path: pendingPath, Content: "{}" }), "deny");
@@ -264,6 +272,27 @@ for (const args of [["health"], ["health", "--id", A], ["stats"], ["info", "--pa
   assert.ok((await checkTranscriptHealth({ callerConvId: A, ids: args[1] === "--id" ? [A] : [] })).error);
 }
 setPolicy(P, "open");
+const alternateStateHome = path.join(work, "alternate-state");
+const alternateEnv = { ...process.env, XDG_STATE_HOME: alternateStateHome };
+delete alternateEnv.AGY_TEST_PROFILE_DIR;
+if (process.platform === "win32") alternateEnv.LOCALAPPDATA = alternateStateHome;
+const alternateStateDir = path.join(alternateStateHome, "agy-context-saver");
+fs.mkdirSync(alternateStateDir, { recursive: true });
+const stateAlias = path.join(work, "state-alias");
+fs.symlinkSync(alternateStateDir, stateAlias, process.platform === "win32" ? "junction" : "dir");
+fs.writeFileSync(path.join(alternateStateDir, "private.json"), "{}");
+const stateParentAlias = path.join(work, "state-parent-alias");
+fs.symlinkSync(alternateStateHome, stateParentAlias, process.platform === "win32" ? "junction" : "dir");
+for (const toolCall of [
+  { name: "read_file", args: { Path: path.join(stateAlias, "private.json"), StartLine: 1, EndLine: 10 } },
+  { name: "run_command", args: { CommandLine: `cat "${path.join(stateAlias, "private.json")}"`, WaitMsBeforeAsync: 5000 } },
+  { name: "run_command", args: { CommandLine: `rg nonce "${stateAlias}"`, WaitMsBeforeAsync: 5000 } },
+  { name: "run_command", args: { CommandLine: `cd "${stateAlias}" && cat private.json`, WaitMsBeforeAsync: 5000 } },
+  { name: "run_command", args: { CommandLine: `stat "${stateParentAlias}" && rg nonce "${stateParentAlias}"`, WaitMsBeforeAsync: 5000 } }
+]) {
+  const response = spawnSync(process.execPath, [hookScript], { encoding: "utf-8", env: alternateEnv, input: JSON.stringify({ conversationId: P, cwd: work, toolCall }) });
+  assert.equal(JSON.parse(response.stdout).decision, "deny", "Alternate state roots remain protected through directory aliases");
+}
 assert.equal(executeHookedShell(A, `node "${cliScript.replace(/\\/g, "/")}" transcript access set deny # note`).blocked, true);
 assert.equal(fs.existsSync(getPolicyFile()), false);
 
@@ -291,7 +320,7 @@ seed(A, P);
 const aliasBrain = path.join(work, "brain");
 fs.symlinkSync(brain, aliasBrain, process.platform === "win32" ? "junction" : "dir");
 const aliasHealth = await checkTranscriptHealth({ ids: [A], callerConvId: P, activeTranscriptPath: path.join(aliasBrain, A, ".system_generated", "logs", "transcript.jsonl") });
-assert.equal(aliasHealth.sessions[0].file, fs.realpathSync.native(tfile(A)));
+assert.equal(fs.realpathSync.native(aliasHealth.sessions[0].file), fs.realpathSync.native(tfile(A)));
 // Health cohorts use the same launch attribution and tolerate malformed records.
 const Q = "aaaaaaaa-0000-4000-8000-000000000004";
 seed(Q, null);

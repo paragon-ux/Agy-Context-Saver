@@ -20,7 +20,8 @@ import {
   getProfileHomeDir,
   getBrainDirs,
   tryRealpath,
-  isContainedInAnyBrainDir
+  isContainedInAnyBrainDir,
+  isContainedInDir
 } from "../../lib/path-guards.mjs";
 import {
   HOOK_REPO_ROOT,
@@ -32,6 +33,7 @@ import {
   updateSessionState,
   resolveHookPath,
   expandLeadingTilde,
+  expandAndResolvePathVariants,
   cleanFileToken,
   isProtectedInternalState,
   isProtectedGovernanceFileMutationPath,
@@ -745,7 +747,7 @@ function checkShellMutations(segments, convId, ctx, depth = 0) {
 const SEARCH_COMMANDS = new Set(["grep", "egrep", "fgrep", "rg", "ripgrep", "ag", "ack", "select-string"]);
 const SEARCH_VALUE_FLAGS = new Set(["-e", "--regexp", "-f", "--file", "-m", "--max-count", "-A", "--after-context", "-B", "--before-context", "-C", "--context", "-t", "--type", "-T", "--type-not", "-g", "--glob", "--iglob", "-M", "--max-columns", "--max-filesize", "--color", "-j", "--threads", "-r", "--replace", "--sort", "--sortr"]);
 
-function filterProseFlags(detailed, subIdx, allTokens, envPrefix, shouldSkipPair, shouldSkipInline) {
+function filterProseFlags(detailed, subIdx, allTokens, envPrefix, shouldSkipPair, shouldSkipInline, asWords = false) {
   const kept = envPrefix.trim() ? [envPrefix.trim()] : [];
   let afterDD = false;
   for (let i = 0; i < detailed.length; i++) {
@@ -765,21 +767,22 @@ function filterProseFlags(detailed, subIdx, allTokens, envPrefix, shouldSkipPair
     kept.push(tok.value);
   }
   kept.push(...extractRedirectTargets(allTokens));
-  return kept.join(" ");
+  return asWords ? kept : kept.join(" ");
 }
 
-function getInspectableTextForSegment(seg, { hasDownstreamPipe = false } = {}) {
+function getInspectableTextForSegment(seg, { hasDownstreamPipe = false, asWords = false } = {}) {
   const allTokens = getSegTokens(seg);
   const { prefix: envPrefix, body } = splitEnvPrefix(seg.text, allTokens);
   const detailed = body && body !== seg.text ? tokenizeShellWordsDetailed(body) : allTokens;
-  if (detailed.length === 0) return "";
+  if (detailed.length === 0) return asWords ? [] : "";
 
   const cmd0 = normalizeCmdName(detailed[0].value);
   const cmd1 = detailed[1] ? normalizeCmdName(detailed[1].value) : "";
   const cmd2 = detailed[2] ? normalizeCmdName(detailed[2].value) : "";
 
   if (!hasDownstreamPipe && (cmd0 === "echo" || cmd0 === "printf" || cmd0 === "write-output")) {
-    return extractRedirectTargets(allTokens).join(" ");
+    const targets = extractRedirectTargets(allTokens);
+    return asWords ? targets : targets.join(" ");
   }
 
   const rtkBase = (target) => cmd0 === target ? 0 : (cmd0 === "rtk" && cmd1 === target ? 1 : (cmd0 === "node" && detailed[1] && isTrustedLocalRtkLauncherPath(detailed[1].value) && cmd2 === target ? 2 : -1));
@@ -802,10 +805,10 @@ function getInspectableTextForSegment(seg, { hasDownstreamPipe = false } = {}) {
     if (gitSub === "commit" || gitSub === "tag") {
       const preRe = gitSub === "commit" ? /^-[apsnvqezoih]*m$/ : /^-[asfdvin]*m$/;
       const inlRe = gitSub === "commit" ? /^-[apsnvqezoih]*m.+/ : /^-[asfdvin]*m.+/;
-      return filterProseFlags(detailed, subIdx, allTokens, envPrefix, (v) => v === "-m" || v === "--message" || preRe.test(v), (v) => v.startsWith("--message=") || (!v.startsWith("--") && inlRe.test(v)));
+      return filterProseFlags(detailed, subIdx, allTokens, envPrefix, (v) => v === "-m" || v === "--message" || preRe.test(v), (v) => v.startsWith("--message=") || (!v.startsWith("--") && inlRe.test(v)), asWords);
     }
     if (["log", "rev-list", "shortlog"].includes(gitSub)) {
-      return filterProseFlags(detailed, subIdx, allTokens, envPrefix, (v) => v === "--grep" || v === "-S" || v === "-G", (v) => v.startsWith("--grep=") || ((v.startsWith("-S") || v.startsWith("-G")) && v.length > 2));
+      return filterProseFlags(detailed, subIdx, allTokens, envPrefix, (v) => v === "--grep" || v === "-S" || v === "-G", (v) => v.startsWith("--grep=") || ((v.startsWith("-S") || v.startsWith("-G")) && v.length > 2), asWords);
     }
   }
 
@@ -821,7 +824,7 @@ function getInspectableTextForSegment(seg, { hasDownstreamPipe = false } = {}) {
         detailed, subIdx, allTokens, envPrefix,
         (v, next) => v === "-f" || v === "--raw-field" || ((v === "-F" || v === "--field") && next && !isFileF(next.value)),
         (v) => v.startsWith("--raw-field=") || (v.startsWith("-f") && v.length > 2 && !v.startsWith("--")) ||
-          (v.startsWith("--field=") && !isFileF(v.slice(8))) || (v.startsWith("-F") && v.length > 2 && !v.startsWith("--") && !isFileF(v.slice(2)))
+          (v.startsWith("--field=") && !isFileF(v.slice(8))) || (v.startsWith("-F") && v.length > 2 && !v.startsWith("--") && !isFileF(v.slice(2))), asWords
       );
     }
     if (["pr", "issue", "release"].includes(ghSub)) {
@@ -831,7 +834,7 @@ function getInspectableTextForSegment(seg, { hasDownstreamPipe = false } = {}) {
       return filterProseFlags(
         detailed, subIdx, allTokens, envPrefix,
         (v) => ["-b", "--body", "-t", "--title", "-n", "--notes", "--subject"].includes(v) || (allowC && (v === "-c" || v === "--comment")),
-        (v) => /^--(?:body|title|notes|subject)=/.test(v) || (allowC && v.startsWith("--comment=")) || (!v.startsWith("--") && (allowC ? /^-[btnc].+/ : /^-[btn].+/).test(v))
+        (v) => /^--(?:body|title|notes|subject)=/.test(v) || (allowC && v.startsWith("--comment=")) || (!v.startsWith("--") && (allowC ? /^-[btnc].+/ : /^-[btn].+/).test(v)), asWords
       );
     }
   }
@@ -866,9 +869,10 @@ function getInspectableTextForSegment(seg, { hasDownstreamPipe = false } = {}) {
       positionals.push(v);
     }
     targets.push(...(hasPat ? positionals : positionals.slice(1)));
-    return targets.join(" ");
+    return asWords ? targets : targets.join(" ");
   }
 
+  if (asWords) return allTokens.map((tok) => tok.value);
   const unquoted = allTokens.map((t) => t.value.replace(/[\r\n]+/g, " ")).join(" ");
   return unquoted && unquoted !== seg.text ? `${seg.text}\n${unquoted}` : seg.text;
 }
@@ -904,6 +908,53 @@ function collectInspectableTexts(segments, depth = 0) {
     }
   }
   return texts;
+}
+
+// Identity grants share protected state, including accesses through workspace aliases.
+function touchesCanonicalState(segments, ctx, depth = 0, seen = new Set()) {
+  if (depth > 12) return true;
+  let cwd = ctx.cwd || "";
+  const stateDir = getStateDir();
+  const shellPipeline = new Set();
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const next = segments[i + 1];
+    if (SHELL_INTERPRETERS.has(getSegmentCmdName(segments[i])) ||
+        (next && ["|", "|&"].includes(next.leadingSep) && shellPipeline.has(i + 1))) shellPipeline.add(i);
+  }
+  for (const [segIdx, seg] of segments.entries()) {
+    const tokens = getSegTokens(seg);
+    const cmdIdx = stripLeadingShellPrefixes(tokens);
+    const verb = normalizeCmdName(tokens[cmdIdx]?.value);
+    if (verb === "cd" && tokens[cmdIdx + 1]) cwd = resolveHookPath(expandLeadingTilde(tokens[cmdIdx + 1].value), cwd);
+    const candidates = getInspectableTextForSegment(seg, { asWords: true });
+    const recursive = SEARCH_COMMANDS.has(verb) || ["find", "ls"].includes(verb) || (verb === "rtk" && ["grep", "rg", "ls"].includes(tokens[cmdIdx + 1]?.value));
+    if (recursive) candidates.push(cwd || ".");
+    for (const raw of candidates) {
+      const values = [raw];
+      if (raw.includes("=")) values.push(raw.slice(raw.indexOf("=") + 1));
+      if (raw.includes("@")) values.push(raw.slice(raw.indexOf("@") + 1));
+      if (/^-[^-]*F/.test(raw)) values.push(raw.slice(raw.indexOf("F") + 1));
+      for (let value of values) {
+        if (!value || value.startsWith("-")) continue;
+        const glob = value.search(/[*?\[]/);
+        if (glob !== -1) value = path.dirname(value.slice(0, glob) + "_");
+        const key = `${recursive}\0${cwd}\0${value}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        for (const target of expandAndResolvePathVariants(value, cwd)) {
+          if (isContainedInDir(target, stateDir) || (recursive && isContainedInDir(stateDir, target))) return true;
+        }
+      }
+    }
+    const wrapper = extractSimpleWrappedScript(seg.text);
+    const nested = [...(seg.subshells || []), ...(seg.heredocBodies || [])];
+    if (wrapper?.innerScript) nested.push(wrapper.innerScript);
+    if (["echo", "printf"].includes(verb) && shellPipeline.has(segIdx)) {
+      nested.push(...tokens.slice(cmdIdx + 1).map((tok) => tok.value));
+    }
+    for (const script of nested) if (touchesCanonicalState(splitShellSegments(script), { ...ctx, cwd }, depth + 1, seen)) return true;
+  }
+  return false;
 }
 
 function areAllSegmentsReadOnlyTranscriptReads(segments) {
@@ -1393,6 +1444,9 @@ export async function handleRunCommand(ctx) {
 
   // Parse ONCE per run_command
   const segments = splitShellSegments(rawCmd);
+  if (touchesCanonicalState(segments, ctx)) {
+    respond({ decision: "deny", reason: "Antigravity Governance: Direct access to protected plugin state is prohibited." });
+  }
 
   const mutVerdict = checkShellMutations(segments, convId, ctx);
   if (mutVerdict) respond(mutVerdict);

@@ -1783,7 +1783,7 @@ console.log("\n--- Group N: Wave 2 Narrow RTK Pre-Gate, 800L/45KiB read_file & E
       assert.match(res.overwrite?.CommandLine || "", expectedRe, `Pre-gate must delegate '${cmd}'`);
     }
     for (const rawPass of [
-      "find /tmp -maxdepth 2 -name '*.js'",
+      `find "${w2Dir}" -maxdepth 2 -name '*.js'`,
       "git diff HEAD~1",
       "git -C /tmp/repo diff",
       "git show HEAD",
