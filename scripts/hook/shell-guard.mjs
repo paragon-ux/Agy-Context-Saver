@@ -286,6 +286,7 @@ export function splitShellSegments(command) {
   let hasRedirect = false;
   let hasWriteRedirect = false;
   let hasHeredoc = false;
+  let hasHereString = false;
   let hasSubshell = false;
   let subshells = [];
   let heredocBodies = [];
@@ -298,13 +299,30 @@ export function splitShellSegments(command) {
       const leadWS = raw.length - raw.trimStart().length;
       const trailWS = raw.length - raw.trimEnd().length;
       segments.push({
-        text: trimmed, raw, start: segStart + leadWS, end: Math.max(segStart + leadWS, endOffset - trailWS),
-        leadingSep, hasRedirect, hasWriteRedirect, hasHeredoc, heredocBodies, hasSubshell, subshells, _tokens: null
+        text: trimmed,
+        raw,
+        start: segStart + leadWS,
+        end: Math.max(segStart + leadWS, endOffset - trailWS),
+        leadingSep,
+        hasRedirect,
+        hasWriteRedirect,
+        hasHeredoc,
+        hasHereString,
+        heredocBodies,
+        hasSubshell,
+        subshells,
+        _tokens: null
       });
       if (hasHeredoc && firstHdIdx === -1) firstHdIdx = segments.length - 1;
     }
-    leadingSep = ""; hasRedirect = false; hasWriteRedirect = false; hasHeredoc = false; hasSubshell = false;
-    subshells = []; heredocBodies = [];
+    leadingSep = "";
+    hasRedirect = false;
+    hasWriteRedirect = false;
+    hasHeredoc = false;
+    hasHereString = false;
+    hasSubshell = false;
+    subshells = [];
+    heredocBodies = [];
   };
 
   for (let i = 0; i < command.length;) {
@@ -330,13 +348,32 @@ export function splitShellSegments(command) {
     if (c === "(") { hasSubshell = true; const s = readBalancedSubshell(command, i + 1); subshells.push(s.inner); i = s.nextIndex; continue; }
     if (c === "`") { hasSubshell = true; const s = readBacktickSubshell(command, i + 1); subshells.push(s.inner); i = s.nextIndex; continue; }
     if (c === "<") {
-      if (next === "<" && command[i + 2] !== "<") {
-        const tag = parseHeredocTag(command, i);
-        if (tag) { hasHeredoc = true; pendingHeredocs.push(tag); i = tag.endIndex; continue; }
+      if (next === "<" && command[i + 2] === "<") {
+        hasRedirect = true;
+        hasHeredoc = true;
+        hasHereString = true;
+        i += 3;
+        continue;
       }
-      hasRedirect = true; i += next === "<" ? (command[i + 2] === "<" ? 3 : 2) : 1; continue;
+      if (next === "<") {
+        const tag = parseHeredocTag(command, i);
+        if (tag) {
+          hasHeredoc = true;
+          pendingHeredocs.push(tag);
+          i = tag.endIndex;
+          continue;
+        }
+      }
+      hasRedirect = true;
+      i += next === "<" ? 2 : 1;
+      continue;
     }
-    if (c === ">") { hasRedirect = true; hasWriteRedirect = true; i += (next === ">" || next === "|") ? 2 : 1; continue; }
+    if (c === ">") {
+      hasRedirect = true;
+      hasWriteRedirect = true;
+      i += (next === ">" || next === "|") ? 2 : 1;
+      continue;
+    }
     if (c === "\n" || (c === "\r" && next === "\n")) {
       pushSeg(i);
       i += c === "\r" ? 2 : 1;
@@ -453,12 +490,21 @@ function skipSingleRedirect(tokens, idx) {
   const tok = tokens[idx];
   if (!tok || tok.quoted) return null;
   if (REDIRECT_CLOSE_FD_REGEX.test(tok.raw)) return { nextIdx: idx + 1, missingTarget: false };
-  if (REDIRECT_OP_REGEX.test(tok.raw)) return (idx + 1 >= tokens.length || isUnquotedRedir(tokens[idx + 1])) ? { nextIdx: tokens.length, missingTarget: true } : { nextIdx: idx + 2, missingTarget: false };
+  if (REDIRECT_OP_REGEX.test(tok.raw)) {
+    const missing = idx + 1 >= tokens.length || isUnquotedRedir(tokens[idx + 1]);
+    return missing ? { nextIdx: tokens.length, missingTarget: true } : { nextIdx: idx + 2, missingTarget: false };
+  }
   return REDIRECT_ATTACHED_REGEX.test(tok.raw) ? { nextIdx: idx + 1, missingTarget: false } : null;
 }
 
 function hasMalformedRedirects(tokens) {
-  for (let i = 0; i < tokens.length; i++) { const r = skipSingleRedirect(tokens, i); if (r) { if (r.missingTarget) return true; i = r.nextIdx - 1; } }
+  for (let i = 0; i < tokens.length; i++) {
+    const r = skipSingleRedirect(tokens, i);
+    if (r) {
+      if (r.missingTarget) return true;
+      i = r.nextIdx - 1;
+    }
+  }
   return false;
 }
 
@@ -492,8 +538,11 @@ function skipEnvTokens(tokens, startIdx = 0) {
 }
 
 function splitEnvPrefix(text, preTokens = null) {
-  const tokens = preTokens || tokenizeShellWordsDetailed(text), idx = skipEnvTokens(tokens, 0);
-  return idx === 0 ? { prefix: "", body: text } : (idx >= tokens.length ? { prefix: text, body: "" } : { prefix: text.slice(0, tokens[idx].start), body: text.slice(tokens[idx].start) });
+  const tokens = preTokens || tokenizeShellWordsDetailed(text);
+  const idx = skipEnvTokens(tokens, 0);
+  if (idx === 0) return { prefix: "", body: text };
+  if (idx >= tokens.length) return { prefix: text, body: "" };
+  return { prefix: text.slice(0, tokens[idx].start), body: text.slice(tokens[idx].start) };
 }
 
 function stripLeadingShellPrefixes(tokens, startIdx = 0, { includeControlKeywords = true } = {}) {
@@ -504,10 +553,15 @@ function stripLeadingShellPrefixes(tokens, startIdx = 0, { includeControlKeyword
     const nextEnv = skipEnvTokens(tokens, idx);
     if (nextEnv !== idx) { idx = nextEnv; continue; }
     const rawKw = tokens[idx].value.toLowerCase();
-    if (!tokens[idx].quoted && (includeControlKeywords ? SHELL_CONTROL_KEYWORDS.has(rawKw) : (rawKw === "!" || rawKw === "time" || (idx === 0 && rawKw === "&")))) { idx++; continue; }
+    const isKw = includeControlKeywords
+      ? SHELL_CONTROL_KEYWORDS.has(rawKw)
+      : (rawKw === "!" || rawKw === "time" || (idx === 0 && rawKw === "&"));
+    if (!tokens[idx].quoted && isKw) { idx++; continue; }
     const cmd = normalizeCmdName(tokens[idx].value);
     if (cmd === "sudo" || cmd === "doas" || cmd === "timeout" || cmd === "nice") {
-      const valFlags = (cmd === "sudo" || cmd === "doas") ? SUDO_VALUE_FLAGS : (cmd === "timeout" ? new Set(["-k", "-s", "--kill-after", "--signal"]) : new Set(["-n", "--adjustment"]));
+      const valFlags = (cmd === "sudo" || cmd === "doas")
+        ? SUDO_VALUE_FLAGS
+        : (cmd === "timeout" ? new Set(["-k", "-s", "--kill-after", "--signal"]) : new Set(["-n", "--adjustment"]));
       for (idx++; idx < tokens.length;) {
         const r = skipSingleRedirect(tokens, idx);
         if (r) { idx = r.nextIdx; continue; }
@@ -570,27 +624,49 @@ function extractWrapperLocalCwd(tokens, startPos, cmdIdx) {
   return localCwd;
 }
 
-const FIND_NON_PATH_VAL = new Set("-name -iname -path -ipath -wholename -iwholename -lname -ilname -regex -iregex -regextype -type -xtype -perm -user -group -uid -gid -size -links -inum -mindepth -maxdepth -mtime -atime -ctime -mmin -amin -cmin -printf -used -fstype -context".split(" "));
+const FIND_NON_PATH_VAL = new Set(
+  "-name -iname -path -ipath -wholename -iwholename -lname -ilname -regex -iregex -regextype -type -xtype -perm -user -group -uid -gid -size -links -inum -mindepth -maxdepth -mtime -atime -ctime -mmin -amin -cmin -printf -used -fstype -context".split(" ")
+);
 const FIND_FILE_VAL = new Set(["-newer", "-anewer", "-cnewer", "-samefile", "-files0-from", "-fprint", "-fprint0", "-fls"]);
 const FIND_WRITE_VAL = new Set(["-fprint", "-fprint0", "-fls", "-fprintf"]);
-const FIND_NO_ARG = new Set("-print -print0 -ls -delete -prune -quit -empty -executable -readable -writable -true -false -depth -d -mount -xdev -daystart -follow -noleaf -warn -nowarn -ignore_readdir_race -noignore_readdir_race ( ) ! -not -a -and -o -or ,".split(" "));
+const FIND_NO_ARG = new Set(
+  "-print -print0 -ls -delete -prune -quit -empty -executable -readable -writable -true -false -depth -d -mount -xdev -daystart -follow -noleaf -warn -nowarn -ignore_readdir_race -noignore_readdir_race ( ) ! -not -a -and -o -or ,".split(" ")
+);
 
 function scanFindCommand(tokens, cmdIdx, endIdx, depth = 0) {
   const starts = [], pathItems = [], startPoints = [], writeTargets = [];
   let uncertain = depth > 4, mutates = false, i = cmdIdx + 1;
   while (i < endIdx) {
     const r = skipSingleRedirect(tokens, i);
-    if (r) { if (r.missingTarget) uncertain = true; i = r.nextIdx; continue; }
+    if (r) {
+      if (r.missingTarget) uncertain = true;
+      i = r.nextIdx;
+      continue;
+    }
     const tok = tokens[i], v = tok.value;
     if (v === "-H" || v === "-L" || v === "-P" || /^-O\d*$/.test(v)) { i++; continue; }
-    if (v === "-D") { const nx = nextNonRedirectIndex(tokens, i + 1, endIdx); if (nx.missingRedirect || nx.idx >= endIdx) { uncertain = true; i = endIdx; break; } i = nx.idx + 1; continue; }
+    if (v === "-D") {
+      const nx = nextNonRedirectIndex(tokens, i + 1, endIdx);
+      if (nx.missingRedirect || nx.idx >= endIdx) {
+        uncertain = true;
+        i = endIdx;
+        break;
+      }
+      i = nx.idx + 1;
+      continue;
+    }
     if (v.startsWith("-") || v === "(" || v === "!" || v === ",") break;
     pathItems.push({ value: v, globPositions: tok.globPositions, isOperand: true });
-    startPoints.push(v); i++;
+    startPoints.push(v);
+    i++;
   }
   while (i < endIdx) {
     const r = skipSingleRedirect(tokens, i);
-    if (r) { if (r.missingTarget) uncertain = true; i = r.nextIdx; continue; }
+    if (r) {
+      if (r.missingTarget) uncertain = true;
+      i = r.nextIdx;
+      continue;
+    }
     const tok = tokens[i], v = tok.value;
     if (v === "-delete") mutates = true;
     if (!tok.quoted && ["-exec", "-execdir", "-ok", "-okdir"].includes(v)) {
@@ -598,7 +674,9 @@ function scanFindCommand(tokens, cmdIdx, endIdx, depth = 0) {
       while (termIdx < endIdx) {
         const rt = skipSingleRedirect(tokens, termIdx);
         if (rt) { termIdx = rt.nextIdx; continue; }
-        if (!tokens[termIdx].quoted && (tokens[termIdx].value === ";" || (tokens[termIdx].value === "+" && termIdx > i + 1 && tokens[termIdx - 1]?.value === "{}"))) break;
+        const isTerm = !tokens[termIdx].quoted &&
+          (tokens[termIdx].value === ";" || (tokens[termIdx].value === "+" && termIdx > i + 1 && tokens[termIdx - 1]?.value === "{}"));
+        if (isTerm) break;
         termIdx++;
       }
       if (i + 1 >= endIdx || termIdx === i + 1 || termIdx >= endIdx) { uncertain = true; break; }
@@ -607,18 +685,29 @@ function scanFindCommand(tokens, cmdIdx, endIdx, depth = 0) {
       if (subCmdIdx < termIdx) {
         const execVerb = normalizeCmdName(tokens[subCmdIdx].value);
         if (OBVIOUS_MUTATION_VERBS.has(execVerb) || SHELL_INTERPRETERS.has(execVerb) || CODE_INTERPRETERS.has(execVerb)) mutates = true;
-        if (execVerb === "find" && depth < 4) { const n = scanFindCommand(tokens, subCmdIdx, termIdx, depth + 1); starts.push(...n.starts); if (n.uncertain) uncertain = true; }
+        if (execVerb === "find" && depth < 4) {
+          const n = scanFindCommand(tokens, subCmdIdx, termIdx, depth + 1);
+          starts.push(...n.starts);
+          if (n.uncertain) uncertain = true;
+        }
       }
-      i = termIdx + 1; continue;
+      i = termIdx + 1;
+      continue;
     }
-    if (FIND_NON_PATH_VAL.has(v)) { const nx = nextNonRedirectIndex(tokens, i + 1, endIdx); if (nx.missingRedirect || nx.idx >= endIdx) { uncertain = true; break; } i = nx.idx + 1; continue; }
+    if (FIND_NON_PATH_VAL.has(v)) {
+      const nx = nextNonRedirectIndex(tokens, i + 1, endIdx);
+      if (nx.missingRedirect || nx.idx >= endIdx) { uncertain = true; break; }
+      i = nx.idx + 1;
+      continue;
+    }
     if (FIND_FILE_VAL.has(v) || /^-(?:newer[aBcmMt]{2})$/.test(v)) {
       const nx = nextNonRedirectIndex(tokens, i + 1, endIdx);
       if (nx.missingRedirect || nx.idx >= endIdx) { uncertain = true; break; }
       const vt = tokens[nx.idx];
       if (!/^-(?:newer[aBcmMt]t)$/.test(v)) pathItems.push({ value: vt.value, globPositions: vt.globPositions, isOperand: true });
       if (FIND_WRITE_VAL.has(v)) writeTargets.push(vt.value);
-      i = nx.idx + 1; continue;
+      i = nx.idx + 1;
+      continue;
     }
     if (v === "-fprintf") {
       const nf = nextNonRedirectIndex(tokens, i + 1, endIdx);
@@ -626,10 +715,13 @@ function scanFindCommand(tokens, cmdIdx, endIdx, depth = 0) {
       if (nf.missingRedirect || nf.idx >= endIdx || nfmt.missingRedirect || nfmt.idx >= endIdx) { uncertain = true; break; }
       pathItems.push({ value: tokens[nf.idx].value, globPositions: tokens[nf.idx].globPositions, isOperand: true });
       writeTargets.push(tokens[nf.idx].value);
-      i = nfmt.idx + 1; continue;
+      i = nfmt.idx + 1;
+      continue;
     }
     if (FIND_NO_ARG.has(v)) { i++; continue; }
-    uncertain = true; pathItems.push({ value: v, globPositions: tok.globPositions, isOperand: !v.startsWith("-") }); i++;
+    uncertain = true;
+    pathItems.push({ value: v, globPositions: tok.globPositions, isOperand: !v.startsWith("-") });
+    i++;
   }
   return { starts, pathItems, startPoints, writeTargets, mutates, implicitCwd: uncertain || startPoints.length === 0, uncertain };
 }
@@ -645,20 +737,41 @@ function analyzeSegmentCommandStarts(segments, { allowPartialCompound = false } 
       const redir = skipSingleRedirect(tokens, cursor);
       if (redir) { cursor = redir.nextIdx; continue; }
       const tok = tokens[cursor];
-      if (tok.isSubshellGroup) { if (tok.unclosedSubshell || !onlyRedirectsRemain(tokens, cursor + 1)) uncertainSyntax = true; terminal = true; break; }
+      if (tok.isSubshellGroup) {
+        if (tok.unclosedSubshell || !onlyRedirectsRemain(tokens, cursor + 1)) uncertainSyntax = true;
+        terminal = true;
+        break;
+      }
       if (tok.quoted) break;
       const kw = tok.value.toLowerCase();
       if (kw === "!" || kw === "time" || (cursor === 0 && kw === "&")) { cursor++; continue; }
-      if (kw === "{") { state.braceDepth++; if (++cursor >= tokens.length) uncertainSyntax = true; continue; }
+      if (kw === "{") {
+        state.braceDepth++;
+        if (++cursor >= tokens.length) uncertainSyntax = true;
+        continue;
+      }
       if (kw === "}" || kw === "fi" || kw === "done") {
-        const bad = kw === "}" ? state.braceDepth <= 0 : (kw === "fi" ? (state.ifDepth <= 0 || state.awaitingThen) : (state.loopDepth <= 0 || state.awaitingDo));
+        const bad = kw === "}"
+          ? state.braceDepth <= 0
+          : (kw === "fi" ? (state.ifDepth <= 0 || state.awaitingThen) : (state.loopDepth <= 0 || state.awaitingDo));
         if (bad && !allowPartialCompound) uncertainSyntax = true;
-        else if (!bad) { if (kw === "}") state.braceDepth--; else if (kw === "fi") state.ifDepth--; else state.loopDepth--; }
+        else if (!bad) {
+          if (kw === "}") state.braceDepth--;
+          else if (kw === "fi") state.ifDepth--;
+          else state.loopDepth--;
+        }
         if (!onlyRedirectsRemain(tokens, cursor + 1)) uncertainSyntax = true;
-        terminal = true; break;
+        terminal = true;
+        break;
       }
       if (kw === "if" || kw === "while" || kw === "until") {
-        if (kw === "if") { state.ifDepth++; state.awaitingThen = true; } else { state.loopDepth++; state.awaitingDo = true; }
+        if (kw === "if") {
+          state.ifDepth++;
+          state.awaitingThen = true;
+        } else {
+          state.loopDepth++;
+          state.awaitingDo = true;
+        }
         if (++cursor >= tokens.length) uncertainSyntax = true;
         continue;
       }
@@ -670,24 +783,42 @@ function analyzeSegmentCommandStarts(segments, { allowPartialCompound = false } 
       }
       if (kw === "then" || kw === "do") {
         if (!(kw === "then" ? state.awaitingThen : state.awaitingDo) && !allowPartialCompound) uncertainSyntax = true;
-        if (kw === "then") state.awaitingThen = false; else state.awaitingDo = false;
+        if (kw === "then") state.awaitingThen = false;
+        else state.awaitingDo = false;
         if (++cursor >= tokens.length) uncertainSyntax = true;
         continue;
       }
       if (kw === "for" || kw === "select") {
-        state.loopDepth++; state.awaitingDo = true;
-        if (cursor + 1 >= tokens.length) { uncertainSyntax = true; terminal = true; break; }
+        state.loopDepth++;
+        state.awaitingDo = true;
+        if (cursor + 1 >= tokens.length) {
+          uncertainSyntax = true;
+          terminal = true;
+          break;
+        }
         if (cursor + 2 < tokens.length && !tokens[cursor + 2].quoted && tokens[cursor + 2].value.toLowerCase() === "do") {
-          state.awaitingDo = false; cursor += 3; if (cursor >= tokens.length) uncertainSyntax = true; continue;
+          state.awaitingDo = false;
+          cursor += 3;
+          if (cursor >= tokens.length) uncertainSyntax = true;
+          continue;
         }
         let wIdx = cursor + 2;
         if (wIdx < tokens.length && !tokens[wIdx].quoted && tokens[wIdx].value.toLowerCase() === "in") wIdx++;
         else if (wIdx < tokens.length) uncertainSyntax = true;
-        for (; wIdx < tokens.length; wIdx++) { const r = skipSingleRedirect(tokens, wIdx); if (r) { wIdx = r.nextIdx - 1; continue; } forWordTokens.push(tokens[wIdx]); }
-        terminal = true; break;
+        for (; wIdx < tokens.length; wIdx++) {
+          const r = skipSingleRedirect(tokens, wIdx);
+          if (r) { wIdx = r.nextIdx - 1; continue; }
+          forWordTokens.push(tokens[wIdx]);
+        }
+        terminal = true;
+        break;
       }
       // shortcut: case/[[/function/coproc mark syntax uncertain instead of full compound AST parsing, upgrade if needed
-      if (["case", "esac", "[[", "]]", "function", "coproc"].includes(kw) || tok.raw.endsWith(")")) { uncertainSyntax = true; cursor++; continue; }
+      if (["case", "esac", "[[", "]]", "function", "coproc"].includes(kw) || tok.raw.endsWith(")")) {
+        uncertainSyntax = true;
+        cursor++;
+        continue;
+      }
       break;
     }
     if (!terminal && cursor < tokens.length) {
@@ -710,7 +841,6 @@ function analyzeSegmentCommandStarts(segments, { allowPartialCompound = false } 
   return { perSegment, unclosedCompound };
 }
 
-const collectSegmentCommandStartIndices = (tokens) => analyzeSegmentCommandStarts([{ text: "", _tokens: tokens }], { allowPartialCompound: true }).perSegment[0].starts.map((s) => s.startPos);
 function getSegmentCmdName(seg) {
   const tokens = getSegTokens(seg), first = analyzeSegmentCommandStarts([seg], { allowPartialCompound: true }).perSegment[0].starts[0];
   return first && first.cmdIdx < tokens.length ? normalizeCmdName(tokens[first.cmdIdx].value) : "";
@@ -742,62 +872,110 @@ function unwrapShellWrapper(segText) {
   return m ? { prefix: m[1], quote: m[2], inner: m[3] } : null;
 }
 
-export function extractSimpleWrappedScript(segText) {
-  const trimmed = String(segText || "").trim();
-  if (!trimmed) return null;
-  const detailed = tokenizeShellWordsDetailed(trimmed);
-  if (detailed.length < 2) return null;
-  let headIdx = 0, hadPrefix = false;
-  while (headIdx < detailed.length) {
+function extractWrappedScriptInRange(detailed, startPos = 0, endIdx = detailed.length, rawSlice = "") {
+  if (endIdx - startPos < 2) return null;
+  let headIdx = startPos;
+  let hadPrefix = false;
+  while (headIdx < endIdx) {
     const r = skipSingleRedirect(detailed, headIdx);
-    if (r) { hadPrefix = true; headIdx = r.nextIdx; continue; }
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(detailed[headIdx].raw) || (!detailed[headIdx].quoted && ["!", "time", "{", "then", "do", "else", "elif", "if", "while", "until"].includes(detailed[headIdx].value.toLowerCase()))) {
-      hadPrefix = true; headIdx++; continue;
+    if (r) {
+      hadPrefix = true;
+      headIdx = r.nextIdx;
+      continue;
+    }
+    const kw = detailed[headIdx].value.toLowerCase();
+    const isKw = !detailed[headIdx].quoted && ["!", "time", "{", "then", "do", "else", "elif", "if", "while", "until"].includes(kw);
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(detailed[headIdx].raw) || isKw) {
+      hadPrefix = true;
+      headIdx++;
+      continue;
     }
     break;
   }
-  if (headIdx >= detailed.length - 1) return null;
+  if (headIdx >= endIdx - 1) return null;
   const nonRedirRest = (fromIdx) => {
     const out = [];
-    for (let k = fromIdx; k < detailed.length; k++) { const r = skipSingleRedirect(detailed, k); if (r) { k = r.nextIdx - 1; continue; } out.push(detailed[k].value); }
+    for (let k = fromIdx; k < endIdx; k++) {
+      const r = skipSingleRedirect(detailed, k);
+      if (r) {
+        k = r.nextIdx - 1;
+        continue;
+      }
+      out.push(detailed[k].value);
+    }
     return out;
   };
   const cmd0 = normalizeCmdName(detailed[headIdx].value);
-  if (cmd0 === "env") {
-    let envLocalCwd = null;
-    for (let i = headIdx + 1; i < detailed.length; i++) {
-      const r = skipSingleRedirect(detailed, i);
-      if (r) { i = r.nextIdx - 1; continue; }
-      const v = detailed[i].value;
-      if (v === "--") break;
-      if ((v === "-C" || v === "--chdir") && i + 1 < detailed.length) { envLocalCwd = detailed[++i].value; continue; }
-      if (v.startsWith("--chdir=")) { envLocalCwd = v.slice(8); continue; }
-      if ((v === "-S" || v === "--split-string") && i + 1 < detailed.length) return { hadEnvPrefix: true, localCwd: envLocalCwd, innerScript: nonRedirRest(i + 1).join(" ") };
-      if (v.startsWith("--split-string=")) return { hadEnvPrefix: true, localCwd: envLocalCwd, innerScript: [v.slice(15), ...nonRedirRest(i + 1)].filter(Boolean).join(" ") };
-      if (!v.startsWith("--") && /^-[a-zA-Z]*S/.test(v)) { const inner = [v.slice(v.indexOf("S") + 1), ...nonRedirRest(i + 1)].filter(Boolean).join(" "); if (inner) return { hadEnvPrefix: true, localCwd: envLocalCwd, innerScript: inner }; }
-      if ((v === "-u" || v === "--unset") && i + 1 < detailed.length) { i++; continue; }
-      if (!v.startsWith("-") && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(detailed[i].raw)) break;
-    }
+  if (cmd0 === "eval") {
+    return { hadEnvPrefix: hadPrefix, isChildShell: false, innerScript: nonRedirRest(headIdx + 1).join(" ") };
   }
-  if (cmd0 === "eval") return { hadEnvPrefix: hadPrefix, innerScript: nonRedirRest(headIdx + 1).join(" ") };
   if (["bash", "sh", "zsh", "dash", "ksh", "cmd", "pwsh", "powershell"].includes(cmd0)) {
-    for (let i = headIdx + 1; i < detailed.length - 1; i++) {
+    for (let i = headIdx + 1; i < endIdx - 1; i++) {
       const r = skipSingleRedirect(detailed, i);
-      if (r) { i = r.nextIdx - 1; continue; }
+      if (r) {
+        i = r.nextIdx - 1;
+        continue;
+      }
       const fl = detailed[i].value;
       if (fl === "--") break;
-      if (cmd0 === "cmd" ? /^\/[ck]$/i.test(fl) : (cmd0 === "pwsh" || cmd0 === "powershell" ? /^-(?:command|c)$/i.test(fl) : /^-[a-z]*c$/i.test(fl))) {
-        if (cmd0 === "cmd" || cmd0 === "pwsh" || cmd0 === "powershell") return { hadEnvPrefix: hadPrefix, isChildShell: true, innerScript: nonRedirRest(i + 1).join(" ") };
-        const nx = nextNonRedirectIndex(detailed, i + 1, detailed.length);
-        if (nx.idx < detailed.length) return { hadEnvPrefix: hadPrefix, isChildShell: true, innerScript: detailed[nx.idx].value };
+      const isExecFlag = cmd0 === "cmd"
+        ? /^\/[ck]$/i.test(fl)
+        : (cmd0 === "pwsh" || cmd0 === "powershell" ? /^-(?:command|c)$/i.test(fl) : /^-[a-z]*c$/i.test(fl));
+      if (isExecFlag) {
+        if (cmd0 === "cmd" || cmd0 === "pwsh" || cmd0 === "powershell") {
+          return { hadEnvPrefix: hadPrefix, isChildShell: true, innerScript: nonRedirRest(i + 1).join(" ") };
+        }
+        const nx = nextNonRedirectIndex(detailed, i + 1, endIdx);
+        if (nx.idx < endIdx) {
+          return { hadEnvPrefix: hadPrefix, isChildShell: true, innerScript: detailed[nx.idx].value };
+        }
       }
     }
   }
   if (["env", "sudo", "doas", "timeout", "nice"].includes(cmd0) || SIMPLE_WRAPPERS.has(cmd0)) {
-    const nextIdx = stripLeadingShellPrefixes(detailed, headIdx, { includeControlKeywords: false });
-    if (nextIdx > headIdx && nextIdx < detailed.length) return { hadEnvPrefix: true, localCwd: extractWrapperLocalCwd(detailed, headIdx, nextIdx), innerScript: trimmed.slice(detailed[nextIdx].start) };
+    const slice = detailed.slice(headIdx, endIdx);
+    const relNext = stripLeadingShellPrefixes(slice, 0, { includeControlKeywords: false });
+    const nextIdx = headIdx + relNext;
+    if (nextIdx > headIdx && nextIdx < endIdx) {
+      const innerScript = rawSlice
+        ? rawSlice.slice(detailed[nextIdx].start)
+        : nonRedirRest(nextIdx).join(" ");
+      return {
+        hadEnvPrefix: true,
+        localCwd: extractWrapperLocalCwd(detailed, headIdx, nextIdx),
+        innerScript
+      };
+    }
   }
   return null;
+}
+
+export function extractSimpleWrappedScript(segText) {
+  const trimmed = String(segText || "").trim();
+  if (!trimmed) return null;
+  const detailed = tokenizeShellWordsDetailed(trimmed);
+  return extractWrappedScriptInRange(detailed, 0, detailed.length, trimmed);
+}
+
+function extractSegmentWrappedScripts(seg, segInfo) {
+  const list = [];
+  const seen = new Set();
+  const add = (w) => {
+    if (!w || !w.innerScript) return;
+    const key = `${w.localCwd || ""}\0${w.innerScript}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      list.push(w);
+    }
+  };
+  add(extractSimpleWrappedScript(seg.text));
+  const tokens = getSegTokens(seg);
+  for (const st of segInfo.starts) {
+    if (st.cmdIdx < tokens.length && st.cmdIdx < st.endIdx) {
+      add(extractWrappedScriptInRange(tokens, st.cmdIdx, st.endIdx));
+    }
+  }
+  return list;
 }
 
 function isSingleUnchainedShellCmd(segments) {
@@ -843,7 +1021,17 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx, endIdx = tokens.length
   if (verb === "dd") { const t = vals.filter((v) => v.startsWith("of=")).map((v) => v.slice(3)).filter(Boolean); return { benchTargets: t, govTargets: t }; }
   if (verb === "sed" || verb === "perl") {
     let hasI = false;
-    for (const v of vals) { if (v === "--") break; if (v === "-i" || v.startsWith("--in-place") || /^-[a-zA-Z0-9]*i/.test(v)) { hasI = true; break; } }
+    for (const v of vals) {
+      if (v === "--") break;
+      const isInPlace = v === "-i" ||
+        (verb === "sed" && v === "-I") ||
+        v.startsWith("--in-place") ||
+        (verb === "sed" ? /^-[a-zA-Z0-9]*[iI]/.test(v) : /^-[a-zA-Z0-9]*i/.test(v));
+      if (isInPlace) {
+        hasI = true;
+        break;
+      }
+    }
     const t = hasI ? nonFlag(vals) : [];
     return { benchTargets: t, govTargets: t };
   }
@@ -857,57 +1045,187 @@ export function segmentPipesToShell(segments, idx) {
   return false;
 }
 
+const GOV_MUTATION_DENY_REASON =
+  "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited.";
+const BENCH_MUTATION_ASK_REASON =
+  "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination. Set AGY_DISABLE_BENCHMARK_GUARD=1 to disable this guard for non-evaluation repos.";
+
+function unwrapAllowedXargs(tokens, cmdIdx, endIdx) {
+  if (cmdIdx >= endIdx || normalizeCmdName(tokens[cmdIdx].value) !== "xargs") return null;
+  let idx = cmdIdx + 1;
+  while (idx < endIdx) {
+    const r = skipSingleRedirect(tokens, idx);
+    if (r) {
+      if (r.missingTarget) return { safe: false };
+      idx = r.nextIdx;
+      continue;
+    }
+    const v = tokens[idx].value;
+    if (v === "--") {
+      idx++;
+      break;
+    }
+    if (!v.startsWith("-") || v === "-") break;
+    if (["-0", "-r", "-t", "--null", "--no-run-if-empty", "--verbose"].includes(v) || /^-[0rt]+$/.test(v)) {
+      idx++;
+      continue;
+    }
+    return { safe: false };
+  }
+  const subVerb = idx < endIdx ? normalizeCmdName(tokens[idx].value) : "echo";
+  return { safe: subVerb === "echo" || subVerb === "printf", subVerb };
+}
+
+function stepTopLevelCd(tokens, cmdIdx, endIdx, curCwd, { inPipeline = false, inCompoundBranch = false, leadingSep = "", nextLeadingSep = "" } = {}) {
+  // shortcut: non-top-level, conditional, glob, or dynamic cd marks cwd uncertain instead of branching state, upgrade if needed
+  if (inPipeline || inCompoundBranch || leadingSep === "||" || nextLeadingSep === "||") {
+    return { cwd: curCwd, uncertain: true };
+  }
+  const posTokens = [];
+  let sawDD = false;
+  for (let i = cmdIdx + 1; i < endIdx; i++) {
+    const r = skipSingleRedirect(tokens, i);
+    if (r) {
+      if (r.missingTarget) return { cwd: curCwd, uncertain: true };
+      i = r.nextIdx - 1;
+      continue;
+    }
+    const tok = tokens[i];
+    const v = tok.value;
+    if (!sawDD && v === "--") {
+      sawDD = true;
+      continue;
+    }
+    if (!sawDD && (["-L", "-P", "-e", "-@"].includes(v) || v.toLowerCase() === "/d")) continue;
+    if (!sawDD && v.startsWith("-") && v !== "-") return { cwd: curCwd, uncertain: true };
+    posTokens.push(tok);
+  }
+  if (posTokens.length > 1) return { cwd: curCwd, uncertain: true };
+  if (posTokens.length === 0) {
+    const home = getProfileHomeDir();
+    if (nextLeadingSep === ";" && !isAccessibleDirectory(home)) return { cwd: curCwd, uncertain: true };
+    return { cwd: home, uncertain: false };
+  }
+  const targetTok = posTokens[0];
+  const rawVal = targetTok.value;
+  const hasExpansion = (!targetTok.quoted && /[$`%]/.test(targetTok.raw)) ||
+    (targetTok.quoted && targetTok.raw.includes('"') && /(?:^|[^\\])[$`%]/.test(targetTok.raw));
+  if (rawVal === "-" || hasExpansion || /^~[^/\\]+/.test(rawVal) || targetTok.hasUnquotedGlob) {
+    return { cwd: curCwd, uncertain: true };
+  }
+  const nextCwd = resolveHookPath(expandLeadingTilde(rawVal), curCwd);
+  if (nextLeadingSep === ";" && !isAccessibleDirectory(nextCwd)) {
+    return { cwd: curCwd, uncertain: true };
+  }
+  return { cwd: nextCwd, uncertain: false };
+}
+
 function checkShellMutations(segments, convId, ctx, depth = 0) {
   if (depth > 4) return null;
-  let cwds = [ctx?.cwd || ""], oldCwds = null, prePrevCwds = null, branchBaseCwds = null, pendingForceAsk = null;
+  let curCwd = ctx?.cwd || "";
+  let cwdUncertain = false;
+  let pendingForceAsk = null;
   const benchDisabled = isBenchmarkGuardDisabled(convId, ctx);
-  const record = (res) => (!res ? null : (res.decision === "deny" ? res : ((pendingForceAsk ||= res), null)));
+  const record = (res) => {
+    if (!res) return null;
+    if (res.decision === "deny") return res;
+    pendingForceAsk ||= res;
+    return null;
+  };
+  const isRelNonNull = (t) => Boolean(t && !/^(?:\/dev\/null|nul)$/i.test(t) && !path.isAbsolute(expandLeadingTilde(t)));
   const { perSegment } = analyzeSegmentCommandStarts(segments, { allowPartialCompound: depth > 0 });
+
   for (let segIdx = 0; segIdx < segments.length; segIdx++) {
-    const seg = segments[segIdx], segInfo = perSegment[segIdx];
-    if (seg.leadingSep === "||" && prePrevCwds) cwds = dedupCwds([...cwds, ...prePrevCwds]);
-    if (segInfo.inCompoundBranch && !branchBaseCwds) branchBaseCwds = [...cwds];
-    const segCwds = [...cwds], tokens = getSegTokens(seg);
+    const seg = segments[segIdx];
+    const segInfo = perSegment[segIdx];
+    if (seg.hasHereString) return { decision: "deny", reason: GOV_MUTATION_DENY_REASON };
+    const segCwd = curCwd;
+    const segUnc = cwdUncertain;
+    const tokens = getSegTokens(seg);
     const writeRedirects = seg.hasWriteRedirect ? extractRedirectTargets(tokens, true) : [];
-    const govChecks = writeRedirects.map((tok) => ({ tok, isDirVerb: false, isDestructive: false, cmdCwds: segCwds }));
-    const benchChecks = writeRedirects.map((tok) => ({ tok, cmdCwds: segCwds }));
+    if (segUnc && writeRedirects.some(isRelNonNull)) {
+      return { decision: "deny", reason: GOV_MUTATION_DENY_REASON };
+    }
+    const govChecks = writeRedirects.map((tok) => ({ tok, isDirVerb: false, isDestructive: false, effCwd: segCwd }));
+    const benchChecks = writeRedirects.map((tok) => ({ tok, effCwd: segCwd }));
+
     for (const { startPos, cmdIdx, endIdx } of segInfo.starts) {
       if (cmdIdx >= tokens.length || cmdIdx >= endIdx) continue;
       const localCwd = extractWrapperLocalCwd(tokens, startPos, cmdIdx);
-      const cmdCwds = localCwd ? segCwds.map((c) => resolveHookPath(expandLeadingTilde(localCwd), c)) : segCwds;
+      const effCwd = localCwd ? resolveHookPath(expandLeadingTilde(localCwd), segCwd) : segCwd;
       const verb = normalizeCmdName(tokens[cmdIdx].value);
+      const nextSep = segIdx + 1 < segments.length ? segments[segIdx + 1].leadingSep : "";
+      const inPipe = ["|", "|&"].includes(seg.leadingSep) || ["|", "|&"].includes(nextSep);
+
       if (verb === "cd") {
-        const nextSep = segIdx + 1 < segments.length ? segments[segIdx + 1].leadingSep : "";
-        const inPipe = ["|", "|&"].includes(seg.leadingSep) || ["|", "|&"].includes(nextSep);
-        const cdStep = stepCdDirectorySet(tokens, cmdIdx, endIdx, segCwds, oldCwds, { inPipeline: inPipe, inCompoundBranch: segInfo.inCompoundBranch, nextLeadingSep: nextSep });
-        prePrevCwds = segCwds; oldCwds = segCwds;
-        cwds = cdStep.uncertain ? dedupCwds([...cdStep.cwds, path.join(getProfileHomeDir(), ".gemini", "config"), path.join(getProfileHomeDir(), ".gemini", "antigravity"), getStateDir()]) : cdStep.cwds;
+        const stepped = stepTopLevelCd(tokens, cmdIdx, endIdx, segCwd, {
+          inPipeline: inPipe,
+          inCompoundBranch: segInfo.inCompoundBranch,
+          leadingSep: seg.leadingSep,
+          nextLeadingSep: nextSep
+        });
+        curCwd = stepped.cwd;
+        if (stepped.uncertain) cwdUncertain = true;
+        continue;
+      }
+      if (verb === "pushd" || verb === "popd" || verb === "eval" || verb === "source" || verb === ".") {
+        cwdUncertain = true;
+        continue;
+      }
+      if (verb === "xargs") {
+        const xr = unwrapAllowedXargs(tokens, cmdIdx, endIdx);
+        if (!xr?.safe) return { decision: "deny", reason: GOV_MUTATION_DENY_REASON };
         continue;
       }
       if (!OBVIOUS_MUTATION_VERBS.has(verb)) continue;
+
       const { govTargets, benchTargets } = extractVerbMutationTargets(verb, tokens, cmdIdx, endIdx);
-      for (const tok of govTargets) govChecks.push({ tok, isDirVerb: DIR_MUTATION_VERBS.has(verb), isDestructive: DESTRUCTIVE_CONFIG_VERBS.has(verb), cmdCwds });
-      for (const tok of benchTargets) benchChecks.push({ tok, cmdCwds });
+      if (segUnc && !localCwd && [...govTargets, ...benchTargets].some(isRelNonNull)) {
+        return { decision: "deny", reason: GOV_MUTATION_DENY_REASON };
+      }
+      for (const tok of govTargets) {
+        govChecks.push({ tok, isDirVerb: DIR_MUTATION_VERBS.has(verb), isDestructive: DESTRUCTIVE_CONFIG_VERBS.has(verb), effCwd });
+      }
+      for (const tok of benchTargets) {
+        benchChecks.push({ tok, effCwd });
+      }
     }
-    if (!segInfo.inCompoundBranch && branchBaseCwds) { cwds = dedupCwds([...branchBaseCwds, ...cwds]); branchBaseCwds = null; }
-    for (const { tok, isDirVerb, isDestructive, cmdCwds } of govChecks) {
-      for (const effCwd of cmdCwds) {
-        const scopedCtx = { ...ctx, cwd: effCwd };
-        if (isDirVerb && isProtectedGovernanceDirPath(tok, effCwd)) return { decision: "deny", reason: "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited." };
-        if (isProtectedGovernanceFileMutationPath(tok, convId, scopedCtx)) {
-          if (!isDestructive && isUserEditableGeminiConfigPath(tok, convId, scopedCtx)) record({ decision: "force_ask", reason: `[GEMINI CONFIG MUTATION] Shell edit to Antigravity user configuration '${tok}' requires explicit user confirmation.` });
-          else return { decision: "deny", reason: "Antigravity Execution Governance: Shell mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited." };
+
+    for (const { tok, isDirVerb, isDestructive, effCwd } of govChecks) {
+      const scopedCtx = { ...ctx, cwd: effCwd };
+      if (isDirVerb && isProtectedGovernanceDirPath(tok, effCwd)) {
+        return { decision: "deny", reason: GOV_MUTATION_DENY_REASON };
+      }
+      if (isProtectedGovernanceFileMutationPath(tok, convId, scopedCtx)) {
+        if (!isDestructive && isUserEditableGeminiConfigPath(tok, convId, scopedCtx)) {
+          record({
+            decision: "force_ask",
+            reason: `[GEMINI CONFIG MUTATION] Shell edit to Antigravity user configuration '${tok}' requires explicit user confirmation.`
+          });
+        } else {
+          return { decision: "deny", reason: GOV_MUTATION_DENY_REASON };
         }
       }
     }
-    if (!benchDisabled && benchChecks.some(({ tok, cmdCwds }) => cmdCwds.some((effCwd) => isProtectedBenchmarkFilePath(tok, effCwd)))) {
-      record({ decision: "force_ask", reason: "[BENCHMARK MUTATION DETECTED] Shell command mutation of protected evaluator/benchmark artifact requires explicit user confirmation to prevent benchmark contamination. Set AGY_DISABLE_BENCHMARK_GUARD=1 to disable this guard for non-evaluation repos." });
+    if (!benchDisabled && benchChecks.some(({ tok, effCwd }) => isProtectedBenchmarkFilePath(tok, effCwd))) {
+      record({ decision: "force_ask", reason: BENCH_MUTATION_ASK_REASON });
     }
-    const wrap = extractSimpleWrappedScript(seg.text);
-    for (const effCwd of segCwds) {
-      if (wrap?.innerScript) { const d = record(checkShellMutations(splitShellSegments(wrap.innerScript), convId, { ...ctx, cwd: wrap.localCwd ? resolveHookPath(expandLeadingTilde(wrap.localCwd), effCwd) : effCwd }, depth + 1)); if (d) return d; }
-      for (const sub of seg.subshells || []) { const d = record(checkShellMutations(splitShellSegments(sub), convId, { ...ctx, cwd: effCwd }, depth + 1)); if (d) return d; }
-      if (seg.heredocBodies?.length && segmentPipesToShell(segments, segIdx)) for (const hd of seg.heredocBodies) if (hd) { const d = record(checkShellMutations(splitShellSegments(hd), convId, { ...ctx, cwd: effCwd }, depth + 1)); if (d) return d; }
+
+    for (const wrap of extractSegmentWrappedScripts(seg, segInfo)) {
+      const nextCwd = wrap.localCwd ? resolveHookPath(expandLeadingTilde(wrap.localCwd), segCwd) : segCwd;
+      const d = record(checkShellMutations(splitShellSegments(wrap.innerScript), convId, { ...ctx, cwd: nextCwd }, depth + 1));
+      if (d) return d;
+    }
+    for (const sub of seg.subshells || []) {
+      const d = record(checkShellMutations(splitShellSegments(sub), convId, { ...ctx, cwd: segCwd }, depth + 1));
+      if (d) return d;
+    }
+    if (seg.heredocBodies?.length && segmentPipesToShell(segments, segIdx)) {
+      for (const hd of seg.heredocBodies) {
+        if (!hd) continue;
+        const d = record(checkShellMutations(splitShellSegments(hd), convId, { ...ctx, cwd: segCwd }, depth + 1));
+        if (d) return d;
+      }
     }
   }
   return pendingForceAsk;
@@ -923,26 +1241,60 @@ function makeOptionSpec({ sb = "", sr = "", so = "", lb = "", lr = "", lo = "", 
 
 const OPTION_SPECS = {
   rg: makeOptionSpec({
-    sb: "zsFivxUPSawL.ubhnN0opqHIclV", sr: "efEmjgdtTABCMr", allowNoPrefix: true, patNoArg: "--files --type-list --pcre2-version --help --version",
-    lb: "--search-zip --case-sensitive --crlf --fixed-strings --ignore-case --invert-match --line-regexp --mmap --multiline --multiline-dotall --unicode --null-data --pcre2 --smart-case --stop-on-nonmatch --text --word-regexp --auto-hybrid-regex --pcre2-unicode --binary --follow --glob-case-insensitive --hidden --ignore-file-case-insensitive --ignore --ignore-dot --ignore-exclude --ignore-files --ignore-global --ignore-parent --ignore-vcs --require-git --one-file-system --unrestricted --block-buffered --byte-offset --column --no-context-separator --heading --include-zero --line-buffered --line-number --max-columns-preview --null --only-matching --passthru --pretty --quiet --trim --vimgrep --with-filename --no-filename --sort-files --count --count-matches --files-with-matches --files-without-match --json --debug --ignore-messages --messages --stats --trace --config",
-    lr: "--regexp --file --ignore-file --pre --pre-glob --hostname-bin --dfa-size-limit --encoding --engine --max-count --regex-size-limit --threads --glob --iglob --max-depth --max-filesize --type --type-not --type-add --type-clear --after-context --before-context --context --color --colors --context-separator --field-context-separator --field-match-separator --hyperlink-format --max-columns --path-separator --replace --sort --sortr --generate",
+    sb: "zsFivxUPSawL.ubhnN0opqHIclV",
+    sr: "efEmjgdtTABCMr",
+    allowNoPrefix: true,
+    patNoArg: "--files --type-list --pcre2-version --help --version",
+    lb: [
+      "--case-sensitive --crlf --fixed-strings --ignore-case --invert-match --line-regexp --multiline",
+      "--multiline-dotall --null-data --pcre2 --smart-case --text --word-regexp --binary --follow --hidden",
+      "--ignore --ignore-dot --ignore-files --ignore-global --ignore-parent --ignore-vcs --one-file-system",
+      "--unrestricted --byte-offset --column --heading --line-buffered --line-number --null --only-matching",
+      "--pretty --quiet --trim --vimgrep --with-filename --no-filename --sort-files --count --count-matches",
+      "--files-with-matches --files-without-match --json --debug --stats"
+    ].join(" "),
+    lr: [
+      "--regexp --file --ignore-file --pre --pre-glob --hostname-bin --encoding --engine --max-count",
+      "--threads --glob --iglob --max-depth --max-filesize --type --type-not --type-add --type-clear",
+      "--after-context --before-context --context --color --colors --path-separator --replace --sort --sortr"
+    ].join(" "),
     lfr: "--file --ignore-file --pre --hostname-bin"
   }),
   grep: makeOptionSpec({
-    sb: "EFGPiyvwxzsbnHhoqaIrRLlcTZUV0123456789", sr: "efmdDABC", patNoArg: "--help --version",
-    lb: "--extended-regexp --fixed-strings --basic-regexp --perl-regexp --ignore-case --no-ignore-case --word-regexp --line-regexp --null-data --no-messages --invert-match --byte-offset --line-number --line-buffered --with-filename --no-filename --only-matching --quiet --silent --text --recursive --dereference-recursive --files-without-match --files-with-matches --count --initial-tab --null --no-group-separator --binary --unix-byte-offsets",
-    lr: "--regexp --file --exclude-from --max-count --label --binary-files --directories --devices --include --exclude --exclude-dir --before-context --after-context --context --group-separator",
-    lo: "--color --colour", lfr: "--file --exclude-from"
+    sb: "EFGPiyvwxzsbnHhoqaIrRLlcTZUV0123456789",
+    sr: "efmdDABC",
+    patNoArg: "--help --version",
+    lb: [
+      "--extended-regexp --fixed-strings --basic-regexp --perl-regexp --ignore-case --no-ignore-case",
+      "--word-regexp --line-regexp --null-data --no-messages --invert-match --byte-offset --line-number",
+      "--line-buffered --with-filename --no-filename --only-matching --quiet --silent --text --recursive",
+      "--dereference-recursive --files-without-match --files-with-matches --count --initial-tab --null --binary"
+    ].join(" "),
+    lr: "--regexp --file --exclude-from --max-count --label --binary-files --directories --devices --include --exclude --exclude-dir --before-context --after-context --context",
+    lo: "--color --colour",
+    lfr: "--file --exclude-from"
   }),
   "git-grep": makeOptionSpec({
-    sb: "viwaIrEGFPnhHlLzocpWqu0123456789", sr: "efCBAm", so: "O", patNoArg: "--help", allowNoPrefix: true,
-    lb: "--cached --no-index --index --untracked --exclude-standard --recurse-submodules --invert-match --ignore-case --word-regexp --text --textconv --recursive --extended-regexp --basic-regexp --fixed-strings --perl-regexp --line-number --column --full-name --files-with-matches --name-only --files-without-match --null --only-matching --count --break --heading --show-function --function-context --and --or --not --quiet --all-match --ext-grep",
+    sb: "viwaIrEGFPnhHlLzocpWqu0123456789",
+    sr: "efCBAm",
+    so: "O",
+    patNoArg: "--help",
+    allowNoPrefix: true,
+    lb: [
+      "--cached --no-index --index --untracked --exclude-standard --recurse-submodules --invert-match",
+      "--ignore-case --word-regexp --text --textconv --recursive --extended-regexp --basic-regexp",
+      "--fixed-strings --perl-regexp --line-number --column --full-name --files-with-matches --name-only",
+      "--files-without-match --null --only-matching --count --break --heading --show-function --quiet --all-match --ext-grep"
+    ].join(" "),
     lr: "--regexp --file --max-depth --context --before-context --after-context --threads --max-count",
-    lo: "--color --no-color --open-files-in-pager --no-open-files-in-pager", lfr: "--file"
+    lo: "--color --no-color --open-files-in-pager --no-open-files-in-pager",
+    lfr: "--file"
   }),
   ls: makeOptionSpec({
-    hasPattern: false, sb: "aAbBcCdDfFgGhHiklLmnNopqQrRsStuUvxXZ1", sr: "IwT",
-    lb: "--all --almost-all --author --escape --ignore-backups --directory --dired --file-type --full-time --group-directories-first --no-group --human-readable --si --dereference-command-line --dereference-command-line-symlink-to-dir --inode --kibibytes --dereference --numeric-uid-gid --literal --hide-control-chars --show-control-chars --quote-name --reverse --recursive --size --context --zero --help --version",
+    hasPattern: false,
+    sb: "aAbBcCdDfFgGhHiklLmnNopqQrRsStuUvxXZ1",
+    sr: "IwT",
+    lb: "--all --almost-all --directory --file-type --full-time --group-directories-first --human-readable --inode --dereference --numeric-uid-gid --reverse --recursive --size --zero --help --version",
     lr: "--ignore --hide --block-size --format --quoting-style --sort --time --time-style --width --tabsize",
     lo: "--color --hyperlink --indicator-style --classify"
   })
@@ -965,9 +1317,18 @@ function expandItemPathCandidates(item) {
   if (!value || typeof value !== "string") return [];
   const out = [{ value, globPositions, isOperand }];
   if (!isOperand) {
-    for (const ch of ["=", "@"]) { const p = value.indexOf(ch); if (p !== -1 && p + 1 < value.length) out.push({ value: value.slice(p + 1), globPositions: shiftGlobPositions(globPositions, p + 1), isOperand: true }); }
+    for (const ch of ["=", "@"]) {
+      const p = value.indexOf(ch);
+      if (p !== -1 && p + 1 < value.length) {
+        out.push({ value: value.slice(p + 1), globPositions: shiftGlobPositions(globPositions, p + 1), isOperand: true });
+      }
+    }
     if (value.startsWith("-") && !value.startsWith("--")) {
-      for (let i = 1; i < value.length && /[A-Za-z0-9]/.test(value[i]); i++) if ("FfCKTo".includes(value[i]) && i + 1 < value.length) out.push({ value: value.slice(i + 1), globPositions: shiftGlobPositions(globPositions, i + 1), isOperand: true });
+      for (let i = 1; i < value.length && /[A-Za-z0-9]/.test(value[i]); i++) {
+        if ("FfCKTo".includes(value[i]) && i + 1 < value.length) {
+          out.push({ value: value.slice(i + 1), globPositions: shiftGlobPositions(globPositions, i + 1), isOperand: true });
+        }
+      }
     }
   }
   return out;
@@ -979,10 +1340,14 @@ function parseOptionRoles(tokens, argStart, endIdx, dialect) {
   let hasExplicitPat = false, sawDD = false, uncertain = !spec, gitUntracked = false, gitNoIndex = false, gitUnsupported = false, executesHelper = false;
   for (let i = argStart; i < endIdx; i++) {
     const r = skipSingleRedirect(tokens, i);
-    if (r) { if (r.missingTarget) uncertain = true; i = r.nextIdx - 1; continue; }
+    if (r) {
+      if (r.missingTarget) uncertain = true;
+      i = r.nextIdx - 1;
+      continue;
+    }
     const tok = tokens[i], v = tok.value;
     if (!sawDD && v === "--") { sawDD = true; continue; }
-    if (sawDD) { postDD.push({ value: v, globPositions: tok.globPositions, isOperand: true }); continue; }
+    if (sawDD) { postDD.push({ value: v, globPositions: tok.globPositions, hasUnquotedGlob: tok.hasUnquotedGlob, isOperand: true }); continue; }
     if (dialect === "git-grep" && !tok.quoted && (v === "(" || v === ")")) continue;
     if (v.startsWith("--") && v.length > 2) {
       if (!spec) { unknownOpts.push({ value: v, globPositions: tok.globPositions, isOperand: false }); continue; }
@@ -1025,22 +1390,32 @@ function parseOptionRoles(tokens, argStart, endIdx, dialect) {
           }
           break;
         }
-        uncertain = true; unknownOpts.push({ value: v, globPositions: tok.globPositions, isOperand: false }); break;
+        uncertain = true;
+        unknownOpts.push({ value: v, globPositions: tok.globPositions, isOperand: false });
+        break;
       }
       continue;
     }
-    preDD.push({ value: v, globPositions: tok.globPositions, isOperand: true });
+    preDD.push({ value: v, globPositions: tok.globPositions, hasUnquotedGlob: tok.hasUnquotedGlob, isOperand: true });
   }
   const allPos = [...preDD, ...postDD];
   if (uncertain) return { uncertain: true, pathItems: [...fileTargets, ...unknownOpts, ...allPos], implicitCwd: true, executesHelper, gitTrackedScope: null };
   const preDDPostPat = !spec.hasPattern || hasExplicitPat ? preDD : (preDD.length > 0 ? preDD.slice(1) : []);
   const operands = !spec.hasPattern || hasExplicitPat ? allPos : (preDD.length > 0 ? [...preDDPostPat, ...postDD] : postDD.slice(1));
   let gitTrackedScope = null;
-  if (dialect === "git-grep" && !gitUntracked && !gitNoIndex && !gitUnsupported) {
+  if (dialect === "git-grep" && !gitUntracked && !gitNoIndex && !gitUnsupported && !executesHelper) {
     if (sawDD && preDDPostPat.length > 0) uncertain = true;
-    else if (!(!sawDD && operands.some((op) => op.hasUnquotedGlob))) gitTrackedScope = { sawDoubleDash: sawDD, pathspecs: operands.map((op) => op.value), fileTargets };
+    else if (!(!sawDD && operands.some((op) => op.hasUnquotedGlob))) {
+      gitTrackedScope = { sawDoubleDash: sawDD, pathspecs: operands.map((op) => op.value), operandItems: operands, fileTargets };
+    }
   }
-  return { uncertain, pathItems: uncertain ? [...fileTargets, ...allPos] : [...fileTargets, ...operands], implicitCwd: uncertain || operands.length === 0, executesHelper, gitTrackedScope };
+  return {
+    uncertain,
+    pathItems: uncertain ? [...fileTargets, ...allPos] : [...fileTargets, ...operands],
+    implicitCwd: uncertain || operands.length === 0,
+    executesHelper,
+    gitTrackedScope
+  };
 }
 
 function parseGitPrefixBeforeSubcommand(tokens, gitIdx, endIdx) {
@@ -1048,66 +1423,135 @@ function parseGitPrefixBeforeSubcommand(tokens, gitIdx, endIdx) {
   let gitLocalCwd = null, hasConfigOverride = false, uncertain = false, idx = gitIdx + 1;
   while (idx < endIdx) {
     const r = skipSingleRedirect(tokens, idx);
-    if (r) { if (r.missingTarget) uncertain = true; idx = r.nextIdx; continue; }
+    if (r) {
+      if (r.missingTarget) uncertain = true;
+      idx = r.nextIdx;
+      continue;
+    }
     const tok = tokens[idx], v = tok.value;
     if (v === "--") { idx++; break; }
     if (!v.startsWith("-") || v === "-") break;
     if (["-C", "--git-dir", "--work-tree", "--namespace", "-c", "--config-env", "--super-prefix"].includes(v)) {
       const next = nextNonRedirectIndex(tokens, idx + 1, endIdx);
-      if (next.missingRedirect || next.idx >= endIdx) { uncertain = true; idx = endIdx; break; }
+      if (next.missingRedirect || next.idx >= endIdx) {
+        uncertain = true;
+        idx = endIdx;
+        break;
+      }
       const vt = tokens[next.idx];
-      if (v === "-c" || v === "--config-env" || v === "--super-prefix") hasConfigOverride = true; else gitGlobalArgs.push(v, vt.value);
+      if (v === "-c" || v === "--config-env" || v === "--super-prefix") hasConfigOverride = true;
+      else gitGlobalArgs.push(v, vt.value);
       if (v === "-C") gitLocalCwd = gitLocalCwd ? path.resolve(gitLocalCwd, expandLeadingTilde(vt.value)) : vt.value;
       if (v === "-C" || v === "--git-dir" || v === "--work-tree") extraPathItems.push({ value: vt.value, globPositions: vt.globPositions, isOperand: true });
-      idx = next.idx + 1; continue;
+      idx = next.idx + 1;
+      continue;
     }
     if (v.startsWith("-C") && v.length > 2 && !v.startsWith("--")) {
       const dirVal = v.slice(2);
       gitLocalCwd = gitLocalCwd ? path.resolve(gitLocalCwd, expandLeadingTilde(dirVal)) : dirVal;
-      gitGlobalArgs.push("-C", dirVal); extraPathItems.push({ value: dirVal, globPositions: shiftGlobPositions(tok.globPositions, 2), isOperand: true });
+      gitGlobalArgs.push("-C", dirVal);
+      extraPathItems.push({ value: dirVal, globPositions: shiftGlobPositions(tok.globPositions, 2), isOperand: true });
     } else if (v.startsWith("--git-dir=") || v.startsWith("--work-tree=")) {
-      const eq = v.indexOf("="); gitGlobalArgs.push(v); extraPathItems.push({ value: v.slice(eq + 1), globPositions: shiftGlobPositions(tok.globPositions, eq + 1), isOperand: true });
+      const eq = v.indexOf("=");
+      gitGlobalArgs.push(v);
+      extraPathItems.push({ value: v.slice(eq + 1), globPositions: shiftGlobPositions(tok.globPositions, eq + 1), isOperand: true });
     } else if (v.startsWith("--namespace=")) gitGlobalArgs.push(v);
     else if ((v.startsWith("-c") && v.length > 2 && !v.startsWith("--")) || v.startsWith("--config-env=") || v.startsWith("--super-prefix=")) hasConfigOverride = true;
-    else if (["-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--bare", "--no-optional-locks"].includes(v)) { if (v === "--bare") gitGlobalArgs.push(v); }
-    else uncertain = true;
+    else if (["-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--bare", "--no-optional-locks"].includes(v)) {
+      if (v === "--bare") gitGlobalArgs.push(v);
+    } else uncertain = true;
     idx++;
   }
   return { subIdx: idx, subName: idx < endIdx ? normalizeCmdName(tokens[idx].value) : "", gitGlobalArgs, gitLocalCwd, hasConfigOverride, extraPathItems, uncertain };
 }
 
 function classifyCommandRoles(tokens, startPos, cmdIdx, endIdx, { hasDownstreamPipe = false } = {}) {
-  if (cmdIdx >= endIdx || cmdIdx >= tokens.length) return { verb: "", pathItems: [], implicitCwd: false, recursive: false, uncertain: false, gitGrepScope: null };
+  if (cmdIdx >= endIdx || cmdIdx >= tokens.length) {
+    return { verb: "", pathItems: [], implicitCwd: false, recursive: false, uncertain: false, executesHelper: false, gitGrepScope: null };
+  }
   const prefixItems = [];
+  let hasGitEnvPrefix = false;
   for (let p = startPos; p < cmdIdx; p++) {
     const r = skipSingleRedirect(tokens, p);
     if (r) { p = r.nextIdx - 1; continue; }
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[p].raw)) prefixItems.push({ value: tokens[p].value, globPositions: tokens[p].globPositions, isOperand: false });
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[p].raw)) {
+      if (/^GIT_/i.test(tokens[p].raw)) hasGitEnvPrefix = true;
+      prefixItems.push({ value: tokens[p].value, globPositions: tokens[p].globPositions, isOperand: false });
+    }
   }
   const verb = normalizeCmdName(tokens[cmdIdx].value);
-  if ((!hasDownstreamPipe && ["echo", "printf", "write-output"].includes(verb)) || verb === "cd") return { verb, pathItems: prefixItems, implicitCwd: false, recursive: false, uncertain: false, gitGrepScope: null };
-  let effVerb = verb, argStart = cmdIdx + 1;
-  if (verb === "rtk" && argStart < endIdx && ["grep", "rg", "ls", "git"].includes(normalizeCmdName(tokens[argStart].value))) effVerb = normalizeCmdName(tokens[argStart++].value);
-  else if (verb === "node" && argStart + 1 < endIdx && isTrustedLocalRtkLauncherPath(tokens[argStart].value) && ["grep", "rg", "ls", "git"].includes(normalizeCmdName(tokens[argStart + 1].value))) { effVerb = normalizeCmdName(tokens[argStart + 1].value); argStart += 2; }
+  if ((!hasDownstreamPipe && ["echo", "printf", "write-output"].includes(verb)) || verb === "cd") {
+    return { verb, pathItems: prefixItems, implicitCwd: false, recursive: false, uncertain: false, executesHelper: false, gitGrepScope: null };
+  }
+  let effVerb = verb;
+  let argStart = cmdIdx + 1;
+  if (verb === "rtk" && argStart < endIdx && ["grep", "rg", "ls", "git"].includes(normalizeCmdName(tokens[argStart].value))) {
+    effVerb = normalizeCmdName(tokens[argStart++].value);
+  } else if (
+    verb === "node" &&
+    argStart + 1 < endIdx &&
+    isTrustedLocalRtkLauncherPath(tokens[argStart].value) &&
+    ["grep", "rg", "ls", "git"].includes(normalizeCmdName(tokens[argStart + 1].value))
+  ) {
+    effVerb = normalizeCmdName(tokens[argStart + 1].value);
+    argStart += 2;
+  }
   if (effVerb === "git") {
     const gm = parseGitPrefixBeforeSubcommand(tokens, argStart - 1, endIdx);
-    if (gm.subName === "grep") {
-      const p = parseOptionRoles(tokens, gm.subIdx + 1, endIdx, "git-grep"), okTracked = Boolean(p.gitTrackedScope && !gm.uncertain && !gm.hasConfigOverride && !p.uncertain);
+    if (hasGitEnvPrefix) {
       return {
-        verb, effectiveVerb: "git-grep", localCwd: gm.gitLocalCwd, pathItems: [...prefixItems, ...gm.extraPathItems, ...p.pathItems],
-        implicitCwd: p.implicitCwd || gm.uncertain, recursive: true, uncertain: p.uncertain || gm.uncertain,
-        gitGrepScope: okTracked ? { gitGlobalArgs: gm.gitGlobalArgs, sawDoubleDash: p.gitTrackedScope.sawDoubleDash, pathspecs: p.gitTrackedScope.pathspecs, nonPathspecItems: [...prefixItems, ...gm.extraPathItems, ...p.gitTrackedScope.fileTargets] } : null
+        verb,
+        effectiveVerb: "git",
+        localCwd: gm.gitLocalCwd,
+        pathItems: [...prefixItems, ...gm.extraPathItems],
+        implicitCwd: true,
+        recursive: true,
+        uncertain: true,
+        executesHelper: true,
+        gitGrepScope: null
+      };
+    }
+    if (gm.subName === "grep") {
+      const p = parseOptionRoles(tokens, gm.subIdx + 1, endIdx, "git-grep");
+      const okTracked = Boolean(p.gitTrackedScope && !gm.uncertain && !gm.hasConfigOverride && !p.uncertain && !p.executesHelper);
+      return {
+        verb,
+        effectiveVerb: "git-grep",
+        localCwd: gm.gitLocalCwd,
+        pathItems: [...prefixItems, ...gm.extraPathItems, ...p.pathItems],
+        implicitCwd: p.implicitCwd || gm.uncertain || p.executesHelper,
+        recursive: true,
+        uncertain: p.uncertain || gm.uncertain || p.executesHelper,
+        executesHelper: p.executesHelper,
+        gitGrepScope: okTracked
+          ? {
+              gitGlobalArgs: gm.gitGlobalArgs,
+              sawDoubleDash: p.gitTrackedScope.sawDoubleDash,
+              pathspecs: p.gitTrackedScope.pathspecs,
+              operandItems: p.gitTrackedScope.operandItems,
+              nonPathspecItems: [...prefixItems, ...gm.extraPathItems, ...p.gitTrackedScope.fileTargets]
+            }
+          : null
       };
     }
   }
   if (SEARCH_COMMANDS.has(effVerb) || effVerb === "ls") {
     const dialect = effVerb === "ls" ? "ls" : ((effVerb === "rg" || effVerb === "ripgrep") ? "rg" : (["grep", "egrep", "fgrep"].includes(effVerb) ? "grep" : "unknown"));
     const p = parseOptionRoles(tokens, argStart, endIdx, dialect);
-    return { verb, effectiveVerb: dialect, pathItems: [...prefixItems, ...p.pathItems], implicitCwd: p.implicitCwd, recursive: true, uncertain: p.uncertain, gitGrepScope: null };
+    return {
+      verb,
+      effectiveVerb: dialect,
+      pathItems: [...prefixItems, ...p.pathItems],
+      implicitCwd: p.implicitCwd,
+      recursive: true,
+      uncertain: p.uncertain || p.executesHelper,
+      executesHelper: p.executesHelper,
+      gitGrepScope: null
+    };
   }
   if (effVerb === "find") {
     const f = scanFindCommand(tokens, argStart - 1, endIdx);
-    return { verb, effectiveVerb: "find", pathItems: [...prefixItems, ...f.pathItems], implicitCwd: f.implicitCwd, recursive: true, uncertain: f.uncertain, gitGrepScope: null };
+    return { verb, effectiveVerb: "find", pathItems: [...prefixItems, ...f.pathItems], implicitCwd: f.implicitCwd, recursive: true, uncertain: f.uncertain, executesHelper: false, gitGrepScope: null };
   }
   const genericItems = [...prefixItems];
   let sawDD = false;
@@ -1117,7 +1561,7 @@ function classifyCommandRoles(tokens, startPos, cmdIdx, endIdx, { hasDownstreamP
     if (!sawDD && i > cmdIdx && tokens[i].value === "--") { sawDD = true; continue; }
     genericItems.push({ value: tokens[i].value, globPositions: tokens[i].globPositions, isOperand: sawDD });
   }
-  return { verb, effectiveVerb: effVerb, pathItems: genericItems, implicitCwd: false, recursive: false, uncertain: false, gitGrepScope: null };
+  return { verb, effectiveVerb: effVerb, pathItems: genericItems, implicitCwd: false, recursive: false, uncertain: false, executesHelper: false, gitGrepScope: null };
 }
 
 export function needsImplicitRecursiveCwd(tokens) {
@@ -1132,7 +1576,11 @@ function filterProseFlags(detailed, subIdx, allTokens, envPrefix, shouldSkipPair
     const tok = detailed[i];
     if (i <= subIdx) { kept.push(tok.value); continue; }
     const r = skipSingleRedirect(detailed, i);
-    if (r) { for (let k = i; k < Math.min(r.nextIdx, detailed.length); k++) kept.push(detailed[k].value); i = r.nextIdx - 1; continue; }
+    if (r) {
+      for (let k = i; k < Math.min(r.nextIdx, detailed.length); k++) kept.push(detailed[k].value);
+      i = r.nextIdx - 1;
+      continue;
+    }
     if (!afterDD && tok.value === "--") { afterDD = true; kept.push(tok.value); continue; }
     if (!afterDD) {
       const next = nextNonRedirectIndex(detailed, i + 1, detailed.length), nextTok = next.idx < detailed.length ? detailed[next.idx] : null;
@@ -1160,17 +1608,39 @@ export function getInspectableTextForSegment(seg, { hasDownstreamPipe = false, a
   const cmd0 = nr[0] ? normalizeCmdName(nr[0].tok.value) : "", cmd1 = nr[1] ? normalizeCmdName(nr[1].tok.value) : "", cmd2 = nr[2] ? normalizeCmdName(nr[2].tok.value) : "";
   if (!hasDownstreamPipe && ["echo", "printf", "write-output"].includes(cmd0) && segInfo.starts.length <= 1) { const targets = extractRedirectTargets(allTokens); return asWords ? targets : targets.join(" "); }
   const rtkBase = (t) => cmd0 === t ? 0 : (cmd0 === "rtk" && cmd1 === t ? 1 : (cmd0 === "node" && nr[1] && isTrustedLocalRtkLauncherPath(nr[1].tok.value) && cmd2 === t ? 2 : -1));
-  const skipGlobalNr = (start, valSet) => { let idx = start; while (idx < nr.length && nr[idx].tok.value.startsWith("-")) idx += valSet.has(nr[idx].tok.value) ? 2 : 1; return idx; };
+  const skipGlobalNr = (start, valSet) => {
+    let idx = start;
+    while (idx < nr.length && nr[idx].tok.value.startsWith("-")) {
+      idx += valSet.has(nr[idx].tok.value) ? 2 : 1;
+    }
+    return idx;
+  };
   const gitBase = rtkBase("git");
   if (gitBase !== -1 && segInfo.starts.length <= 1) {
     const subNrIdx = skipGlobalNr(gitBase + 1, new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"]));
     const gitSub = subNrIdx < nr.length ? normalizeCmdName(nr[subNrIdx].tok.value) : "", subOrigIdx = subNrIdx < nr.length ? nr[subNrIdx].origIdx : cmdIdx;
     if (gitSub === "commit" || gitSub === "tag") {
       const preRe = gitSub === "commit" ? /^-[apsnvqezoih]*m$/ : /^-[asfdvin]*m$/, inlRe = gitSub === "commit" ? /^-[apsnvqezoih]*m.+/ : /^-[asfdvin]*m.+/;
-      return filterProseFlags(allTokens, subOrigIdx, allTokens, envPrefix, (v) => v === "-m" || v === "--message" || preRe.test(v), (v) => v.startsWith("--message=") || (!v.startsWith("--") && inlRe.test(v)), asWords);
+      return filterProseFlags(
+        allTokens,
+        subOrigIdx,
+        allTokens,
+        envPrefix,
+        (v) => v === "-m" || v === "--message" || preRe.test(v),
+        (v) => v.startsWith("--message=") || (!v.startsWith("--") && inlRe.test(v)),
+        asWords
+      );
     }
     if (["log", "rev-list", "shortlog"].includes(gitSub)) {
-      return filterProseFlags(allTokens, subOrigIdx, allTokens, envPrefix, (v) => v === "--grep" || v === "-S" || v === "-G", (v) => v.startsWith("--grep=") || ((v.startsWith("-S") || v.startsWith("-G")) && v.length > 2), asWords);
+      return filterProseFlags(
+        allTokens,
+        subOrigIdx,
+        allTokens,
+        envPrefix,
+        (v) => v === "--grep" || v === "-S" || v === "-G",
+        (v) => v.startsWith("--grep=") || ((v.startsWith("-S") || v.startsWith("-G")) && v.length > 2),
+        asWords
+      );
     }
   }
   const ghBase = rtkBase("gh");
@@ -1178,13 +1648,37 @@ export function getInspectableTextForSegment(seg, { hasDownstreamPipe = false, a
     const ghGlobals = new Set(["-R", "--repo", "--hostname"]), subNrIdx = skipGlobalNr(ghBase + 1, ghGlobals);
     const ghSub = subNrIdx < nr.length ? normalizeCmdName(nr[subNrIdx].tok.value) : "", subOrigIdx = subNrIdx < nr.length ? nr[subNrIdx].origIdx : cmdIdx;
     if (ghSub === "api") {
-      const isFileF = (val) => { const eq = String(val || "").indexOf("="); return eq !== -1 && String(val).slice(eq + 1).startsWith("@"); };
-      return filterProseFlags(allTokens, subOrigIdx, allTokens, envPrefix, (v, next) => v === "-f" || v === "--raw-field" || ((v === "-F" || v === "--field") && next && !isFileF(next.value)), (v) => v.startsWith("--raw-field=") || (v.startsWith("-f") && v.length > 2 && !v.startsWith("--")) || (v.startsWith("--field=") && !isFileF(v.slice(8))) || (v.startsWith("-F") && v.length > 2 && !v.startsWith("--") && !isFileF(v.slice(2))), asWords);
+      const isFileF = (val) => {
+        const eq = String(val || "").indexOf("=");
+        return eq !== -1 && String(val).slice(eq + 1).startsWith("@");
+      };
+      return filterProseFlags(
+        allTokens,
+        subOrigIdx,
+        allTokens,
+        envPrefix,
+        (v, next) => v === "-f" || v === "--raw-field" || ((v === "-F" || v === "--field") && next && !isFileF(next.value)),
+        (v) => v.startsWith("--raw-field=") ||
+          (v.startsWith("-f") && v.length > 2 && !v.startsWith("--")) ||
+          (v.startsWith("--field=") && !isFileF(v.slice(8))) ||
+          (v.startsWith("-F") && v.length > 2 && !v.startsWith("--") && !isFileF(v.slice(2))),
+        asWords
+      );
     }
     if (["pr", "issue", "release"].includes(ghSub)) {
       const actNrIdx = skipGlobalNr(subNrIdx + 1, ghGlobals), ghAction = actNrIdx < nr.length ? normalizeCmdName(nr[actNrIdx].tok.value) : "";
       const allowC = (ghSub === "pr" || ghSub === "issue") && (ghAction === "close" || ghAction === "reopen");
-      return filterProseFlags(allTokens, subOrigIdx, allTokens, envPrefix, (v) => ["-b", "--body", "-t", "--title", "-n", "--notes", "--subject"].includes(v) || (allowC && (v === "-c" || v === "--comment")), (v) => /^--(?:body|title|notes|subject)=/.test(v) || (allowC && v.startsWith("--comment=")) || (!v.startsWith("--") && (allowC ? /^-[btnc].+/ : /^-[btn].+/).test(v)), asWords);
+      return filterProseFlags(
+        allTokens,
+        subOrigIdx,
+        allTokens,
+        envPrefix,
+        (v) => ["-b", "--body", "-t", "--title", "-n", "--notes", "--subject"].includes(v) || (allowC && (v === "-c" || v === "--comment")),
+        (v) => /^--(?:body|title|notes|subject)=/.test(v) ||
+          (allowC && v.startsWith("--comment=")) ||
+          (!v.startsWith("--") && (allowC ? /^-[btnc].+/ : /^-[btn].+/).test(v)),
+        asWords
+      );
     }
   }
   const roles = segInfo.starts.map((s) => classifyCommandRoles(allTokens, s.startPos, s.cmdIdx, s.endIdx, { hasDownstreamPipe }));
@@ -1205,56 +1699,45 @@ const CODE_FILE_ACCESS_RE = /\b(?:open|read|readFile|readFileSync|createReadStre
 function collectInspectableTexts(segments, depth = 0) {
   if (depth > 4) return [];
   const texts = [];
+  const { perSegment } = analyzeSegmentCommandStarts(segments, { allowPartialCompound: depth > 0 });
   for (let idx = 0; idx < segments.length; idx++) {
-    const seg = segments[idx], pipelineCmds = [getSegmentCmdName(seg)];
-    for (let j = idx + 1; j < segments.length && ["|", "|&"].includes(segments[j].leadingSep); j++) pipelineCmds.push(getSegmentCmdName(segments[j]));
+    const seg = segments[idx];
+    const pipelineCmds = [getSegmentCmdName(seg)];
+    for (let j = idx + 1; j < segments.length && ["|", "|&"].includes(segments[j].leadingSep); j++) {
+      pipelineCmds.push(getSegmentCmdName(segments[j]));
+    }
     const inspectable = getInspectableTextForSegment(seg, { hasDownstreamPipe: pipelineCmds.length > 1 });
     if (inspectable) texts.push(inspectable);
-    const wrapped = extractSimpleWrappedScript(seg.text);
-    if (wrapped?.innerScript) texts.push(...collectInspectableTexts(splitShellSegments(wrapped.innerScript), depth + 1));
-    for (const sub of seg.subshells || []) texts.push(...collectInspectableTexts(splitShellSegments(sub), depth + 1));
+    for (const wrapped of extractSegmentWrappedScripts(seg, perSegment[idx])) {
+      texts.push(...collectInspectableTexts(splitShellSegments(wrapped.innerScript), depth + 1));
+    }
+    for (const sub of seg.subshells || []) {
+      texts.push(...collectInspectableTexts(splitShellSegments(sub), depth + 1));
+    }
     if (seg.heredocBodies?.length) {
-      const hasShell = pipelineCmds.some((c) => SHELL_INTERPRETERS.has(c)), hasXargs = pipelineCmds.includes("xargs");
+      const hasShell = pipelineCmds.some((c) => SHELL_INTERPRETERS.has(c));
+      const hasXargs = pipelineCmds.includes("xargs");
       const hasCode = !seg.hasWriteRedirect && pipelineCmds.some((c) => CODE_INTERPRETERS.has(c));
       const writesExecScript = seg.hasWriteRedirect && extractRedirectTargets(getSegTokens(seg), true).some(isExecutableScriptPath);
-      for (const hd of seg.heredocBodies) if (hd) { if (hasShell) texts.push(...collectInspectableTexts(splitShellSegments(hd), depth + 1)); else if (hasXargs || (hasCode && CODE_FILE_ACCESS_RE.test(hd)) || writesExecScript || /^\s*#!/.test(hd)) texts.push(hd); }
+      for (const hd of seg.heredocBodies) {
+        if (!hd) continue;
+        if (hasShell) texts.push(...collectInspectableTexts(splitShellSegments(hd), depth + 1));
+        else if (hasXargs || (hasCode && CODE_FILE_ACCESS_RE.test(hd)) || writesExecScript || /^\s*#!/.test(hd)) texts.push(hd);
+      }
     }
   }
   return texts;
 }
 
-const dedupCwds = (list) => [...new Set(list.map((c) => c || ""))];
-const isAccessibleDirectory = (d) => { if (!d) return false; try { return fs.statSync(d).isDirectory() && (fs.accessSync(d, fs.constants.X_OK), true); } catch { return false; } };
-
-function stepCdDirectorySet(tokens, cmdIdx, endIdx, curCwds, oldCwds, { inPipeline = false, inCompoundBranch = false, nextLeadingSep = "" } = {}) {
-  const posTokens = [];
-  let sawDD = false, malformed = false;
-  for (let i = cmdIdx + 1; i < endIdx; i++) {
-    const r = skipSingleRedirect(tokens, i);
-    if (r) { if (r.missingTarget) malformed = true; i = r.nextIdx - 1; continue; }
-    const tok = tokens[i], v = tok.value;
-    if (!sawDD && v === "--") { sawDD = true; continue; }
-    if (!sawDD && (["-L", "-P", "-e", "-@"].includes(v) || v.toLowerCase() === "/d")) continue;
-    if (!sawDD && v.startsWith("-") && v !== "-") { malformed = true; continue; }
-    posTokens.push(tok);
+function isAccessibleDirectory(d) {
+  if (!d) return false;
+  try {
+    if (!fs.statSync(d).isDirectory()) return false;
+    fs.accessSync(d, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
   }
-  // shortcut: glob, dynamic, or ambiguous cd marks cwd uncertain instead of expanding globs, upgrade if multi-dir glob cd is needed
-  const fallback = () => ({ cwds: dedupCwds([...curCwds, getProfileHomeDir()]), uncertain: true });
-  if (malformed || posTokens.length > 1) return fallback();
-  const targetTok = posTokens[0] || null;
-  if (!targetTok) {
-    const home = getProfileHomeDir(), must = !inPipeline && !inCompoundBranch && (nextLeadingSep === "&&" || isAccessibleDirectory(home));
-    return { cwds: must ? [home] : dedupCwds([...curCwds, home]), uncertain: false };
-  }
-  const rawVal = targetTok.value;
-  if (rawVal === "-") {
-    if (!oldCwds?.length) return fallback();
-    return { cwds: (!inPipeline && !inCompoundBranch && nextLeadingSep === "&&" && oldCwds.length === 1) ? [...oldCwds] : dedupCwds([...curCwds, ...oldCwds]), uncertain: false };
-  }
-  const hasExpansion = (!targetTok.quoted && /[$`%]/.test(targetTok.raw)) || (targetTok.quoted && targetTok.raw.includes('"') && /(?:^|[^\\])[$`]/.test(targetTok.raw));
-  if (hasExpansion || /^~[^/\\]+/.test(rawVal) || targetTok.hasUnquotedGlob) return fallback();
-  const nextCwds = dedupCwds(curCwds.map((c) => resolveHookPath(expandLeadingTilde(rawVal), c)));
-  return { cwds: (!inPipeline && !inCompoundBranch && (nextLeadingSep === "&&" || nextCwds.every(isAccessibleDirectory))) ? nextCwds : dedupCwds([...curCwds, ...nextCwds]), uncertain: false };
 }
 
 function wouldNaiveScopeTouchProtected(baseCwd, pathspecs, sawDoubleDash, protectedDirs) {
@@ -1274,7 +1757,11 @@ function resolveTrackedGitGrepCandidates(effectiveCwd, gitGlobalArgs, pathspecs,
   for (let i = 0; i < gitGlobalArgs.length; i++) {
     const a = gitGlobalArgs[i];
     if (a === "-C" && gitGlobalArgs[i + 1]) { cwd = path.resolve(cwd, expandLeadingTilde(gitGlobalArgs[++i])); continue; }
-    if (a === "--work-tree" && gitGlobalArgs[i + 1]) { workTree = path.resolve(cwd, expandLeadingTilde(gitGlobalArgs[i + 1])); gitArgs.push(a, gitGlobalArgs[++i]); continue; }
+    if (a === "--work-tree" && gitGlobalArgs[i + 1]) {
+      workTree = path.resolve(cwd, expandLeadingTilde(gitGlobalArgs[i + 1]));
+      gitArgs.push(a, gitGlobalArgs[++i]);
+      continue;
+    }
     if (a.startsWith("--work-tree=")) workTree = path.resolve(cwd, expandLeadingTilde(a.slice(12)));
     gitArgs.push(a);
   }
@@ -1300,85 +1787,137 @@ function resolveTrackedGitGrepCandidates(effectiveCwd, gitGlobalArgs, pathspecs,
 }
 
 export function inspectShellCommandScope(commandOrSegments, initialCwd = "", { depth = 0, protectedDirs = [], out = [] } = {}) {
-  if (depth > 12) { out.push({ value: initialCwd || ".", cwd: initialCwd || "", globPositions: [], isOperand: true, recursive: true, uncertainCwd: true, depthExceeded: true }); return out; }
+  if (depth > 12) {
+    out.push({ value: initialCwd || ".", cwd: initialCwd || "", globPositions: [], isOperand: true, recursive: true, uncertainCwd: true, depthExceeded: true });
+    return out;
+  }
   const segments = Array.isArray(commandOrSegments) ? commandOrSegments : splitShellSegments(commandOrSegments);
   if (!segments.length) return out;
   const shellPipeline = new Set();
   for (let i = segments.length - 1; i >= 0; i--) {
-    if (SHELL_INTERPRETERS.has(getSegmentCmdName(segments[i])) || (segments[i + 1] && ["|", "|&"].includes(segments[i + 1].leadingSep) && shellPipeline.has(i + 1))) shellPipeline.add(i);
+    if (SHELL_INTERPRETERS.has(getSegmentCmdName(segments[i])) || (segments[i + 1] && ["|", "|&"].includes(segments[i + 1].leadingSep) && shellPipeline.has(i + 1))) {
+      shellPipeline.add(i);
+    }
   }
-  let cwds = [initialCwd || ""], oldCwds = null, prePrevCwds = null, branchBaseCwds = null, cwdUncertain = false;
+  let curCwd = initialCwd || "";
+  let cwdUncertain = false;
   const { perSegment, unclosedCompound } = analyzeSegmentCommandStarts(segments);
   const emitItems = (items, baseCwd, rec, unc) => {
-    for (const item of items) for (const cand of expandItemPathCandidates(item)) {
-      if (cand.value && (cand.isOperand || !cand.value.startsWith("-"))) out.push({ value: cand.value, cwd: baseCwd, globPositions: cand.globPositions, isOperand: cand.isOperand, recursive: rec, uncertainCwd: unc });
+    for (const item of items) {
+      for (const cand of expandItemPathCandidates(item)) {
+        if (cand.value && (cand.isOperand || !cand.value.startsWith("-"))) {
+          out.push({ value: cand.value, cwd: baseCwd, globPositions: cand.globPositions, isOperand: cand.isOperand, recursive: rec, uncertainCwd: unc });
+        }
+      }
     }
   };
+  const emitFailClosed = (baseCwd) => {
+    out.push({ value: baseCwd || ".", cwd: baseCwd, globPositions: [], isOperand: true, recursive: true, uncertainCwd: true, uncertainFailClosed: true });
+  };
+
   for (let segIdx = 0; segIdx < segments.length; segIdx++) {
-    const seg = segments[segIdx], segInfo = perSegment[segIdx];
-    if (seg.leadingSep === "||" && prePrevCwds) cwds = dedupCwds([...cwds, ...prePrevCwds]);
-    if (segInfo.inCompoundBranch && !branchBaseCwds) branchBaseCwds = [...cwds];
-    const segCwds = [...cwds], segUnc = cwdUncertain, tokens = getSegTokens(seg);
+    const seg = segments[segIdx];
+    const segInfo = perSegment[segIdx];
+    const segCwd = curCwd;
+    const segUnc = cwdUncertain;
+    const tokens = getSegTokens(seg);
+    // shortcut: here-strings fail closed instead of parsing stdin payloads, upgrade if here-string reads are needed
+    if (seg.hasHereString) {
+      emitFailClosed(segCwd);
+      continue;
+    }
     const hasPipeOut = segIdx + 1 < segments.length && ["|", "|&"].includes(segments[segIdx + 1].leadingSep);
     const redirToks = extractRedirectTargetTokens(tokens, false);
-    for (const baseCwd of segCwds) {
-      if (segInfo.uncertainSyntax || unclosedCompound) out.push({ value: baseCwd || ".", cwd: baseCwd, globPositions: [], isOperand: true, recursive: true, uncertainCwd: segUnc });
-      emitItems(segInfo.forWordTokens.map((fw) => ({ value: fw.value, globPositions: fw.globPositions, isOperand: true })), baseCwd, false, segUnc);
-      for (const rt of redirToks) out.push({ value: rt.value, cwd: baseCwd, globPositions: rt.globPositions, isOperand: true, recursive: false, uncertainCwd: segUnc });
+    if (segInfo.uncertainSyntax || unclosedCompound) {
+      out.push({ value: segCwd || ".", cwd: segCwd, globPositions: [], isOperand: true, recursive: true, uncertainCwd: segUnc });
     }
+    emitItems(segInfo.forWordTokens.map((fw) => ({ value: fw.value, globPositions: fw.globPositions, isOperand: true })), segCwd, false, segUnc);
+    for (const rt of redirToks) {
+      out.push({ value: rt.value, cwd: segCwd, globPositions: rt.globPositions, isOperand: true, recursive: false, uncertainCwd: segUnc });
+    }
+
     for (const { startPos, cmdIdx, endIdx } of segInfo.starts) {
       if (cmdIdx >= tokens.length || cmdIdx >= endIdx) continue;
       const wrapperLocalCwd = extractWrapperLocalCwd(tokens, startPos, cmdIdx);
       const role = classifyCommandRoles(tokens, startPos, cmdIdx, endIdx, { hasDownstreamPipe: hasPipeOut });
+      const nextSep = segIdx + 1 < segments.length ? segments[segIdx + 1].leadingSep : "";
+      const inPipe = ["|", "|&"].includes(seg.leadingSep) || hasPipeOut;
+
       if (role.verb === "cd") {
-        const nextSep = segIdx + 1 < segments.length ? segments[segIdx + 1].leadingSep : "";
-        const cdStep = stepCdDirectorySet(tokens, cmdIdx, endIdx, segCwds, oldCwds, { inPipeline: ["|", "|&"].includes(seg.leadingSep) || ["|", "|&"].includes(nextSep), inCompoundBranch: segInfo.inCompoundBranch, nextLeadingSep: nextSep });
-        prePrevCwds = segCwds; oldCwds = segCwds; cwds = cdStep.cwds; if (cdStep.uncertain) cwdUncertain = true;
-        for (const baseCwd of segCwds) emitItems(role.pathItems, baseCwd, false, segUnc);
+        const stepped = stepTopLevelCd(tokens, cmdIdx, endIdx, segCwd, {
+          inPipeline: inPipe,
+          inCompoundBranch: segInfo.inCompoundBranch,
+          leadingSep: seg.leadingSep,
+          nextLeadingSep: nextSep
+        });
+        curCwd = stepped.cwd;
+        if (stepped.uncertain) cwdUncertain = true;
+        emitItems(role.pathItems, segCwd, false, segUnc);
         continue;
       }
-      let cmdCwds = wrapperLocalCwd ? dedupCwds(segCwds.map((c) => resolveHookPath(expandLeadingTilde(wrapperLocalCwd), c))) : segCwds;
-      if (role.localCwd) cmdCwds = dedupCwds(cmdCwds.map((c) => resolveHookPath(expandLeadingTilde(role.localCwd), c)));
+      if (role.verb === "pushd" || role.verb === "popd" || role.verb === "eval" || role.verb === "source" || role.verb === ".") {
+        cwdUncertain = true;
+        if (role.verb === "source" || role.verb === ".") emitFailClosed(segCwd);
+      }
+      if (role.verb === "xargs") {
+        const xr = unwrapAllowedXargs(tokens, cmdIdx, endIdx);
+        if (!xr?.safe || hasPipeOut) emitFailClosed(segCwd);
+        continue;
+      }
+
+      let baseCwd = wrapperLocalCwd ? resolveHookPath(expandLeadingTilde(wrapperLocalCwd), segCwd) : segCwd;
+      if (role.localCwd) baseCwd = resolveHookPath(expandLeadingTilde(role.localCwd), baseCwd);
+      const cmdUnc = segUnc && !wrapperLocalCwd && !role.localCwd;
+
+      if (role.executesHelper) {
+        emitFailClosed(baseCwd);
+        continue;
+      }
       if (role.gitGrepScope) {
-        const { gitGlobalArgs, sawDoubleDash, pathspecs, nonPathspecItems } = role.gitGrepScope;
-        for (const baseCwd of cmdCwds) {
-          emitItems(nonPathspecItems, baseCwd, false, segUnc);
-          const needsQuery = gitGlobalArgs.some((a) => a === "--work-tree" || a.startsWith("--work-tree=") || a === "--git-dir" || a.startsWith("--git-dir=")) || wouldNaiveScopeTouchProtected(baseCwd, pathspecs, sawDoubleDash, protectedDirs);
-          if (!needsQuery) {
-            for (const sp of (pathspecs.length > 0 ? pathspecs : [baseCwd || "."])) out.push({ value: sp, cwd: baseCwd, globPositions: [], isOperand: true, recursive: true, uncertainCwd: segUnc });
-          } else {
-            const spawnBaseCwd = wrapperLocalCwd ? resolveHookPath(expandLeadingTilde(wrapperLocalCwd), segCwds[0] || "") : (segCwds.includes(baseCwd) ? baseCwd : (segCwds[0] || baseCwd));
-            const tracked = resolveTrackedGitGrepCandidates(spawnBaseCwd, gitGlobalArgs, pathspecs, sawDoubleDash);
-            if (!tracked.ok) out.push({ value: baseCwd || ".", cwd: baseCwd, globPositions: [], isOperand: true, recursive: true, uncertainCwd: true, uncertainFailClosed: true });
-            else for (const absFile of tracked.files) out.push({ value: absFile, cwd: tracked.topLevel, globPositions: [], isOperand: true, recursive: false, uncertainCwd: segUnc });
+        const { gitGlobalArgs, sawDoubleDash, pathspecs, operandItems, nonPathspecItems } = role.gitGrepScope;
+        emitItems(nonPathspecItems, baseCwd, false, cmdUnc);
+        const hasGitTreeFlag = gitGlobalArgs.some((a) => a === "--work-tree" || a.startsWith("--work-tree=") || a === "--git-dir" || a.startsWith("--git-dir="));
+        if (!hasGitTreeFlag && !wouldNaiveScopeTouchProtected(baseCwd, pathspecs, sawDoubleDash, protectedDirs)) {
+          const items = operandItems.length > 0 ? operandItems : [{ value: baseCwd || ".", globPositions: [] }];
+          for (const item of items) {
+            out.push({ value: item.value, cwd: baseCwd, globPositions: item.globPositions || [], isOperand: true, recursive: true, uncertainCwd: cmdUnc });
           }
+        } else {
+          const spawnBaseCwd = wrapperLocalCwd ? resolveHookPath(expandLeadingTilde(wrapperLocalCwd), segCwd) : segCwd;
+          const tracked = resolveTrackedGitGrepCandidates(spawnBaseCwd, gitGlobalArgs, pathspecs, sawDoubleDash);
+          if (!tracked.ok) emitFailClosed(baseCwd);
+          else for (const absFile of tracked.files) out.push({ value: absFile, cwd: tracked.topLevel, globPositions: [], isOperand: true, recursive: false, uncertainCwd: cmdUnc });
         }
         continue;
       }
-      for (const baseCwd of cmdCwds) {
-        if (role.implicitCwd) out.push({ value: baseCwd || ".", cwd: baseCwd, globPositions: [], isOperand: true, recursive: true, uncertainCwd: segUnc });
-        emitItems(role.pathItems, baseCwd, role.recursive, segUnc);
+      if (role.implicitCwd) {
+        out.push({ value: baseCwd || ".", cwd: baseCwd, globPositions: [], isOperand: true, recursive: true, uncertainCwd: cmdUnc });
       }
+      emitItems(role.pathItems, baseCwd, role.recursive, cmdUnc);
       if ((role.verb === "echo" || role.verb === "printf") && shellPipeline.has(segIdx)) {
         const pipedScript = tokens.slice(cmdIdx + 1, endIdx).filter((_, k) => !skipSingleRedirect(tokens, cmdIdx + 1 + k)).map((t) => t.value).join(" ");
-        if (pipedScript) for (const subCwd of cmdCwds) inspectShellCommandScope(pipedScript, subCwd, { depth: depth + 1, protectedDirs, out });
+        if (pipedScript) inspectShellCommandScope(pipedScript, baseCwd, { depth: depth + 1, protectedDirs, out });
       }
     }
-    if (!segInfo.inCompoundBranch && branchBaseCwds) { cwds = dedupCwds([...branchBaseCwds, ...cwds]); branchBaseCwds = null; }
-    const wrapper = extractSimpleWrappedScript(seg.text);
-    for (const subCwd of segCwds) {
-      if (wrapper?.innerScript) inspectShellCommandScope(wrapper.innerScript, wrapper.localCwd ? resolveHookPath(expandLeadingTilde(wrapper.localCwd), subCwd) : subCwd, { depth: depth + 1, protectedDirs, out });
-      for (const sub of seg.subshells || []) inspectShellCommandScope(sub, subCwd, { depth: depth + 1, protectedDirs, out });
-      for (const hd of seg.heredocBodies || []) if (hd) inspectShellCommandScope(hd, subCwd, { depth: depth + 1, protectedDirs, out });
+
+    for (const wrapper of extractSegmentWrappedScripts(seg, segInfo)) {
+      const nextCwd = wrapper.localCwd ? resolveHookPath(expandLeadingTilde(wrapper.localCwd), segCwd) : segCwd;
+      inspectShellCommandScope(wrapper.innerScript, nextCwd, { depth: depth + 1, protectedDirs, out });
+    }
+    for (const sub of seg.subshells || []) inspectShellCommandScope(sub, segCwd, { depth: depth + 1, protectedDirs, out });
+    for (const hd of seg.heredocBodies || []) {
+      if (hd) inspectShellCommandScope(hd, segCwd, { depth: depth + 1, protectedDirs, out });
     }
   }
   return out;
 }
 
 function touchesCanonicalState(segments, ctx) {
-  const stateDir = getStateDir(), seen = new Set();
+  const stateDir = getStateDir();
+  const seen = new Set();
   for (const entry of inspectShellCommandScope(segments, ctx.cwd || "", { protectedDirs: [stateDir] })) {
     if (entry.depthExceeded || entry.uncertainFailClosed) return true;
+    if (entry.uncertainCwd && (entry.recursive || !path.isAbsolute(expandLeadingTilde(entry.value)))) return true;
     const checkDesc = Boolean(entry.recursive || entry.globPositions?.length);
     const collapsed = collapseActiveShellGlob(entry.value, entry.globPositions);
     if (!collapsed || (!entry.isOperand && collapsed.startsWith("-"))) continue;
@@ -1438,7 +1977,12 @@ function findBlockingWatchLoop(segments, depth = 0) {
     const seg = segments[segIdx], tokens = getSegTokens(seg);
     for (const { cmdIdx: baseIdx, endIdx } of perSegment[segIdx].starts) {
       let idx = baseIdx;
-      while (idx < endIdx) { const r = skipSingleRedirect(tokens, idx); if (r) { idx = r.nextIdx; continue; } if (normalizeCmdName(tokens[idx].value) === "rtk") { idx++; continue; } break; }
+      while (idx < endIdx) {
+        const r = skipSingleRedirect(tokens, idx);
+        if (r) { idx = r.nextIdx; continue; }
+        if (normalizeCmdName(tokens[idx].value) === "rtk") { idx++; continue; }
+        break;
+      }
       if (idx < endIdx && normalizeCmdName(tokens[idx].value) === "gh") {
         const rest = [], pos = [];
         for (let k = idx + 1; k < endIdx; k++) { const r = skipSingleRedirect(tokens, k); if (r) { k = r.nextIdx - 1; continue; } rest.push(tokens[k].value); }
@@ -1458,8 +2002,10 @@ function findBlockingWatchLoop(segments, depth = 0) {
         if (!hasHelp && pos[0] === "run" && pos[1] === "watch") return { command: "gh run watch" };
       }
     }
-    const w = extractSimpleWrappedScript(seg.text);
-    if (w?.innerScript) { const r = findBlockingWatchLoop(splitShellSegments(w.innerScript), depth + 1); if (r) return r; }
+    for (const w of extractSegmentWrappedScripts(seg, perSegment[segIdx])) {
+      const r = findBlockingWatchLoop(splitShellSegments(w.innerScript), depth + 1);
+      if (r) return r;
+    }
     for (const sub of seg.subshells || []) { const r = findBlockingWatchLoop(splitShellSegments(sub), depth + 1); if (r) return r; }
     if (seg.heredocBodies?.length && segmentPipesToShell(segments, segIdx)) for (const hd of seg.heredocBodies) if (hd) { const r = findBlockingWatchLoop(splitShellSegments(hd), depth + 1); if (r) return r; }
   }
@@ -1602,31 +2148,34 @@ function hasMachineReadableOutputFlag(cmd0, subcmd, tokens) {
   return false;
 }
 
-function findNearestNodeModulesBin(toolName, startDir) {
-  if (!toolName || !startDir) return "";
-  const isWin = os.platform() === "win32";
-  const exts = isWin ? [".cmd", ".exe", ".bat", ""] : [""];
+function walkUpDirs(startDir, visit) {
+  if (!startDir) return undefined;
   let dir = path.resolve(startDir);
   while (true) {
-    const binDir = path.join(dir, "node_modules", ".bin");
-    for (const ext of exts) {
-      const candidate = path.join(binDir, `${toolName}${ext}`);
-      try {
-        if (fs.statSync(candidate).isFile()) return candidate;
-      } catch {}
-    }
+    const res = visit(dir);
+    if (res !== undefined) return res;
     const parent = path.dirname(dir);
-    if (parent === dir) break;
+    if (parent === dir) return undefined;
     dir = parent;
   }
-  return "";
+}
+
+function findNearestNodeModulesBin(toolName, startDir) {
+  if (!toolName || !startDir) return "";
+  const exts = os.platform() === "win32" ? [".cmd", ".exe", ".bat", ""] : [""];
+  return walkUpDirs(startDir, (dir) => {
+    for (const ext of exts) {
+      const cand = path.join(dir, "node_modules", ".bin", `${toolName}${ext}`);
+      try { if (fs.statSync(cand).isFile()) return cand; } catch {}
+    }
+    return undefined;
+  }) || "";
 }
 
 function isLocalBinShadowedByGlobalPath(toolName, startDir) {
   const localBin = findNearestNodeModulesBin(toolName, startDir);
-  if (!localBin) return false;
-  const pathBin = findExecutableOnPath(toolName);
-  if (!pathBin) return false;
+  const pathBin = localBin ? findExecutableOnPath(toolName) : "";
+  if (!localBin || !pathBin) return false;
   const isCI = os.platform() === "win32" || os.platform() === "darwin";
   const norm = (p) => {
     const r = tryRealpath(path.resolve(p)).replace(/\\/g, "/");
@@ -1635,29 +2184,19 @@ function isLocalBinShadowedByGlobalPath(toolName, startDir) {
   return norm(localBin) !== norm(pathBin);
 }
 
-function findNearestVitestMajorVersion(startDir) {
-  if (!startDir) return null;
-  let dir = path.resolve(startDir);
-  while (true) {
-    const pkgPath = path.join(dir, "node_modules", "vitest", "package.json");
-    try {
-      if (fs.statSync(pkgPath).isFile()) {
-        const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-        const match = String(pkg?.version || "").match(/^(\d+)\./);
-        return match ? parseInt(match[1], 10) : null;
-      }
-    } catch {}
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
-}
-
 function isUnsupportedVitestForRtk(startDir, rtkVersion) {
   if (!isRtkVersionBelow(rtkVersion, 1, 2)) return false;
-  const major = findNearestVitestMajorVersion(startDir);
-  return major !== null && major >= 5;
+  const major = walkUpDirs(startDir, (dir) => {
+    try {
+      const pkgPath = path.join(dir, "node_modules", "vitest", "package.json");
+      if (fs.statSync(pkgPath).isFile()) {
+        const m = String(JSON.parse(fs.readFileSync(pkgPath, "utf-8"))?.version || "").match(/^(\d+)\./);
+        return m ? parseInt(m[1], 10) : null;
+      }
+    } catch {}
+    return undefined;
+  });
+  return typeof major === "number" && major >= 5;
 }
 
 function resolveNextSegmentCwd(segText, curCwd) {
@@ -1666,8 +2205,8 @@ function resolveNextSegmentCwd(segText, curCwd) {
   const tokens = tokenizeShellWordsDetailed(trimmed);
   const cmdIdx = stripLeadingShellPrefixes(tokens, 0, { includeControlKeywords: false });
   if (cmdIdx >= tokens.length || normalizeCmdName(tokens[cmdIdx].value) !== "cd") return curCwd;
-  const stepped = stepCdDirectorySet(tokens, cmdIdx, tokens.length, [curCwd], null, { nextLeadingSep: "&&" });
-  return !stepped.uncertain && stepped.cwds.length === 1 ? stepped.cwds[0] : curCwd;
+  const stepped = stepTopLevelCd(tokens, cmdIdx, tokens.length, curCwd, { nextLeadingSep: "&&" });
+  return !stepped.uncertain ? stepped.cwd : curCwd;
 }
 
 function filterAllowedStderrRedirects(tokens) {
@@ -1892,14 +2431,11 @@ export async function handleRunCommand(ctx) {
 
     if ((isSpillover || taskMatch) && !isSingleUnchainedShellCmd(segments)) {
       const hasRtk = Boolean(resolveCachedHostEnv().rtk);
+      const how = hasRtk ? "'rtk read <path>' command" : "'head -n 150 <path>' or 'tail -n 150 <path>' command (or bounded 'read_file' <= 150 lines;";
       const reason = isSpillover
-        ? (hasRtk
-            ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'rtk read <path>' command (no chaining, redirects, subshells, or '..' traversal)."
-            : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' command (or bounded 'read_file' <= 150 lines; no chaining, redirects, subshells, or '..' traversal).")
+        ? `Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained ${how}${hasRtk ? " (" : " "}no chaining, redirects, subshells, or '..' traversal).`
         : (taskMatches.length > 0 && taskMatches.every((m) => getTaskState(m, convId, ctx) === "COMPLETED")
-            ? (hasRtk
-                ? "Antigravity Execution Governance: Completed task logs must be inspected using a single unchained 'rtk read <path>' command (no chaining, pipes, redirects, subshells, or '..' traversal)."
-                : "Antigravity Execution Governance: Completed task logs must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' command (or bounded 'read_file' <= 150 lines; no chaining, pipes, redirects, subshells, or '..' traversal).")
+            ? `Antigravity Execution Governance: Completed task logs must be inspected using a single unchained ${how}${hasRtk ? " (" : " "}no chaining, pipes, redirects, subshells, or '..' traversal).`
             : buildInternalStateShellDenial(convId, ctx));
       respond({ decision: "deny", reason });
     }
@@ -1972,15 +2508,12 @@ export async function handleRunCommand(ctx) {
       respond({ decision: "deny", reason: "Antigravity Execution Governance: Internal step spillovers and task logs must be inspected strictly one file at a time using 'rtk read <path>' with valid read flags (multi-file operands and mixed targets are prohibited)." });
     }
 
-    if (isSpillover) {
-      if (rtk ? !parsedEff : !isDegradedBoundedRead) {
-        respond({
-          decision: "deny",
-          reason: rtk
-            ? "Antigravity Execution Governance: Runtime step output spillover files must be inspected using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
-            : "Antigravity Execution Governance: Runtime step output spillover files must be inspected using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts."
-        });
-      }
+    const readHow = rtk ? "'rtk read <path>'" : "a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>'";
+    if (isSpillover && (rtk ? !parsedEff : !isDegradedBoundedRead)) {
+      respond({
+        decision: "deny",
+        reason: `Antigravity Execution Governance: Runtime step output spillover files must be inspected using ${readHow} via run_command (or bounded 'read_file' <= 150 lines) to prevent context blowouts.`
+      });
     }
 
     if (taskMatch) {
@@ -1990,9 +2523,10 @@ export async function handleRunCommand(ctx) {
       if (!allowedTaskRead) {
         respond({
           decision: "deny",
-          reason: rtk
-            ? "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n- Once completed, inspect output using 'rtk read <path>' via run_command (or bounded 'read_file' <= 150 lines).\n- If actively running, use Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE>)."
-            : "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n- Once completed, inspect output using a single unchained 'head -n 150 <path>' or 'tail -n 150 <path>' via run_command (or bounded 'read_file' <= 150 lines).\n- If actively running, use Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE>)."
+          reason:
+            "Antigravity Execution Governance: Direct shell access to internal Antigravity execution state (.system_generated) is strictly prohibited to prevent transcript bloat and polling loops.\n" +
+            `- Once completed, inspect output using ${readHow} via run_command (or bounded 'read_file' <= 150 lines).\n` +
+            "- If actively running, use Pure Yield (end turn; no 'schedule'/status card; await <SYSTEM_MESSAGE>)."
         });
       }
     }
@@ -2039,8 +2573,15 @@ export async function handleRunCommand(ctx) {
   respond(Object.keys(overwrite).length > 0 ? { decision: "allow", overwrite } : { decision: "allow" });
 }
 
-const NODE_VALUE_FLAGS = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--env-file", "--env-file-if-exists", "--watch-path", "--redirect-warnings", "--diagnostic-dir", "--heapsnapshot-near-heap-limit", "--title", "--openssl-config", "--icu-data-dir"]);
-const XARGS_VALUE_FLAGS = new Set(["-I", "-L", "-n", "-P", "-d", "-E", "-s", "-a", "--arg-file", "--max-args", "--max-procs", "--max-lines", "--replace", "--delimiter", "--eof", "--max-chars"]);
+const NODE_VALUE_FLAGS = new Set([
+  "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions",
+  "--env-file", "--env-file-if-exists", "--watch-path", "--redirect-warnings", "--diagnostic-dir",
+  "--heapsnapshot-near-heap-limit", "--title", "--openssl-config", "--icu-data-dir"
+]);
+const XARGS_VALUE_FLAGS = new Set([
+  "-I", "-L", "-n", "-P", "-d", "-E", "-s", "-a",
+  "--arg-file", "--max-args", "--max-procs", "--max-lines", "--replace", "--delimiter", "--eof", "--max-chars"
+]);
 
 function isCleanTranscriptArgs(sub, args) {
   if (sub === "access") {
@@ -2138,9 +2679,19 @@ export function parseTranscriptInvocation(command, depth = 0) {
           !argv.some((w) => w.startsWith("--hook-grant"))
       };
     }
-    const wrapper = extractSimpleWrappedScript(seg.text);
-    if (wrapper?.innerScript && parseTranscriptInvocation(wrapper.innerScript, depth + 1)) matchCount++;
-    for (const sub of [...(seg.subshells || []), ...(seg.heredocBodies || [])]) if (parseTranscriptInvocation(sub, depth + 1)) matchCount++;
+    if (seg.hasHereString) {
+      for (let i = 0; i < detailed.length; i++) {
+        if (!detailed[i].quoted && /^(?:\d+)?<<<$/.test(detailed[i].raw) && detailed[i + 1]) {
+          if (parseTranscriptInvocation(detailed[i + 1].value, depth + 1)) matchCount++;
+        }
+      }
+    }
+    for (const wrapper of extractSegmentWrappedScripts(seg, segInfo)) {
+      if (parseTranscriptInvocation(wrapper.innerScript, depth + 1)) matchCount++;
+    }
+    for (const sub of [...(seg.subshells || []), ...(seg.heredocBodies || [])]) {
+      if (parseTranscriptInvocation(sub, depth + 1)) matchCount++;
+    }
   }
   if (invocation && matchCount > 1) invocation.clean = false;
   return invocation || (matchCount > 0 ? { clean: false } : null);

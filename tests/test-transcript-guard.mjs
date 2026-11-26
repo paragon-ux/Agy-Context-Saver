@@ -898,6 +898,139 @@ function testA4GitGrepScopedAuthorization() {
 testA4GitGrepScopedAuthorization();
 console.log("✓ A4 passed");
 
+console.log("--- A1-A4 Adversarial Boost Regressions: <<< here-strings, find -exec sh -c, xargs, executesHelper, uncertainCwd, GIT_DIR/GIT_WORK_TREE & BSD sed -I ---");
+async function testAdversarialBoostRegressions() {
+  const boostDir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), "agy-boost-"));
+  const subDir = path.join(work, "boost-sub");
+  fs.mkdirSync(subDir, { recursive: true });
+  fs.symlinkSync(logsOf(B), path.join(subDir, "alias.jsonl").replace(/alias\.jsonl$/, "sib-logs"), process.platform === "win32" ? "junction" : "dir");
+  const sibFileLink = path.join(subDir, "alias.jsonl");
+  if (process.platform !== "win32") fs.symlinkSync(tfile(B), sibFileLink);
+  const stateDir = getStateDir();
+  const stateSecret = path.join(stateDir, "boost-secret.json");
+  fs.writeFileSync(stateSecret, '{"secret":"BOOST_STATE_SECRET"}\n');
+  const subStateLink = path.join(subDir, "state-dir-lnk");
+  fs.symlinkSync(stateDir, subStateLink, process.platform === "win32" ? "junction" : "dir");
+  const hooksJson = path.join(hermetic.profileDir, ".gemini", "config", "hooks.json");
+  fs.mkdirSync(path.dirname(hooksJson), { recursive: true });
+  fs.writeFileSync(hooksJson, '{"hooks":{}}\n');
+  const safeFile = path.join(work, "note.txt");
+
+  try {
+    setPolicy(P, "self-only");
+    const sibTarget = process.platform === "win32"
+      ? `${subDir.replace(/\\/g, "/")}/sib-logs/transcript.jsonl`
+      : sibFileLink;
+    const stateTarget = `${subStateLink.replace(/\\/g, "/")}/boost-secret.json`;
+    const hooksFwd = hooksJson.replace(/\\/g, "/");
+    const safeFwd = safeFile.replace(/\\/g, "/");
+
+    // 1. Finding 1: Here-strings (`<<<`) across all 5 hook guards
+    for (const hsCmd of [
+      `bash <<< "cat '${sibTarget}'"`,
+      `<<< "cat '${sibTarget}'" bash`,
+      `sh <<<"cat '${stateTarget}'"`,
+      `bash <<< "rm -f '${hooksFwd}'"`,
+      `bash <<< "gh pr checks --watch"`,
+      `<<< "gh run watch" sh`,
+      `xargs rm -f <<< "${hooksFwd}"`
+    ]) {
+      assert.equal(shell(A, hsCmd), "deny", `Here-string guard must deny: ${hsCmd}`);
+    }
+    for (const hsCli of [
+      "bash <<< 'agy-context transcript access set open'",
+      "<<< 'agy-context transcript access set open' bash"
+    ]) {
+      assert.equal(executeHookedShell(A, hsCli).blocked, true, `Here-string CLI guard must block: ${hsCli}`);
+    }
+    assert.equal(readPolicies()[P]?.mode, "self-only");
+    // Legitimate quoted `<<<` controls (literal text, not unquoted here-string operator)
+    assert.equal(shellFromHome(A, 'echo "a <<< b"'), "allow");
+    assert.equal(shellFromHome(A, "printf '%s\\n' 'gh <<< ok'"), "allow");
+
+    // 2. Finding 3: `find -exec sh -c`, `xargs`, and macOS BSD `sed -I`
+    for (const findWrap of [
+      `find "${safeFwd}" -maxdepth 0 -exec sh -c "cat '${sibTarget}'" \\;`,
+      `find "${safeFwd}" -maxdepth 0 -exec sh -c "cat '${stateTarget}'" \\;`,
+      `find "${safeFwd}" -maxdepth 0 -exec sh -c "rm -f '${hooksFwd}'" \\;`,
+      `find "${safeFwd}" -maxdepth 0 -exec sh -c "gh pr checks --watch" \\;`
+    ]) {
+      assert.equal(shell(A, findWrap), "deny", `find -exec sh -c must deny: ${findWrap}`);
+    }
+    assert.equal(
+      executeHookedShell(A, `find "${safeFwd}" -maxdepth 0 -exec sh -c "agy-context transcript access set open" \\;`).blocked,
+      true
+    );
+    assert.equal(shell(P, `echo "${hooksFwd}" | xargs rm -f`), "deny", "xargs rm -f on hooks.json must deny");
+    assert.equal(shellFromHome(A, "echo needle | xargs rg"), "deny", "xargs rg without file operand from $HOME must deny");
+    assert.equal(shell(P, `sed -I "" "s/hooks/pwn/" "${hooksFwd}"`), "deny", "BSD sed -I on hooks.json must deny");
+    assert.equal(shell(P, `sed -I.bak "s/hooks/pwn/" "${hooksFwd}"`), "deny", "Attached BSD sed -I.bak on hooks.json must deny");
+    assert.equal(shellFromHome(A, "echo hello | xargs echo"), "allow", "Safe xargs echo control must allow");
+
+    // 3. Finding 4: `executesHelper` (`git grep -O`/`--open-files-in-pager`, `rg --pre`/`--hostname-bin`)
+    for (const helperCmd of [
+      `git grep --no-index -O"cat '${sibTarget}' #" ok "${safeFwd}"`,
+      `git grep --no-index --open-files-in-pager="rm -f '${hooksFwd}' #" ok "${safeFwd}"`,
+      `git grep --no-index -O ok "${safeFwd}"`,
+      `rg --pre sh ok "${safeFwd}"`,
+      `rg --pre=sh ok "${safeFwd}"`,
+      `rg --hostname-bin sh ok "${safeFwd}"`
+    ]) {
+      assert.equal(shell(A, helperCmd), "deny", `executesHelper must deny in self-only: ${helperCmd}`);
+      setPolicy(P, "open");
+      assert.equal(shell(P, helperCmd), "deny", `executesHelper must deny in open mode: ${helperCmd}`);
+      setPolicy(P, "self-only");
+    }
+
+    // 4. Finding 5: Open-session uncertain `cd` (state & `~/.gemini`), `eval`/`pushd`, `hasUnquotedGlob`, and inline `GIT_DIR`/`GIT_WORK_TREE`
+    assert.equal(shell(A, `eval "cd boost-sub" && head -n 1 "${process.platform === "win32" ? "sib-logs/transcript.jsonl" : "alias.jsonl"}"`), "deny");
+    assert.equal(shell(A, `pushd boost-sub >/dev/null && head -n 1 "${process.platform === "win32" ? "sib-logs/transcript.jsonl" : "alias.jsonl"}"`), "deny");
+
+    setPolicy(P, "open");
+    assert.equal(shell(P, 'D=boost-sub; cd "$D" && cat state-dir-lnk/boost-secret.json'), "deny", "Open-mode dynamic cd + state alias must deny");
+    assert.equal(shell(P, "cd boost-* && cat state-dir-lnk/boost-secret.json"), "deny", "Open-mode glob cd + state alias must deny");
+    assert.equal(shell(P, `D=.gemini; cd "${hermetic.profileDir.replace(/\\/g, "/")}/$D" && rm -f config/hooks.json`), "deny", "Open-mode dynamic cd to ~/.gemini + rm config/hooks.json must deny");
+
+    // Inline GIT_DIR / GIT_WORK_TREE from outside directory targeting repo with tracked state
+    const gitHome = path.join(boostDir, "git-home");
+    const outsideCwd = path.join(boostDir, "outside");
+    fs.mkdirSync(gitHome, { recursive: true });
+    fs.mkdirSync(outsideCwd, { recursive: true });
+    const gitHomeState = process.platform === "win32"
+      ? path.join(gitHome, "AppData", "Local", "agy-context-saver")
+      : path.join(gitHome, ".local", "state", "agy-context-saver");
+    fs.mkdirSync(gitHomeState, { recursive: true });
+    const trackedStateFile = path.join(gitHomeState, "tracked-secret.json");
+    fs.writeFileSync(trackedStateFile, '{"s":"INLINE_GIT_ENV_SECRET"}\n');
+    for (const gArgs of [["init", "-q"], ["config", "user.email", "t@e.com"], ["config", "user.name", "T"], ["add", "-f", trackedStateFile], ["commit", "-q", "-m", "seed"]]) {
+      assert.equal(spawnSync("git", gArgs, { cwd: gitHome, encoding: "utf-8" }).status, 0);
+    }
+    const gitHomeEnv = {
+      ...process.env,
+      AGY_TEST_PROFILE_DIR: gitHome,
+      XDG_STATE_HOME: path.dirname(gitHomeState),
+      ...(process.platform === "win32" ? { LOCALAPPDATA: path.dirname(gitHomeState) } : {})
+    };
+    const gitEnvHook = (cmd) => JSON.parse(spawnSync(process.execPath, [hookScript], {
+      encoding: "utf-8",
+      env: gitHomeEnv,
+      input: JSON.stringify({ conversationId: P, cwd: outsideCwd, toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } })
+    }).stdout).decision;
+
+    const gitHomeFwd = gitHome.replace(/\\/g, "/");
+    assert.equal(gitEnvHook('GIT_DIR="$HOME/.git" GIT_WORK_TREE="$HOME" git grep INLINE_GIT_ENV_SECRET'), "deny");
+    assert.equal(gitEnvHook(`GIT_DIR="${gitHomeFwd}/.git" GIT_WORK_TREE="${gitHomeFwd}" git grep INLINE_GIT_ENV_SECRET`), "deny");
+  } finally {
+    fs.rmSync(stateSecret, { force: true });
+    fs.rmSync(hooksJson, { force: true });
+    fs.rmSync(subDir, { recursive: true, force: true });
+    fs.rmSync(boostDir, { recursive: true, force: true });
+    setPolicy(P, "open");
+  }
+}
+await testAdversarialBoostRegressions();
+console.log("✓ Adversarial Boost Regressions passed");
+
 } finally {
   fs.rmSync(work, { recursive: true, force: true });
   hermetic.cleanup();
