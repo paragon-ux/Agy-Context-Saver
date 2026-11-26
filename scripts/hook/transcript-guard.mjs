@@ -3,7 +3,7 @@ import path from "node:path";
 import { getBrainDirs, resolveRealOrAncestorPath } from "../../lib/path-guards.mjs";
 import { readPolicies, hasRestrictivePolicy, getEffectiveMode } from "../../lib/transcript-policy.mjs";
 import { respond, expandAndResolvePathVariants } from "./common.mjs";
-import { splitShellSegments, tokenizeShellWordsDetailed, extractSimpleWrappedScript, parseTranscriptInvocation } from "./shell-guard.mjs";
+import { splitShellSegments, tokenizeShellWordsDetailed, extractSimpleWrappedScript, parseTranscriptInvocation, expandInlinePathCandidates, needsImplicitRecursiveCwd, getInspectableTextForSegment, segmentPipesToShell } from "./shell-guard.mjs";
 
 const PATH_KEYS = [
   "Path", "path", "AbsolutePath", "absolutePath", "absolute_path", "FilePath", "filePath", "file_path",
@@ -39,12 +39,19 @@ function logsOwner(raw, cwd, brainDirs) {
 
 function shellTargets(command, cwd, out, depth = 0) {
   if (depth > 12) throw new Error("Shell nesting exceeds transcript inspection limit.");
-  for (const seg of splitShellSegments(command)) {
-    const words = tokenizeShellWordsDetailed(seg.text).map((t) => t.value);
-    if (words[0] === "cd" && words[1]) cwd = path.resolve(cwd, words[1]);
-    const verb = path.basename((words[0] || "").replace(/\\/g, "/")).replace(/\.(?:exe|cmd|bat)$/i, "").toLowerCase();
-    if (["rg", "grep", "egrep", "fgrep", "find", "ls"].includes(verb)) out.push({ value: cwd || ".", cwd });
-    for (const word of words) out.push({ value: word, cwd });
+  const segments = splitShellSegments(command);
+  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+    const seg = segments[segIdx];
+    const detailed = tokenizeShellWordsDetailed(seg.text);
+    const words = detailed.map((t) => t.value);
+    if (words[0] === "cd") {
+      const cdTarget = words.slice(1).find((w, idx, arr) => arr[idx - 1] === "--" || (!w.startsWith("-") && w !== "--" && w.toLowerCase() !== "/d"));
+      if (cdTarget) cwd = path.resolve(cwd, cdTarget);
+    }
+    if (needsImplicitRecursiveCwd(detailed)) out.push({ value: cwd || ".", cwd });
+    for (const word of getInspectableTextForSegment(seg, { hasDownstreamPipe: segmentPipesToShell(segments, segIdx), asWords: true })) {
+      for (const value of expandInlinePathCandidates(word)) out.push({ value, cwd });
+    }
     const wrapper = extractSimpleWrappedScript(seg.text);
     if (wrapper?.innerScript) shellTargets(wrapper.innerScript, cwd, out, depth + 1);
     for (const sub of seg.subshells || []) shellTargets(sub, cwd, out, depth + 1);

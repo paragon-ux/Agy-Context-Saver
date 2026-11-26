@@ -675,7 +675,7 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
   return { benchTargets: t, govTargets: t };
 }
 
-function segmentPipesToShell(segments, idx) {
+export function segmentPipesToShell(segments, idx) {
   if (SHELL_INTERPRETERS.has(getSegmentCmdName(segments[idx]))) return true;
   for (let j = idx + 1; j < segments.length && (segments[j].leadingSep === "|" || segments[j].leadingSep === "|&"); j++) {
     if (SHELL_INTERPRETERS.has(getSegmentCmdName(segments[j]))) return true;
@@ -745,7 +745,87 @@ function checkShellMutations(segments, convId, ctx, depth = 0) {
 // ============================================================================
 
 const SEARCH_COMMANDS = new Set(["grep", "egrep", "fgrep", "rg", "ripgrep", "ag", "ack", "select-string"]);
-const SEARCH_VALUE_FLAGS = new Set(["-e", "--regexp", "-f", "--file", "-m", "--max-count", "-A", "--after-context", "-B", "--before-context", "-C", "--context", "-t", "--type", "-T", "--type-not", "-g", "--glob", "--iglob", "-M", "--max-columns", "--max-filesize", "--color", "-j", "--threads", "-r", "--replace", "--sort", "--sortr"]);
+const SEARCH_VALUE_FLAGS = new Set(["-e", "--regexp", "-f", "--file", "-m", "--max-count", "-A", "--after-context", "-B", "--before-context", "-C", "--context", "-t", "--type", "-T", "--type-not", "-g", "--glob", "--iglob", "-M", "--max-columns", "--max-filesize", "--color", "-j", "--threads", "-r", "--replace", "--sort", "--sortr", "-d", "--max-depth", "--include", "--exclude", "--exclude-dir", "--exclude-from", "--ignore-file", "--encoding", "-E", "--binary-files", "--directories", "--pre", "--pre-glob", "--type-add"]);
+const LS_VALUE_FLAGS = new Set(["-w", "-T", "-I", "--block-size", "--color", "--format", "--hide", "--ignore", "--quoting-style", "--sort", "--time", "--time-style", "--width", "--tabsize"]);
+const FIND_PATTERN_FLAGS = new Set(["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname", "-ilname", "-regex", "-iregex", "-type", "-xtype", "-perm", "-user", "-group", "-uid", "-gid", "-size", "-links", "-inum", "-mindepth", "-maxdepth", "-mtime", "-atime", "-ctime", "-mmin", "-amin", "-cmin", "-printf"]);
+
+function takesSearchFlagArg(flag, effVerb) {
+  const isRg = effVerb === "rg" || effVerb === "ripgrep";
+  if (SEARCH_VALUE_FLAGS.has(flag)) return !["-E", "-r"].includes(flag) || isRg;
+  if (!flag.startsWith("--") && flag.length > 2) {
+    const tail = `-${flag.slice(-1)}`;
+    return /^[A-Za-z0-9]+$/.test(flag.slice(1, -1)) && SEARCH_VALUE_FLAGS.has(tail) && (!["-E", "-r"].includes(tail) || isRg);
+  }
+  return false;
+}
+
+export function expandInlinePathCandidates(raw) {
+  if (!raw || typeof raw !== "string") return [];
+  const values = [raw];
+  const eq = raw.indexOf("=");
+  if (eq !== -1 && eq + 1 < raw.length) values.push(raw.slice(eq + 1));
+  const at = raw.indexOf("@");
+  if (at !== -1 && at + 1 < raw.length) values.push(raw.slice(at + 1));
+  if (raw.startsWith("-") && !raw.startsWith("--")) {
+    for (let i = 1; i < raw.length && /[A-Za-z0-9]/.test(raw[i]); i++) {
+      if ("FfCKTo".includes(raw[i]) && i + 1 < raw.length) values.push(raw.slice(i + 1));
+    }
+  }
+  return values;
+}
+
+export function needsImplicitRecursiveCwd(tokens) {
+  const starts = collectSegmentCommandStartIndices(tokens);
+  for (let s = 0; s < starts.length; s++) {
+    const cmdIdx = stripLeadingShellPrefixes(tokens, starts[s]);
+    const endIdx = s + 1 < starts.length ? starts[s + 1] - 1 : tokens.length;
+    const verb = normalizeCmdName(tokens[cmdIdx]?.value);
+    let eff = verb;
+    let start = cmdIdx + 1;
+    if (verb === "rtk" && ["grep", "rg", "ls"].includes(normalizeCmdName(tokens[start]?.value))) {
+      eff = normalizeCmdName(tokens[start].value);
+      start++;
+    } else if (verb === "git" && normalizeCmdName(tokens[start]?.value) === "grep") {
+      eff = "grep";
+      start++;
+    }
+    const isSearch = SEARCH_COMMANDS.has(eff);
+    if (!isSearch && eff !== "find" && eff !== "ls") continue;
+    let hasPat = false, afterDD = false, explicitPaths = 0, findExplicit = false, findDone = false;
+    for (let i = start; i < endIdx; i++) {
+      const tok = tokens[i];
+      if (!tok.quoted && (tok.value === ";" || tok.value === "+") && s > 0) break;
+      if (isUnquotedRedir(tok)) { if (!tok.quoted && REDIRECT_OP_REGEX.test(tok.raw)) i++; continue; }
+      const v = tok.value;
+      if (eff === "find") {
+        if (v === "-H" || v === "-L" || v === "-P" || /^-O\d*$/.test(v)) continue;
+        if (v === "-D") { i++; continue; }
+        findExplicit = !(v.startsWith("-") || v === "(" || v === "!");
+        findDone = true;
+        break;
+      }
+      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (!afterDD && v.startsWith("-") && v !== "-") {
+        if (isSearch) {
+          if (v === "--files") { hasPat = true; continue; }
+          if (v === "--regexp" || v === "-e" || v === "--file" || v === "-f" || (!v.startsWith("--") && /^-[A-Za-cdg-z0-9]*[ef]$/.test(v))) { hasPat = true; i++; continue; }
+          if (v.startsWith("--regexp=") || v.startsWith("--file=") || (!v.startsWith("--") && /^-[A-Za-cdg-z0-9]*[ef][\s\S]+$/.test(v))) { hasPat = true; continue; }
+          if (takesSearchFlagArg(v, eff)) i++;
+        } else if (LS_VALUE_FLAGS.has(v)) {
+          i++;
+        }
+        continue;
+      }
+      explicitPaths++;
+    }
+    if (eff === "find") {
+      if (!findDone || !findExplicit) return true;
+    } else if (isSearch ? (hasPat ? explicitPaths === 0 : explicitPaths <= 1) : explicitPaths === 0) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function filterProseFlags(detailed, subIdx, allTokens, envPrefix, shouldSkipPair, shouldSkipInline, asWords = false) {
   const kept = envPrefix.trim() ? [envPrefix.trim()] : [];
@@ -770,7 +850,7 @@ function filterProseFlags(detailed, subIdx, allTokens, envPrefix, shouldSkipPair
   return asWords ? kept : kept.join(" ");
 }
 
-function getInspectableTextForSegment(seg, { hasDownstreamPipe = false, asWords = false } = {}) {
+export function getInspectableTextForSegment(seg, { hasDownstreamPipe = false, asWords = false } = {}) {
   const allTokens = getSegTokens(seg);
   const { prefix: envPrefix, body } = splitEnvPrefix(seg.text, allTokens);
   const detailed = body && body !== seg.text ? tokenizeShellWordsDetailed(body) : allTokens;
@@ -845,7 +925,15 @@ function getInspectableTextForSegment(seg, { hasDownstreamPipe = false, asWords 
   else if ((cmd0 === "rtk" && (cmd1 === "grep" || cmd1 === "rg")) || (cmd0 === "git" && cmd1 === "grep")) argStart = 2;
   else if (cmd0 === "node" && detailed[1] && isTrustedLocalRtkLauncherPath(detailed[1].value) && (cmd2 === "grep" || cmd2 === "rg")) argStart = 3;
 
+  if (cmd0 === "find") {
+    return filterProseFlags(detailed, 0, allTokens, envPrefix, (v) => FIND_PATTERN_FLAGS.has(v), () => false, asWords);
+  }
+  if (cmd0 === "ls" || (cmd0 === "rtk" && cmd1 === "ls")) {
+    return filterProseFlags(detailed, cmd0 === "rtk" ? 1 : 0, allTokens, envPrefix, (v) => v === "-I" || v === "--ignore" || v === "--hide", (v) => /^--(?:ignore|hide)=/.test(v) || (v.startsWith("-I") && v.length > 2 && !v.startsWith("--")), asWords);
+  }
+
   if (argStart !== -1) {
+    const effSearch = argStart === 1 ? cmd0 : (cmd0 === "git" ? "grep" : normalizeCmdName(detailed[argStart - 1]?.value));
     const targets = extractRedirectTargets(allTokens);
     if (envPrefix.trim()) targets.unshift(envPrefix.trim());
     let hasPat = false;
@@ -858,12 +946,15 @@ function getInspectableTextForSegment(seg, { hasDownstreamPipe = false, asWords 
       const v = tok.value;
       if (!afterDD && v === "--") { afterDD = true; continue; }
       if (!afterDD && v.startsWith("-") && v !== "-") {
+        if (v === "--files") { hasPat = true; continue; }
         if (v === "--regexp" || v.startsWith("--regexp=")) { hasPat = true; if (v === "--regexp") i++; continue; }
-        if (v === "-f" || v === "--file" || (!v.startsWith("--") && /^-[^-]*f$/.test(v))) { if (detailed[i + 1]) targets.push(detailed[++i].value); hasPat = true; continue; }
-        if (!v.startsWith("--") && /^-([^-]*)f(.+)$/.test(v)) { targets.push(v.slice(v.indexOf("f") + 1)); hasPat = true; continue; }
+        if (v === "-f" || v === "--file" || (!v.startsWith("--") && /^-[A-Za-cdg-z0-9]*f$/.test(v))) { if (detailed[i + 1]) targets.push(detailed[++i].value); hasPat = true; continue; }
+        if (!v.startsWith("--") && /^-[A-Za-cdg-z0-9]*f[\s\S]+$/.test(v)) { targets.push(v.slice(v.indexOf("f") + 1)); hasPat = true; continue; }
         if (v.startsWith("--file=")) { targets.push(v.slice(7)); hasPat = true; continue; }
-        if (!v.startsWith("--") && /^-[^-]*e/.test(v)) { hasPat = true; if (/^-[^-]*e$/.test(v)) i++; continue; }
-        if (SEARCH_VALUE_FLAGS.has(v)) i++;
+        if (v === "--ignore-file" || v === "--exclude-from") { if (detailed[i + 1]) targets.push(detailed[++i].value); continue; }
+        if (v.startsWith("--ignore-file=") || v.startsWith("--exclude-from=")) { targets.push(v.slice(v.indexOf("=") + 1)); continue; }
+        if (!v.startsWith("--") && /^-[A-Za-df-z0-9]*e/.test(v)) { hasPat = true; if (/^-[A-Za-df-z0-9]*e$/.test(v)) i++; continue; }
+        if (takesSearchFlagArg(v, effSearch)) i++;
         continue;
       }
       positionals.push(v);
@@ -927,14 +1018,11 @@ function touchesCanonicalState(segments, ctx, depth = 0, seen = new Set()) {
     const verb = normalizeCmdName(tokens[cmdIdx]?.value);
     if (verb === "cd" && tokens[cmdIdx + 1]) cwd = resolveHookPath(expandLeadingTilde(tokens[cmdIdx + 1].value), cwd);
     const candidates = getInspectableTextForSegment(seg, { asWords: true });
-    const recursive = SEARCH_COMMANDS.has(verb) || ["find", "ls"].includes(verb) || (verb === "rtk" && ["grep", "rg", "ls"].includes(tokens[cmdIdx + 1]?.value));
-    if (recursive) candidates.push(cwd || ".");
+    const subVerb = normalizeCmdName(tokens[cmdIdx + 1]?.value);
+    const recursive = SEARCH_COMMANDS.has(verb) || ["find", "ls"].includes(verb) || (verb === "rtk" && ["grep", "rg", "ls"].includes(subVerb)) || (verb === "git" && subVerb === "grep");
+    if (needsImplicitRecursiveCwd(tokens)) candidates.push(cwd || ".");
     for (const raw of candidates) {
-      const values = [raw];
-      if (raw.includes("=")) values.push(raw.slice(raw.indexOf("=") + 1));
-      if (raw.includes("@")) values.push(raw.slice(raw.indexOf("@") + 1));
-      if (/^-[^-]*F/.test(raw)) values.push(raw.slice(raw.indexOf("F") + 1));
-      for (let value of values) {
+      for (let value of expandInlinePathCandidates(raw)) {
         if (!value || value.startsWith("-")) continue;
         const glob = value.search(/[*?\[]/);
         if (glob !== -1) value = path.dirname(value.slice(0, glob) + "_");
@@ -1624,37 +1712,70 @@ export async function handleRunCommand(ctx) {
   respond(Object.keys(overwrite).length > 0 ? { decision: "allow", overwrite } : { decision: "allow" });
 }
 
+const NODE_VALUE_FLAGS = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--env-file", "--env-file-if-exists", "--watch-path", "--redirect-warnings", "--diagnostic-dir", "--heapsnapshot-near-heap-limit", "--title", "--openssl-config", "--icu-data-dir"]);
+const XARGS_VALUE_FLAGS = new Set(["-I", "-L", "-n", "-P", "-d", "-E", "-s", "-a", "--arg-file", "--max-args", "--max-procs", "--max-lines", "--replace", "--delimiter", "--eof", "--max-chars"]);
+
 /** Recognize the actual argv, including quoted executable/subcommand words. */
 export function parseTranscriptInvocation(command, depth = 0) {
   if (depth > 12) return { clean: false };
   if (!command.includes("transcript") && !/['"\\]/.test(command)) return null;
   const segments = splitShellSegments(command);
-  let seen = false;
+  let matchCount = 0;
   let invocation = null;
-  for (const seg of segments) {
+  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+    const seg = segments[segIdx];
     const detailed = getSegTokens(seg);
     const words = detailed.map((t) => t.value);
-    for (let i = 0; i < words.length; i++) {
-      const name = normalizeCmdName(words[i]);
+    for (const startPos of collectSegmentCommandStartIndices(detailed)) {
+      let cmdIdx = stripLeadingShellPrefixes(detailed, startPos);
+      let viaXargs = false;
+      while (cmdIdx < words.length && normalizeCmdName(words[cmdIdx]) === "xargs") {
+        viaXargs = true;
+        cmdIdx++;
+        while (cmdIdx < words.length && words[cmdIdx].startsWith("-")) {
+          const fl = words[cmdIdx++];
+          if (fl === "--") break;
+          if (XARGS_VALUE_FLAGS.has(fl) && cmdIdx < words.length) cmdIdx++;
+        }
+      }
+      if (cmdIdx >= words.length) continue;
+      const name = normalizeCmdName(words[cmdIdx]);
+      if ((name === "echo" || name === "printf") && segmentPipesToShell(segments, segIdx)) {
+        if (parseTranscriptInvocation(words.slice(cmdIdx + 1).join(" "), depth + 1)) matchCount++;
+        continue;
+      }
       const direct = /^agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?$/.test(name);
-      const node = /^node(?:\.exe)?$/.test(name) && /(?:^|[\\/])agy-context\.mjs$/i.test(words[i + 1] || "");
-      const start = i + (node ? 2 : 1);
+      const isNode = /^node(?:\.exe)?$/.test(name);
+      let scriptIdx = cmdIdx + 1;
+      if (isNode) {
+        while (scriptIdx < words.length && words[scriptIdx].startsWith("-") && words[scriptIdx] !== "--") {
+          const fl = words[scriptIdx++];
+          if (NODE_VALUE_FLAGS.has(fl) && scriptIdx < words.length) scriptIdx++;
+        }
+        if (words[scriptIdx] === "--") scriptIdx++;
+      }
+      const node = isNode && /(?:^|[\\/])agy-context\.mjs$/i.test(words[scriptIdx] || "");
+      const start = node ? scriptIdx + 1 : cmdIdx + 1;
       if ((!direct && !node) || words[start] !== "transcript") continue;
-      seen = true;
       const sub = words[start + 1];
+      if (sub === "--help" || sub === "-h" || sub === "help" || (!sub && !viaXargs && cmdIdx === 0 && segments.length === 1 && !seg.hasSubshell && !seg.hasHeredoc && !seg.hasRedirect)) continue;
+      matchCount++;
       if (!["access", "health", "stats", "info"].includes(sub)) continue;
+      const directCleanStart = !viaXargs && cmdIdx === 0 && (!node || scriptIdx === 1);
+      const validLeadingPrefix = /^[ \t]*(?:&[ \t]*)?$/.test(command.slice(0, seg.start));
       invocation = {
-        command: sub === "access" ? "access" : "health", args: words.slice(start + 2),
-        clean: segments.length === 1 && i === 0 && !seg.hasSubshell && !seg.hasHeredoc && !seg.hasRedirect &&
-          /^[ \t]*$/.test(command.slice(0, seg.start)) && /^[ \t]*$/.test(command.slice(seg.end)) &&
+        command: sub === "access" ? "access" : "health",
+        args: words.slice(start + 2),
+        clean: segments.length === 1 && directCleanStart && !seg.hasSubshell && !seg.hasHeredoc && !seg.hasRedirect &&
+          validLeadingPrefix && /^[ \t]*$/.test(command.slice(seg.end)) &&
           !detailed.some((t) => !t.quoted && t.raw.startsWith("#")) &&
           !words.some((w) => w.startsWith("--hook-grant"))
       };
-      i = start + 1;
     }
     const wrapper = extractSimpleWrappedScript(seg.text);
-    if (wrapper?.innerScript && parseTranscriptInvocation(wrapper.innerScript, depth + 1)) seen = true;
-    for (const sub of [...(seg.subshells || []), ...(seg.heredocBodies || [])]) if (parseTranscriptInvocation(sub, depth + 1)) seen = true;
+    if (wrapper?.innerScript && parseTranscriptInvocation(wrapper.innerScript, depth + 1)) matchCount++;
+    for (const sub of [...(seg.subshells || []), ...(seg.heredocBodies || [])]) if (parseTranscriptInvocation(sub, depth + 1)) matchCount++;
   }
-  return invocation || (seen ? { clean: false } : null);
+  if (invocation && matchCount > 1) invocation.clean = false;
+  return invocation || (matchCount > 0 ? { clean: false } : null);
 }

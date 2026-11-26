@@ -252,7 +252,7 @@ async function handleTranscriptCommand(argv) {
     if (!owner) throw new Error("No caller session; run this from inside an Antigravity session.");
     const previous = readPolicies();
     const lineage = getLineage(owner, getBrainDirs(identity));
-    if (lineage.isChild || ((!lineage.found || lineage.unresolved) && hasRestrictivePolicy(previous))) {
+    if (lineage.isChild || ((!lineage.found || lineage.unresolved) && (hasRestrictivePolicy(previous) || (verb === "set" && mode !== "open")))) {
       throw new Error("Only a confirmed top-level session may manage transcript access.");
     }
     const policies = verb === "set" ? setPolicy(owner, mode) : previous;
