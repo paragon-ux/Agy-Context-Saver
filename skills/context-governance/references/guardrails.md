@@ -1,11 +1,11 @@
 # Layer 1–3 Execution Guardrails (`PreToolUse` Hook Reference)
 
-Detailed reference for `Agy-Context-Saver` (`v2.2.1`) + `RTK` (`>= 1.1.0`) hooks. For the concise Turn-1 invariants, see `rules/AGENTS.md`.
+Detailed reference for `Agy-Context-Saver` (`v2.2.2`) + `RTK` (`>= 1.1.0`) hooks. For the concise Turn-1 invariants, see `rules/AGENTS.md`.
 
 ## Architectural Boundary
 
 - **RTK (`>= 1.1.0`)**: Compresses noisy test, build, lint, container, and `git status`/`push`/`pull`/`fetch` stdout via the Narrow High-ROI Pre-Gate (`AGY_RTK_MODE=pregate|off`, default `pregate`), reads step spillovers and completed task logs (`rtk read`), and remains available explicitly (`rtk <cmd>`, `rtk err`, `rtk summary`). Precision inspection tools (`find`, `grep`, `rg`, `ls`, `wc`, `diff`, workspace `cat`/`head`/`tail`, `ps`, `git diff`/`show`/`log`), pipelines, redirects, and `--json`/`--porcelain` commands stay untouched and lossless (`2>&1` and `2>/dev/null` pass through).
-- **Agy-Context-Saver (`v2.2.1`)**: Exposes the two-tier `agy-context transcript` CLI (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode) and enforces Layer 1–3 `PreToolUse` guardrails.
+- **Agy-Context-Saver (`v2.2.2`)**: Exposes the two-tier `agy-context transcript` CLI (`~9.2 KB` inline defaults + `--full`/`--out` `512 KB` deep mode) and enforces Layer 1–3 `PreToolUse` guardrails.
 
 ## Layer 1: Background Tasks, Remote CI & Proportional Backoff
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver CLI (v2.2.1)
+ * Agy-Context-Saver CLI (v2.2.2)
  *
  * Local-first CLI for streaming transcript inspection, forensic querying,
  * context health diagnostics, and lifecycle management.
@@ -49,9 +49,9 @@ process.stdout.on("error", (err) => {
 function getVersion() {
   try {
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-    return pkg.version || "2.2.1";
+    return pkg.version || "2.2.2";
   } catch {
-    return "2.2.1";
+    return "2.2.2";
   }
 }
 

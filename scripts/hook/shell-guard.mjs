@@ -232,8 +232,9 @@ export function resolveCachedHostEnv() {
 // ============================================================================
 
 const SHELL_ESCAPE_CHARS = new Set([" ", "\t", "\n", "\r", ";", "|", "&", "<", ">", "(", ")", '"', "'", "\\", "$", "`"]);
-const REDIRECT_OP_REGEX = /^(?:&>>?|(?:\d+)?(?:>>?|<<<?|<<-|<&|>&|>\||<>))$/;
-const REDIRECT_ATTACHED_REGEX = /^(?:\d+)?(?:>>?|<<?)(.+)$/;
+const REDIRECT_OP_REGEX = /^(?:&>>?|(?:\d+)?(?:>>?|<<<?|<|<<-|<&|>&|>\||<>))$/;
+const REDIRECT_ATTACHED_REGEX = /^(?:\d+)?(?:>>?|>\||<<?)(.+)$/;
+const REDIRECT_CLOSE_REGEX = /^(?:\d+)?[<>]&-$/;
 const ENV_VALUE_FLAGS = new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]);
 const SHELL_CONTROL_KEYWORDS = new Set(["{", "!", "if", "then", "elif", "else", "do", "while", "until", "time", "&"]);
 const SUDO_VALUE_FLAGS = new Set(["-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "--user", "--group", "--host"]);
@@ -485,9 +486,19 @@ function splitEnvPrefix(text, preTokens = null) {
   return { prefix: text.slice(0, tokens[idx].start), body: text.slice(tokens[idx].start) };
 }
 
+function skipSingleRedirectToken(tokens, idx) {
+  const tok = tokens[idx];
+  if (!tok || tok.quoted) return idx;
+  if (REDIRECT_CLOSE_REGEX.test(tok.raw) || REDIRECT_ATTACHED_REGEX.test(tok.raw)) return idx + 1;
+  if (REDIRECT_OP_REGEX.test(tok.raw)) return Math.min(tokens.length, idx + 2);
+  return idx;
+}
+
 function stripLeadingShellPrefixes(tokens, startIdx = 0) {
   let idx = startIdx;
   for (let guard = 0; idx < tokens.length && guard++ < 24;) {
+    const nextRedir = skipSingleRedirectToken(tokens, idx);
+    if (nextRedir !== idx) { idx = nextRedir; continue; }
     const nextEnv = skipEnvTokens(tokens, idx);
     if (nextEnv !== idx) { idx = nextEnv; continue; }
     if (!tokens[idx].quoted && SHELL_CONTROL_KEYWORDS.has(tokens[idx].value.toLowerCase())) { idx++; continue; }
@@ -564,7 +575,12 @@ function extractSimpleWrappedScript(segText) {
   const detailed = tokenizeShellWordsDetailed(effective);
   if (detailed.length < 2) return null;
   let headIdx = 0;
-  while (headIdx < detailed.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(detailed[headIdx].raw)) headIdx++;
+  while (headIdx < detailed.length) {
+    const nextRedir = skipSingleRedirectToken(detailed, headIdx);
+    if (nextRedir !== headIdx) { headIdx = nextRedir; continue; }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(detailed[headIdx].raw)) { headIdx++; continue; }
+    break;
+  }
   if (headIdx >= detailed.length - 1) return null;
   const cmd0 = normalizeCmdName(detailed[headIdx].value);
   if (cmd0 === "env") {
@@ -624,12 +640,91 @@ const OBVIOUS_MUTATION_VERBS = new Set([
 const DIR_MUTATION_VERBS = new Set(["rm", "del", "remove-item", "mv", "cp", "ln", "chmod", "chown", "find"]);
 const DESTRUCTIVE_CONFIG_VERBS = new Set(["rm", "del", "remove-item", "mv", "ln", "truncate", "shred", "dd", "chmod", "chown", "find"]);
 
+function extractSedMutationTargets(vals) {
+  const positionals = [];
+  let hasInPlace = false;
+  let hasExplicitScript = false;
+  let afterDD = false;
+  for (let i = 0; i < vals.length; i++) {
+    const v = vals[i];
+    if (!afterDD && v === "--") {
+      afterDD = true;
+      continue;
+    }
+    if (!afterDD && v.startsWith("--")) {
+      if (v === "--in-place" || v.startsWith("--in-place=")) hasInPlace = true;
+      else if (v === "--expression" || v === "--file" || v === "--line-length") {
+        if (v === "--expression" || v === "--file") hasExplicitScript = true;
+        i += 1;
+      } else if (v.startsWith("--expression=") || v.startsWith("--file=")) {
+        hasExplicitScript = true;
+      }
+      continue;
+    }
+    if (!afterDD && v.startsWith("-") && v.length > 1) {
+      for (let k = 1; k < v.length; k++) {
+        const ch = v[k];
+        if (ch === "e" || ch === "f") {
+          hasExplicitScript = true;
+          if (k + 1 >= v.length) i += 1;
+          break;
+        }
+        if (ch === "l") {
+          if (k + 1 >= v.length) i += 1;
+          break;
+        }
+        if (ch === "i" || ch === "I") {
+          hasInPlace = true;
+          break;
+        }
+      }
+      continue;
+    }
+    positionals.push(v);
+  }
+  if (!hasInPlace) return [];
+  return hasExplicitScript ? positionals : (positionals.length > 1 ? positionals.slice(1) : positionals);
+}
+
+function extractPerlMutationTargets(vals) {
+  const positionals = [];
+  let hasInPlace = false;
+  let hasExplicitScript = false;
+  let afterDD = false;
+  for (let i = 0; i < vals.length; i++) {
+    const v = vals[i];
+    if (!afterDD && v === "--") {
+      afterDD = true;
+      continue;
+    }
+    if (!afterDD && v.startsWith("-") && v.length > 1 && !v.startsWith("--")) {
+      for (let k = 1; k < v.length; k++) {
+        const ch = v[k];
+        if (ch === "e" || ch === "E") {
+          hasExplicitScript = true;
+          if (k + 1 >= v.length) i += 1;
+          break;
+        }
+        if (ch === "i") {
+          hasInPlace = true;
+          break;
+        }
+      }
+      continue;
+    }
+    if (!afterDD && v.startsWith("--")) continue;
+    positionals.push(v);
+  }
+  if (!hasInPlace) return [];
+  return hasExplicitScript ? positionals : (positionals.length > 1 ? positionals.slice(1) : positionals);
+}
+
 function extractVerbMutationTargets(verb, tokens, cmdIdx) {
   const args = tokens.slice(cmdIdx + 1);
   const vals = [];
   for (let i = 0; i < args.length; i++) {
-    if (!args[i].quoted && REDIRECT_OP_REGEX.test(args[i].raw)) { i++; continue; }
-    if (!args[i].quoted && REDIRECT_ATTACHED_REGEX.test(args[i].raw)) continue;
+    const nextIdx = skipSingleRedirectToken(args, i);
+    if (nextIdx !== i) { i = nextIdx - 1; continue; }
     vals.push(args[i].value);
   }
   if (verb === "cp" || verb === "ln") {
@@ -657,9 +752,12 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
     const t = vals.filter((v) => v.startsWith("of=")).map((v) => v.slice(3)).filter(Boolean);
     return { benchTargets: t, govTargets: t };
   }
-  if (verb === "sed" || verb === "perl") {
-    const hasI = vals.some((v) => v === "-i" || v === "--in-place" || v.startsWith("--in-place=") || /^-[a-zA-Z0-9]*i/.test(v));
-    const t = hasI ? vals.filter((v) => !v.startsWith("-")) : [];
+  if (verb === "sed") {
+    const t = extractSedMutationTargets(vals);
+    return { benchTargets: t, govTargets: t };
+  }
+  if (verb === "perl") {
+    const t = extractPerlMutationTargets(vals);
     return { benchTargets: t, govTargets: t };
   }
   if (verb === "find") {
@@ -1508,7 +1606,12 @@ function findBlockingWatchLoop(segments, depth = 0) {
     let idx = stripLeadingShellPrefixes(tokens, 0);
     while (idx < tokens.length && normalizeCmdName(tokens[idx].value) === "rtk") idx++;
     if (idx < tokens.length && normalizeCmdName(tokens[idx].value) === "gh") {
-      const rest = tokens.slice(idx + 1).map((t) => t.value);
+      const rest = [];
+      for (let k = idx + 1; k < tokens.length; k++) {
+        const nextK = skipSingleRedirectToken(tokens, k);
+        if (nextK !== k) { k = nextK - 1; continue; }
+        rest.push(tokens[k].value);
+      }
       const pos = [];
       let hasHelp = false;
       let hasWatch = false;

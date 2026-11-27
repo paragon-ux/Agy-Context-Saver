@@ -5,6 +5,12 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.2] - 2026-11-27
+
+### Fixed
+- Normalize shell commands with leading file-descriptor redirections such as `2>/dev/null rm ...`, `2> /dev/null rm ...`, and `</dev/null gh pr checks --watch` before command classification so protected-file mutation checks and blocking CI watch-loop guards apply consistently without rewriting the executed command.
+- Parse macOS and BSD `sed -I` in-place flags alongside GNU `sed -i` and `--in-place` (including `-e`, `-f`, and `--` option terminators) when checking shell commands for protected configuration and hook mutations.
+
 ## [2.2.1] - 2026-11-23
 
 ### Added

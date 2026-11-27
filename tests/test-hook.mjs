@@ -5464,6 +5464,57 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
   console.log("✓ Group V: Day-One audit regressions (SEC-001 namespaced .bak, SEC-003 linear guard, RUN-001 outline flags) verified");
 }
 
+// --- Group W: v2.2.2 Leading Redirection & macOS BSD sed -I Guard Regressions ---
+{
+  const wConv = "w-redir-sed-001";
+  const protectedHooks = "~/.gemini/config/plugins/agy-context-saver/hooks.json";
+  const safeFile = path.join(hermetic.profileDir, "safe-notes.txt");
+  fs.writeFileSync(safeFile, "hello\n");
+
+  for (const deniedCmd of [
+    `2>/dev/null rm ${protectedHooks}`,
+    `2> /dev/null rm ${protectedHooks}`,
+    `</dev/null rm ${protectedHooks}`,
+    `2>&- rm ${protectedHooks}`,
+    `rm ${protectedHooks} 2>/dev/null`,
+    `echo pwn > ${protectedHooks}`,
+    `2>/dev/null gh pr checks --watch`,
+    `2> /dev/null gh pr checks --watch`,
+    `</dev/null gh pr checks --watch`,
+    `</dev/null gh run watch`,
+    `gh 2>/dev/null pr checks --watch`,
+    `sed -I s/x/y/ ${protectedHooks}`,
+    `sed -I '' s/x/y/ ${protectedHooks}`,
+    `sed -I .bak -e 's/x/y/' ${protectedHooks}`,
+    `sed -nI.bak 's/x/y/' ${protectedHooks}`,
+    `sed -I s/x/y/ -- ${protectedHooks}`
+  ]) {
+    const res = runHook({
+      conversationId: wConv,
+      toolCall: { name: "run_command", args: { CommandLine: deniedCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(res.decision, "deny", `v2.2.2 guard must deny: ${deniedCmd}`);
+  }
+
+  // Classification-only normalization: safe commands with leading redirects or `--` before `-I` must allow without rewriting CommandLine
+  for (const allowedCmd of [
+    `2>/dev/null cat "${safeFile}"`,
+    `2> /dev/null head -n 5 "${safeFile}"`,
+    `</dev/null gh pr checks`,
+    `sed -n 's/x/y/p' -- -I "${safeFile}"`,
+    `sed -e '-I' "${safeFile}"`
+  ]) {
+    const res = runHook({
+      conversationId: wConv,
+      toolCall: { name: "run_command", args: { CommandLine: allowedCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(res.decision, "allow", `v2.2.2 safe control must allow: ${allowedCmd} (got ${res.reason})`);
+    assert.equal(res.overwrite?.CommandLine, undefined, `v2.2.2 normalization must not rewrite CommandLine: ${allowedCmd}`);
+  }
+
+  console.log("✓ Group W: v2.2.2 leading-redirection normalization and macOS BSD sed -I parsing verified");
+}
+
 hermetic.cleanup();
 console.log("\n=================================================");
 console.log("ALL 2.0 PRETOOLUSE HOOK GOVERNANCE TESTS PASSED!");
