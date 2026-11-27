@@ -369,7 +369,7 @@ function splitShellSegments(command) {
       }
       hasRedirect = true; i += next === "<" ? (command[i + 2] === "<" ? 3 : 2) : 1; continue;
     }
-    if (c === ">") { hasRedirect = true; hasWriteRedirect = true; i += next === ">" ? 2 : 1; continue; }
+    if (c === ">") { hasRedirect = true; hasWriteRedirect = true; i += next === ">" || next === "|" ? 2 : 1; continue; }
     if (c === "\n" || (c === "\r" && next === "\n")) {
       pushSeg(i);
       i += c === "\r" ? 2 : 1;
@@ -489,19 +489,24 @@ function splitEnvPrefix(text, preTokens = null) {
 function skipSingleRedirectToken(tokens, idx) {
   const tok = tokens[idx];
   if (!tok || tok.quoted) return idx;
-  if (REDIRECT_CLOSE_REGEX.test(tok.raw) || REDIRECT_ATTACHED_REGEX.test(tok.raw)) return idx + 1;
+  if (REDIRECT_CLOSE_REGEX.test(tok.raw)) return idx + 1;
   if (REDIRECT_OP_REGEX.test(tok.raw)) return Math.min(tokens.length, idx + 2);
+  if (REDIRECT_ATTACHED_REGEX.test(tok.raw)) return idx + 1;
   return idx;
 }
 
 function stripLeadingShellPrefixes(tokens, startIdx = 0) {
   let idx = startIdx;
-  for (let guard = 0; idx < tokens.length && guard++ < 24;) {
+  while (idx < tokens.length) {
+    const beforeIdx = idx;
+    const assertProgress = () => {
+      if (idx <= beforeIdx) throw new Error("Internal shell-prefix parser error: no forward progress.");
+    };
     const nextRedir = skipSingleRedirectToken(tokens, idx);
-    if (nextRedir !== idx) { idx = nextRedir; continue; }
+    if (nextRedir !== idx) { idx = nextRedir; assertProgress(); continue; }
     const nextEnv = skipEnvTokens(tokens, idx);
-    if (nextEnv !== idx) { idx = nextEnv; continue; }
-    if (!tokens[idx].quoted && SHELL_CONTROL_KEYWORDS.has(tokens[idx].value.toLowerCase())) { idx++; continue; }
+    if (nextEnv !== idx) { idx = nextEnv; assertProgress(); continue; }
+    if (!tokens[idx].quoted && SHELL_CONTROL_KEYWORDS.has(tokens[idx].value.toLowerCase())) { idx++; assertProgress(); continue; }
     const cmd = normalizeCmdName(tokens[idx].value);
     if (cmd === "sudo" || cmd === "doas") {
       idx++;
@@ -511,6 +516,7 @@ function stripLeadingShellPrefixes(tokens, startIdx = 0) {
         if (!fl.startsWith("-") || fl === "-") break;
         idx += SUDO_VALUE_FLAGS.has(fl) && idx + 1 < tokens.length ? 2 : 1;
       }
+      assertProgress();
       continue;
     }
     if (cmd === "timeout" || cmd === "nice") {
@@ -520,11 +526,13 @@ function stripLeadingShellPrefixes(tokens, startIdx = 0) {
         idx += valFlags.has(tokens[idx].value) && idx + 1 < tokens.length ? 2 : 1;
       }
       if (cmd === "timeout" && idx < tokens.length) idx++;
+      assertProgress();
       continue;
     }
     if (SIMPLE_WRAPPERS.has(cmd)) {
       idx++;
       while (idx < tokens.length && tokens[idx].value.startsWith("-")) { if (tokens[idx++].value === "--") break; }
+      assertProgress();
       continue;
     }
     break;

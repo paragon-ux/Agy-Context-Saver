@@ -5512,6 +5512,45 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
     assert.equal(res.overwrite?.CommandLine, undefined, `v2.2.2 normalization must not rewrite CommandLine: ${allowedCmd}`);
   }
 
+  for (const deniedCmd of [
+    `2>>/dev/null rm ${protectedHooks}`,
+    `2>> /dev/null rm ${protectedHooks}`,
+    `2>&1 rm ${protectedHooks}`,
+    `0<&0 rm ${protectedHooks}`,
+    `<&0 rm ${protectedHooks}`,
+    `>&2 rm ${protectedHooks}`,
+    `&>/dev/null rm ${protectedHooks}`,
+    `&>>/dev/null rm ${protectedHooks}`,
+    `2>|/dev/null rm ${protectedHooks}`,
+    `<>/dev/null rm ${protectedHooks}`,
+    `2>>/dev/null gh pr checks --watch`
+  ]) {
+    const res = runHook({
+      conversationId: wConv,
+      toolCall: { name: "run_command", args: { CommandLine: deniedCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(res.decision, "deny", `v2.2.2 operator regression must deny: ${deniedCmd}`);
+  }
+
+  for (const count of [25, 500]) {
+    const deniedCmd = `${"2>/dev/null ".repeat(count)}rm ${protectedHooks}`;
+    const res = runHook({
+      conversationId: wConv,
+      toolCall: { name: "run_command", args: { CommandLine: deniedCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(res.decision, "deny", `v2.2.2 must not fail open after ${count} leading redirects`);
+  }
+
+  const perfCmd = `${"2>/dev/null ".repeat(10000)}rm ${protectedHooks}`;
+  const perfStart = performance.now();
+  const perfRes = runHook({
+    conversationId: wConv,
+    toolCall: { name: "run_command", args: { CommandLine: perfCmd, WaitMsBeforeAsync: 5000 } }
+  });
+  const perfMs = performance.now() - perfStart;
+  assert.equal(perfRes.decision, "deny", "v2.2.2 must deny after 10,000 leading redirects");
+  assert.ok(perfMs < 1000, `v2.2.2 redirect stripping must remain linear (${perfMs.toFixed(1)}ms >= 1000ms)`);
+
   console.log("✓ Group W: v2.2.2 leading-redirection normalization and macOS BSD sed -I parsing verified");
 }
 
