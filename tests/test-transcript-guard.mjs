@@ -1020,6 +1020,40 @@ async function testAdversarialBoostRegressions() {
     const gitHomeFwd = gitHome.replace(/\\/g, "/");
     assert.equal(gitEnvHook('GIT_DIR="$HOME/.git" GIT_WORK_TREE="$HOME" git grep INLINE_GIT_ENV_SECRET'), "deny");
     assert.equal(gitEnvHook(`GIT_DIR="${gitHomeFwd}/.git" GIT_WORK_TREE="${gitHomeFwd}" git grep INLINE_GIT_ENV_SECRET`), "deny");
+
+    // 5. Open-mode everyday developer commands MUST remain allowed in clean workspaces (no global false denials)
+    const cleanProj = path.join(boostDir, "clean-workspace", "my-app");
+    fs.mkdirSync(path.join(cleanProj, "sub"), { recursive: true });
+    fs.writeFileSync(path.join(cleanProj, "sub", "README.md"), "ok\n");
+    const homeCleanSub = path.join(gitHome, "clean-sub");
+    fs.mkdirSync(homeCleanSub, { recursive: true });
+    fs.writeFileSync(path.join(homeCleanSub, "sample.txt"), "foo bar needle\n");
+    const openCleanHook = (cmd, cwd = cleanProj) => JSON.parse(spawnSync(process.execPath, [hookScript], {
+      encoding: "utf-8",
+      env: gitHomeEnv,
+      input: JSON.stringify({ conversationId: P, cwd, toolCall: { name: "run_command", args: { CommandLine: cmd, WaitMsBeforeAsync: 5000 } } })
+    }).stdout).decision;
+
+    for (const [label, cmd, cwd] of [
+      ["source venv", "source .venv/bin/activate && pytest", cleanProj],
+      ["dot nvm", ". ~/.nvm/nvm.sh && npm test", cleanProj],
+      ["jq here-string", 'jq .name <<< \'{"name":"foo"}\'', cleanProj],
+      ["grep here-string", 'grep foo <<< "foo bar"', cleanProj],
+      ["xargs wc -l", "git ls-files '*.js' | xargs wc -l", cleanProj],
+      ["xargs -0 rg", "find src -name '*.ts' -print0 | xargs -0 rg needle", cleanProj],
+      ["xargs -n 1 echo", "printf 'a\\nb\\n' | xargs -n 1 echo", cleanProj],
+      ["cd $DIR && cat", 'DIR=sub; cd "$DIR" && cat README.md', cleanProj],
+      ["if cd build; fi && ls", "if [ -d build ]; then cd build; fi && ls", cleanProj],
+      ["pushd && npm test", "pushd sub && npm test && popd", cleanProj],
+      ["cd sub || exit 1", "cd sub || exit 1; cat README.md", cleanProj],
+      ["GIT_PAGER=cat git diff", "GIT_PAGER=cat git diff", cleanProj],
+      ["GIT_TERMINAL_PROMPT=0 git status", "GIT_TERMINAL_PROMPT=0 git status", cleanProj],
+      ["GIT_OPTIONAL_LOCKS=0 git status", "GIT_OPTIONAL_LOCKS=0 git status", cleanProj],
+      ["rg --max-columns from $HOME", "rg --max-columns 200 needle ./clean-sub", gitHome],
+      ["git grep --and from $HOME", "git grep -e foo --and -e bar ./clean-sub", gitHome]
+    ]) {
+      assert.equal(openCleanHook(cmd, cwd), "allow", `Everyday open-mode command (${label}) must allow: ${cmd}`);
+    }
   } finally {
     fs.rmSync(stateSecret, { force: true });
     fs.rmSync(hooksJson, { force: true });

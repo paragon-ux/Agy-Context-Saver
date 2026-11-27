@@ -59,7 +59,7 @@ export function handleTranscriptGuard(ctx) {
     }
     const scoped = inspectShellCommandScope(command, ctx.cwd || "", { protectedDirs: brainDirs });
     for (const entry of scoped) {
-      if (entry.depthExceeded || entry.uncertainFailClosed) deny();
+      if (entry.depthExceeded || entry.uncertainFailClosed || entry.uncertainSource || entry.viaXargs) deny();
       if (entry.uncertainCwd && (entry.recursive || !path.isAbsolute(expandLeadingTilde(entry.value)))) {
         deny();
       }
