@@ -164,4 +164,4 @@ node scripts/install-register.mjs --uninstall --restore-backups
 
 ### Governance File Protection
 
-During active runs, `PreToolUse` hard-denies file-tool and shell writes to the installed plugin and hook source (`~/.gemini/config/plugins/agy-context-saver/`), `~/.gemini/config/hooks.json`, and backups for every session. Child sessions are also hard-denied from editing `mcp_config.json` and `config.json`; top-level sessions get a confirmation prompt. Lifecycle commands such as `setup` and `uninstall` are not blocked for any session, so run them only when you intend to.
+During active runs, `PreToolUse` hard-denies file-tool and shell writes to the installed plugin and hook source (`~/.gemini/config/plugins/agy-context-saver/`), `~/.gemini/config/hooks.json`, and backups for every session. Child sessions are also hard-denied from editing `mcp_config.json` and `config.json`; top-level sessions get a confirmation prompt. Lifecycle commands such as `setup` and `uninstall` remain available to top-level sessions, but are hard-denied for sessions restricted by parent transcript isolation because they can remove or replace the governance hook.

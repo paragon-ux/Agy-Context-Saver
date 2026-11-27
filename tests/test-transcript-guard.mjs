@@ -1065,6 +1065,57 @@ async function testAdversarialBoostRegressions() {
 await testAdversarialBoostRegressions();
 console.log("✓ Adversarial Boost Regressions passed");
 
+async function testRestrictedChildLifecycleContainment() {
+  const lifeDir = fs.mkdtempSync(path.join(work, "life-guard-"));
+  const evilSh = path.join(lifeDir, "evil.sh");
+  const evilZeroSh = path.join(lifeDir, "evil-zero.sh");
+  const evilMjs = path.join(lifeDir, "evil.mjs");
+  const safeMd = path.join(lifeDir, "NOTES.md");
+  const hookAt = (convId, toolName, args, cwd = lifeDir) => JSON.parse(spawnSync(process.execPath, [hookScript], {
+    input: JSON.stringify({ conversationId: convId, cwd, toolCall: { name: toolName, args } }),
+    encoding: "utf-8", env: process.env
+  }).stdout.trim()).decision;
+  const shellAt = (convId, cmd, cwd = lifeDir) => hookAt(convId, "run_command", { CommandLine: cmd, WaitMsBeforeAsync: 5000 }, cwd);
+  try {
+    fs.writeFileSync(evilSh, "node scripts/install-register.mjs --uninstall\n");
+    fs.writeFileSync(evilZeroSh, "node scripts/install-register.mjs\n");
+    fs.writeFileSync(evilMjs, "import { execSync } from 'node:child_process';\nexecSync('agy-context uninstall');\n");
+    for (const mode of ["self-only", "deny"]) {
+      setPolicy(P, mode);
+      for (const cmd of [
+        "agy-context uninstall",
+        "agy-context setup",
+        "agy-context restore-backups",
+        "agy-context 2>/dev/null uninstall",
+        "xargs agy-context uninstall",
+        "node scripts/install-register.mjs --uninstall",
+        "node --no-warnings scripts/install-register.mjs",
+        "node --no-warnings scripts/install-register.mjs --uninstall",
+        "bash -c 'agy-context uninstall'",
+        "env FOO=1 agy-context uninstall",
+        "sh install.sh --uninstall",
+        "bash evil.sh",
+        "bash evil-zero.sh",
+        ". ./evil.sh",
+        "node ./evil.mjs"
+      ]) {
+        assert.equal(shellAt(A, cmd), "deny", `Restricted child (${mode}) must deny lifecycle command: ${cmd}`);
+      }
+      assert.equal(hookAt(A, "write_file", { Path: path.join(lifeDir, "drop.sh"), Content: "node scripts/install-register.mjs --uninstall\n" }), "deny");
+      assert.equal(hookAt(A, "write_file", { Path: path.join(lifeDir, "drop-zero.sh"), Content: "node scripts/install-register.mjs\n" }), "deny");
+      assert.equal(hookAt(A, "write_file", { Path: safeMd, Content: "Run `agy-context setup` from a top-level session.\n" }), "allow");
+      assert.equal(shellAt(A, "agy-context status"), "allow");
+      assert.equal(shellAt(A, "node scripts/install-register.mjs --check", root), "allow");
+      assert.equal(shellAt(P, "agy-context uninstall", root), "allow");
+    }
+  } finally {
+    setPolicy(P, "open");
+    fs.rmSync(lifeDir, { recursive: true, force: true });
+  }
+}
+await testRestrictedChildLifecycleContainment();
+console.log("✓ Restricted-Child Lifecycle Containment passed");
+
 } finally {
   fs.rmSync(work, { recursive: true, force: true });
   hermetic.cleanup();

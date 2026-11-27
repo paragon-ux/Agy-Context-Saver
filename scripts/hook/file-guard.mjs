@@ -33,7 +33,9 @@ import {
   matchTaskLogToken,
   getTaskState,
   isOversizedInternalTarget,
-  buildInternalStateToolDenial
+  buildInternalStateToolDenial,
+  hasLifecycleScriptBodyMatch,
+  isRestrictedLifecycleCaller
 } from "./common.mjs";
 
 const SAFE_MULTIMODAL_MEDIA_RE = /\.(?:png|jpe?g|gif|webp|bmp|ico|pdf|mp3|wav|ogg|flac|m4a|mp4|webm|mov)$/i;
@@ -369,6 +371,24 @@ export async function handleInspectionTool(ctx) {
   respond({ decision: "allow" });
 }
 
+const RESTRICTED_ENV_KEYS = "AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID|XDG_STATE_HOME|LOCALAPPDATA";
+const RESTRICTED_SCRIPT_ENV_PROP_RE = new RegExp(
+  `(?:process\\.env|os\\.environ)\\s*(?:\\.\\s*(?:${RESTRICTED_ENV_KEYS})\\b|\\[\\s*['"](?:${RESTRICTED_ENV_KEYS})['"]\\s*\\])`,
+  "i"
+);
+
+function getRestrictedChildScriptBlockReason(body) {
+  if (!body || typeof body !== "string") return null;
+  if (isProtectedInternalState(body)) return "internal-state";
+  if (/\bagy-context(?:-saver)?(?:\.(?:m?js|cmd|exe|bat))?[\s'",\[\]()]{1,24}transcript\b/i.test(body)) return "non-canonical-cli";
+  if (hasLifecycleScriptBodyMatch(body)) return "lifecycle-command";
+  if (
+    /(?:^|[\s;|&(])(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID|XDG_STATE_HOME|LOCALAPPDATA)=/i.test(body) ||
+    RESTRICTED_SCRIPT_ENV_PROP_RE.test(body)
+  ) return "governance-env";
+  return null;
+}
+
 export function handleMutationTool(ctx) {
   const { args, convId, cwd } = ctx;
   const targetFiles = collectPathAliases(args, MUTATION_PATH_KEYS, false);
@@ -384,6 +404,45 @@ export function handleMutationTool(ctx) {
       } else {
         respond({ decision: "deny", reason: "Antigravity Execution Governance: Direct mutation of protected Antigravity hook, shim, or governance source files is strictly prohibited." });
       }
+    }
+  }
+
+  if (isRestrictedLifecycleCaller(convId, ctx)) {
+    const bodyParts = [
+      args.Content, args.content, args.file_content, args.CodeContent, args.codeContent, args.code_content,
+      args.Replacement, args.replacement, args.ReplacementContent, args.replacementContent, args.new_string
+    ].filter((v) => typeof v === "string" && v);
+    const rawChunks = Array.isArray(args.ReplacementChunks) ? args.ReplacementChunks : (Array.isArray(args.replacementChunks) ? args.replacementChunks : []);
+    for (const ch of rawChunks) {
+      const cb = ch && typeof ch === "object"
+        ? (ch.ReplacementContent || ch.replacementContent || ch.Replacement || ch.replacement || ch.Content || ch.content || "")
+        : "";
+      if (typeof cb === "string" && cb) bodyParts.push(cb);
+    }
+    const bodyContent = bodyParts.join("\n");
+    if (bodyContent && (targetFiles.some(isExecutableScriptPath) || /^\s*#!/.test(bodyContent))) {
+      const code = getRestrictedChildScriptBlockReason(bodyContent);
+      if (code === "lifecycle-command") {
+        respond({
+          decision: "deny",
+          reason: "Antigravity Execution Governance: Sessions restricted by parent transcript isolation cannot embed " +
+            "plugin lifecycle setup, install, uninstall, or restore-backups commands in executable scripts."
+        });
+      }
+      if (code === "governance-env") {
+        respond({
+          decision: "deny",
+          reason: "Antigravity Execution Governance: Overriding Antigravity governance/state environment variables " +
+            "inside restricted child scripts is prohibited."
+        });
+      }
+      if (code === "non-canonical-cli") {
+        respond({
+          decision: "deny",
+          reason: "Antigravity Execution Governance: Transcript commands must be invoked directly via run_command, not wrapped inside a script."
+        });
+      }
+      if (code) respond({ decision: "deny", reason: buildInternalStateToolDenial() });
     }
   }
 

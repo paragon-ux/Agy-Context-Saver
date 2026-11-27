@@ -9,7 +9,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { getStateDir } from "../state-dir.mjs";
-import { isTopLevelUnrestricted } from "../../lib/transcript-policy.mjs";
+import { getEffectiveMode, isTopLevelUnrestricted } from "../../lib/transcript-policy.mjs";
 import {
   getProfileHomeDir,
   getBrainDir,
@@ -561,3 +561,76 @@ function buildInternalStateDenial(kindLabel) {
 
 export const buildInternalStateShellDenial = (convId = "global", ctx = {}) => buildInternalStateDenial("shell access");
 export const buildInternalStateToolDenial = (convId = "global", ctx = {}) => buildInternalStateDenial("access");
+
+const LIFECYCLE_ACTION_RE = /^(?:--?(?:setup|install|uninstall|restore-backups)|setup|install|uninstall|restore-backups)$/i;
+const LIFECYCLE_READONLY_RE = /^(?:--?(?:check|status|help)|-[ch]|status)$/i;
+const LIFECYCLE_CLI_BODY_RE = new RegExp("\\bagy-context(?:-saver)?(?:\\.(?:m?js|cmd|exe|bat))?[\\s'\",\\[\\]()]{1,24}" +
+  "(?:--?(?:setup|install|uninstall|restore-backups)|setup|install|uninstall|restore-backups)\\b", "i");
+const LIFECYCLE_FILE_LINE_RE = /(?:^|[\s"'=/\\])(?:scripts[\/\\]install-register\.mjs|install\.(?:sh|ps1))(?=$|[\s'",\[\]();&|])([^\r\n;|&]*)/gim;
+const SCRIPT_RUNNERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "pwsh", "powershell", "node", "nodejs", "python", "python3", ".", "source"]);
+const INLINE_STOP_RE = /^(?:-[epcm]|--(?:eval|print|check|command)|-[a-z]*c)$/i;
+const normalizeHookCmdName = (tok) => path.basename(String(tok || "").replace(/\\/g, "/")).toLowerCase().replace(/\.(exe|cmd|bat|mjs|cjs|js)$/i, "");
+const isAgyCliScript = (s) => /(?:^|\/)agy-context(?:-saver)?\.mjs$/i.test(s);
+const isLifecycleScript = (s) => /(?:^|\/)(?:scripts\/install-register\.mjs|install\.(?:sh|ps1))$/i.test(s);
+
+export function hasLifecycleScriptBodyMatch(body) {
+  if (LIFECYCLE_CLI_BODY_RE.test(body)) return true;
+  for (const m of body.matchAll(LIFECYCLE_FILE_LINE_RE)) {
+    const tail = m[1] || "";
+    if (/(?:--?(?:setup|install|uninstall|restore-backups)|\b(?:setup|install|uninstall|restore-backups)\b)/i.test(tail)) return true;
+    if (!/(?:^|[\s'",\[\]()])(?:--?(?:check|status|help)|-[ch]|status)\b/i.test(tail)) return true;
+  }
+  return false;
+}
+
+export function lifecycleActionIndex(tokens, cmdIdx, endIdx) {
+  if (cmdIdx >= endIdx) return -1;
+  const raw0 = cleanFileToken(tokens[cmdIdx].value).replace(/\\/g, "/"), cmd0 = normalizeHookCmdName(tokens[cmdIdx].value);
+  const isAgyCli = /^agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?$/.test(cmd0) || isAgyCliScript(raw0);
+  if (isAgyCli) return cmdIdx + 1 < endIdx && LIFECYCLE_ACTION_RE.test(tokens[cmdIdx + 1].value) ? cmdIdx + 1 : -1;
+  const scriptAt = (idx) => idx < endIdx ? cleanFileToken(tokens[idx].value).replace(/\\/g, "/") : "";
+  const isMutatingScript = (sIdx) => {
+    const rest = tokens.slice(sIdx + 1, endIdx);
+    return rest.some((t) => LIFECYCLE_ACTION_RE.test(t.value)) || !rest.some((t) => LIFECYCLE_READONLY_RE.test(t.value)) ? sIdx : -1;
+  };
+  if (isLifecycleScript(raw0)) return isMutatingScript(cmdIdx);
+  if (["node", "nodejs", "sh", "bash", "zsh", "dash", "ksh", "pwsh", "powershell"].includes(cmd0)) {
+    for (let i = cmdIdx + 1; i < endIdx; i++) {
+      const v = tokens[i].value, s = scriptAt(i);
+      if (v === "--" || ((cmd0 === "node" || cmd0 === "nodejs") && /^(?:-[ep]|--(?:eval|print))$/.test(v))) break;
+      if (!v.startsWith("-") && isAgyCliScript(s)) return i + 1 < endIdx && LIFECYCLE_ACTION_RE.test(tokens[i + 1].value) ? i + 1 : -1;
+      if (!v.startsWith("-") && isLifecycleScript(s)) return isMutatingScript(i);
+    }
+  }
+  return -1;
+}
+
+export function scriptBodyHasLifecycleCommand(file) {
+  try {
+    const st = fs.statSync(file);
+    return st.isFile() && st.size <= 1024 * 1024 && hasLifecycleScriptBodyMatch(fs.readFileSync(file, "utf-8"));
+  } catch { return false; }
+}
+
+export function commandScriptPath(tokens, idx, endIdx) {
+  const toCand = (tok) => {
+    const c = cleanFileToken(tok), norm = c.replace(/\\/g, "/");
+    return isExecutableScriptPath(c) && !isAgyCliScript(norm) && !isLifecycleScript(norm) ? c : null;
+  };
+  if (idx >= endIdx) return null;
+  const direct = toCand(tokens[idx].value), cmd0 = normalizeHookCmdName(tokens[idx].value);
+  if (direct || !SCRIPT_RUNNERS.has(cmd0)) return direct;
+  for (let i = idx + 1; i < endIdx; i++) {
+    const v = tokens[i].value;
+    if (v === "--") return i + 1 < endIdx ? toCand(tokens[i + 1].value) : null;
+    if (INLINE_STOP_RE.test(v)) return null;
+    if (!v.startsWith("-") && toCand(v)) return toCand(v);
+  }
+  return null;
+}
+
+export function isRestrictedLifecycleCaller(convId, ctx) {
+  if (!convId || convId === "global") return false;
+  try { return getEffectiveMode(convId, undefined, getBrainDirs({ activeTranscriptPath: ctx?.transcriptPath || "" })).restricted; }
+  catch { return true; }
+}

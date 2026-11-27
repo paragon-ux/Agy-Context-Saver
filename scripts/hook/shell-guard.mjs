@@ -13,7 +13,8 @@ import { HOOK_REPO_ROOT, MAX_SPILLOVER_SLICE_LINES, MAX_FULL_FILE_BYTES, respond
   expandLeadingTilde, expandAndResolvePathVariants, cleanFileToken, isProtectedInternalState, isProtectedGovernanceFileMutationPath,
   isUserEditableGeminiConfigPath, isProtectedGovernanceDirPath, isProtectedBenchmarkFilePath, isBenchmarkGuardDisabled, isStepSpilloverPath,
   stripTranscriptLogRefs, isReadOnlyTranscriptVerb, isExecutableScriptPath, matchTaskLogToken, extractTaskLogMatches, resolveInternalReadStatPaths,
-  getTaskState, buildInternalStateShellDenial } from "./common.mjs";
+  getTaskState, buildInternalStateShellDenial, lifecycleActionIndex, scriptBodyHasLifecycleCommand, commandScriptPath,
+  isRestrictedLifecycleCaller } from "./common.mjs";
 const ENV_CACHE_TTL_MS = 60000;
 let cachedRtkKey = null, cachedRtkValue = undefined;
 const safeStat = (p) => {
@@ -1963,12 +1964,43 @@ function postProcessCommand(rawCmd, effCmd, rtkPrefix) {
   }
   return result;
 }
+function hasLifecycleInvocation(segments, depth = 0, cwd = "") {
+  if (depth > 4) return true;
+  const { perSegment } = analyzeSegmentCommandStarts(segments, { allowPartialCompound: depth > 0 });
+  for (let idx = 0; idx < segments.length; idx++) {
+    const tokens = getSegTokens(segments[idx]);
+    for (const start of perSegment[idx]?.starts || []) {
+      const endIdx = start.endIdx ?? tokens.length, xr = unwrapCommandPrefix(tokens, start.cmdIdx, endIdx, { unwrapXargs: true });
+      const clean = [];
+      for (let k = xr.uncertain ? start.cmdIdx : xr.cmdIdx; k < endIdx; k++) {
+        const r = skipSingleRedirect(tokens, k);
+        if (r) k = r.nextIdx - 1;
+        else clean.push(tokens[k]);
+      }
+      if (lifecycleActionIndex(clean, 0, clean.length) !== -1) return true;
+      const script = commandScriptPath(clean, 0, clean.length), effCwd = joinLocalCwd(start.localCwd, xr.localCwd);
+      if (script) {
+        const base = effCwd ? path.resolve(cwd || "", expandLeadingTilde(effCwd)) : (cwd || "");
+        if (scriptBodyHasLifecycleCommand(resolveHookPath(expandLeadingTilde(script), base))) return true;
+      }
+    }
+    for (const child of collectSegmentChildScripts(segments[idx], perSegment[idx], segments, idx, "none")) {
+      const nextCwd = child.localCwd ? path.resolve(cwd || "", expandLeadingTilde(child.localCwd)) : cwd;
+      if (!child.innerScript || hasLifecycleInvocation(splitShellSegments(child.innerScript), depth + 1, nextCwd)) return true;
+    }
+  }
+  return false;
+}
 export async function handleRunCommand(ctx) {
   const { args, convId, cwd } = ctx, rawCmd = args.CommandLine !== undefined ? args.CommandLine : args.command;
   const deny = (reason) => respond({ decision: "deny", reason });
   if (typeof rawCmd !== "string" || !rawCmd.trim()) deny("Antigravity Governance: Missing or empty CommandLine in run_command.");
   const segments = splitShellSegments(rawCmd);
   if (touchesCanonicalState(segments, ctx)) deny("Antigravity Governance: Direct access to protected plugin state is prohibited.");
+  if (isRestrictedLifecycleCaller(convId, ctx) && hasLifecycleInvocation(segments, 0, cwd)) {
+    deny("Antigravity Execution Governance: Sessions restricted by parent transcript isolation cannot execute " +
+      "plugin lifecycle setup, install, uninstall, or restore-backups commands.");
+  }
   const mutVerdict = checkShellMutations(segments, convId, ctx);
   if (mutVerdict) respond(mutVerdict);
   const blockingWatch = findBlockingWatchLoop(segments);
