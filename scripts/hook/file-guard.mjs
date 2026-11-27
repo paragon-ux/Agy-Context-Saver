@@ -35,6 +35,7 @@ import {
   isOversizedInternalTarget,
   buildInternalStateToolDenial,
   hasLifecycleScriptBodyMatch,
+  stripsGovernanceEnvironment,
   isRestrictedLifecycleCaller
 } from "./common.mjs";
 
@@ -384,7 +385,8 @@ function getRestrictedChildScriptBlockReason(body) {
   if (hasLifecycleScriptBodyMatch(body)) return "lifecycle-command";
   if (
     /(?:^|[\s;|&(])(?:AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR|GEMINI_CONVERSATION_ID|XDG_STATE_HOME|LOCALAPPDATA)=/i.test(body) ||
-    RESTRICTED_SCRIPT_ENV_PROP_RE.test(body)
+    RESTRICTED_SCRIPT_ENV_PROP_RE.test(body) ||
+    stripsGovernanceEnvironment(body)
   ) return "governance-env";
   return null;
 }

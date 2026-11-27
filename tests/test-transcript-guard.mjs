@@ -1071,15 +1071,26 @@ async function testRestrictedChildLifecycleContainment() {
   const evilZeroSh = path.join(lifeDir, "evil-zero.sh");
   const evilMjs = path.join(lifeDir, "evil.mjs");
   const safeMd = path.join(lifeDir, "NOTES.md");
-  const hookAt = (convId, toolName, args, cwd = lifeDir) => JSON.parse(spawnSync(process.execPath, [hookScript], {
+  const hookFullAt = (convId, toolName, args, cwd = lifeDir) => JSON.parse(spawnSync(process.execPath, [hookScript], {
     input: JSON.stringify({ conversationId: convId, cwd, toolCall: { name: toolName, args } }),
     encoding: "utf-8", env: process.env
-  }).stdout.trim()).decision;
+  }).stdout.trim());
+  const hookAt = (convId, toolName, args, cwd = lifeDir) => hookFullAt(convId, toolName, args, cwd).decision;
   const shellAt = (convId, cmd, cwd = lifeDir) => hookAt(convId, "run_command", { CommandLine: cmd, WaitMsBeforeAsync: 5000 }, cwd);
   try {
+    const { stripsGovernanceEnvironment } = await import("../scripts/hook/common.mjs");
+    const t0 = performance.now();
+    assert.equal(stripsGovernanceEnvironment("env a ".repeat(20000) + "x"), false);
+    assert.ok(performance.now() - t0 < 200, "stripsGovernanceEnvironment must stay linear on repetitive env prefixes");
+
     fs.writeFileSync(evilSh, "node scripts/install-register.mjs --uninstall\n");
     fs.writeFileSync(evilZeroSh, "node scripts/install-register.mjs\n");
     fs.writeFileSync(evilMjs, "import { execSync } from 'node:child_process';\nexecSync('agy-context uninstall');\n");
+    fs.mkdirSync(path.join(lifeDir, "sub"));
+    fs.writeFileSync(path.join(lifeDir, "sub", "evil.sh"), "node scripts/install-register.mjs --uninstall\n");
+    fs.writeFileSync(path.join(lifeDir, "plain"), "agy-context uninstall\n");
+    fs.writeFileSync(path.join(lifeDir, "package.json"), JSON.stringify({ scripts: { uninstaller: "agy-context uninstall" } }));
+    fs.writeFileSync(path.join(lifeDir, "sub", "package.json"), JSON.stringify({ scripts: { subuninstall: "agy-context uninstall" } }));
     for (const mode of ["self-only", "deny"]) {
       setPolicy(P, mode);
       for (const cmd of [
@@ -1097,16 +1108,77 @@ async function testRestrictedChildLifecycleContainment() {
         "bash evil.sh",
         "bash evil-zero.sh",
         ". ./evil.sh",
-        "node ./evil.mjs"
+        "node ./evil.mjs",
+        "cd sub && bash evil.sh",
+        "sh plain",
+        "bash plain",
+        "node -e \"require('child_process').execSync('agy-context uninstall')\"",
+        "node -e\"require('child_process').execSync('agy-context uninstall')\"",
+        "node --eval=\"require('child_process').execSync('agy-context uninstall')\"",
+        "python3 -c \"import os; os.system('agy-context uninstall')\"",
+        "python3 -c\"import os; os.system('agy-context uninstall')\"",
+        "npx agy-context uninstall",
+        "npx -y --package=agy-context-saver agy-context uninstall",
+        "npm exec -- agy-context uninstall",
+        "pnpm dlx agy-context-saver uninstall",
+        "npm run uninstaller",
+        "npm --prefix sub run subuninstall",
+        "pnpm -C sub run subuninstall",
+        "env -i sh plain",
+        "env - sh plain",
+        "/usr/bin/env -i sh plain",
+        "env -u GEMINI_CONVERSATION_ID sh plain",
+        "env -uGEMINI_CONVERSATION_ID sh plain",
+        "env --unset=GEMINI_CONVERSATION_ID sh plain",
+        "GEMINI_CONVERSATION_ID= sh plain",
+        "unset GEMINI_CONVERSATION_ID; agy-context uninstall",
+        "export -n GEMINI_CONVERSATION_ID && sh plain"
       ]) {
         assert.equal(shellAt(A, cmd), "deny", `Restricted child (${mode}) must deny lifecycle command: ${cmd}`);
       }
       assert.equal(hookAt(A, "write_file", { Path: path.join(lifeDir, "drop.sh"), Content: "node scripts/install-register.mjs --uninstall\n" }), "deny");
       assert.equal(hookAt(A, "write_file", { Path: path.join(lifeDir, "drop-zero.sh"), Content: "node scripts/install-register.mjs\n" }), "deny");
+      assert.equal(hookAt(A, "write_file", { Path: path.join(lifeDir, "drop-env.sh"), Content: "#!/bin/sh\nenv -i sh plain\n" }), "deny");
       assert.equal(hookAt(A, "write_file", { Path: safeMd, Content: "Run `agy-context setup` from a top-level session.\n" }), "allow");
       assert.equal(shellAt(A, "agy-context status"), "allow");
+      assert.equal(shellAt(A, "agy-context setup --check"), "allow");
+      assert.equal(shellAt(A, "agy-context install --help"), "allow");
+      assert.equal(shellAt(A, "rg 'GEMINI_CONVERSATION_ID=' NOTES.md"), "allow");
       assert.equal(shellAt(A, "node scripts/install-register.mjs --check", root), "allow");
-      assert.equal(shellAt(P, "agy-context uninstall", root), "allow");
+
+      // Runtime lifecycle authorization: child without grant fails; external without GEMINI_CONVERSATION_ID succeeds; parent gets valid grant
+      const childBin = spawnSync(process.execPath, [path.join(root, "bin", "agy-context.mjs"), "uninstall"], {
+        cwd: root, encoding: "utf-8", env: { ...process.env, GEMINI_CONVERSATION_ID: A }
+      });
+      assert.notEqual(childBin.status, 0);
+      assert.match(childBin.stderr + childBin.stdout, /verified hook identity grant/);
+
+      const childCheck = spawnSync(process.execPath, [path.join(root, "bin", "agy-context.mjs"), "setup", "--check"], {
+        cwd: root, encoding: "utf-8", env: { ...process.env, GEMINI_CONVERSATION_ID: A }
+      });
+      assert.doesNotMatch(childCheck.stderr + childCheck.stdout, /verified hook identity grant/);
+
+      const extEnv = { ...process.env };
+      delete extEnv.GEMINI_CONVERSATION_ID;
+      const extUninstall = spawnSync(process.execPath, [path.join(root, "scripts", "install-register.mjs"), "--uninstall"], {
+        cwd: root, encoding: "utf-8", env: extEnv
+      });
+      assert.equal(extUninstall.status, 0);
+      setPolicy(P, mode);
+
+      const parentHook = hookFullAt(P, "run_command", { CommandLine: "node bin/agy-context.mjs uninstall", WaitMsBeforeAsync: 5000 }, root);
+      assert.equal(parentHook.decision, "allow");
+      assert.match(parentHook.overwrite?.CommandLine || "", /--hook-grant=[a-f0-9]{32}$/);
+      const parentRun = spawnSync(parentHook.overwrite.CommandLine, {
+        shell: true, cwd: root, encoding: "utf-8", env: { ...process.env, GEMINI_CONVERSATION_ID: P }
+      });
+      assert.equal(parentRun.status, 0, `Parent with grant should succeed: ${parentRun.stderr}`);
+      setPolicy(P, mode);
+
+      // Non-clean top-level lifecycle forms under restrictive policy must cleanly deny in hook rather than corrupting CommandLine
+      for (const dirtyCmd of ["agy-context uninstall &", "agy-context uninstall # comment", "env FOO=1 agy-context uninstall"]) {
+        assert.equal(shellAt(P, dirtyCmd, root), "deny", `Dirty top-level lifecycle command (${dirtyCmd}) must deny cleanly`);
+      }
     }
   } finally {
     setPolicy(P, "open");

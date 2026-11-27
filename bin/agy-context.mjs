@@ -14,6 +14,7 @@ import { readPolicies, setPolicy, getLineage, hasRestrictivePolicy } from "../li
 import { resolveCallerIdentity } from "../lib/hook-identity.mjs";
 import { getBrainDirs } from "../lib/path-guards.mjs";
 import { checkTranscriptHealth, formatTranscriptHealth } from "../lib/transcript-health.mjs";
+import { assertLifecycleAuthorized, stripLifecycleGrant } from "../lib/lifecycle-auth.mjs";
 import {
   assertSupportedNodeVersion,
   runInstall,
@@ -313,17 +314,20 @@ async function main() {
     return;
   }
   if (cmd === "setup" || cmd === "install" || cmd === "--install") {
-    const opts = parseLifecycleCmd("setup", rest, ["check", "allow-degraded"]);
+    const opts = parseLifecycleCmd("setup", stripLifecycleGrant(rest).argv, ["check", "allow-degraded"]);
+    if (!opts.check) assertLifecycleAuthorized(rest);
     await runInstall({ checkOnly: Boolean(opts.check), allowDegraded: Boolean(opts["allow-degraded"]) });
     return;
   }
   if (cmd === "uninstall" || cmd === "--uninstall") {
-    const opts = parseLifecycleCmd("uninstall", rest, ["restore-backups"]);
+    const opts = parseLifecycleCmd("uninstall", stripLifecycleGrant(rest).argv, ["restore-backups"]);
+    assertLifecycleAuthorized(rest);
     await runUninstall({ restoreBackups: Boolean(opts["restore-backups"]) });
     return;
   }
   if (cmd === "restore-backups" || cmd === "--restore-backups") {
-    parseLifecycleCmd("restore-backups", rest);
+    parseLifecycleCmd("restore-backups", stripLifecycleGrant(rest).argv);
+    assertLifecycleAuthorized(rest);
     await runRestoreBackups();
     return;
   }

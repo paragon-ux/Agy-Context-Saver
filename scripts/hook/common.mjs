@@ -567,8 +567,19 @@ const LIFECYCLE_READONLY_RE = /^(?:--?(?:check|status|help)|-[ch]|status)$/i;
 const LIFECYCLE_CLI_BODY_RE = new RegExp("\\bagy-context(?:-saver)?(?:\\.(?:m?js|cmd|exe|bat))?[\\s'\",\\[\\]()]{1,24}" +
   "(?:--?(?:setup|install|uninstall|restore-backups)|setup|install|uninstall|restore-backups)\\b", "i");
 const LIFECYCLE_FILE_LINE_RE = /(?:^|[\s"'=/\\])(?:scripts[\/\\]install-register\.mjs|install\.(?:sh|ps1))(?=$|[\s'",\[\]();&|])([^\r\n;|&]*)/gim;
-const SCRIPT_RUNNERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "pwsh", "powershell", "node", "nodejs", "python", "python3", ".", "source"]);
-const INLINE_STOP_RE = /^(?:-[epcm]|--(?:eval|print|check|command)|-[a-z]*c)$/i;
+const SCRIPT_RUNNERS = new Set([
+  "sh", "bash", "zsh", "dash", "ksh", "pwsh", "powershell", "node", "nodejs", "python", "python3", "perl", "ruby", "php", "cmd", ".", "source"
+]);
+const INLINE_STOP_RE = /^(?:-[epcmr]|--(?:eval|print|check|command)|-[a-z]*c|\/[ck])$/i;
+const INLINE_EXEC_FLAG_RE = /^(?:-[epcr]|--(?:eval|print|command)|\/[ck])$/i;
+const GOV_ENV_SET = new Set(["GEMINI_CONVERSATION_ID", "XDG_STATE_HOME", "LOCALAPPDATA", "AGY_TEST_PROFILE_DIR", "AGY_BRAIN_DIR"]);
+const SCRIPT_ENV_MUTATION_RE = new RegExp(
+  "(?:(?:process\\.env|os\\.environ)\\s*(?:\\.\\s*(?:GEMINI_CONVERSATION_ID|XDG_STATE_HOME|LOCALAPPDATA|AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR)\\b|" +
+  "\\[\\s*['\"](?:GEMINI_CONVERSATION_ID|XDG_STATE_HOME|LOCALAPPDATA|AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR)['\"]\\s*\\])|" +
+  "\\$env:(?:GEMINI_CONVERSATION_ID|XDG_STATE_HOME|LOCALAPPDATA|AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR)\\b|" +
+  "\\bset\\s+(?:GEMINI_CONVERSATION_ID|XDG_STATE_HOME|LOCALAPPDATA|AGY_TEST_PROFILE_DIR|AGY_BRAIN_DIR)=)",
+  "i"
+);
 const normalizeHookCmdName = (tok) => path.basename(String(tok || "").replace(/\\/g, "/")).toLowerCase().replace(/\.(exe|cmd|bat|mjs|cjs|js)$/i, "");
 const isAgyCliScript = (s) => /(?:^|\/)agy-context(?:-saver)?\.mjs$/i.test(s);
 const isLifecycleScript = (s) => /(?:^|\/)(?:scripts\/install-register\.mjs|install\.(?:sh|ps1))$/i.test(s);
@@ -583,11 +594,22 @@ export function hasLifecycleScriptBodyMatch(body) {
   return false;
 }
 
-export function lifecycleActionIndex(tokens, cmdIdx, endIdx) {
+function checkAgyCliAction(tokens, actIdx, endIdx) {
+  if (actIdx >= endIdx || !LIFECYCLE_ACTION_RE.test(tokens[actIdx].value)) return -1;
+  const rest = tokens.slice(actIdx + 1, endIdx).map((t) => t.value);
+  if (rest.some((v) => v === "--help" || v === "-h")) return -1;
+  const isSetup = /^(?:--?(?:setup|install)|setup|install)$/i.test(tokens[actIdx].value);
+  const isMutFlag = rest.some((v) => /^--?(?:uninstall|restore-backups)$/i.test(v));
+  if (isSetup && !isMutFlag && rest.some((v) => v === "--check" || v === "-c")) return -1;
+  return actIdx;
+}
+
+function directLifecycleActionIndex(tokens, cmdIdx, endIdx) {
   if (cmdIdx >= endIdx) return -1;
-  const raw0 = cleanFileToken(tokens[cmdIdx].value).replace(/\\/g, "/"), cmd0 = normalizeHookCmdName(tokens[cmdIdx].value);
+  const raw0 = cleanFileToken(tokens[cmdIdx].value).replace(/\\/g, "/");
+  const cmd0 = normalizeHookCmdName(tokens[cmdIdx].value);
   const isAgyCli = /^agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?$/.test(cmd0) || isAgyCliScript(raw0);
-  if (isAgyCli) return cmdIdx + 1 < endIdx && LIFECYCLE_ACTION_RE.test(tokens[cmdIdx + 1].value) ? cmdIdx + 1 : -1;
+  if (isAgyCli) return checkAgyCliAction(tokens, cmdIdx + 1, endIdx);
   const scriptAt = (idx) => idx < endIdx ? cleanFileToken(tokens[idx].value).replace(/\\/g, "/") : "";
   const isMutatingScript = (sIdx) => {
     const rest = tokens.slice(sIdx + 1, endIdx);
@@ -596,41 +618,343 @@ export function lifecycleActionIndex(tokens, cmdIdx, endIdx) {
   if (isLifecycleScript(raw0)) return isMutatingScript(cmdIdx);
   if (["node", "nodejs", "sh", "bash", "zsh", "dash", "ksh", "pwsh", "powershell"].includes(cmd0)) {
     for (let i = cmdIdx + 1; i < endIdx; i++) {
-      const v = tokens[i].value, s = scriptAt(i);
-      if (v === "--" || ((cmd0 === "node" || cmd0 === "nodejs") && /^(?:-[ep]|--(?:eval|print))$/.test(v))) break;
-      if (!v.startsWith("-") && isAgyCliScript(s)) return i + 1 < endIdx && LIFECYCLE_ACTION_RE.test(tokens[i + 1].value) ? i + 1 : -1;
+      const v = tokens[i].value;
+      const s = scriptAt(i);
+      if (v === "--" || ((cmd0 === "node" || cmd0 === "nodejs") && /^(?:-[epc]|--(?:eval|print|check))$/.test(v))) break;
+      if (!v.startsWith("-") && isAgyCliScript(s)) return checkAgyCliAction(tokens, i + 1, endIdx);
       if (!v.startsWith("-") && isLifecycleScript(s)) return isMutatingScript(i);
     }
   }
   return -1;
 }
 
+export function lifecycleActionIndex(tokens, cmdIdx, endIdx) {
+  const direct = directLifecycleActionIndex(tokens, cmdIdx, endIdx);
+  if (direct !== -1 || cmdIdx >= endIdx) return direct;
+  const cmd0 = normalizeHookCmdName(tokens[cmdIdx].value);
+  if (["npx", "npm", "pnpm", "yarn", "bun", "bunx"].includes(cmd0)) {
+    for (let i = cmdIdx + 1; i < endIdx; i++) {
+      const v = cleanFileToken(tokens[i].value).replace(/\\/g, "/");
+      const base = normalizeHookCmdName(v);
+      const cli = /^agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?$/.test(base) || isAgyCliScript(v);
+      const pkg = /^agy-context(?:-saver)?(?:@[^\s]+)?$/.test(base);
+      if ((cli || pkg) && i + 1 < endIdx) {
+        const act = checkAgyCliAction(tokens, i + 1, endIdx);
+        if (act !== -1) return act;
+      }
+    }
+  }
+  return -1;
+}
+
+function isGovAssignmentWord(word) {
+  const eq = word.indexOf("=");
+  return eq > 0 && GOV_ENV_SET.has(word.slice(0, eq).toUpperCase());
+}
+
+function envSplitStringStripsGov(spec) {
+  const parts = String(spec || "").trim().split(/\s+/).filter(Boolean);
+  return wordsStripGovernanceEnv(["env", ...parts], 4);
+}
+
+function wordsStripGovernanceEnv(words, depth = 0) {
+  if (depth > 4) return true;
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i];
+    if (isGovAssignmentWord(w)) return true;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
+      i += 1;
+      continue;
+    }
+    const cmd = normalizeHookCmdName(w);
+    if (["command", "builtin", "nohup", "time", "sudo", "nice"].includes(cmd)) {
+      i += 1;
+      while (i < words.length && words[i].startsWith("-") && words[i] !== "--") i += 1;
+      if (words[i] === "--") i += 1;
+      continue;
+    }
+    if (cmd === "unset") return words.slice(i + 1).some((arg) => GOV_ENV_SET.has(arg.toUpperCase()));
+    if (cmd === "export" || cmd === "declare" || cmd === "typeset") {
+      const hasUnexport = words.slice(i + 1).includes("-n");
+      return words.slice(i + 1).some((arg) => isGovAssignmentWord(arg) || (hasUnexport && GOV_ENV_SET.has(arg.toUpperCase())));
+    }
+    if (cmd === "env") {
+      let j = i + 1;
+      while (j < words.length) {
+        const arg = words[j];
+        if (arg === "-" || arg === "-i" || arg === "--ignore-environment") return true;
+        if (arg === "--") {
+          j += 1;
+          break;
+        }
+        if (isGovAssignmentWord(arg)) return true;
+        if (arg.includes("=") && !arg.startsWith("-")) {
+          j += 1;
+          continue;
+        }
+        if (arg === "-u" || arg === "--unset") {
+          const target = words[j + 1] ? words[j + 1].replace(/^=/, "").toUpperCase() : "";
+          if (GOV_ENV_SET.has(target)) return true;
+          j += 2;
+          continue;
+        }
+        if (arg.startsWith("--unset=") && GOV_ENV_SET.has(arg.slice("--unset=".length).toUpperCase())) return true;
+        if (arg.startsWith("-u") && arg.length > 2 && GOV_ENV_SET.has(arg.slice(2).replace(/^=/, "").toUpperCase())) return true;
+        if (arg === "-S" || arg === "--split-string") {
+          if (envSplitStringStripsGov(words[j + 1])) return true;
+          j += 2;
+          continue;
+        }
+        if (arg.startsWith("-S") && arg.length > 2 && envSplitStringStripsGov(arg.slice(2))) return true;
+        if (arg.startsWith("--split-string=") && envSplitStringStripsGov(arg.slice("--split-string=".length))) return true;
+        if (/^-[a-zA-Z]+$/.test(arg) && arg.includes("i")) return true;
+        if (arg === "-C" || arg === "--chdir") {
+          j += 2;
+          continue;
+        }
+        if (arg.startsWith("-")) {
+          j += 1;
+          continue;
+        }
+        break;
+      }
+      if (j >= words.length) return false;
+      i = j;
+      continue;
+    }
+    if (["sh", "bash", "zsh", "dash", "ksh"].includes(cmd)) {
+      for (let k = i + 1; k + 1 < words.length; k++) {
+        if (/^-[a-zA-Z]*c$/.test(words[k])) return stripsGovernanceEnvironment(words[k + 1], depth + 1);
+      }
+    }
+    return false;
+  }
+  return false;
+}
+
+function splitShellClausesWords(text) {
+  const clauses = [];
+  let curClause = [];
+  let curWord = "";
+  let inWord = false;
+  let quote = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote === "'") {
+      if (ch === "'") quote = "";
+      else curWord += ch;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === "\\") {
+        i += 1;
+        if (i < text.length) curWord += text[i];
+      } else if (ch === '"') {
+        quote = "";
+      } else {
+        curWord += ch;
+      }
+      continue;
+    }
+    if (ch === "\\" && i + 1 < text.length) {
+      inWord = true;
+      i += 1;
+      curWord += text[i];
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      inWord = true;
+      quote = ch;
+      continue;
+    }
+    if (!inWord && ch === "#") {
+      while (i < text.length && text[i] !== "\n") i += 1;
+      if (curClause.length) clauses.push(curClause);
+      curClause = [];
+      continue;
+    }
+    if (ch === " " || ch === "\t") {
+      if (inWord) {
+        curClause.push(curWord);
+        curWord = "";
+        inWord = false;
+      }
+      continue;
+    }
+    if (";|&\r\n()`".includes(ch)) {
+      if (inWord) {
+        curClause.push(curWord);
+        curWord = "";
+        inWord = false;
+      }
+      if (curClause.length) clauses.push(curClause);
+      curClause = [];
+      continue;
+    }
+    inWord = true;
+    curWord += ch;
+  }
+  if (inWord) curClause.push(curWord);
+  if (curClause.length) clauses.push(curClause);
+  return clauses;
+}
+
+export function tokensStripGovernanceEnv(tokens, startIdx = 0, endIdx = tokens.length) {
+  return wordsStripGovernanceEnv(tokens.slice(startIdx, endIdx).map((t) => t.value));
+}
+
+export function stripsGovernanceEnvironment(command, depth = 0) {
+  if (typeof command !== "string" || !command) return false;
+  if (depth > 4) return true;
+  if (SCRIPT_ENV_MUTATION_RE.test(command)) return true;
+  return splitShellClausesWords(command).some((words) => wordsStripGovernanceEnv(words, depth));
+}
+
 export function scriptBodyHasLifecycleCommand(file) {
   try {
     const st = fs.statSync(file);
-    return st.isFile() && st.size <= 1024 * 1024 && hasLifecycleScriptBodyMatch(fs.readFileSync(file, "utf-8"));
-  } catch { return false; }
+    const body = st.isFile() && st.size <= 1024 * 1024 ? fs.readFileSync(file, "utf-8") : "";
+    return Boolean(body && (hasLifecycleScriptBodyMatch(body) || stripsGovernanceEnvironment(body)));
+  } catch {
+    return false;
+  }
 }
 
 export function commandScriptPath(tokens, idx, endIdx) {
   const toCand = (tok) => {
-    const c = cleanFileToken(tok), norm = c.replace(/\\/g, "/");
+    const c = cleanFileToken(tok);
+    const norm = c.replace(/\\/g, "/");
     return isExecutableScriptPath(c) && !isAgyCliScript(norm) && !isLifecycleScript(norm) ? c : null;
   };
   if (idx >= endIdx) return null;
-  const direct = toCand(tokens[idx].value), cmd0 = normalizeHookCmdName(tokens[idx].value);
+  const direct = toCand(tokens[idx].value);
+  const cmd0 = normalizeHookCmdName(tokens[idx].value);
   if (direct || !SCRIPT_RUNNERS.has(cmd0)) return direct;
   for (let i = idx + 1; i < endIdx; i++) {
     const v = tokens[i].value;
     if (v === "--") return i + 1 < endIdx ? toCand(tokens[i + 1].value) : null;
     if (INLINE_STOP_RE.test(v)) return null;
     if (!v.startsWith("-") && toCand(v)) return toCand(v);
+    if (!v.startsWith("-") && SCRIPT_RUNNERS.has(cmd0)) {
+      const c = cleanFileToken(v);
+      const norm = c.replace(/\\/g, "/");
+      if (c && !/^[a-z][a-z0-9+.-]*:/i.test(c) && !isAgyCliScript(norm) && !isLifecycleScript(norm)) return c;
+    }
   }
   return null;
 }
 
+function extractInlineEvalSnippet(cmd0, tok, nextTok) {
+  if (INLINE_EXEC_FLAG_RE.test(tok)) return nextTok || "";
+  const longMatch = /^--(?:eval|print|command)=(.+)$/is.exec(tok);
+  if (longMatch) return longMatch[1];
+  if ((cmd0 === "node" || cmd0 === "nodejs") && /^-[ep].+/s.test(tok)) return tok.slice(2);
+  if (cmd0.startsWith("python") && /^-c.+/s.test(tok)) return tok.slice(2);
+  if ((cmd0 === "perl" || cmd0 === "ruby") && /^-e.+/s.test(tok)) return tok.slice(2);
+  if (cmd0 === "php" && /^-r.+/s.test(tok)) return tok.slice(2);
+  return "";
+}
+
+export function inlineScriptHasLifecycle(tokens, idx, endIdx, blockEnvStrip = false) {
+  if (idx >= endIdx) return false;
+  const cmd0 = normalizeHookCmdName(tokens[idx].value);
+  if (!["node", "nodejs", "python", "python3", "perl", "ruby", "php", "pwsh", "powershell", "cmd"].includes(cmd0)) return false;
+  for (let i = idx + 1; i < endIdx; i++) {
+    const code = extractInlineEvalSnippet(cmd0, tokens[i].value, tokens[i + 1]?.value);
+    if (code && (hasLifecycleScriptBodyMatch(code) || (blockEnvStrip && stripsGovernanceEnvironment(code)))) return true;
+  }
+  return false;
+}
+
+function parsePackageRunInvocation(tokens, idx, endIdx) {
+  const cmd0 = normalizeHookCmdName(tokens[idx]?.value);
+  if (!["npm", "pnpm", "yarn", "bun"].includes(cmd0)) return null;
+  let subDir = "";
+  for (let i = idx + 1; i < endIdx; i++) {
+    const v = tokens[i].value;
+    if (v === "--") return i + 1 < endIdx ? { name: tokens[i + 1].value, subDir } : null;
+    if ((v === "--prefix" || v === "-C" || v === "--dir" || v === "--cwd") && i + 1 < endIdx) {
+      subDir = tokens[i + 1].value;
+      i += 1;
+      continue;
+    }
+    const eq = /^--(?:prefix|dir|cwd)=(.+)$/.exec(v) || /^-C(.+)$/.exec(v);
+    if (eq) {
+      subDir = eq[1];
+      continue;
+    }
+    if (v === "run" || v === "run-script") return i + 1 < endIdx ? { name: tokens[i + 1].value, subDir } : null;
+    if (!v.startsWith("-") && (cmd0 === "yarn" || cmd0 === "bun")) return { name: v, subDir };
+    if (!v.startsWith("-") && ["test", "t", "start", "stop", "restart"].includes(v)) {
+      return { name: v === "t" ? "test" : v, subDir };
+    }
+  }
+  return null;
+}
+
+export function packageRunScriptHasLifecycle(tokens, idx, endIdx, cwd = "", blockEnvStrip = false) {
+  const parsed = parsePackageRunInvocation(tokens, idx, endIdx);
+  if (!parsed || !/^[A-Za-z0-9:._-]+$/.test(parsed.name)) return false;
+  const base = cwd || process.cwd();
+  let dir = parsed.subDir ? resolveHookPath(expandLeadingTilde(parsed.subDir), base) : path.resolve(base);
+  for (let depth = 0; depth < 16; depth++) {
+    const pkgFile = path.join(dir, "package.json");
+    if (fs.existsSync(pkgFile)) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(pkgFile, "utf8"));
+        const scripts = pkg?.scripts;
+        if (!scripts || typeof scripts !== "object") return false;
+        for (const key of [`pre${parsed.name}`, parsed.name, `post${parsed.name}`]) {
+          const s = scripts[key];
+          if (typeof s === "string" && (hasLifecycleScriptBodyMatch(s) || (blockEnvStrip && stripsGovernanceEnvironment(s)))) {
+            return true;
+          }
+        }
+        return false;
+      } catch {
+        return true;
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return false;
+}
+
+export function hasDirectLifecycleTokens(tokens, cwd = "", blockEnvStrip = false) {
+  return lifecycleActionIndex(tokens, 0, tokens.length) !== -1 ||
+    inlineScriptHasLifecycle(tokens, 0, tokens.length, blockEnvStrip) ||
+    packageRunScriptHasLifecycle(tokens, 0, tokens.length, cwd, blockEnvStrip);
+}
+
+export function isCleanLifecycleCommand(rawCmd, seg, tokens, unwrapPrefixFn) {
+  if (!tokens.length || seg.hasRedirect || seg.hasSubshell || seg.hasHeredoc || seg.hasHereString) return false;
+  if (!/^[ \t]*$/.test(rawCmd.slice(0, seg.start)) || !/^[ \t]*$/.test(rawCmd.slice(seg.end))) return false;
+  if (tokens.some((t) => (!t.quoted && t.raw.startsWith("#")) || t.value.startsWith("--hook-grant"))) return false;
+  const unwrapped = unwrapPrefixFn(tokens, 0, tokens.length, { unwrapXargs: true });
+  if (unwrapped.uncertain || unwrapped.cmdIdx !== 0) return false;
+  return directLifecycleActionIndex(tokens, 0, tokens.length) !== -1;
+}
+
+export function resolveGovernedGrantTarget(invocation, needLife, lifeClean, hasRealCaller) {
+  const hasEnvCaller = Boolean(process.env.GEMINI_CONVERSATION_ID);
+  if (invocation && (hasRealCaller ? !invocation.clean : hasEnvCaller)) {
+    return { denyReason: "Antigravity Governance: Run transcript commands as a single direct command so the hook can pass the caller identity." };
+  }
+  if (needLife && (hasRealCaller ? !lifeClean : hasEnvCaller)) {
+    return { denyReason: "Antigravity Governance: Run lifecycle commands as a single direct command so the hook can pass the caller identity." };
+  }
+  const grantCmd = invocation?.clean ? invocation.command : (lifeClean ? "lifecycle" : null);
+  return { denyReason: "", grantCmd: hasRealCaller ? grantCmd : null };
+}
+
 export function isRestrictedLifecycleCaller(convId, ctx) {
   if (!convId || convId === "global") return false;
-  try { return getEffectiveMode(convId, undefined, getBrainDirs({ activeTranscriptPath: ctx?.transcriptPath || "" })).restricted; }
-  catch { return true; }
+  try {
+    return getEffectiveMode(convId, undefined, getBrainDirs({ activeTranscriptPath: ctx?.transcriptPath || "" })).restricted;
+  } catch {
+    return true;
+  }
 }

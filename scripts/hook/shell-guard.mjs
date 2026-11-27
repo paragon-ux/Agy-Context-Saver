@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { getEffectiveMode } from "../../lib/transcript-policy.mjs";
+import { getEffectiveMode, hasRestrictivePolicy } from "../../lib/transcript-policy.mjs";
 import { mintHookIdentity } from "../../lib/hook-identity.mjs";
 import { getStateDir } from "../state-dir.mjs";
 import { quoteForCmd } from "../rtk-run.mjs";
@@ -13,8 +13,9 @@ import { HOOK_REPO_ROOT, MAX_SPILLOVER_SLICE_LINES, MAX_FULL_FILE_BYTES, respond
   expandLeadingTilde, expandAndResolvePathVariants, cleanFileToken, isProtectedInternalState, isProtectedGovernanceFileMutationPath,
   isUserEditableGeminiConfigPath, isProtectedGovernanceDirPath, isProtectedBenchmarkFilePath, isBenchmarkGuardDisabled, isStepSpilloverPath,
   stripTranscriptLogRefs, isReadOnlyTranscriptVerb, isExecutableScriptPath, matchTaskLogToken, extractTaskLogMatches, resolveInternalReadStatPaths,
-  getTaskState, buildInternalStateShellDenial, lifecycleActionIndex, scriptBodyHasLifecycleCommand, commandScriptPath,
-  isRestrictedLifecycleCaller } from "./common.mjs";
+  getTaskState, buildInternalStateShellDenial, scriptBodyHasLifecycleCommand, commandScriptPath, isRestrictedLifecycleCaller,
+  tokensStripGovernanceEnv, stripsGovernanceEnvironment, hasDirectLifecycleTokens, isCleanLifecycleCommand,
+  resolveGovernedGrantTarget } from "./common.mjs";
 const ENV_CACHE_TTL_MS = 60000;
 let cachedRtkKey = null, cachedRtkValue = undefined;
 const safeStat = (p) => {
@@ -1964,29 +1965,34 @@ function postProcessCommand(rawCmd, effCmd, rtkPrefix) {
   }
   return result;
 }
-function hasLifecycleInvocation(segments, depth = 0, cwd = "") {
+function hasLifecycleInvocation(segments, depth = 0, cwd = "", blockEnvStrip = false) {
   if (depth > 4) return true;
   const { perSegment } = analyzeSegmentCommandStarts(segments, { allowPartialCompound: depth > 0 });
+  let curCwd = cwd || "";
   for (let idx = 0; idx < segments.length; idx++) {
     const tokens = getSegTokens(segments[idx]);
     for (const start of perSegment[idx]?.starts || []) {
       const endIdx = start.endIdx ?? tokens.length, xr = unwrapCommandPrefix(tokens, start.cmdIdx, endIdx, { unwrapXargs: true });
+      if (blockEnvStrip && tokensStripGovernanceEnv(tokens, start.cmdIdx, endIdx)) return true;
       const clean = [];
       for (let k = xr.uncertain ? start.cmdIdx : xr.cmdIdx; k < endIdx; k++) {
         const r = skipSingleRedirect(tokens, k);
         if (r) k = r.nextIdx - 1;
         else clean.push(tokens[k]);
       }
-      if (lifecycleActionIndex(clean, 0, clean.length) !== -1) return true;
+      if (hasDirectLifecycleTokens(clean, curCwd, blockEnvStrip)) return true;
       const script = commandScriptPath(clean, 0, clean.length), effCwd = joinLocalCwd(start.localCwd, xr.localCwd);
-      if (script) {
-        const base = effCwd ? path.resolve(cwd || "", expandLeadingTilde(effCwd)) : (cwd || "");
-        if (scriptBodyHasLifecycleCommand(resolveHookPath(expandLeadingTilde(script), base))) return true;
+      const base = script && effCwd ? path.resolve(curCwd, expandLeadingTilde(effCwd)) : curCwd;
+      if (script && scriptBodyHasLifecycleCommand(resolveHookPath(expandLeadingTilde(script), base))) return true;
+      if (normalizeCmdName(tokens[start.cmdIdx]?.value) === "cd") {
+        const stepped = stepSegmentCd(segments, perSegment, idx, tokens, start.cmdIdx, endIdx, curCwd);
+        if (stepped.uncertain) return true;
+        curCwd = stepped.cwd;
       }
     }
     for (const child of collectSegmentChildScripts(segments[idx], perSegment[idx], segments, idx, "none")) {
-      const nextCwd = child.localCwd ? path.resolve(cwd || "", expandLeadingTilde(child.localCwd)) : cwd;
-      if (!child.innerScript || hasLifecycleInvocation(splitShellSegments(child.innerScript), depth + 1, nextCwd)) return true;
+      const nextCwd = child.localCwd ? path.resolve(curCwd, expandLeadingTilde(child.localCwd)) : curCwd;
+      if (!child.innerScript || hasLifecycleInvocation(splitShellSegments(child.innerScript), depth + 1, nextCwd, blockEnvStrip)) return true;
     }
   }
   return false;
@@ -1997,9 +2003,9 @@ export async function handleRunCommand(ctx) {
   if (typeof rawCmd !== "string" || !rawCmd.trim()) deny("Antigravity Governance: Missing or empty CommandLine in run_command.");
   const segments = splitShellSegments(rawCmd);
   if (touchesCanonicalState(segments, ctx)) deny("Antigravity Governance: Direct access to protected plugin state is prohibited.");
-  if (isRestrictedLifecycleCaller(convId, ctx) && hasLifecycleInvocation(segments, 0, cwd)) {
-    deny("Antigravity Execution Governance: Sessions restricted by parent transcript isolation cannot execute " +
-      "plugin lifecycle setup, install, uninstall, or restore-backups commands.");
+  if (isRestrictedLifecycleCaller(convId, ctx) && (hasLifecycleInvocation(segments, 0, cwd, true) || stripsGovernanceEnvironment(rawCmd))) {
+    deny("Antigravity Execution Governance: Sessions restricted by parent transcript isolation cannot strip governance environment variables " +
+      "or execute plugin lifecycle setup, install, uninstall, or restore-backups commands.");
   }
   const mutVerdict = checkShellMutations(segments, convId, ctx);
   if (mutVerdict) respond(mutVerdict);
@@ -2114,12 +2120,13 @@ export async function handleRunCommand(ctx) {
     }
   }
   const invocation = parseTranscriptInvocation(rawCmd), hasRealCaller = Boolean(ctx.convId && ctx.convId !== "global");
-  if (invocation && (hasRealCaller ? !invocation.clean : Boolean(process.env.GEMINI_CONVERSATION_ID))) {
-    deny("Antigravity Governance: Run transcript commands as a single direct command so the hook can pass the caller identity.");
-  }
-  if (invocation?.clean && hasRealCaller) {
-    const nonce = mintHookIdentity(ctx, invocation.command);
-    if (!nonce) deny("Antigravity Governance: Unable to mint verified caller identity for transcript command.");
+  const lifeClean = !invocation && segments.length === 1 && isCleanLifecycleCommand(rawCmd, segments[0], getSegTokens(segments[0]), unwrapCommandPrefix);
+  const needLife = !invocation && (!lifeClean || !hasRealCaller) && hasRestrictivePolicy() && hasLifecycleInvocation(segments, 0, cwd, false);
+  const grantTarget = resolveGovernedGrantTarget(invocation, needLife, lifeClean, hasRealCaller);
+  if (grantTarget.denyReason) deny(grantTarget.denyReason);
+  if (grantTarget.grantCmd) {
+    const nonce = mintHookIdentity(ctx, grantTarget.grantCmd);
+    if (!nonce) deny("Antigravity Governance: Unable to mint verified caller identity for governed command.");
     effectiveCmd += ` --hook-grant=${nonce}`;
   }
   const isDaemon = args.IsDaemon === true || args.isDaemon === true;

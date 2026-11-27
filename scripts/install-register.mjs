@@ -26,6 +26,7 @@ import {
   verifyLocalRtkBinary
 } from "./provision-rtk.mjs";
 import { getStateDir, removeLegacyTmpState } from "./state-dir.mjs";
+import { assertLifecycleAuthorized, stripLifecycleGrant } from "../lib/lifecycle-auth.mjs";
 
 export { isManagedShimFile, isManagedShimFile as isManagedAgyShimFile };
 export const MIN_NODE_MAJOR = 22;
@@ -1212,7 +1213,17 @@ function isDirectExecution() {
 
 // Auto-run if executed directly as script
 if (isDirectExecution()) {
-  const args = process.argv.slice(2);
+  const rawArgs = process.argv.slice(2);
+  const readOnlyFlags = new Set(["--check", "-c", "--status", "status", "--help", "-h", "help"]);
+  const mutatingFlags = new Set(["--uninstall", "uninstall", "--restore-backups", "restore-backups"]);
+  const mutating = rawArgs.some((a) => mutatingFlags.has(a)) || !rawArgs.some((a) => readOnlyFlags.has(a));
+  let args;
+  try {
+    args = mutating ? assertLifecycleAuthorized(rawArgs) : stripLifecycleGrant(rawArgs).argv;
+  } catch (err) {
+    console.error(`Error: ${err && err.message ? err.message : String(err)}`);
+    process.exit(1);
+  }
   const knownFlags = new Set(["--help", "-h", "--uninstall", "--status", "--json", "--check", "-c", "--restore-backups", "--allow-degraded"]);
   const knownPositionals = new Set(["help", "uninstall", "status", "restore-backups"]);
   for (const arg of args) {
