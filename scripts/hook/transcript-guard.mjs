@@ -15,22 +15,20 @@ const outside = (rel) => rel === ".." || rel.startsWith(`..${path.sep}`) || path
 
 function logsOwner(raw, cwd, brainDirs, globPositions = null) {
   const owners = new Set();
-  const target = collapseActiveShellGlob(raw, globPositions);
-  for (const variant of expandAndResolvePathVariants(target, cwd)) {
+  for (const variant of expandAndResolvePathVariants(collapseActiveShellGlob(raw, globPositions), cwd)) {
     const canonical = resolveRealOrAncestorPath(variant);
     for (const brain of brainDirs) {
       const root = resolveRealOrAncestorPath(brain);
-      const ancestor = path.relative(canonical, root);
-      if (!outside(ancestor)) { owners.add(""); continue; }
-      const rel = path.relative(root, canonical);
-      if (outside(rel)) continue;
-      const parts = rel.split(path.sep);
-      if (parts.length === 1 || (parts[1] === ".system_generated" && (parts.length === 2 || parts[2] === "logs"))) {
-        owners.add(parts[0]);
+      if (!outside(path.relative(canonical, root))) owners.add("");
+      else if (!outside(path.relative(root, canonical))) {
+        const parts = path.relative(root, canonical).split(path.sep);
+        if (parts.length === 1 || (parts[1] === ".system_generated" && (parts.length === 2 || parts[2] === "logs"))) owners.add(parts[0]);
       }
     }
     const norm = variant.replace(/\\/g, "/");
-    if (/\.system_generated\/logs(?:\/|$)/i.test(norm)) owners.add(norm.match(/(?:^|\/)([^/]+)\/\.system_generated\/logs(?:\/|$)/i)?.[1] || "");
+    if (/\.system_generated\/logs(?:\/|$)/i.test(norm)) {
+      owners.add(norm.match(/(?:^|\/)([^/]+)\/\.system_generated\/logs(?:\/|$)/i)?.[1] || "");
+    }
   }
   return !owners.size ? null : owners.size === 1 ? [...owners][0] : "";
 }
@@ -57,18 +55,19 @@ export function handleTranscriptGuard(ctx) {
         }
       }
     }
-    const scoped = inspectShellCommandScope(command, ctx.cwd || "", { protectedDirs: brainDirs });
-    for (const entry of scoped) {
+    for (const entry of inspectShellCommandScope(command, ctx.cwd || "", { protectedDirs: brainDirs })) {
       if (entry.depthExceeded || entry.uncertainFailClosed || entry.uncertainSource || entry.viaXargs) deny();
-      if (entry.uncertainCwd && (entry.recursive || !path.isAbsolute(expandLeadingTilde(entry.value)))) {
-        deny();
-      }
+      if (entry.uncertainCwd && (entry.recursive || !path.isAbsolute(expandLeadingTilde(entry.value)))) deny();
       targets.push({ value: entry.value, cwd: entry.cwd, globPositions: entry.globPositions, isOperand: entry.isOperand });
     }
   } else {
-    for (const key of PATH_KEYS) if (typeof ctx.args[key] === "string") targets.push({ value: ctx.args[key], cwd: ctx.cwd || "", globPositions: null, isOperand: true });
-    for (const arr of [ctx.args.paths, ctx.args.Paths]) if (Array.isArray(arr)) {
-      for (const value of arr) if (typeof value === "string") targets.push({ value, cwd: ctx.cwd || "", globPositions: null, isOperand: true });
+    for (const key of PATH_KEYS) {
+      if (typeof ctx.args[key] === "string") targets.push({ value: ctx.args[key], cwd: ctx.cwd || "", globPositions: null, isOperand: true });
+    }
+    for (const arr of [ctx.args.paths, ctx.args.Paths]) {
+      for (const value of Array.isArray(arr) ? arr : []) {
+        if (typeof value === "string") targets.push({ value, cwd: ctx.cwd || "", globPositions: null, isOperand: true });
+      }
     }
   }
   for (const { value, cwd, globPositions, isOperand } of targets) {
