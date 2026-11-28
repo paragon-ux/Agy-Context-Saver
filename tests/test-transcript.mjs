@@ -3784,10 +3784,22 @@ try {
         ["a{2,4}?", /a{2,4}?/i],
         ["step\\t\\d+\\n", /step\t\d+\n/i],
         ["[\\x41-\\x46]-\\d", /[\x41-\x46]-\d/i],
-        ["[a-\\d]", /[a-\d]/i]
+        ["[a-\\d]", /[a-\d]/i],
+        ["(?<\\u0061>foo)", /(?<\u0061>foo)/i],
+        ["(?<\\u{61}>foo)", /(?<\u{61}>foo)/i],
+        ["(?<\\ud835\\udc9c>foo)", /(?<\ud835\udc9c>foo)/i],
+        ["(?:^)?error", /(?:^)?error/i],
+        ["((?:^))?error", /((?:^))?error/i],
+        ["(^)*error", /(^)*error/i],
+        ["(?:\\b)+error", /(?:\b)+error/i],
+        ["(?:^|$)+error", /(?:^|$)+error/i],
+        ["{foo}|error", /\{foo\}|error/i],
+        ["\\{2\\}|error", /\{2\}|error/i]
       ];
       for (const [pat, truthRx] of supportedPairs) {
         const compiled = getCompiledRegex(pat);
+        assert.equal(compiled instanceof RegExp, false);
+        assert.equal(compiled.exec, undefined);
         assert.equal(compiled.source, pat);
         assert.equal(compiled.flags, "i");
         assert.equal(compiled.toString(), `/${pat}/i`);
@@ -3795,19 +3807,106 @@ try {
           assert.equal(compiled.test(inp), truthRx.test(inp), `Differential mismatch on pattern ${pat} input ${JSON.stringify(inp)}`);
         }
       }
+      const extraDiffInputs = [...diffInputs, "error", "warning", "FOO", "found error", "ordinary error", "{2}", "xy", "z"];
+      for (const [pat, truthRx] of supportedPairs) {
+        const compiled = getCompiledRegex(pat);
+        for (const inp of extraDiffInputs) {
+          assert.equal(compiled.test(inp), truthRx.test(inp), `Extended differential mismatch on ${pat} input ${JSON.stringify(inp)}`);
+        }
+      }
+      // ES2025 alternative-scoped duplicate group names: identical NFA behavior on Node 22 & 24, native oracle gated on runtime support
+      let supportsNativeDupGroups = false;
+      try {
+        supportsNativeDupGroups = new RegExp("(?<a>x)|(?<a>y)", "i").test("y");
+      } catch {}
+      const dupGroupCases = [
+        { pat: "(?<kind>error)|(?<kind>warning)", makeNative: () => new RegExp("(?<kind>error)|(?<kind>warning)", "i"), yes: ["error", "WARNING", "found warning"], no: ["info", ""] },
+        { pat: "(?<a>x)|(?<b>(?<a>y)|(?<a>z))", makeNative: () => new RegExp("(?<a>x)|(?<b>(?<a>y)|(?<a>z))", "i"), yes: ["x", "Y", "z"], no: ["w", ""] },
+        { pat: "(?<a>x)|(?<\\u0061>y)", makeNative: () => new RegExp("(?<a>x)|(?<\\u0061>y)", "i"), yes: ["X", "y"], no: ["z"] },
+        { pat: "(?<a>x)|(?<\\u{61}>y)", makeNative: () => new RegExp("(?<a>x)|(?<\\u{61}>y)", "i"), yes: ["x", "Y"], no: ["z"] },
+        { pat: "((?<a>x)|(?<a>y))+", makeNative: () => new RegExp("((?<a>x)|(?<a>y))+", "i"), yes: ["x", "y", "XY"], no: ["z", ""] }
+      ];
+      for (const { pat, makeNative, yes, no } of dupGroupCases) {
+        const compiled = getCompiledRegex(pat);
+        for (const s of yes) assert.equal(compiled.test(s), true, `ACS-R2-B2 ${pat} must match ${JSON.stringify(s)}`);
+        for (const s of no) assert.equal(compiled.test(s), false, `ACS-R2-B2 ${pat} must reject ${JSON.stringify(s)}`);
+        if (supportsNativeDupGroups) {
+          const nativeRx = makeNative();
+          for (const s of [...yes, ...no, ...extraDiffInputs]) {
+            assert.equal(compiled.test(s), nativeRx.test(s), `ACS-R2-B2 native parity mismatch for ${pat} on ${JSON.stringify(s)}`);
+          }
+        }
+      }
+      // Cyclic zero-width repetitions & deep diamond epsilon split chains must stay bounded without state truncation
+      for (const zeroWidthPat of ["((((^)*)*)*)*!", "((?:\\b)*)*!", "(?:(?:^|$)*)+!"]) {
+        assert.equal(getCompiledRegex(zeroWidthPat).test("a".repeat(2000)), false, `Zero-width repetition ${zeroWidthPat} must terminate cleanly`);
+        assert.equal(getCompiledRegex(zeroWidthPat).test("!"), true, `Zero-width repetition ${zeroWidthPat} must match '!'`);
+      }
+      const deepDiamond = "(?:a?){120}Z";
+      assert.equal(getCompiledRegex(deepDiamond).test("a".repeat(120) + "Z"), true, "Deep epsilon split chain must not truncate pending states");
+      assert.equal(getCompiledRegex(deepDiamond).test("a".repeat(120)), false);
+
       // Malformed, unsupported, or over-limit patterns fall back cleanly to case-insensitive literal match
       const literalFallbackCases = [
-        "foo\\", "^*", "\\b+", "$?", "a**", "a+*", "a?+", "a{2}{3}", "a+?*",
-        "(?<1a>x)", "(?<a>x)(?<a>y)", "(?<>x)", "(?=a)a", "(?!a)b", "(a)\\1",
+        "foo\\", "^*", "\\b+", "$?", "(?:^*)", "a**", "a+*", "a?+", "a{2}{3}", "a+?*",
+        "{2}|error", "{2,}|error", "{2,4}|error", "{4,2}|error", "a|{2}", "({2})", "(?:{2})", "(?<a>{2})", "^{2}|error",
+        "(?<1a>x)", "(?<a>x)(?<a>y)", "(?<a>(?<a>x))", "(?<a>x)(?:(?<a>y)|z)", "((?<a>x)|y)(?<a>z)",
+        "(?<a>x)(?<\\u0061>y)", "(?<a>x)(?<\\u{61}>y)", "(?<\\x61>foo)", "(?<\\uD800>foo)", "(?<\\u{D800}>foo)", "(?<\\u{110000}>foo)", "(?<\\u{1F600}>foo)",
+        "(?<>x)", "(?=a)a", "(?!a)b", "(a)\\1",
         "\\p{L}", "\\cA", "a{257}", "x".repeat(513), "(".repeat(300) + "a" + ")".repeat(300)
       ];
       for (const pat of literalFallbackCases) {
         const compiled = getCompiledRegex(pat);
+        assert.equal(compiled instanceof RegExp, false);
+        assert.equal(compiled.exec, undefined);
         assert.equal(compiled.test(`prefix_${pat.toUpperCase()}_suffix`), true, `Literal fallback must match case-folded literal for ${pat.slice(0, 32)}`);
         assert.equal(compiled.test("completely_unrelated_input"), false, `Literal fallback must reject unrelated input for ${pat.slice(0, 32)}`);
       }
+      assert.equal(getCompiledRegex("{2}|error").test("ordinary error"), false, "ACS-R2-B4 {2}|error must not match 'ordinary error'");
+      assert.equal(getCompiledRegex("a|{2}").test("a"), false, "ACS-R2-B4 a|{2} must fall back to literal");
       assert.equal(getCompiledRegex("k_literal").test("\u212a_literal"), false, "Literal matcher must not fold Kelvin sign to ASCII k");
       assert.equal(getCompiledRegex("s_literal").test("\u017f_literal"), false, "Literal matcher must not fold Latin small long-s to ASCII s");
+      assert.equal(getCompiledRegex("ss_literal").test("ß_literal"), false, "Literal matcher must not fold sharp-s ß to ASCII ss");
+      assert.equal(getCompiledRegex(""), null);
+      assert.equal(getCompiledRegex(null), null);
+
+      // ACS-R2-F2: KMP literal matcher O(N + M) scaling across both query length M and input length N
+      {
+        const hay10k = " ".repeat(10000);
+        for (const qLen of [64, 512, 2048, 4096]) {
+          const rightPat = " ".repeat(qLen) + "X";
+          const leftPat = "X" + " ".repeat(qLen);
+          const rightRx = getCompiledRegex(rightPat);
+          const leftRx = getCompiledRegex(leftPat);
+          const tM = performance.now();
+          for (let r = 0; r < 50; r++) {
+            assert.equal(rightRx.test(hay10k), false);
+            assert.equal(leftRx.test(hay10k), false);
+          }
+          const elapsedM = performance.now() - tM;
+          assert.ok(elapsedM < 350, `ACS-R2-F2 literal scan at M=${qLen}, N=10000 x50 must stay O(N+M) (${elapsedM.toFixed(1)}ms >= 350ms)`);
+          assert.equal(rightRx.test(" ".repeat(qLen) + "x"), true);
+        }
+        const pat600 = " ".repeat(600) + "X";
+        const rx600 = getCompiledRegex(pat600);
+        const periodicRx = getCompiledRegex("ab".repeat(300) + "c");
+        for (const nLen of [2500, 5000, 10000, 20000]) {
+          const spHay = " ".repeat(nLen);
+          const abHay = "ab".repeat(nLen >> 1);
+          const tN = performance.now();
+          for (let r = 0; r < 50; r++) {
+            assert.equal(rx600.test(spHay), false);
+            assert.equal(periodicRx.test(abHay), false);
+          }
+          const elapsedN = performance.now() - tN;
+          assert.ok(elapsedN < 450, `ACS-R2-F2 literal scan at M=601, N=${nLen} x50 must stay linear (${elapsedN.toFixed(1)}ms >= 450ms)`);
+        }
+        const earlyHay = "ok ".repeat(4) + "ERROR_TOKEN " + "x".repeat(100000);
+        const earlyRx = getCompiledRegex("error_token");
+        const tEarly = performance.now();
+        for (let r = 0; r < 50; r++) assert.equal(earlyRx.test(earlyHay), true);
+        assert.ok(performance.now() - tEarly < 100, "ACS-R2-F2 literal scan must preserve early exit on large fields");
+      }
       // 100-entry FIFO cache eviction preserves exact matching
       const firstCached = getCompiledRegex("cache_probe_0");
       for (let idx = 1; idx <= 110; idx++) {
