@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.2] - 2026-11-27
 
+### Security
+- Eliminate native `RegExp` construction in `getCompiledRegex` (`lib/transcript-core.mjs`) by pairing the bounded Thompson NFA with an ECMA-262 case-folding literal matcher and stricter Unicode group-name, assertion-quantifier, and stacked-quantifier validation.
+- Harden shell mutation target extraction in `scripts/hook/shell-guard.mjs` across GNU `sed` unambiguous long-option prefixes (`--in`, `--expr=`, `--fi=`), conservative macOS and BSD `sed` `-l`, `-i`, and `-I` flag parsing, and Coreutils `cp`, `ln`, `mv`, and `install` target-directory (`-t`, `--target-directory`), `install -d`, and single-operand `ln` implicit destination checks.
+
 ### Fixed
-- Normalize shell commands with leading file-descriptor redirections such as `2>/dev/null rm ...`, `2> /dev/null rm ...`, and `</dev/null gh pr checks --watch` before command classification so protected-file mutation checks and blocking CI watch-loop guards apply consistently without rewriting the executed command.
-- Parse macOS and BSD `sed -I` in-place flags alongside GNU `sed -i` and `--in-place` (including `-e`, `-f`, and `--` option terminators) when checking shell commands for protected configuration and hook mutations.
+- Normalize shell commands with leading file-descriptor redirections such as `2>/dev/null rm ...`, `2> /dev/null rm ...`, and `</dev/null gh pr checks --watch` before command classification so protected-file mutation checks and blocking CI watch-loop guards apply consistently without rewriting the executed command, while preserving allowed leading and trailing stderr redirects (`2>/dev/null`, `2>&1`) on `agy-context transcript` commands and off-`PATH` shim resolution.
+- Retry `EAGAIN` on non-blocking chunked hook stdin reads (`> 64 KiB` pipes) and extend session lock wait to `2500ms` with Windows `EPERM`, `EACCES`, and `EBUSY` lock retry handling in `scripts/hook/common.mjs`.
 
 ## [2.2.1] - 2026-11-23
 
