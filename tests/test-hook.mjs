@@ -5692,14 +5692,24 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
       const natSrc = path.join(benchTmp, "nat-src"), natDst = path.join(benchTmp, "nat-dst");
       fs.writeFileSync(natSrc, "src\n", { mode: 0o444 });
       fs.writeFileSync(natDst, "old\n");
+      const nativeEnv = { ...process.env };
+      delete nativeEnv.VERSION_CONTROL;
+      delete nativeEnv.SIMPLE_BACKUP_SUFFIX;
+      const nativeOpts = { env: nativeEnv };
       if (process.platform === "linux") {
-        assert.equal(spawnSync("install", ["-b", "-S", ".bak", natSrc, natDst]).status, 0);
+        assert.equal(spawnSync("install", ["-b", "-S", ".bak", natSrc, natDst], nativeOpts).status, 0);
         assert.equal(fs.readFileSync(natDst, "utf8") + fs.readFileSync(`${natDst}.bak`, "utf8"), "src\nold\n");
-        assert.equal(spawnSync("install", ["-T", natSrc, `${natDst}-t`]).status, 0);
-        assert.ok(spawnSync("install", ["-S", natSrc, `${natDst}-bad`]).status !== 0 && !fs.existsSync(`${natDst}-bad`));
+        assert.equal(spawnSync("install", ["-T", natSrc, `${natDst}-t`], nativeOpts).status, 0);
+        assert.ok(spawnSync("install", ["-S", natSrc, `${natDst}-bad`], nativeOpts).status !== 0 && !fs.existsSync(`${natDst}-bad`));
       } else {
-        assert.ok(spawnSync("install", ["-S", natSrc, natDst]).status === 0 && fs.readFileSync(natDst, "utf8") === "src\n");
-        assert.ok(spawnSync("install", ["-b", "-S", ".bak", natSrc, `${natDst}-nodir`]).status !== 0 && spawnSync("install", ["-T", natSrc, `${natDst}-t`]).status !== 0 && !fs.existsSync(`${natDst}-t`));
+        const fakeGnuBin = path.join(benchTmp, "gnubin");
+        fs.mkdirSync(fakeGnuBin, { recursive: true });
+        fs.writeFileSync(path.join(fakeGnuBin, "install"), "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+        const bsdOpts = { env: { ...nativeEnv, PATH: `${fakeGnuBin}${path.delimiter}${nativeEnv.PATH || ""}` } };
+        const bsdInstall = "/usr/bin/install";
+        assert.equal(spawnSync("install", ["-S", natSrc, natDst], bsdOpts).status, 99);
+        assert.ok(spawnSync(bsdInstall, ["-S", natSrc, natDst], bsdOpts).status === 0 && fs.readFileSync(natDst, "utf8") === "src\n");
+        assert.ok(spawnSync(bsdInstall, ["-b", "-S", ".bak", natSrc, `${natDst}-nodir`], bsdOpts).status !== 0 && spawnSync(bsdInstall, ["-T", natSrc, `${natDst}-t`], bsdOpts).status !== 0 && !fs.existsSync(`${natDst}-t`));
       }
       assert.equal(fs.readFileSync(natSrc, "utf8"), "src\n");
     }
