@@ -3787,7 +3787,9 @@ try {
         ["[a-\\d]", /[a-\d]/i],
         ["(?<\\u0061>foo)", /(?<\u0061>foo)/i],
         ["(?<\\u{61}>foo)", /(?<\u{61}>foo)/i],
+        ["(?<𝒜>foo)", /(?<𝒜>foo)/i],
         ["(?<\\ud835\\udc9c>foo)", /(?<\ud835\udc9c>foo)/i],
+        ["(?<\\u{1d49c}>foo)", /(?<\u{1d49c}>foo)/i],
         ["(?:^)?error", /(?:^)?error/i],
         ["((?:^))?error", /((?:^))?error/i],
         ["(^)*error", /(^)*error/i],
@@ -3824,6 +3826,7 @@ try {
         { pat: "(?<a>x)|(?<b>(?<a>y)|(?<a>z))", makeNative: () => new RegExp("(?<a>x)|(?<b>(?<a>y)|(?<a>z))", "i"), yes: ["x", "Y", "z"], no: ["w", ""] },
         { pat: "(?<a>x)|(?<\\u0061>y)", makeNative: () => new RegExp("(?<a>x)|(?<\\u0061>y)", "i"), yes: ["X", "y"], no: ["z"] },
         { pat: "(?<a>x)|(?<\\u{61}>y)", makeNative: () => new RegExp("(?<a>x)|(?<\\u{61}>y)", "i"), yes: ["x", "Y"], no: ["z"] },
+        { pat: "(?<𝒜>x)|(?<\\ud835\\udc9c>y)|(?<\\u{1d49c}>z)", makeNative: () => new RegExp("(?<𝒜>x)|(?<\\ud835\\udc9c>y)|(?<\\u{1d49c}>z)", "i"), yes: ["x", "Y", "z"], no: ["w"] },
         { pat: "((?<a>x)|(?<a>y))+", makeNative: () => new RegExp("((?<a>x)|(?<a>y))+", "i"), yes: ["x", "y", "XY"], no: ["z", ""] }
       ];
       for (const { pat, makeNative, yes, no } of dupGroupCases) {
@@ -3845,13 +3848,20 @@ try {
       const deepDiamond = "(?:a?){120}Z";
       assert.equal(getCompiledRegex(deepDiamond).test("a".repeat(120) + "Z"), true, "Deep epsilon split chain must not truncate pending states");
       assert.equal(getCompiledRegex(deepDiamond).test("a".repeat(120)), false);
+      // ACS-10: Seven nested transparent group wrappers around a 256-repeat char class must stay within MAX_BUILD_OPS
+      const nestedSeven = "^((((((([a-z]))))))){256}$";
+      assert.equal(getCompiledRegex(nestedSeven).test("a".repeat(256)), true, "ACS-10 7 nested transparent groups x256 must compile as NFA");
+      assert.equal(getCompiledRegex(nestedSeven).test("Z".repeat(256)), true, "ACS-10 7 nested transparent groups x256 must match case-insensitively");
+      assert.equal(getCompiledRegex(nestedSeven).test("a".repeat(255)), false, "ACS-10 7 nested transparent groups x256 must enforce exact 256 count");
 
       // Malformed, unsupported, or over-limit patterns fall back cleanly to case-insensitive literal match
       const literalFallbackCases = [
         "foo\\", "^*", "\\b+", "$?", "(?:^*)", "a**", "a+*", "a?+", "a{2}{3}", "a+?*",
         "{2}|error", "{2,}|error", "{2,4}|error", "{4,2}|error", "a|{2}", "({2})", "(?:{2})", "(?<a>{2})", "^{2}|error",
         "(?<1a>x)", "(?<a>x)(?<a>y)", "(?<a>(?<a>x))", "(?<a>x)(?:(?<a>y)|z)", "((?<a>x)|y)(?<a>z)",
-        "(?<a>x)(?<\\u0061>y)", "(?<a>x)(?<\\u{61}>y)", "(?<\\x61>foo)", "(?<\\uD800>foo)", "(?<\\u{D800}>foo)", "(?<\\u{110000}>foo)", "(?<\\u{1F600}>foo)",
+        "(?<a>x)(?<\\u0061>y)", "(?<a>x)(?<\\u{61}>y)", "(?<𝒜>x)(?<\\ud835\\udc9c>y)", "(?<\\u{1d49c}>x)(?<\\ud835\\udc9c>y)",
+        "(?<\ud835\\udc9c>foo)", "(?<\\ud835\udc9c>foo)", "(?<\\u{d835}\\u{dc9c}>foo)", "(?<\\ud835\\u{dc9c}>foo)",
+        "(?<\\x61>foo)", "(?<\\uD800>foo)", "(?<\\uDC00>foo)", "(?<\uD800>foo)", "(?<\uDC00>foo)", "(?<\\u{D800}>foo)", "(?<\\u{110000}>foo)", "(?<\\u{1F600}>foo)",
         "(?<>x)", "(?=a)a", "(?!a)b", "(a)\\1",
         "\\p{L}", "\\cA", "a{257}", "x".repeat(513), "(".repeat(300) + "a" + ")".repeat(300)
       ];
