@@ -3760,6 +3760,63 @@ try {
     assert.equal(getCompiledRegex("\\bfoo\\b").test("foobar"), false, "SEC-004 word boundary \\b negative verified");
     assert.equal(getCompiledRegex("\\bfoo\\b").test("a FOO b"), true, "SEC-004 word boundary \\b positive verified");
 
+    // v2.2.2 RegExp-free getCompiledRegex differential compatibility & cache/limit parity
+    {
+      const diffInputs = [
+        "", "a", "A", "aa", "aaaa", "foo\\bar", "foo\\", "^*", "\\b+", "a+{2}",
+        "(?<1a>x)", "(?<a>x)(?<a>y)", "(?=a)a", "a\\1", "CAFÉ", "café", "Ä", "ö",
+        "\u212a", "k", "K", "\u017f", "s", "S", "π=314", "Π=42", "$a_1=ok",
+        "step\t9\n", "A-5", "a-z", "hello world", "x".repeat(520)
+      ];
+      const supportedPairs = [
+        ["plain_literal", /plain_literal/i],
+        ["k", /k/i],
+        ["s", /s/i],
+        ["\u212a", /\u212a/i],
+        ["\u017f", /\u017f/i],
+        ["caf[é]", /caf[é]/i],
+        ["[ä-ö]", /[ä-ö]/i],
+        ["(?<π>π=\\d+)", /(?<π>π=\d+)/i],
+        ["(?<$a_1>\\$a_1=ok)", /(?<$a_1>\$a_1=ok)/i],
+        ["a*?b", /a*?b/i],
+        ["a+?b", /a+?b/i],
+        ["a??b", /a??b/i],
+        ["a{2,4}?", /a{2,4}?/i],
+        ["step\\t\\d+\\n", /step\t\d+\n/i],
+        ["[\\x41-\\x46]-\\d", /[\x41-\x46]-\d/i],
+        ["[a-\\d]", /[a-\d]/i]
+      ];
+      for (const [pat, truthRx] of supportedPairs) {
+        const compiled = getCompiledRegex(pat);
+        assert.equal(compiled.source, pat);
+        assert.equal(compiled.flags, "i");
+        assert.equal(compiled.toString(), `/${pat}/i`);
+        for (const inp of diffInputs) {
+          assert.equal(compiled.test(inp), truthRx.test(inp), `Differential mismatch on pattern ${pat} input ${JSON.stringify(inp)}`);
+        }
+      }
+      // Malformed, unsupported, or over-limit patterns fall back cleanly to case-insensitive literal match
+      const literalFallbackCases = [
+        "foo\\", "^*", "\\b+", "$?", "a**", "a+*", "a?+", "a{2}{3}", "a+?*",
+        "(?<1a>x)", "(?<a>x)(?<a>y)", "(?<>x)", "(?=a)a", "(?!a)b", "(a)\\1",
+        "\\p{L}", "\\cA", "a{257}", "x".repeat(513), "(".repeat(300) + "a" + ")".repeat(300)
+      ];
+      for (const pat of literalFallbackCases) {
+        const compiled = getCompiledRegex(pat);
+        assert.equal(compiled.test(`prefix_${pat.toUpperCase()}_suffix`), true, `Literal fallback must match case-folded literal for ${pat.slice(0, 32)}`);
+        assert.equal(compiled.test("completely_unrelated_input"), false, `Literal fallback must reject unrelated input for ${pat.slice(0, 32)}`);
+      }
+      assert.equal(getCompiledRegex("k_literal").test("\u212a_literal"), false, "Literal matcher must not fold Kelvin sign to ASCII k");
+      assert.equal(getCompiledRegex("s_literal").test("\u017f_literal"), false, "Literal matcher must not fold Latin small long-s to ASCII s");
+      // 100-entry FIFO cache eviction preserves exact matching
+      const firstCached = getCompiledRegex("cache_probe_0");
+      for (let idx = 1; idx <= 110; idx++) {
+        assert.equal(getCompiledRegex(`cache_probe_${idx}`).test(`CACHE_PROBE_${idx}`), true);
+      }
+      assert.equal(firstCached.test("cache_probe_0"), true);
+      assert.equal(getCompiledRegex("cache_probe_0").test("CACHE_PROBE_0"), true);
+    }
+
     // SEC-006: !transcriptFound does not branch on AGY_TEST_PROFILE_DIR
     const sec006Policy = findGoverningPolicyForCaller(
       { activeOwnerId: "p-owner", policies: { "p-owner": { ownerId: "p-owner", mode: "deny", allow: [], deny: [] } } },
