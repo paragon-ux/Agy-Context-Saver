@@ -656,9 +656,9 @@ const SED_LONG_OPTS = [
 
 const COREUTILS_LONG_OPTS = {
   cp: [
-    "--attributes-only", "--backup", "--copy-contents", "--debug", "--force",
-    "--interactive", "--link", "--no-clobber", "--no-dereference", "--no-preserve",
-    "--no-target-directory", "--one-file-system", "--parents", "--preserve",
+    "--archive", "--attributes-only", "--backup", "--copy-contents", "--debug", "--dereference", "--force",
+    "--interactive", "--keep-directory-symlink", "--link", "--no-clobber", "--no-dereference", "--no-preserve",
+    "--no-target-directory", "--one-file-system", "--parents", "--preserve", "--recursive",
     "--reflink", "--remove-destination", "--sparse", "--strip-trailing-slashes",
     "--suffix", "--symbolic-link", "--target-directory", "--update", "--verbose",
     "--context", "--help", "--version"
@@ -676,10 +676,19 @@ const COREUTILS_LONG_OPTS = {
   install: [
     "--backup", "--compare", "--debug", "--directory", "--group", "--mode",
     "--no-target-directory", "--owner", "--preserve-timestamps", "--preserve-context",
-    "--strip", "--strip-program", "--suffix", "--target-directory", "--verbose",
+    "--strip", "--strip-program", "--suffix", "--target-directory", "--unprivileged", "--verbose",
     "--context", "--help", "--version"
   ]
 };
+const COREUTILS_BOOL_SHORTS = {
+  cp: "abcdfHilLnPpRrsTuvxZNX",
+  ln: "bdFfhiLnPrsTvw",
+  mv: "bfinTuvZ",
+  install: "bcCDpsvPZUV"
+};
+const COREUTILS_REQUIRED_ARG_LONGS = new Set([
+  "--suffix", "--no-preserve", "--sparse", "--group", "--mode", "--owner", "--strip-program"
+]);
 
 function resolveLongOption(optName, candidates) {
   if (candidates.includes(optName)) return optName;
@@ -798,12 +807,18 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
     let afterDD = false;
     let hasInstallDirMode = false;
     let ambiguousOperands = false;
+    let sawTrailingOpt = false;
     const longOpts = COREUTILS_LONG_OPTS[verb];
+    const boolShorts = COREUTILS_BOOL_SHORTS[verb];
     for (let i = 0; i < vals.length; i++) {
       const v = vals[i];
-      if (!afterDD && v === "--") { afterDD = true; continue; }
+      if (!afterDD && v === "--") {
+        if (positionals.length > 0) sawTrailingOpt = true;
+        afterDD = true;
+        continue;
+      }
       if (!afterDD && v.startsWith("-") && v !== "-") {
-        if (positionals.length > 0) ambiguousOperands = true;
+        if (positionals.length > 0) sawTrailingOpt = true;
         if (v.startsWith("--")) {
           const eqIdx = v.indexOf("=");
           const optName = eqIdx === -1 ? v : v.slice(0, eqIdx);
@@ -811,13 +826,15 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
           if (resolved === "--target-directory") {
             if (eqIdx !== -1) targetDirs.push(v.slice(eqIdx + 1));
             else if (i + 1 < vals.length) targetDirs.push(vals[++i]);
+            else ambiguousOperands = true;
           } else if (verb === "install" && resolved === "--directory") {
             if (eqIdx === -1) hasInstallDirMode = true;
             else ambiguousOperands = true;
           } else if (!resolved) {
             ambiguousOperands = true;
-          } else if ((resolved === "--suffix" || resolved === "--no-preserve" || resolved === "--sparse") && eqIdx === -1 && i + 1 < vals.length) {
-            i++;
+          } else if (COREUTILS_REQUIRED_ARG_LONGS.has(resolved) && eqIdx === -1) {
+            if (i + 1 < vals.length) i++;
+            else ambiguousOperands = true;
           }
           continue;
         }
@@ -826,13 +843,34 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
           if (ch === "t") {
             if (k + 1 < v.length) targetDirs.push(v.slice(k + 1));
             else if (i + 1 < vals.length) targetDirs.push(vals[++i]);
+            else ambiguousOperands = true;
             break;
           }
           if (verb === "install") {
             if (ch === "d") { hasInstallDirMode = true; continue; }
-            if ("gmoBfhMNT".includes(ch)) break;
+            if (ch === "S") {
+              if (k + 1 < v.length) {
+                if (v.slice(k + 1).includes("d")) hasInstallDirMode = true;
+              } else {
+                ambiguousOperands = true;
+              }
+              break;
+            }
+            if ("gmoBfN".includes(ch)) {
+              if (k + 1 >= v.length && i + 1 < vals.length) i++;
+              break;
+            }
+            if ("ThMl".includes(ch)) {
+              ambiguousOperands = true;
+              if (k + 1 < v.length) continue;
+              break;
+            }
           } else if (ch === "S") {
             if (k + 1 >= v.length && i + 1 < vals.length) i++;
+            break;
+          }
+          if (!boolShorts.includes(ch)) {
+            ambiguousOperands = true;
             break;
           }
         }
@@ -840,18 +878,20 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
       }
       positionals.push(v);
     }
+    const bsdTrailingDest = sawTrailingOpt && vals.length >= 2 ? [vals[vals.length - 1]] : [];
     let dests;
     if ((verb === "install" && hasInstallDirMode) || ambiguousOperands) {
-      dests = [...targetDirs, ...positionals];
+      dests = [...targetDirs, ...positionals, ...bsdTrailingDest];
     } else if (targetDirs.length > 0) {
-      dests = targetDirs;
+      dests = [...targetDirs, ...bsdTrailingDest];
     } else if (positionals.length >= 2) {
-      dests = [positionals[positionals.length - 1]];
+      dests = [positionals[positionals.length - 1], ...bsdTrailingDest];
     } else if (verb === "ln" && positionals.length === 1) {
       const implicitName = path.posix.basename(positionals[0].replace(/\\/g, "/").replace(/\/+$/, "")) || ".";
-      dests = implicitName === "." ? ["."] : [".", implicitName];
+      const baseDests = implicitName === "." ? ["."] : [".", implicitName];
+      dests = [...baseDests, ...bsdTrailingDest];
     } else {
-      dests = [];
+      dests = bsdTrailingDest;
     }
     if (verb === "mv") {
       const all = [...dests, ...positionals];

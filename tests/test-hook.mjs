@@ -5494,6 +5494,11 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
     `sed -i --e 's/x/y/' ${protectedHooks}`,
     `sed -i --fi=/tmp/s.sed ${protectedHooks}`,
     `sed -i --f 's/x/y/' ${protectedHooks}`,
+    `sed -i --expr='s/x/y/' ${protectedHooks} "${safeFile}"`,
+    `sed -i --e 's/x/y/' ${protectedHooks} "${safeFile}"`,
+    `sed -i --ex 's/x/y/' ${protectedHooks} "${safeFile}"`,
+    `sed -i --fi=/tmp/s.sed ${protectedHooks} "${safeFile}"`,
+    `sed -i --f /tmp/s.sed ${protectedHooks} "${safeFile}"`,
     `sed -l -i '' 's/x/y/' ${protectedHooks}`,
     `sed -l -I '' 's/x/y/' ${protectedHooks}`,
     `sed -li '' 's/x/y/' ${protectedHooks}`,
@@ -5577,7 +5582,29 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
     `install -d ${protectedPluginDir} /tmp/agy-ok-dir`,
     `install -d -S ${protectedPluginDir}`,
     `install --dir ${protectedPluginDir}`,
-    `install "${safeFile}" ${protectedHooks} -m 0644`
+    `install "${safeFile}" ${protectedHooks} -m 0644`,
+    `install -S.t/tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
+    `install -bS.t/tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
+    `install -St /tmp/agy-fake-dir ${protectedHooks}`,
+    `install -Sd ${protectedPluginDir}`,
+    `install -S .bak "${safeFile}" ${protectedHooks}`,
+    `install -S "${safeFile}" ${protectedHooks}`,
+    `install -S -t /tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
+    `install -t /tmp/agy-fake-dir -S "${safeFile}" ${protectedHooks}`,
+    `install "${safeFile}" ${protectedHooks} -S .bak`,
+    `install -Tt${protectedPluginDir} "${safeFile}"`,
+    `install -T.t/tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
+    `install -g -t /tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
+    `install --strip-program -t "${safeFile}" ${protectedHooks}`,
+    `install "${safeFile}" ${protectedHooks} --mode 0644`,
+    `cp "${safeFile}" ${protectedHooks} -v`,
+    `cp "${safeFile}" ${protectedHooks} --archive`,
+    `cp "${safeFile}" -t /tmp/agy-fake-dir ${protectedPluginDir}`,
+    `cp ${protectedHooks} "${safeFile}" -Q`,
+    `cp ${protectedHooks} "${safeFile}" --unknown-flag`,
+    `cp -t /tmp/agy-fake-dir -Q "${safeFile}" ${protectedHooks}`,
+    `mv ${protectedHooks} "${safeFile}" -v`,
+    `ln -s ${protectedHooks} "${safeFile}" -v`
   ]) {
     const res = runHook({
       conversationId: wConv,
@@ -5612,12 +5639,26 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
       toolCall: { name: "run_command", args: { CommandLine: `ln -s benchmarks/1 "${safeFile}-ln"`, WaitMsBeforeAsync: 5000 } }
     });
     assert.equal(lnSafeBench.decision, "allow", "FRIC-RUN-009 ln -s benchmarks/1 <outside> must stay allowed");
+    const cpSafeBenchTrailing = runHook({
+      conversationId: wConv,
+      cwd: benchTmp,
+      toolCall: { name: "run_command", args: { CommandLine: `cp benchmarks/1 "${safeFile}-cp" -v`, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(cpSafeBenchTrailing.decision, "allow", "ACS-R2-B1 cp benchmarks/1 <outside> -v must allow without benchmark force_ask");
     for (const safeSedOrCp of [
       `sed -i 's/hooks.json/x/' "${safeFile}"`,
       `sed -i -e 's/hooks.json/x/' "${safeFile}"`,
       `sed -i --expr='s/hooks.json/x/' "${safeFile}"`,
       `sed -n --expr='s/x/y/p' ${protectedHooks}`,
-      `cp ${protectedHooks} "${safeFile}"`
+      `cp ${protectedHooks} "${safeFile}"`,
+      `cp ${protectedHooks} "${safeFile}" -v`,
+      `cp ${protectedHooks} "${safeFile}" --archive`,
+      `cp ${protectedHooks} "${safeFile}" --keep-directory-symlink`,
+      `cp ${protectedHooks} "${safeFile}" -S .bak`,
+      `cp ${protectedHooks} -t /tmp/agy-safe-dir`,
+      `install -S.bak ${protectedHooks} "${safeFile}"`,
+      `install ${protectedHooks} "${safeFile}" -m 0644`,
+      `install ${protectedHooks} "${safeFile}" --mode 0644`
     ]) {
       const safeRes = runHook({
         conversationId: wConv,
