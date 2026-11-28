@@ -5464,6 +5464,376 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
   console.log("✓ Group V: Day-One audit regressions (SEC-001 namespaced .bak, SEC-003 linear guard, RUN-001 outline flags) verified");
 }
 
+// --- Group W: v2.2.2 Leading Redirection & macOS BSD sed -I Guard Regressions ---
+{
+  const wConv = "w-redir-sed-001";
+  const protectedHooks = "~/.gemini/config/plugins/agy-context-saver/hooks.json";
+  const safeFile = path.join(hermetic.profileDir, "safe-notes.txt");
+  fs.writeFileSync(safeFile, "hello\n");
+
+  for (const deniedCmd of [
+    `2>/dev/null rm ${protectedHooks}`,
+    `2> /dev/null rm ${protectedHooks}`,
+    `</dev/null rm ${protectedHooks}`,
+    `2>&- rm ${protectedHooks}`,
+    `rm ${protectedHooks} 2>/dev/null`,
+    `echo pwn > ${protectedHooks}`,
+    `2>/dev/null gh pr checks --watch`,
+    `2> /dev/null gh pr checks --watch`,
+    `</dev/null gh pr checks --watch`,
+    `</dev/null gh run watch`,
+    `gh 2>/dev/null pr checks --watch`,
+    `sed -I s/x/y/ ${protectedHooks}`,
+    `sed -I '' s/x/y/ ${protectedHooks}`,
+    `sed -I .bak -e 's/x/y/' ${protectedHooks}`,
+    `sed -nI.bak 's/x/y/' ${protectedHooks}`,
+    `sed -I s/x/y/ -- ${protectedHooks}`,
+    `sed --in 's/x/y/' ${protectedHooks}`,
+    `sed --in-p=.bak 's/x/y/' ${protectedHooks}`,
+    `sed -i --expr='s/x/y/' ${protectedHooks}`,
+    `sed -i --e 's/x/y/' ${protectedHooks}`,
+    `sed -i --fi=/tmp/s.sed ${protectedHooks}`,
+    `sed -i --f 's/x/y/' ${protectedHooks}`,
+    `sed -i --expr='s/x/y/' ${protectedHooks} "${safeFile}"`,
+    `sed -i --e 's/x/y/' ${protectedHooks} "${safeFile}"`,
+    `sed -i --ex 's/x/y/' ${protectedHooks} "${safeFile}"`,
+    `sed -i --fi=/tmp/s.sed ${protectedHooks} "${safeFile}"`,
+    `sed -i --f /tmp/s.sed ${protectedHooks} "${safeFile}"`,
+    `sed -l -i '' 's/x/y/' ${protectedHooks}`,
+    `sed -l -I '' 's/x/y/' ${protectedHooks}`,
+    `sed -li '' 's/x/y/' ${protectedHooks}`,
+    `sed -l 80 -i 's/x/y/' ${protectedHooks}`,
+    `sed --line-length 80 -i 's/x/y/' ${protectedHooks}`,
+    `sed -e 's/x/y/' -I -e ${protectedHooks}`,
+    `sed -e 's/x/y/' -i -e ${protectedHooks}`
+  ]) {
+    const res = runHook({
+      conversationId: wConv,
+      toolCall: { name: "run_command", args: { CommandLine: deniedCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(res.decision, "deny", `v2.2.2 guard must deny: ${deniedCmd}`);
+  }
+
+  // Classification-only normalization: safe commands with leading redirects or `--` before `-I` must allow without rewriting CommandLine
+  for (const allowedCmd of [
+    `2>/dev/null cat "${safeFile}"`,
+    `2> /dev/null head -n 5 "${safeFile}"`,
+    `</dev/null gh pr checks`,
+    `sed -n 's/x/y/p' -- -I "${safeFile}"`,
+    `sed -e '-I' "${safeFile}"`
+  ]) {
+    const res = runHook({
+      conversationId: wConv,
+      toolCall: { name: "run_command", args: { CommandLine: allowedCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(res.decision, "allow", `v2.2.2 safe control must allow: ${allowedCmd} (got ${res.reason})`);
+    assert.equal(res.overwrite?.CommandLine, undefined, `v2.2.2 normalization must not rewrite CommandLine: ${allowedCmd}`);
+  }
+
+  for (const deniedCmd of [
+    `2>>/dev/null rm ${protectedHooks}`,
+    `2>> /dev/null rm ${protectedHooks}`,
+    `2>&1 rm ${protectedHooks}`,
+    `0<&0 rm ${protectedHooks}`,
+    `<&0 rm ${protectedHooks}`,
+    `>&2 rm ${protectedHooks}`,
+    `&>/dev/null rm ${protectedHooks}`,
+    `&>>/dev/null rm ${protectedHooks}`,
+    `2>|/dev/null rm ${protectedHooks}`,
+    `<>/dev/null rm ${protectedHooks}`,
+    `2>>/dev/null gh pr checks --watch`
+  ]) {
+    const res = runHook({
+      conversationId: wConv,
+      toolCall: { name: "run_command", args: { CommandLine: deniedCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(res.decision, "deny", `v2.2.2 operator regression must deny: ${deniedCmd}`);
+  }
+
+  for (const count of [25, 500]) {
+    const deniedCmd = `${"2>/dev/null ".repeat(count)}rm ${protectedHooks}`;
+    const res = runHook({
+      conversationId: wConv,
+      toolCall: { name: "run_command", args: { CommandLine: deniedCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(res.decision, "deny", `v2.2.2 must not fail open after ${count} leading redirects`);
+  }
+
+  const { splitShellSegments, tokenizeShellWordsDetailed, stripLeadingShellPrefixes } = await import("../scripts/hook/shell-guard.mjs");
+  const protectedPluginDir = "~/.gemini/config/plugins/agy-context-saver";
+  for (const deniedCoreCmd of [
+    `cp -t ${protectedPluginDir} "${safeFile}"`,
+    `cp -t${protectedPluginDir} "${safeFile}"`,
+    `cp -rft ${protectedPluginDir} "${safeFile}"`,
+    `cp --target-directory=${protectedPluginDir} "${safeFile}"`,
+    `cp --target-dir=${protectedPluginDir} "${safeFile}"`,
+    `cp "${safeFile}" ${protectedHooks} -S .bak`,
+    `ln -s -t ${protectedPluginDir} "${safeFile}"`,
+    `ln -st${protectedPluginDir} "${safeFile}"`,
+    `ln -s --target-dir=${protectedPluginDir} "${safeFile}"`,
+    `mv -t ${protectedPluginDir} "${safeFile}"`,
+    `mv -t${protectedPluginDir} "${safeFile}"`,
+    `mv --target-directory=${protectedPluginDir} "${safeFile}"`,
+    `mv --target-dir=${protectedPluginDir} "${safeFile}"`,
+    `install -t ${protectedPluginDir} "${safeFile}"`,
+    `install -t${protectedPluginDir} "${safeFile}"`,
+    `install --target-dir=${protectedPluginDir} "${safeFile}"`,
+    `install -m 0644 "${safeFile}" ${protectedHooks}`,
+    `install -d ${protectedPluginDir} /tmp/agy-ok-dir`,
+    `install -d -S ${protectedPluginDir}`,
+    `install --dir ${protectedPluginDir}`,
+    `install "${safeFile}" ${protectedHooks} -m 0644`,
+    `install -S.t/tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
+    `install -bS.t/tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
+    `install -St /tmp/agy-fake-dir ${protectedHooks}`,
+    `install -Sd ${protectedPluginDir}`,
+    `install -S .bak "${safeFile}" ${protectedHooks}`,
+    `install -S "${safeFile}" ${protectedHooks}`,
+    `install -S -t /tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
+    `install -t ${protectedPluginDir} -S .bak "${safeFile}"`,
+    `install -T mytags "${safeFile}" ${protectedHooks}`,
+    `install -T -t /tmp/agy-fake-dir "${safeFile}" ${protectedPluginDir}`,
+    `install "${safeFile}" ${protectedHooks} -S .bak`,
+    `install -Tt${protectedPluginDir} "${safeFile}"`,
+    `install -T.t/tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
+    `install -g -t /tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
+    `install --strip-program -t "${safeFile}" ${protectedHooks}`,
+    `install "${safeFile}" ${protectedHooks} --mode 0644`,
+    `install "${safeFile}" ${protectedHooks} -Q`,
+    `install -M ${protectedHooks} "${safeFile}" /tmp/agy-ok-dst`,
+    `cp "${safeFile}" ${protectedHooks} -v`,
+    `cp "${safeFile}" ${protectedHooks} --archive`,
+    `cp "${safeFile}" -t /tmp/agy-fake-dir ${protectedPluginDir}`,
+    `cp ${protectedHooks} "${safeFile}" -Q`,
+    `cp ${protectedHooks} "${safeFile}" --unknown-flag`,
+    `cp -t /tmp/agy-fake-dir -Q "${safeFile}" ${protectedHooks}`,
+    `mv ${protectedHooks} "${safeFile}" -v`,
+    `ln -s ${protectedHooks} "${safeFile}" -v`
+  ]) {
+    const res = runHook({
+      conversationId: wConv,
+      toolCall: { name: "run_command", args: { CommandLine: deniedCoreCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(res.decision, "deny", `v2.2.2 Coreutils guard must deny: ${deniedCoreCmd}`);
+  }
+
+  // Implicit 1-operand `ln` destination in protected cwd must deny
+  const implicitLnRes = runHook({
+    conversationId: wConv,
+    cwd: path.join(hermetic.profileDir, ".gemini", "config"),
+    toolCall: { name: "run_command", args: { CommandLine: `ln -sf "/tmp/hooks.json"`, WaitMsBeforeAsync: 5000 } }
+  });
+  assert.equal(implicitLnRes.decision, "deny", "v2.2.2 1-operand ln implicit ./hooks.json in ~/.gemini/config must deny");
+
+  // Numeric filename under benchmarks/ with BSD sed -l must trigger benchmark force_ask (never discarded as GNU -l arg)
+  const benchTmp = fs.mkdtempSync(path.join(os.tmpdir(), "agy-bench-sed-l-"));
+  try {
+    fs.mkdirSync(path.join(benchTmp, "benchmarks"), { recursive: true });
+    fs.writeFileSync(path.join(benchTmp, "benchmarks", "1"), "score=1\n");
+    fs.writeFileSync(path.join(benchTmp, "safe.txt"), "ok\n");
+    const numSedRes = runHook({
+      conversationId: wConv,
+      cwd: path.join(benchTmp, "benchmarks"),
+      toolCall: { name: "run_command", args: { CommandLine: `sed -i '' -e 's/1/2/' -l 1`, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(numSedRes.decision, "force_ask", "v2.2.2 BSD sed -l before numeric filename '1' in benchmarks/ must force_ask");
+    const lnSafeBench = runHook({
+      conversationId: wConv,
+      cwd: benchTmp,
+      toolCall: { name: "run_command", args: { CommandLine: `ln -s benchmarks/1 "${safeFile}-ln"`, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(lnSafeBench.decision, "allow", "FRIC-RUN-009 ln -s benchmarks/1 <outside> must stay allowed");
+    const cpSafeBenchTrailing = runHook({
+      conversationId: wConv,
+      cwd: benchTmp,
+      toolCall: { name: "run_command", args: { CommandLine: `cp benchmarks/1 "${safeFile}-cp" -v`, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(cpSafeBenchTrailing.decision, "allow", "ACS-R2-B1 cp benchmarks/1 <outside> -v must allow without benchmark force_ask");
+    for (const benchInstallCmd of [
+      `install -b -S .bak benchmarks/1 "${safeFile}-inst1"`,
+      `install -T benchmarks/1 "${safeFile}-inst2"`
+    ]) {
+      const instBenchRes = runHook({
+        conversationId: wConv,
+        cwd: benchTmp,
+        toolCall: { name: "run_command", args: { CommandLine: benchInstallCmd, WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(instBenchRes.decision, "allow", `ACS-9 safe benchmark source install must allow: ${benchInstallCmd}`);
+    }
+    for (const safeSedOrCp of [
+      `sed -i 's/hooks.json/x/' "${safeFile}"`,
+      `sed -i -e 's/hooks.json/x/' "${safeFile}"`,
+      `sed -i --expr='s/hooks.json/x/' "${safeFile}"`,
+      `sed -n --expr='s/x/y/p' ${protectedHooks}`,
+      `cp ${protectedHooks} "${safeFile}"`,
+      `cp ${protectedHooks} "${safeFile}" -v`,
+      `cp ${protectedHooks} "${safeFile}" --archive`,
+      `cp ${protectedHooks} "${safeFile}" --keep-directory-symlink`,
+      `cp ${protectedHooks} "${safeFile}" -S .bak`,
+      `cp ${protectedHooks} -t /tmp/agy-safe-dir`,
+      `install -S.bak ${protectedHooks} "${safeFile}"`,
+      `install -b -S .bak ${protectedHooks} "${safeFile}"`,
+      `install -S .bak ${protectedHooks} "${safeFile}"`,
+      `install -T ${protectedHooks} "${safeFile}"`,
+      `install -S ${protectedHooks} "${safeFile}"`,
+      `install ${protectedHooks} "${safeFile}" -S .bak`,
+      `install ${protectedHooks} "${safeFile}" -T`,
+      `install -t /tmp/agy-safe-dir -S .bak ${protectedHooks}`,
+      `install ${protectedHooks} "${safeFile}" -m 0644`,
+      `install ${protectedHooks} "${safeFile}" --mode 0644`
+    ]) {
+      const safeRes = runHook({
+        conversationId: wConv,
+        toolCall: { name: "run_command", args: { CommandLine: safeSedOrCp, WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(safeRes.decision, "allow", `v2.2.2 benign control must allow: ${safeSedOrCp} (got ${safeRes.decision}: ${safeRes.reason})`);
+    }
+    if (process.platform === "linux" || process.platform === "darwin") {
+      const natSrc = path.join(benchTmp, "nat-src"), natDst = path.join(benchTmp, "nat-dst");
+      fs.writeFileSync(natSrc, "src\n", { mode: 0o444 });
+      fs.writeFileSync(natDst, "old\n");
+      const nativeEnv = { ...process.env };
+      delete nativeEnv.VERSION_CONTROL;
+      delete nativeEnv.SIMPLE_BACKUP_SUFFIX;
+      const nativeOpts = { env: nativeEnv };
+      if (process.platform === "linux") {
+        assert.equal(spawnSync("install", ["-b", "-S", ".bak", natSrc, natDst], nativeOpts).status, 0);
+        assert.equal(fs.readFileSync(natDst, "utf8") + fs.readFileSync(`${natDst}.bak`, "utf8"), "src\nold\n");
+        assert.equal(spawnSync("install", ["-T", natSrc, `${natDst}-t`], nativeOpts).status, 0);
+        assert.ok(spawnSync("install", ["-S", natSrc, `${natDst}-bad`], nativeOpts).status !== 0 && !fs.existsSync(`${natDst}-bad`));
+      } else {
+        const fakeGnuBin = path.join(benchTmp, "gnubin");
+        fs.mkdirSync(fakeGnuBin, { recursive: true });
+        fs.writeFileSync(path.join(fakeGnuBin, "install"), "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+        const bsdOpts = { env: { ...nativeEnv, PATH: `${fakeGnuBin}${path.delimiter}${nativeEnv.PATH || ""}` } };
+        const bsdInstall = "/usr/bin/install";
+        assert.equal(spawnSync("install", ["-S", natSrc, natDst], bsdOpts).status, 99);
+        assert.ok(spawnSync(bsdInstall, ["-S", natSrc, natDst], bsdOpts).status === 0 && fs.readFileSync(natDst, "utf8") === "src\n");
+        assert.ok(spawnSync(bsdInstall, ["-b", "-S", ".bak", natSrc, `${natDst}-nodir`], bsdOpts).status !== 0 && spawnSync(bsdInstall, ["-T", natSrc, `${natDst}-t`], bsdOpts).status !== 0 && !fs.existsSync(`${natDst}-t`));
+      }
+      assert.equal(fs.readFileSync(natSrc, "utf8"), "src\n");
+    }
+  } finally {
+    fs.rmSync(benchTmp, { recursive: true, force: true });
+  }
+
+  // Leading & trailing allowed stderr redirects on agy-context transcript vs denied redirects/wrappers
+  for (const allowedTranscriptCmd of [
+    `2>/dev/null agy-context transcript list`,
+    `2> /dev/null agy-context transcript list`,
+    `2>&1 agy-context transcript list`,
+    `agy-context transcript list 2>/dev/null`
+  ]) {
+    const res = runHook({
+      conversationId: wConv,
+      toolCall: { name: "run_command", args: { CommandLine: allowedTranscriptCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(res.decision, "allow", `v2.2.2 allowed stderr redirect on agy-context transcript must allow: ${allowedTranscriptCmd} (got ${res.reason})`);
+  }
+  {
+    // Off-PATH agy-context shim rewrite must preserve leading 2>/dev/null across POSIX and Windows
+    const emptyOffPathBin = fs.mkdtempSync(path.join(os.tmpdir(), "agy-empty-bin-"));
+    const shimBinDir = path.join(hermetic.profileDir, ".gemini", "antigravity", "bin");
+    fs.mkdirSync(shimBinDir, { recursive: true });
+    const shimPath = path.join(shimBinDir, process.platform === "win32" ? "agy-context.cmd" : "agy-context");
+    fs.writeFileSync(shimPath, process.platform === "win32" ? "@echo off\r\n" : "#!/bin/sh\n", { mode: 0o755 });
+    try {
+      const offPathEnv = withEnvPath(emptyOffPathBin, { ...process.env });
+      const offPathRes = runHook(
+        {
+          conversationId: wConv,
+          toolCall: { name: "run_command", args: { CommandLine: "2>/dev/null agy-context transcript list", WaitMsBeforeAsync: 5000 } }
+        },
+        offPathEnv
+      );
+      assert.equal(offPathRes.decision, "allow", `Off-PATH agy-context with leading 2>/dev/null must allow (got ${offPathRes.reason})`);
+      assert.match(offPathRes.overwrite?.CommandLine || "", /^2>\/dev\/null\s+.*agy-context/, "Off-PATH shim rewrite must preserve leading 2>/dev/null");
+    } finally {
+      fs.rmSync(shimPath, { force: true });
+      fs.rmSync(emptyOffPathBin, { recursive: true, force: true });
+    }
+  }
+  for (const deniedTranscriptCmd of [
+    `</dev/null agy-context transcript list`,
+    `>/tmp/agy-out.txt agy-context transcript list`,
+    `2>>/tmp/agy-err.txt agy-context transcript list`,
+    `&>/dev/null agy-context transcript list`,
+    `FOO=1 2>/dev/null agy-context transcript list`,
+    `sudo 2>/dev/null agy-context transcript list`,
+    `(2>/dev/null agy-context transcript list)`
+  ]) {
+    const res = runHook({
+      conversationId: wConv,
+      toolCall: { name: "run_command", args: { CommandLine: deniedTranscriptCmd, WaitMsBeforeAsync: 5000 } }
+    });
+    assert.equal(res.decision, "deny", `v2.2.2 disallowed redirect/wrapper on agy-context transcript must deny: ${deniedTranscriptCmd}`);
+  }
+
+  assert.equal(typeof tokenizeShellWordsDetailed, "function", "shell-guard must export tokenizeShellWordsDetailed");
+  assert.equal(typeof stripLeadingShellPrefixes, "function", "shell-guard must export stripLeadingShellPrefixes");
+  for (const count of [1000, 10000]) {
+    const sizedCmd = `${"2>/dev/null ".repeat(count)}rm ${protectedHooks}`;
+    const tStart = performance.now();
+    const segs = splitShellSegments(sizedCmd);
+    const toks = tokenizeShellWordsDetailed(segs[0].text);
+    const cmdIdx = stripLeadingShellPrefixes(toks, 0);
+    const elapsed = performance.now() - tStart;
+    assert.equal(segs.length, 1);
+    assert.equal(cmdIdx, count * 2);
+    assert.equal(toks[cmdIdx]?.value, "rm");
+    assert.ok(elapsed < 150, `v2.2.2 in-process redirect tokenization+stripping at N=${count} must stay linear (${elapsed.toFixed(1)}ms >= 150ms)`);
+  }
+  const perfCmd = `${"2>/dev/null ".repeat(10000)}rm ${protectedHooks}`;
+
+  const perfStart = performance.now();
+  const perfRes = runHook({
+    conversationId: wConv,
+    toolCall: { name: "run_command", args: { CommandLine: perfCmd, WaitMsBeforeAsync: 5000 } }
+  });
+  const perfMs = performance.now() - perfStart;
+  assert.equal(perfRes.decision, "deny", "v2.2.2 must deny after 10,000 leading redirects");
+  assert.ok(perfMs < 2500, `v2.2.2 redirect stripping subprocess must stay bounded (${perfMs.toFixed(1)}ms >= 2500ms)`);
+
+  // Verify >64 KiB chunked pipe delivery (macOS non-blocking pipe EAGAIN regression) reaches shell-guard for both deny and allow
+  const runChunkedHook = (commandLine) => {
+    const payload = Buffer.from(JSON.stringify({
+      conversationId: wConv,
+      toolCall: { name: "run_command", args: { CommandLine: commandLine, WaitMsBeforeAsync: 5000 } }
+    }), "utf-8");
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [hookScript], { env: process.env });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => { stdout += d; });
+      child.stderr.on("data", (d) => { stderr += d; });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code !== 0) return reject(new Error(`Chunked hook exited ${code}: ${stderr}`));
+        try { resolve(JSON.parse(stdout.trim())); } catch (e) { reject(e); }
+      });
+      let offset = 0;
+      const stepBytes = 8192;
+      const writeNext = () => {
+        if (offset >= payload.length) {
+          child.stdin.end();
+          return;
+        }
+        const slice = payload.subarray(offset, Math.min(offset + stepBytes, payload.length));
+        offset += slice.length;
+        child.stdin.write(slice, () => setTimeout(writeNext, 2));
+      };
+      writeNext();
+    });
+  };
+  const chunkedRes = await runChunkedHook(perfCmd);
+  assert.equal(chunkedRes.decision, "deny", "v2.2.2 must deny >64 KiB chunked stdin payloads without EAGAIN fail-open");
+  assert.match(chunkedRes.reason || "", /Shell mutation of protected Antigravity hook/, "Chunked deny must come from shell-guard mutation check, not router stdin parse error");
+  const chunkedSafeRes = await runChunkedHook(`${"2>/dev/null ".repeat(10000)}cat "${safeFile}"`);
+  assert.equal(chunkedSafeRes.decision, "allow", `v2.2.2 benign >64 KiB chunked stdin payload must allow (got ${chunkedSafeRes.reason})`);
+
+  console.log("✓ Group W: v2.2.2 leading-redirection normalization and macOS BSD sed -I parsing verified");
+}
+
 hermetic.cleanup();
 console.log("\n=================================================");
 console.log("ALL 2.0 PRETOOLUSE HOOK GOVERNANCE TESTS PASSED!");

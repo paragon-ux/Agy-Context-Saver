@@ -87,7 +87,7 @@ Validates Markdown links, navigation entries, and SVG assets.
 Pushing a `v*` tag triggers `.github/workflows/release-tag.yml`, which runs the verification matrix across Linux, macOS, and Windows (Node 22 and 24), creates the GitHub Release, and publishes to npm via OIDC Trusted Publishing (`npm publish --access public --provenance`):
 
 ```bash
-git commit -m "chore(release): v2.2.1"
-git tag -a v2.2.1 -m "Release v2.2.1"
+git commit -m "chore(release): v2.2.2"
+git tag -a v2.2.2 -m "Release v2.2.2"
 git push origin main --follow-tags
 ```

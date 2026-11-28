@@ -26,7 +26,7 @@ Reload Antigravity Desktop IDE or start a new session after setup or uninstall f
 
 ## How Agy-Context-Saver guards a default session
 
-Agy-Context-Saver layers a lightweight pre-tool hook on top of Google Antigravity's native shell, file, and background-task tools rather than replacing them. It compresses noisy terminal output through RTK, keeps workspace file reads focused, prevents background polling loops, and lets parent sessions control child transcript access:
+Agy-Context-Saver layers a lightweight pre-tool hook on top of Google Antigravity's native shell, file, and background-task tools rather than replacing them. It compresses noisy terminal output through RTK, keeps workspace file reads focused, blocks shell and file mutations targeting protected hook and configuration paths, prevents background polling loops, and lets parent sessions control child transcript access:
 
 ![Default Antigravity session vs. Antigravity with Agy-Context-Saver](docs/assets/default-vs-context-saver.svg)
 

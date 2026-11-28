@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Agy-Context-Saver Registration & Installation Engine (v2.2.1)
+ * Agy-Context-Saver Registration & Installation Engine (v2.2.2)
  * Zero-delay cross-platform installer with CLI-first shim provisioning,
  * unified hook registration, and legacy MCP retirement/sweep.
  *
@@ -54,9 +54,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const PACKAGE_VERSION = (() => {
   try {
-    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.2.1";
+    return JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version || "2.2.2";
   } catch {
-    return "2.2.1";
+    return "2.2.2";
   }
 })();
 

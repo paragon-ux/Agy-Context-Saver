@@ -232,8 +232,9 @@ export function resolveCachedHostEnv() {
 // ============================================================================
 
 const SHELL_ESCAPE_CHARS = new Set([" ", "\t", "\n", "\r", ";", "|", "&", "<", ">", "(", ")", '"', "'", "\\", "$", "`"]);
-const REDIRECT_OP_REGEX = /^(?:&>>?|(?:\d+)?(?:>>?|<<<?|<<-|<&|>&|>\||<>))$/;
-const REDIRECT_ATTACHED_REGEX = /^(?:\d+)?(?:>>?|<<?)(.+)$/;
+const REDIRECT_OP_REGEX = /^(?:&>>?|(?:\d+)?(?:>>?|<<<?|<|<<-|<&|>&|>\||<>))$/;
+const REDIRECT_ATTACHED_REGEX = /^(?:\d+)?(?:>>?|>\||<<?)(.+)$/;
+const REDIRECT_CLOSE_REGEX = /^(?:\d+)?[<>]&-$/;
 const ENV_VALUE_FLAGS = new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]);
 const SHELL_CONTROL_KEYWORDS = new Set(["{", "!", "if", "then", "elif", "else", "do", "while", "until", "time", "&"]);
 const SUDO_VALUE_FLAGS = new Set(["-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "--user", "--group", "--host"]);
@@ -307,7 +308,7 @@ function readBacktickSubshell(cmd, startPos) {
   return { inner, nextIndex: i };
 }
 
-function splitShellSegments(command) {
+export function splitShellSegments(command) {
   if (!command || typeof command !== "string") return [];
   const segments = [];
   const pendingHeredocs = [];
@@ -368,7 +369,7 @@ function splitShellSegments(command) {
       }
       hasRedirect = true; i += next === "<" ? (command[i + 2] === "<" ? 3 : 2) : 1; continue;
     }
-    if (c === ">") { hasRedirect = true; hasWriteRedirect = true; i += next === ">" ? 2 : 1; continue; }
+    if (c === ">") { hasRedirect = true; hasWriteRedirect = true; i += next === ">" || next === "|" ? 2 : 1; continue; }
     if (c === "\n" || (c === "\r" && next === "\n")) {
       pushSeg(i);
       i += c === "\r" ? 2 : 1;
@@ -405,7 +406,7 @@ function splitShellSegments(command) {
   return segments;
 }
 
-function tokenizeShellWordsDetailed(text) {
+export function tokenizeShellWordsDetailed(text) {
   const tokens = [];
   for (let i = 0; i < text.length;) {
     while (i < text.length && /\s/.test(text[i])) i++;
@@ -485,12 +486,27 @@ function splitEnvPrefix(text, preTokens = null) {
   return { prefix: text.slice(0, tokens[idx].start), body: text.slice(tokens[idx].start) };
 }
 
-function stripLeadingShellPrefixes(tokens, startIdx = 0) {
+function skipSingleRedirectToken(tokens, idx) {
+  const tok = tokens[idx];
+  if (!tok || tok.quoted) return idx;
+  if (REDIRECT_CLOSE_REGEX.test(tok.raw)) return idx + 1;
+  if (REDIRECT_OP_REGEX.test(tok.raw)) return Math.min(tokens.length, idx + 2);
+  if (REDIRECT_ATTACHED_REGEX.test(tok.raw)) return idx + 1;
+  return idx;
+}
+
+export function stripLeadingShellPrefixes(tokens, startIdx = 0) {
   let idx = startIdx;
-  for (let guard = 0; idx < tokens.length && guard++ < 24;) {
+  while (idx < tokens.length) {
+    const beforeIdx = idx;
+    const assertProgress = () => {
+      if (idx <= beforeIdx) throw new Error("Internal shell-prefix parser error: no forward progress.");
+    };
+    const nextRedir = skipSingleRedirectToken(tokens, idx);
+    if (nextRedir !== idx) { idx = nextRedir; assertProgress(); continue; }
     const nextEnv = skipEnvTokens(tokens, idx);
-    if (nextEnv !== idx) { idx = nextEnv; continue; }
-    if (!tokens[idx].quoted && SHELL_CONTROL_KEYWORDS.has(tokens[idx].value.toLowerCase())) { idx++; continue; }
+    if (nextEnv !== idx) { idx = nextEnv; assertProgress(); continue; }
+    if (!tokens[idx].quoted && SHELL_CONTROL_KEYWORDS.has(tokens[idx].value.toLowerCase())) { idx++; assertProgress(); continue; }
     const cmd = normalizeCmdName(tokens[idx].value);
     if (cmd === "sudo" || cmd === "doas") {
       idx++;
@@ -500,6 +516,7 @@ function stripLeadingShellPrefixes(tokens, startIdx = 0) {
         if (!fl.startsWith("-") || fl === "-") break;
         idx += SUDO_VALUE_FLAGS.has(fl) && idx + 1 < tokens.length ? 2 : 1;
       }
+      assertProgress();
       continue;
     }
     if (cmd === "timeout" || cmd === "nice") {
@@ -509,11 +526,13 @@ function stripLeadingShellPrefixes(tokens, startIdx = 0) {
         idx += valFlags.has(tokens[idx].value) && idx + 1 < tokens.length ? 2 : 1;
       }
       if (cmd === "timeout" && idx < tokens.length) idx++;
+      assertProgress();
       continue;
     }
     if (SIMPLE_WRAPPERS.has(cmd)) {
       idx++;
       while (idx < tokens.length && tokens[idx].value.startsWith("-")) { if (tokens[idx++].value === "--") break; }
+      assertProgress();
       continue;
     }
     break;
@@ -564,7 +583,12 @@ function extractSimpleWrappedScript(segText) {
   const detailed = tokenizeShellWordsDetailed(effective);
   if (detailed.length < 2) return null;
   let headIdx = 0;
-  while (headIdx < detailed.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(detailed[headIdx].raw)) headIdx++;
+  while (headIdx < detailed.length) {
+    const nextRedir = skipSingleRedirectToken(detailed, headIdx);
+    if (nextRedir !== headIdx) { headIdx = nextRedir; continue; }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(detailed[headIdx].raw)) { headIdx++; continue; }
+    break;
+  }
   if (headIdx >= detailed.length - 1) return null;
   const cmd0 = normalizeCmdName(detailed[headIdx].value);
   if (cmd0 === "env") {
@@ -621,35 +645,267 @@ function isSingleUnchainedShellCmd(segments) {
 const OBVIOUS_MUTATION_VERBS = new Set([
   "rm", "del", "remove-item", "mv", "cp", "ln", "tee", "truncate", "shred", "dd", "patch", "chmod", "chown", "sed", "perl", "find", "install"
 ]);
-const DIR_MUTATION_VERBS = new Set(["rm", "del", "remove-item", "mv", "cp", "ln", "chmod", "chown", "find"]);
+const DIR_MUTATION_VERBS = new Set(["rm", "del", "remove-item", "mv", "cp", "ln", "chmod", "chown", "find", "install"]);
 const DESTRUCTIVE_CONFIG_VERBS = new Set(["rm", "del", "remove-item", "mv", "ln", "truncate", "shred", "dd", "chmod", "chown", "find"]);
+
+const SED_LONG_OPTS = [
+  "--quiet", "--silent", "--debug", "--expression", "--file", "--follow-symlinks",
+  "--in-place", "--line-length", "--posix", "--regexp-extended", "--separate",
+  "--sandbox", "--unbuffered", "--null-data", "--help", "--version"
+];
+
+const COREUTILS_LONG_OPTS = {
+  cp: [
+    "--archive", "--attributes-only", "--backup", "--copy-contents", "--debug", "--dereference", "--force",
+    "--interactive", "--keep-directory-symlink", "--link", "--no-clobber", "--no-dereference", "--no-preserve",
+    "--no-target-directory", "--one-file-system", "--parents", "--preserve", "--recursive",
+    "--reflink", "--remove-destination", "--sparse", "--strip-trailing-slashes",
+    "--suffix", "--symbolic-link", "--target-directory", "--update", "--verbose",
+    "--context", "--help", "--version"
+  ],
+  ln: [
+    "--backup", "--directory", "--force", "--interactive", "--logical",
+    "--no-dereference", "--no-target-directory", "--physical", "--relative",
+    "--suffix", "--symbolic", "--target-directory", "--verbose", "--help", "--version"
+  ],
+  mv: [
+    "--backup", "--debug", "--exchange", "--force", "--interactive", "--no-clobber",
+    "--no-copy", "--no-target-directory", "--strip-trailing-slashes", "--suffix",
+    "--target-directory", "--update", "--verbose", "--context", "--help", "--version"
+  ],
+  install: [
+    "--backup", "--compare", "--debug", "--directory", "--group", "--mode",
+    "--no-target-directory", "--owner", "--preserve-timestamps", "--preserve-context",
+    "--strip", "--strip-program", "--suffix", "--target-directory", "--unprivileged", "--verbose",
+    "--context", "--help", "--version"
+  ]
+};
+const COREUTILS_BOOL_SHORTS = {
+  cp: "abcdfHilLnPpRrsTuvxZNX",
+  ln: "bdFfhiLnPrsTvw",
+  mv: "bfinTuvZ",
+  install: "bcCDpsTvPZUV"
+};
+const COREUTILS_REQUIRED_ARG_LONGS = new Set([
+  "--suffix", "--no-preserve", "--sparse", "--group", "--mode", "--owner", "--strip-program"
+]);
+
+function resolveLongOption(optName, candidates) {
+  if (candidates.includes(optName)) return optName;
+  const hits = candidates.filter((c) => c.startsWith(optName));
+  return hits.length === 1 ? hits[0] : null;
+}
+
+function extractSedMutationTargets(vals) {
+  const positionals = [];
+  let hasInPlace = false;
+  let hasExplicitScript = false;
+  let ambiguousScript = false;
+  let prevStandaloneInPlace = false;
+  let afterDD = false;
+  for (let i = 0; i < vals.length; i++) {
+    const v = vals[i];
+    const afterInPlace = prevStandaloneInPlace;
+    prevStandaloneInPlace = false;
+    if (!afterDD && v === "--") {
+      afterDD = true;
+      continue;
+    }
+    if (!afterDD && v.startsWith("--")) {
+      const eqIdx = v.indexOf("=");
+      const optName = eqIdx === -1 ? v : v.slice(0, eqIdx);
+      const hasEq = eqIdx !== -1;
+      const resolved = resolveLongOption(optName, SED_LONG_OPTS);
+      if (resolved === "--in-place") {
+        hasInPlace = true;
+      } else if (resolved === "--expression" || resolved === "--file") {
+        if (!hasEq) {
+          if (afterInPlace && (hasExplicitScript || i + 2 >= vals.length)) ambiguousScript = true;
+          else i += 1;
+        }
+        hasExplicitScript = true;
+      } else if (resolved === "--line-length") {
+        if (!hasEq) ambiguousScript = true;
+      } else if (!resolved || hasEq) {
+        ambiguousScript = true;
+      }
+      continue;
+    }
+    if (!afterDD && v.startsWith("-") && v.length > 1) {
+      for (let k = 1; k < v.length; k++) {
+        const ch = v[k];
+        if (ch === "e" || ch === "f") {
+          if (k + 1 >= v.length) {
+            if (afterInPlace && (hasExplicitScript || i + 2 >= vals.length)) ambiguousScript = true;
+            else i += 1;
+          }
+          hasExplicitScript = true;
+          break;
+        }
+        if (ch === "l") {
+          ambiguousScript = true;
+          continue;
+        }
+        if (ch === "i" || ch === "I") {
+          hasInPlace = true;
+          if (k + 1 >= v.length) prevStandaloneInPlace = true;
+          break;
+        }
+      }
+      continue;
+    }
+    positionals.push(v);
+  }
+  if (!hasInPlace) return [];
+  return (hasExplicitScript || ambiguousScript) ? positionals : (positionals.length > 1 ? positionals.slice(1) : positionals);
+}
+
+function extractPerlMutationTargets(vals) {
+  const positionals = [];
+  let hasInPlace = false;
+  let hasExplicitScript = false;
+  let afterDD = false;
+  for (let i = 0; i < vals.length; i++) {
+    const v = vals[i];
+    if (!afterDD && v === "--") {
+      afterDD = true;
+      continue;
+    }
+    if (!afterDD && v.startsWith("-") && v.length > 1 && !v.startsWith("--")) {
+      for (let k = 1; k < v.length; k++) {
+        const ch = v[k];
+        if (ch === "e" || ch === "E") {
+          hasExplicitScript = true;
+          if (k + 1 >= v.length) i += 1;
+          break;
+        }
+        if (ch === "i") {
+          hasInPlace = true;
+          break;
+        }
+      }
+      continue;
+    }
+    if (!afterDD && v.startsWith("--")) continue;
+    positionals.push(v);
+  }
+  if (!hasInPlace) return [];
+  return hasExplicitScript ? positionals : (positionals.length > 1 ? positionals.slice(1) : positionals);
+}
+
+function parseCoreutilsPass(verb, vals, bsdInstall = false) {
+    const targetDirs = [];
+    const positionals = [];
+    let afterDD = false;
+    let hasInstallDirMode = false;
+    let ambiguousOperands = false;
+    let sawTrailingOpt = false;
+    const longOpts = COREUTILS_LONG_OPTS[verb];
+    const boolShorts = bsdInstall ? "bcCDpSsvU" : COREUTILS_BOOL_SHORTS[verb];
+    for (let i = 0; i < vals.length; i++) {
+      const v = vals[i];
+      if (!afterDD && (!bsdInstall || positionals.length === 0) && v === "--") {
+        if (positionals.length > 0) sawTrailingOpt = true;
+        afterDD = true;
+        continue;
+      }
+      if (!afterDD && (!bsdInstall || positionals.length === 0) && v.startsWith("-") && v !== "-") {
+        if (positionals.length > 0) sawTrailingOpt = true;
+        if (v.startsWith("--")) {
+          if (bsdInstall) return null;
+          const eqIdx = v.indexOf("=");
+          const optName = eqIdx === -1 ? v : v.slice(0, eqIdx);
+          const resolved = resolveLongOption(optName, longOpts);
+          if (resolved === "--target-directory") {
+            if (eqIdx !== -1) targetDirs.push(v.slice(eqIdx + 1));
+            else if (i + 1 < vals.length) targetDirs.push(vals[++i]);
+            else ambiguousOperands = true;
+          } else if (verb === "install" && resolved === "--directory") {
+            if (eqIdx === -1) hasInstallDirMode = true;
+            else ambiguousOperands = true;
+          } else if (!resolved) {
+            if (verb === "install" && positionals.length === 0) return null;
+            ambiguousOperands = true;
+          } else if (COREUTILS_REQUIRED_ARG_LONGS.has(resolved) && eqIdx === -1) {
+            if (i + 1 < vals.length) i++;
+            else ambiguousOperands = true;
+          }
+          continue;
+        }
+        for (let k = 1; k < v.length; k++) {
+          const ch = v[k];
+          if (ch === "t") {
+            if (bsdInstall) return null;
+            if (k + 1 < v.length) targetDirs.push(v.slice(k + 1));
+            else if (i + 1 < vals.length) targetDirs.push(vals[++i]);
+            else ambiguousOperands = true;
+            break;
+          }
+          if (verb === "install") {
+            if (ch === "d") { hasInstallDirMode = true; continue; }
+            if ((bsdInstall ? "BfglmoNT" : "gmoS").includes(ch)) {
+              if (k + 1 >= v.length) { if (i + 1 < vals.length) i++; else ambiguousOperands = true; }
+              break;
+            }
+            if ("hM".includes(ch)) {
+              ambiguousOperands = true;
+              if (k + 1 < v.length) { if (ch === "M") targetDirs.push(v.slice(k + 1)); continue; }
+              break;
+            }
+          } else if (ch === "S") {
+            if (k + 1 >= v.length) { if (i + 1 < vals.length) i++; else ambiguousOperands = true; }
+            break;
+          }
+          if (!boolShorts.includes(ch)) {
+            if (verb === "install" && positionals.length === 0) return null;
+            ambiguousOperands = true;
+            break;
+          }
+        }
+        continue;
+      }
+      if (bsdInstall && !afterDD && v.startsWith("-") && v !== "-") sawTrailingOpt = true;
+      positionals.push(v);
+    }
+    const bsdTrailingDest = (!bsdInstall && verb !== "install" && sawTrailingOpt && vals.length >= 2) ? [vals[vals.length - 1]] : [];
+    let dests;
+    if ((verb === "install" && hasInstallDirMode) || ambiguousOperands) {
+      dests = [...targetDirs, ...positionals, ...bsdTrailingDest];
+    } else if (targetDirs.length > 0) {
+      dests = [...targetDirs, ...bsdTrailingDest];
+    } else if (positionals.length >= 2) {
+      dests = [positionals[positionals.length - 1], ...bsdTrailingDest];
+    } else if (verb === "ln" && positionals.length === 1) {
+      const implicitName = path.posix.basename(positionals[0].replace(/\\/g, "/").replace(/\/+$/, "")) || ".";
+      const baseDests = implicitName === "." ? ["."] : [".", implicitName];
+      dests = [...baseDests, ...bsdTrailingDest];
+    } else {
+      dests = bsdTrailingDest;
+    }
+    return { dests, positionals, sawTrailingOpt };
+}
 
 function extractVerbMutationTargets(verb, tokens, cmdIdx) {
   const args = tokens.slice(cmdIdx + 1);
   const vals = [];
   for (let i = 0; i < args.length; i++) {
-    if (!args[i].quoted && REDIRECT_OP_REGEX.test(args[i].raw)) { i++; continue; }
-    if (!args[i].quoted && REDIRECT_ATTACHED_REGEX.test(args[i].raw)) continue;
+    const nextIdx = skipSingleRedirectToken(args, i);
+    if (nextIdx !== i) { i = nextIdx - 1; continue; }
     vals.push(args[i].value);
   }
-  if (verb === "cp" || verb === "ln") {
-    const targetDirs = [];
-    const positionals = [];
-    let afterDD = false;
-    const valFlags = new Set(["-S", "--suffix", "--no-preserve", "--sparse"]);
-    for (let i = 0; i < vals.length; i++) {
-      const v = vals[i];
-      if (!afterDD && v === "--") { afterDD = true; continue; }
-      if (!afterDD && v.startsWith("-") && v !== "-") {
-        if (v === "-t" || v === "--target-directory" || (!v.startsWith("--") && /^-[^-]*t$/.test(v))) { if (vals[i + 1]) targetDirs.push(vals[++i]); continue; }
-        if (v.startsWith("--target-directory=")) { targetDirs.push(v.slice("--target-directory=".length)); continue; }
-        if (!v.startsWith("--") && /^-[^-]*t(.+)$/.test(v)) { targetDirs.push(v.slice(v.indexOf("t") + 1)); continue; }
-        if (valFlags.has(v) && i + 1 < vals.length) i++;
-        continue;
-      }
-      positionals.push(v);
+  if (verb === "install") {
+    const gnu = parseCoreutilsPass(verb, vals, false), bsd = parseCoreutilsPass(verb, vals, true);
+    const dests = ((!gnu && !bsd) || (bsd?.sawTrailingOpt && !gnu))
+      ? vals.filter((v) => v !== "--")
+      : [...new Set([...(gnu ? gnu.dests : []), ...(bsd ? bsd.dests : [])])];
+    return { benchTargets: dests, govTargets: dests };
+  }
+  if (verb === "cp" || verb === "ln" || verb === "mv") {
+    const { dests, positionals } = parseCoreutilsPass(verb, vals, false);
+    if (verb === "mv") {
+      const all = [...dests, ...positionals];
+      return { benchTargets: all, govTargets: all };
     }
-    const dests = targetDirs.length > 0 ? targetDirs : (positionals.length >= 2 ? [positionals[positionals.length - 1]] : []);
     // For `ln`, also inspect source args for governance dir symlink attempts while keeping `ln -s benchmarks/x /tmp/y` allowed (FRIC-RUN-009)
     return { benchTargets: dests, govTargets: verb === "ln" ? [...dests, ...positionals] : dests };
   }
@@ -657,9 +913,12 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
     const t = vals.filter((v) => v.startsWith("of=")).map((v) => v.slice(3)).filter(Boolean);
     return { benchTargets: t, govTargets: t };
   }
-  if (verb === "sed" || verb === "perl") {
-    const hasI = vals.some((v) => v === "-i" || v === "--in-place" || v.startsWith("--in-place=") || /^-[a-zA-Z0-9]*i/.test(v));
-    const t = hasI ? vals.filter((v) => !v.startsWith("-")) : [];
+  if (verb === "sed") {
+    const t = extractSedMutationTargets(vals);
+    return { benchTargets: t, govTargets: t };
+  }
+  if (verb === "perl") {
+    const t = extractPerlMutationTargets(vals);
     return { benchTargets: t, govTargets: t };
   }
   if (verb === "find") {
@@ -807,8 +1066,10 @@ function findAgyContextTranscriptUsage(segments, cwd = "", depth = 0) {
     let inSub = false;
     while (text.startsWith("(") && text.endsWith(")")) { inSub = true; text = text.slice(1, -1).trim(); }
     const { prefix: envPrefix, body } = splitEnvPrefix(text);
-    const parsedDirect = parseAgyContextTranscriptTokens(tokenizeShellWords(body || text), cwd);
-    if (parsedDirect) return { ...parsedDirect, seg, segIndex: idx, totalSegs: segments.length, hadWrapper: inSub || Boolean(envPrefix.trim()) };
+    const directDetailed = tokenizeShellWordsDetailed(body || text);
+    const cleanDirect = seg.hasRedirect ? filterAllowedStderrRedirects(directDetailed) : directDetailed;
+    const parsedDirect = parseAgyContextTranscriptTokens((cleanDirect || directDetailed).map((t) => t.value), cwd);
+    if (parsedDirect) return { ...parsedDirect, seg, segIndex: idx, totalSegs: segments.length, hadWrapper: inSub || Boolean(envPrefix.trim()) || !cleanDirect };
     const detailed = tokenizeShellWordsDetailed(text);
     for (const startPos of collectSegmentCommandStartIndices(detailed)) {
       const cmdIdx = stripLeadingShellPrefixes(detailed, startPos);
@@ -1508,7 +1769,12 @@ function findBlockingWatchLoop(segments, depth = 0) {
     let idx = stripLeadingShellPrefixes(tokens, 0);
     while (idx < tokens.length && normalizeCmdName(tokens[idx].value) === "rtk") idx++;
     if (idx < tokens.length && normalizeCmdName(tokens[idx].value) === "gh") {
-      const rest = tokens.slice(idx + 1).map((t) => t.value);
+      const rest = [];
+      for (let k = idx + 1; k < tokens.length; k++) {
+        const nextK = skipSingleRedirectToken(tokens, k);
+        if (nextK !== k) { k = nextK - 1; continue; }
+        rest.push(tokens[k].value);
+      }
       const pos = [];
       let hasHelp = false;
       let hasWatch = false;
@@ -2078,10 +2344,21 @@ export async function handleRunCommand(ctx) {
 
   // Rewrite bare `agy-context` / `agy-context-saver` to installed shim when off PATH
   if (agyTranscriptCheck.allowed || (isSingleUnchainedShellCmd(segments) && !isSpillover && !taskMatch)) {
-    const bareAgy = effectiveCmd.match(/^(\s*)(agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?)(?=\s|$)/i);
-    if (bareAgy && !findExecutableOnPath(normalizeCmdName(bareAgy[2]))) {
-      const localAgyCmd = resolveInstalledAgyContextCommand(normalizeCmdName(bareAgy[2]));
-      if (localAgyCmd) effectiveCmd = `${bareAgy[1]}${localAgyCmd}${effectiveCmd.slice(bareAgy[0].length)}`;
+    const effSegs = effectiveCmd === rawCmd ? segments : splitShellSegments(effectiveCmd);
+    const effSeg0 = effSegs[0];
+    const effTokens0 = effSeg0 ? getSegTokens(effSeg0) : [];
+    const cleanEff0 = effSeg0?.hasRedirect ? filterAllowedStderrRedirects(effTokens0) : effTokens0;
+    const binTok = cleanEff0?.[0];
+    if (binTok && !/[/\\]/.test(binTok.value)) {
+      const binName = normalizeCmdName(binTok.value);
+      if ((binName === "agy-context" || binName === "agy-context-saver") && !findExecutableOnPath(binName)) {
+        const localAgyCmd = resolveInstalledAgyContextCommand(binName);
+        if (localAgyCmd) {
+          const absStart = effSeg0.start + binTok.start;
+          const absEnd = effSeg0.start + binTok.end;
+          effectiveCmd = `${effectiveCmd.slice(0, absStart)}${localAgyCmd}${effectiveCmd.slice(absEnd)}`;
+        }
+      }
     }
   }
 

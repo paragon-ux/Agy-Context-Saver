@@ -5,6 +5,17 @@ All notable changes to `Agy-Context-Saver` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.2] - 2026-11-27
+
+### Security
+- Eliminate native `RegExp` construction in `getCompiledRegex` (`lib/transcript-core.mjs`) by pairing the bounded Thompson NFA with a linear-time KMP ECMA-262 case-folding literal matcher, Unicode escape decoding and alternative-scoped duplicate capture-group validation across Node.js 22 and 24, grouped-assertion support, and operand-less or stacked quantifier rejection. Compatibility note: `getCompiledRegex(pattern)` now uniformly returns `{ source, flags: "i", test(input), toString() }` (or `null` when `pattern` is empty or not a string) for both regex and literal queries rather than a native `RegExp` instance with `.exec()`.
+- Harden shell mutation target extraction in `scripts/hook/shell-guard.mjs` across GNU `sed` unambiguous long-option prefixes (`--in`, `--expr=`, `--fi=`), conservative macOS and BSD `sed` `-l`, `-i`, and `-I` flag parsing, and Coreutils `cp`, `ln`, `mv`, and `install` target-directory (`-t`, `--target-directory`), `install -d`, GNU and BSD `install -S` backup-suffix vs. safe-copy handling, required option-argument consumption, and single-operand `ln` implicit destination checks.
+
+### Fixed
+- Allow safe `cp` and `install` copies of protected or benchmark source files when using GNU `install -S <suffix>`, `install -T`, or recognized GNU options after positional operands (such as `cp hooks.json /tmp/copy.json -v`), checking the union of valid GNU and BSD destinations while failing closed on unknown or ambiguous flags.
+- Normalize shell commands with leading file-descriptor redirections such as `2>/dev/null rm ...`, `2> /dev/null rm ...`, and `</dev/null gh pr checks --watch` before command classification so protected-file mutation checks and blocking CI watch-loop guards apply consistently without rewriting the executed command, while preserving allowed leading and trailing stderr redirects (`2>/dev/null`, `2>&1`) on `agy-context transcript` commands and off-`PATH` shim resolution.
+- Retry `EAGAIN` on non-blocking chunked hook stdin reads (`> 64 KiB` pipes) and extend session lock wait to `2500ms` with Windows `EPERM`, `EACCES`, and `EBUSY` lock retry handling in `scripts/hook/common.mjs`.
+
 ## [2.2.1] - 2026-11-23
 
 ### Added
