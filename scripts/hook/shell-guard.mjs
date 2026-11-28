@@ -406,7 +406,7 @@ export function splitShellSegments(command) {
   return segments;
 }
 
-function tokenizeShellWordsDetailed(text) {
+export function tokenizeShellWordsDetailed(text) {
   const tokens = [];
   for (let i = 0; i < text.length;) {
     while (i < text.length && /\s/.test(text[i])) i++;
@@ -495,7 +495,7 @@ function skipSingleRedirectToken(tokens, idx) {
   return idx;
 }
 
-function stripLeadingShellPrefixes(tokens, startIdx = 0) {
+export function stripLeadingShellPrefixes(tokens, startIdx = 0) {
   let idx = startIdx;
   while (idx < tokens.length) {
     const beforeIdx = idx;
@@ -645,27 +645,80 @@ function isSingleUnchainedShellCmd(segments) {
 const OBVIOUS_MUTATION_VERBS = new Set([
   "rm", "del", "remove-item", "mv", "cp", "ln", "tee", "truncate", "shred", "dd", "patch", "chmod", "chown", "sed", "perl", "find", "install"
 ]);
-const DIR_MUTATION_VERBS = new Set(["rm", "del", "remove-item", "mv", "cp", "ln", "chmod", "chown", "find"]);
+const DIR_MUTATION_VERBS = new Set(["rm", "del", "remove-item", "mv", "cp", "ln", "chmod", "chown", "find", "install"]);
 const DESTRUCTIVE_CONFIG_VERBS = new Set(["rm", "del", "remove-item", "mv", "ln", "truncate", "shred", "dd", "chmod", "chown", "find"]);
+
+const SED_LONG_OPTS = [
+  "--quiet", "--silent", "--debug", "--expression", "--file", "--follow-symlinks",
+  "--in-place", "--line-length", "--posix", "--regexp-extended", "--separate",
+  "--sandbox", "--unbuffered", "--null-data", "--help", "--version"
+];
+
+const COREUTILS_LONG_OPTS = {
+  cp: [
+    "--attributes-only", "--backup", "--copy-contents", "--debug", "--force",
+    "--interactive", "--link", "--no-clobber", "--no-dereference", "--no-preserve",
+    "--no-target-directory", "--one-file-system", "--parents", "--preserve",
+    "--reflink", "--remove-destination", "--sparse", "--strip-trailing-slashes",
+    "--suffix", "--symbolic-link", "--target-directory", "--update", "--verbose",
+    "--context", "--help", "--version"
+  ],
+  ln: [
+    "--backup", "--directory", "--force", "--interactive", "--logical",
+    "--no-dereference", "--no-target-directory", "--physical", "--relative",
+    "--suffix", "--symbolic", "--target-directory", "--verbose", "--help", "--version"
+  ],
+  mv: [
+    "--backup", "--debug", "--exchange", "--force", "--interactive", "--no-clobber",
+    "--no-copy", "--no-target-directory", "--strip-trailing-slashes", "--suffix",
+    "--target-directory", "--update", "--verbose", "--context", "--help", "--version"
+  ],
+  install: [
+    "--backup", "--compare", "--debug", "--directory", "--group", "--mode",
+    "--no-target-directory", "--owner", "--preserve-timestamps", "--preserve-context",
+    "--strip", "--strip-program", "--suffix", "--target-directory", "--verbose",
+    "--context", "--help", "--version"
+  ]
+};
+
+function resolveLongOption(optName, candidates) {
+  if (candidates.includes(optName)) return optName;
+  const hits = candidates.filter((c) => c.startsWith(optName));
+  return hits.length === 1 ? hits[0] : null;
+}
 
 function extractSedMutationTargets(vals) {
   const positionals = [];
   let hasInPlace = false;
   let hasExplicitScript = false;
+  let ambiguousScript = false;
+  let prevStandaloneInPlace = false;
   let afterDD = false;
   for (let i = 0; i < vals.length; i++) {
     const v = vals[i];
+    const afterInPlace = prevStandaloneInPlace;
+    prevStandaloneInPlace = false;
     if (!afterDD && v === "--") {
       afterDD = true;
       continue;
     }
     if (!afterDD && v.startsWith("--")) {
-      if (v === "--in-place" || v.startsWith("--in-place=")) hasInPlace = true;
-      else if (v === "--expression" || v === "--file" || v === "--line-length") {
-        if (v === "--expression" || v === "--file") hasExplicitScript = true;
-        i += 1;
-      } else if (v.startsWith("--expression=") || v.startsWith("--file=")) {
+      const eqIdx = v.indexOf("=");
+      const optName = eqIdx === -1 ? v : v.slice(0, eqIdx);
+      const hasEq = eqIdx !== -1;
+      const resolved = resolveLongOption(optName, SED_LONG_OPTS);
+      if (resolved === "--in-place") {
+        hasInPlace = true;
+      } else if (resolved === "--expression" || resolved === "--file") {
+        if (!hasEq) {
+          if (afterInPlace && (hasExplicitScript || i + 2 >= vals.length)) ambiguousScript = true;
+          else i += 1;
+        }
         hasExplicitScript = true;
+      } else if (resolved === "--line-length") {
+        if (!hasEq) ambiguousScript = true;
+      } else if (!resolved || hasEq) {
+        ambiguousScript = true;
       }
       continue;
     }
@@ -735,24 +788,71 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
     if (nextIdx !== i) { i = nextIdx - 1; continue; }
     vals.push(args[i].value);
   }
-  if (verb === "cp" || verb === "ln") {
+  if (verb === "cp" || verb === "ln" || verb === "mv" || verb === "install") {
     const targetDirs = [];
     const positionals = [];
     let afterDD = false;
-    const valFlags = new Set(["-S", "--suffix", "--no-preserve", "--sparse"]);
+    let hasInstallDirMode = false;
+    let ambiguousOperands = false;
+    const longOpts = COREUTILS_LONG_OPTS[verb];
     for (let i = 0; i < vals.length; i++) {
       const v = vals[i];
       if (!afterDD && v === "--") { afterDD = true; continue; }
       if (!afterDD && v.startsWith("-") && v !== "-") {
-        if (v === "-t" || v === "--target-directory" || (!v.startsWith("--") && /^-[^-]*t$/.test(v))) { if (vals[i + 1]) targetDirs.push(vals[++i]); continue; }
-        if (v.startsWith("--target-directory=")) { targetDirs.push(v.slice("--target-directory=".length)); continue; }
-        if (!v.startsWith("--") && /^-[^-]*t(.+)$/.test(v)) { targetDirs.push(v.slice(v.indexOf("t") + 1)); continue; }
-        if (valFlags.has(v) && i + 1 < vals.length) i++;
+        if (positionals.length > 0) ambiguousOperands = true;
+        if (v.startsWith("--")) {
+          const eqIdx = v.indexOf("=");
+          const optName = eqIdx === -1 ? v : v.slice(0, eqIdx);
+          const resolved = resolveLongOption(optName, longOpts);
+          if (resolved === "--target-directory") {
+            if (eqIdx !== -1) targetDirs.push(v.slice(eqIdx + 1));
+            else if (i + 1 < vals.length) targetDirs.push(vals[++i]);
+          } else if (verb === "install" && resolved === "--directory") {
+            if (eqIdx === -1) hasInstallDirMode = true;
+            else ambiguousOperands = true;
+          } else if (!resolved) {
+            ambiguousOperands = true;
+          } else if ((resolved === "--suffix" || resolved === "--no-preserve" || resolved === "--sparse") && eqIdx === -1 && i + 1 < vals.length) {
+            i++;
+          }
+          continue;
+        }
+        for (let k = 1; k < v.length; k++) {
+          const ch = v[k];
+          if (ch === "t") {
+            if (k + 1 < v.length) targetDirs.push(v.slice(k + 1));
+            else if (i + 1 < vals.length) targetDirs.push(vals[++i]);
+            break;
+          }
+          if (verb === "install") {
+            if (ch === "d") { hasInstallDirMode = true; continue; }
+            if ("gmoBfhMNT".includes(ch)) break;
+          } else if (ch === "S") {
+            if (k + 1 >= v.length && i + 1 < vals.length) i++;
+            break;
+          }
+        }
         continue;
       }
       positionals.push(v);
     }
-    const dests = targetDirs.length > 0 ? targetDirs : (positionals.length >= 2 ? [positionals[positionals.length - 1]] : []);
+    let dests;
+    if ((verb === "install" && hasInstallDirMode) || ambiguousOperands) {
+      dests = [...targetDirs, ...positionals];
+    } else if (targetDirs.length > 0) {
+      dests = targetDirs;
+    } else if (positionals.length >= 2) {
+      dests = [positionals[positionals.length - 1]];
+    } else if (verb === "ln" && positionals.length === 1) {
+      const implicitName = path.posix.basename(positionals[0].replace(/\\/g, "/").replace(/\/+$/, "")) || ".";
+      dests = implicitName === "." ? ["."] : [".", implicitName];
+    } else {
+      dests = [];
+    }
+    if (verb === "mv") {
+      const all = [...dests, ...positionals];
+      return { benchTargets: all, govTargets: all };
+    }
     // For `ln`, also inspect source args for governance dir symlink attempts while keeping `ln -s benchmarks/x /tmp/y` allowed (FRIC-RUN-009)
     return { benchTargets: dests, govTargets: verb === "ln" ? [...dests, ...positionals] : dests };
   }
