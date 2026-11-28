@@ -684,7 +684,7 @@ const COREUTILS_BOOL_SHORTS = {
   cp: "abcdfHilLnPpRrsTuvxZNX",
   ln: "bdFfhiLnPrsTvw",
   mv: "bfinTuvZ",
-  install: "bcCDpsvPZUV"
+  install: "bcCDpsTvPZUV"
 };
 const COREUTILS_REQUIRED_ARG_LONGS = new Set([
   "--suffix", "--no-preserve", "--sparse", "--group", "--mode", "--owner", "--strip-program"
@@ -793,15 +793,7 @@ function extractPerlMutationTargets(vals) {
   return hasExplicitScript ? positionals : (positionals.length > 1 ? positionals.slice(1) : positionals);
 }
 
-function extractVerbMutationTargets(verb, tokens, cmdIdx) {
-  const args = tokens.slice(cmdIdx + 1);
-  const vals = [];
-  for (let i = 0; i < args.length; i++) {
-    const nextIdx = skipSingleRedirectToken(args, i);
-    if (nextIdx !== i) { i = nextIdx - 1; continue; }
-    vals.push(args[i].value);
-  }
-  if (verb === "cp" || verb === "ln" || verb === "mv" || verb === "install") {
+function parseCoreutilsPass(verb, vals, bsdInstall = false) {
     const targetDirs = [];
     const positionals = [];
     let afterDD = false;
@@ -809,17 +801,18 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
     let ambiguousOperands = false;
     let sawTrailingOpt = false;
     const longOpts = COREUTILS_LONG_OPTS[verb];
-    const boolShorts = COREUTILS_BOOL_SHORTS[verb];
+    const boolShorts = bsdInstall ? "bcCDpSsvU" : COREUTILS_BOOL_SHORTS[verb];
     for (let i = 0; i < vals.length; i++) {
       const v = vals[i];
-      if (!afterDD && v === "--") {
+      if (!afterDD && (!bsdInstall || positionals.length === 0) && v === "--") {
         if (positionals.length > 0) sawTrailingOpt = true;
         afterDD = true;
         continue;
       }
-      if (!afterDD && v.startsWith("-") && v !== "-") {
+      if (!afterDD && (!bsdInstall || positionals.length === 0) && v.startsWith("-") && v !== "-") {
         if (positionals.length > 0) sawTrailingOpt = true;
         if (v.startsWith("--")) {
+          if (bsdInstall) return null;
           const eqIdx = v.indexOf("=");
           const optName = eqIdx === -1 ? v : v.slice(0, eqIdx);
           const resolved = resolveLongOption(optName, longOpts);
@@ -831,6 +824,7 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
             if (eqIdx === -1) hasInstallDirMode = true;
             else ambiguousOperands = true;
           } else if (!resolved) {
+            if (verb === "install" && positionals.length === 0) return null;
             ambiguousOperands = true;
           } else if (COREUTILS_REQUIRED_ARG_LONGS.has(resolved) && eqIdx === -1) {
             if (i + 1 < vals.length) i++;
@@ -841,6 +835,7 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
         for (let k = 1; k < v.length; k++) {
           const ch = v[k];
           if (ch === "t") {
+            if (bsdInstall) return null;
             if (k + 1 < v.length) targetDirs.push(v.slice(k + 1));
             else if (i + 1 < vals.length) targetDirs.push(vals[++i]);
             else ambiguousOperands = true;
@@ -848,37 +843,31 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
           }
           if (verb === "install") {
             if (ch === "d") { hasInstallDirMode = true; continue; }
-            if (ch === "S") {
-              if (k + 1 < v.length) {
-                if (v.slice(k + 1).includes("d")) hasInstallDirMode = true;
-              } else {
-                ambiguousOperands = true;
-              }
+            if ((bsdInstall ? "BfglmoNT" : "gmoS").includes(ch)) {
+              if (k + 1 >= v.length) { if (i + 1 < vals.length) i++; else ambiguousOperands = true; }
               break;
             }
-            if ("gmoBfN".includes(ch)) {
-              if (k + 1 >= v.length && i + 1 < vals.length) i++;
-              break;
-            }
-            if ("ThMl".includes(ch)) {
+            if ("hM".includes(ch)) {
               ambiguousOperands = true;
-              if (k + 1 < v.length) continue;
+              if (k + 1 < v.length) { if (ch === "M") targetDirs.push(v.slice(k + 1)); continue; }
               break;
             }
           } else if (ch === "S") {
-            if (k + 1 >= v.length && i + 1 < vals.length) i++;
+            if (k + 1 >= v.length) { if (i + 1 < vals.length) i++; else ambiguousOperands = true; }
             break;
           }
           if (!boolShorts.includes(ch)) {
+            if (verb === "install" && positionals.length === 0) return null;
             ambiguousOperands = true;
             break;
           }
         }
         continue;
       }
+      if (bsdInstall && !afterDD && v.startsWith("-") && v !== "-") sawTrailingOpt = true;
       positionals.push(v);
     }
-    const bsdTrailingDest = sawTrailingOpt && vals.length >= 2 ? [vals[vals.length - 1]] : [];
+    const bsdTrailingDest = (!bsdInstall && verb !== "install" && sawTrailingOpt && vals.length >= 2) ? [vals[vals.length - 1]] : [];
     let dests;
     if ((verb === "install" && hasInstallDirMode) || ambiguousOperands) {
       dests = [...targetDirs, ...positionals, ...bsdTrailingDest];
@@ -893,6 +882,26 @@ function extractVerbMutationTargets(verb, tokens, cmdIdx) {
     } else {
       dests = bsdTrailingDest;
     }
+    return { dests, positionals, sawTrailingOpt };
+}
+
+function extractVerbMutationTargets(verb, tokens, cmdIdx) {
+  const args = tokens.slice(cmdIdx + 1);
+  const vals = [];
+  for (let i = 0; i < args.length; i++) {
+    const nextIdx = skipSingleRedirectToken(args, i);
+    if (nextIdx !== i) { i = nextIdx - 1; continue; }
+    vals.push(args[i].value);
+  }
+  if (verb === "install") {
+    const gnu = parseCoreutilsPass(verb, vals, false), bsd = parseCoreutilsPass(verb, vals, true);
+    const dests = ((!gnu && !bsd) || (bsd?.sawTrailingOpt && !gnu))
+      ? vals.filter((v) => v !== "--")
+      : [...new Set([...(gnu ? gnu.dests : []), ...(bsd ? bsd.dests : [])])];
+    return { benchTargets: dests, govTargets: dests };
+  }
+  if (verb === "cp" || verb === "ln" || verb === "mv") {
+    const { dests, positionals } = parseCoreutilsPass(verb, vals, false);
     if (verb === "mv") {
       const all = [...dests, ...positionals];
       return { benchTargets: all, govTargets: all };

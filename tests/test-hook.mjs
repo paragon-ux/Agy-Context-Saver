@@ -5590,13 +5590,17 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
     `install -S .bak "${safeFile}" ${protectedHooks}`,
     `install -S "${safeFile}" ${protectedHooks}`,
     `install -S -t /tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
-    `install -t /tmp/agy-fake-dir -S "${safeFile}" ${protectedHooks}`,
+    `install -t ${protectedPluginDir} -S .bak "${safeFile}"`,
+    `install -T mytags "${safeFile}" ${protectedHooks}`,
+    `install -T -t /tmp/agy-fake-dir "${safeFile}" ${protectedPluginDir}`,
     `install "${safeFile}" ${protectedHooks} -S .bak`,
     `install -Tt${protectedPluginDir} "${safeFile}"`,
     `install -T.t/tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
     `install -g -t /tmp/agy-fake-dir "${safeFile}" ${protectedHooks}`,
     `install --strip-program -t "${safeFile}" ${protectedHooks}`,
     `install "${safeFile}" ${protectedHooks} --mode 0644`,
+    `install "${safeFile}" ${protectedHooks} -Q`,
+    `install -M ${protectedHooks} "${safeFile}" /tmp/agy-ok-dst`,
     `cp "${safeFile}" ${protectedHooks} -v`,
     `cp "${safeFile}" ${protectedHooks} --archive`,
     `cp "${safeFile}" -t /tmp/agy-fake-dir ${protectedPluginDir}`,
@@ -5645,6 +5649,17 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
       toolCall: { name: "run_command", args: { CommandLine: `cp benchmarks/1 "${safeFile}-cp" -v`, WaitMsBeforeAsync: 5000 } }
     });
     assert.equal(cpSafeBenchTrailing.decision, "allow", "ACS-R2-B1 cp benchmarks/1 <outside> -v must allow without benchmark force_ask");
+    for (const benchInstallCmd of [
+      `install -b -S .bak benchmarks/1 "${safeFile}-inst1"`,
+      `install -T benchmarks/1 "${safeFile}-inst2"`
+    ]) {
+      const instBenchRes = runHook({
+        conversationId: wConv,
+        cwd: benchTmp,
+        toolCall: { name: "run_command", args: { CommandLine: benchInstallCmd, WaitMsBeforeAsync: 5000 } }
+      });
+      assert.equal(instBenchRes.decision, "allow", `ACS-9 safe benchmark source install must allow: ${benchInstallCmd}`);
+    }
     for (const safeSedOrCp of [
       `sed -i 's/hooks.json/x/' "${safeFile}"`,
       `sed -i -e 's/hooks.json/x/' "${safeFile}"`,
@@ -5657,6 +5672,13 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
       `cp ${protectedHooks} "${safeFile}" -S .bak`,
       `cp ${protectedHooks} -t /tmp/agy-safe-dir`,
       `install -S.bak ${protectedHooks} "${safeFile}"`,
+      `install -b -S .bak ${protectedHooks} "${safeFile}"`,
+      `install -S .bak ${protectedHooks} "${safeFile}"`,
+      `install -T ${protectedHooks} "${safeFile}"`,
+      `install -S ${protectedHooks} "${safeFile}"`,
+      `install ${protectedHooks} "${safeFile}" -S .bak`,
+      `install ${protectedHooks} "${safeFile}" -T`,
+      `install -t /tmp/agy-safe-dir -S .bak ${protectedHooks}`,
       `install ${protectedHooks} "${safeFile}" -m 0644`,
       `install ${protectedHooks} "${safeFile}" --mode 0644`
     ]) {
