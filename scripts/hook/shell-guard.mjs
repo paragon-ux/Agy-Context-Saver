@@ -726,16 +726,20 @@ function extractSedMutationTargets(vals) {
       for (let k = 1; k < v.length; k++) {
         const ch = v[k];
         if (ch === "e" || ch === "f") {
+          if (k + 1 >= v.length) {
+            if (afterInPlace && (hasExplicitScript || i + 2 >= vals.length)) ambiguousScript = true;
+            else i += 1;
+          }
           hasExplicitScript = true;
-          if (k + 1 >= v.length) i += 1;
           break;
         }
         if (ch === "l") {
-          if (k + 1 >= v.length) i += 1;
-          break;
+          ambiguousScript = true;
+          continue;
         }
         if (ch === "i" || ch === "I") {
           hasInPlace = true;
+          if (k + 1 >= v.length) prevStandaloneInPlace = true;
           break;
         }
       }
@@ -744,7 +748,7 @@ function extractSedMutationTargets(vals) {
     positionals.push(v);
   }
   if (!hasInPlace) return [];
-  return hasExplicitScript ? positionals : (positionals.length > 1 ? positionals.slice(1) : positionals);
+  return (hasExplicitScript || ambiguousScript) ? positionals : (positionals.length > 1 ? positionals.slice(1) : positionals);
 }
 
 function extractPerlMutationTargets(vals) {
@@ -1013,8 +1017,10 @@ function findAgyContextTranscriptUsage(segments, cwd = "", depth = 0) {
     let inSub = false;
     while (text.startsWith("(") && text.endsWith(")")) { inSub = true; text = text.slice(1, -1).trim(); }
     const { prefix: envPrefix, body } = splitEnvPrefix(text);
-    const parsedDirect = parseAgyContextTranscriptTokens(tokenizeShellWords(body || text), cwd);
-    if (parsedDirect) return { ...parsedDirect, seg, segIndex: idx, totalSegs: segments.length, hadWrapper: inSub || Boolean(envPrefix.trim()) };
+    const directDetailed = tokenizeShellWordsDetailed(body || text);
+    const cleanDirect = seg.hasRedirect ? filterAllowedStderrRedirects(directDetailed) : directDetailed;
+    const parsedDirect = parseAgyContextTranscriptTokens((cleanDirect || directDetailed).map((t) => t.value), cwd);
+    if (parsedDirect) return { ...parsedDirect, seg, segIndex: idx, totalSegs: segments.length, hadWrapper: inSub || Boolean(envPrefix.trim()) || !cleanDirect };
     const detailed = tokenizeShellWordsDetailed(text);
     for (const startPos of collectSegmentCommandStartIndices(detailed)) {
       const cmdIdx = stripLeadingShellPrefixes(detailed, startPos);
@@ -2289,10 +2295,21 @@ export async function handleRunCommand(ctx) {
 
   // Rewrite bare `agy-context` / `agy-context-saver` to installed shim when off PATH
   if (agyTranscriptCheck.allowed || (isSingleUnchainedShellCmd(segments) && !isSpillover && !taskMatch)) {
-    const bareAgy = effectiveCmd.match(/^(\s*)(agy-context(?:-saver)?(?:\.(?:cmd|exe|bat))?)(?=\s|$)/i);
-    if (bareAgy && !findExecutableOnPath(normalizeCmdName(bareAgy[2]))) {
-      const localAgyCmd = resolveInstalledAgyContextCommand(normalizeCmdName(bareAgy[2]));
-      if (localAgyCmd) effectiveCmd = `${bareAgy[1]}${localAgyCmd}${effectiveCmd.slice(bareAgy[0].length)}`;
+    const effSegs = effectiveCmd === rawCmd ? segments : splitShellSegments(effectiveCmd);
+    const effSeg0 = effSegs[0];
+    const effTokens0 = effSeg0 ? getSegTokens(effSeg0) : [];
+    const cleanEff0 = effSeg0?.hasRedirect ? filterAllowedStderrRedirects(effTokens0) : effTokens0;
+    const binTok = cleanEff0?.[0];
+    if (binTok && !/[/\\]/.test(binTok.value)) {
+      const binName = normalizeCmdName(binTok.value);
+      if ((binName === "agy-context" || binName === "agy-context-saver") && !findExecutableOnPath(binName)) {
+        const localAgyCmd = resolveInstalledAgyContextCommand(binName);
+        if (localAgyCmd) {
+          const absStart = effSeg0.start + binTok.start;
+          const absEnd = effSeg0.start + binTok.end;
+          effectiveCmd = `${effectiveCmd.slice(0, absStart)}${localAgyCmd}${effectiveCmd.slice(absEnd)}`;
+        }
+      }
     }
   }
 
