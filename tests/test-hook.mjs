@@ -5688,6 +5688,21 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
       });
       assert.equal(safeRes.decision, "allow", `v2.2.2 benign control must allow: ${safeSedOrCp} (got ${safeRes.decision}: ${safeRes.reason})`);
     }
+    if (process.platform === "linux" || process.platform === "darwin") {
+      const natSrc = path.join(benchTmp, "nat-src"), natDst = path.join(benchTmp, "nat-dst");
+      fs.writeFileSync(natSrc, "src\n", { mode: 0o444 });
+      fs.writeFileSync(natDst, "old\n");
+      if (process.platform === "linux") {
+        assert.equal(spawnSync("install", ["-b", "-S", ".bak", natSrc, natDst]).status, 0);
+        assert.equal(fs.readFileSync(natDst, "utf8") + fs.readFileSync(`${natDst}.bak`, "utf8"), "src\nold\n");
+        assert.equal(spawnSync("install", ["-T", natSrc, `${natDst}-t`]).status, 0);
+        assert.ok(spawnSync("install", ["-S", natSrc, `${natDst}-bad`]).status !== 0 && !fs.existsSync(`${natDst}-bad`));
+      } else {
+        assert.ok(spawnSync("install", ["-S", natSrc, natDst]).status === 0 && fs.readFileSync(natDst, "utf8") === "src\n");
+        assert.ok(spawnSync("install", ["-b", "-S", ".bak", natSrc, `${natDst}-nodir`]).status !== 0 && spawnSync("install", ["-T", natSrc, `${natDst}-t`]).status !== 0 && !fs.existsSync(`${natDst}-t`));
+      }
+      assert.equal(fs.readFileSync(natSrc, "utf8"), "src\n");
+    }
   } finally {
     fs.rmSync(benchTmp, { recursive: true, force: true });
   }
