@@ -43,8 +43,9 @@ export const MAX_STATE_ENTRIES = 50;
 export const MAX_TASK_BACKOFF_ENTRIES = 64;
 export const HOOK_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-const SESSION_LOCK_STALE_MS = 3000;
-const SESSION_LOCK_WAIT_MS = 800;
+const SESSION_LOCK_STALE_MS = 6000;
+const SESSION_LOCK_WAIT_MS = 2500;
+const RETRYABLE_LOCK_CODES = new Set(["EEXIST", "EPERM", "EACCES", "EBUSY"]);
 const SLEEP_WAIT_ARR = new Int32Array(new SharedArrayBuffer(4));
 
 const heldLocks = new Map();
@@ -99,13 +100,15 @@ function withSessionLock(convId, fn) {
       acquired = true;
       break;
     } catch (err) {
-      if (!err || err.code !== "EEXIST") break;
-      try {
-        if ((Date.now() - fs.statSync(lockPath).mtimeMs) > SESSION_LOCK_STALE_MS) {
-          try { fs.unlinkSync(lockPath); } catch {}
-          continue;
-        }
-      } catch { continue; }
+      if (!err || !RETRYABLE_LOCK_CODES.has(err.code)) break;
+      if (err.code === "EEXIST") {
+        try {
+          if ((Date.now() - fs.statSync(lockPath).mtimeMs) > SESSION_LOCK_STALE_MS) {
+            try { fs.unlinkSync(lockPath); } catch {}
+            continue;
+          }
+        } catch { continue; }
+      }
       if (Date.now() >= deadline) break;
       try { Atomics.wait(SLEEP_WAIT_ARR, 0, 0, 15); } catch { break; }
     }
@@ -121,10 +124,17 @@ function withSessionLock(convId, fn) {
 export function writeAtomicJson(filePath, jsonStr) {
   const tmpFile = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   fs.writeFileSync(tmpFile, jsonStr, "utf-8");
-  try { fs.renameSync(tmpFile, filePath); } catch {
-    fs.writeFileSync(filePath, jsonStr, "utf-8");
-    try { fs.unlinkSync(tmpFile); } catch {}
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      fs.renameSync(tmpFile, filePath);
+      return;
+    } catch (err) {
+      if (!RETRYABLE_LOCK_CODES.has(err?.code) || attempt === 2) break;
+      try { Atomics.wait(SLEEP_WAIT_ARR, 0, 0, 5); } catch { break; }
+    }
   }
+  fs.writeFileSync(filePath, jsonStr, "utf-8");
+  try { fs.unlinkSync(tmpFile); } catch {}
 }
 
 function pruneExpiredSessionFiles(now) {

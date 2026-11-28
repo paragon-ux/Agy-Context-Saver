@@ -308,7 +308,7 @@ function readBacktickSubshell(cmd, startPos) {
   return { inner, nextIndex: i };
 }
 
-function splitShellSegments(command) {
+export function splitShellSegments(command) {
   if (!command || typeof command !== "string") return [];
   const segments = [];
   const pendingHeredocs = [];

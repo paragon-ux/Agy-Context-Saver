@@ -5541,7 +5541,14 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
     assert.equal(res.decision, "deny", `v2.2.2 must not fail open after ${count} leading redirects`);
   }
 
+  const { splitShellSegments } = await import("../scripts/hook/shell-guard.mjs");
   const perfCmd = `${"2>/dev/null ".repeat(10000)}rm ${protectedHooks}`;
+  const parseStart = performance.now();
+  const perfSegments = splitShellSegments(perfCmd);
+  const parseMs = performance.now() - parseStart;
+  assert.equal(perfSegments.length, 1);
+  assert.ok(parseMs < 100, `v2.2.2 in-process redirect stripping must remain linear (${parseMs.toFixed(1)}ms >= 100ms)`);
+
   const perfStart = performance.now();
   const perfRes = runHook({
     conversationId: wConv,
@@ -5549,7 +5556,38 @@ console.log("\n--- Group U: RTK Pre-Gate Hardening (Pruned pkg run, --reporter b
   });
   const perfMs = performance.now() - perfStart;
   assert.equal(perfRes.decision, "deny", "v2.2.2 must deny after 10,000 leading redirects");
-  assert.ok(perfMs < 1000, `v2.2.2 redirect stripping must remain linear (${perfMs.toFixed(1)}ms >= 1000ms)`);
+  assert.ok(perfMs < 2500, `v2.2.2 redirect stripping subprocess must stay bounded (${perfMs.toFixed(1)}ms >= 2500ms)`);
+
+  // Verify >64 KiB chunked pipe delivery (macOS non-blocking pipe EAGAIN regression) denies cleanly
+  const chunkedPayload = Buffer.from(JSON.stringify({
+    conversationId: wConv,
+    toolCall: { name: "run_command", args: { CommandLine: perfCmd, WaitMsBeforeAsync: 5000 } }
+  }), "utf-8");
+  const chunkedRes = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [hookScript], { env: process.env });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => { stdout += d; });
+    child.stderr.on("data", (d) => { stderr += d; });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) return reject(new Error(`Chunked hook exited ${code}: ${stderr}`));
+      try { resolve(JSON.parse(stdout.trim())); } catch (e) { reject(e); }
+    });
+    let offset = 0;
+    const stepBytes = 8192;
+    const writeNext = () => {
+      if (offset >= chunkedPayload.length) {
+        child.stdin.end();
+        return;
+      }
+      const slice = chunkedPayload.subarray(offset, Math.min(offset + stepBytes, chunkedPayload.length));
+      offset += slice.length;
+      child.stdin.write(slice, () => setTimeout(writeNext, 2));
+    };
+    writeNext();
+  });
+  assert.equal(chunkedRes.decision, "deny", "v2.2.2 must deny >64 KiB chunked stdin payloads without EAGAIN fail-open");
 
   console.log("✓ Group W: v2.2.2 leading-redirection normalization and macOS BSD sed -I parsing verified");
 }
